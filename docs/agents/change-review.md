@@ -10,5 +10,7 @@ Record a concise, relevance-driven summary on the implementing GitHub issue. Ide
 - Replaced legacy behavior and deletions.
 - Purpose of each new dependency.
 - Guidance or ADR changes required by the work.
+- Local learnings: non-obvious facts recorded in the nearest `AGENTS.md`, one to three lines each, and stale lines pruned on the way.
 
-Omit irrelevant items. Mechanical checks remain the objective completion evidence. Use the issue until a later decision establishes another delivery review surface.
+Omit irrelevant items. Mechanical checks remain the objective completion evidence. Use the issue until a later decision establishes another delivery
+review surface.

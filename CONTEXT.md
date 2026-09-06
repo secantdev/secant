@@ -47,7 +47,8 @@ cluster that matches the task, followed by its related ADRs when the task needs 
   Crucible-owned Interface.
 - **Projection Port** — the single Crucible-owned application Interface shared by TUI and headless callers. It opens bounded **Projections**,
   admits user intent as **Operations**, and reads content through **Resource References** without exposing workflow-runtime, persistence, Adapter,
-  or Harness-native objects. It is an in-memory Interface rather than a wire protocol; see [ADR 0024](./docs/adr/0024-use-one-deep-projection-port-for-tui-and-headless-clients.md).
+  or Harness-native objects. It is an in-memory Interface rather than a wire protocol; see
+  [ADR 0024](./docs/adr/0024-use-one-deep-projection-port-for-tui-and-headless-clients.md).
 - **Projection** — a disposable bounded task view over canonical Crucible truth, optionally combined with an explicitly separate live Harness
   overlay. It carries current **Action Offers** and can be rebuilt without preserving cache, database, or storage identity. _Avoid_: Entity mirror,
   screen model.

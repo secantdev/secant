@@ -27,3 +27,11 @@ dependencies, and keep internal test Seams private to the Module's Implementatio
 
 The canonical gate runs on Windows, macOS, and Linux, and a release publishes only from CI behind a human-approved environment. Real-terminal and
 real-Harness evidence that CI cannot produce is recorded per release; see [ADR 0027](../adr/0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md).
+
+## Recorded Harness Fixtures
+
+- Recordings live under `tests/harness/fixtures/<harness>/<case>/` and stay byte-faithful; their metadata lives beside them in `recording.json`.
+- `recording.json` names `harness`, `executableVersion`, `protocolVersion`, `recordedAt`, `redactions`, and `refreshCommand`. The guidance-structure
+  suite fails a case directory without it.
+- Refresh is an opt-in script that needs the installed Harness. An agent or a human may re-record; the implementing issue states what changed
+  semantically.

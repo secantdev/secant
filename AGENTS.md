@@ -1,23 +1,32 @@
 # Agent Instructions
 
-## Agent skills
+Read the line that matches your task, then the file it names. The canonical gate (`npm run check`) is the safety net; these lines are the route.
 
-### Issue tracker
+## Tracker and domain
 
-Before reading or changing an issue or spec, follow `docs/agents/issue-tracker.md`.
+- Before reading or changing an issue or spec, follow `docs/agents/issue-tracker.md`.
+- Before applying or interpreting triage labels, follow `docs/agents/triage-labels.md`.
+- Before exploring or changing a domain area, follow `docs/agents/domain.md`.
 
-### Triage labels
+## Engineering
 
-Before applying or interpreting triage labels, follow `docs/agents/triage-labels.md`.
+- Before changing source, tests, dependencies, tooling, or prototypes, follow `docs/agents/engineering-baseline.md`.
+- Before changing ownership, a Module, its Interface, or a Seam, read `docs/agents/module-design.md`.
+- Before creating or moving target source, changing a public entrypoint, or crossing a Module, read `docs/agents/topology.md`.
+- Before changing dependencies, composition, or allowed import direction, read `docs/agents/dependencies.md`.
+- Before changing tests or fixtures, read `docs/agents/testing.md`.
+- Before handling external or persisted input or translating external failures, read `docs/agents/validation.md`.
+- Before starting or changing a prototype, read `docs/agents/prototypes.md`.
+- Before replacing legacy behavior, read `docs/agents/refactoring.md`.
+- Before adding, moving, splitting, or materially expanding agent guidance, read `docs/agents/guidance.md`.
+- Before declaring an implementation issue complete, read `docs/agents/change-review.md`.
 
-### Domain docs
+## Module-local guidance
 
-Before exploring or changing a domain area, follow `docs/agents/domain.md`.
+Before editing under a Module root that carries its own `AGENTS.md`, read that file. Each one is listed here by path when it is created:
 
-### Engineering baseline
+- None yet.
 
-Before changing source, tests, dependencies, tooling, prototypes, or agent guidance—or declaring implementation complete—follow `docs/agents/engineering-baseline.md`.
+## Commits
 
-### Commit guidelines
-
-No Co-author in commit messages
+No Co-author in commit messages.

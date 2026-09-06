@@ -37,6 +37,10 @@ devflow "add dark mode"
 
 DevFlow writes run artifacts under the target repository's `.devflow/` directory and prints progress in the terminal.
 
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Agents working in this repository start from `AGENTS.md`.
+
 ## Architecture
 
 For the deeper architecture model, provider terminology, and current design decisions, read [CONTEXT.md](./CONTEXT.md).

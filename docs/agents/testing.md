@@ -22,3 +22,8 @@ dependencies, and keep internal test Seams private to the Module's Implementatio
 - Give recorded external-protocol fixtures source and version provenance, redaction, representative data, and update instructions.
 - When replacing a recording, explain meaningful behavioral or protocol changes on the implementing issue.
 - Await observable readiness events, promises, probes, or bounded conditions instead of fixed sleeps.
+
+## Release Evidence
+
+The canonical gate runs on Windows, macOS, and Linux, and a release publishes only from CI behind a human-approved environment. Real-terminal and
+real-Harness evidence that CI cannot produce is recorded per release; see [ADR 0027](../adr/0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md).

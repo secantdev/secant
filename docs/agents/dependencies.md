@@ -8,5 +8,5 @@ Read this before changing dependencies, composition, or allowed import direction
 - Callers depend on the narrow Interface they need. Adapter-specific types, configuration, lifecycle, and external models remain behind their Seam.
 - Give every third-party dependency a current purpose, and pin native or compatibility-sensitive dependencies deliberately.
 
-Define concrete allowed import directions only after the relevant domains and Seams exist. Enforce a settled, expensive-to-violate direction with the
-narrowest honest mechanism rather than a general architecture linter.
+Before creating target source, moving a public entrypoint, or crossing a target Module, read [target topology](./topology.md) for ownership and the
+checked import map. Enforce settled, expensive-to-violate directions with the narrowest honest mechanism rather than a general architecture linter.

@@ -1,10 +1,11 @@
 # DevFlow Progress
-_Last updated: 2026-08-16_
+_Last updated: 2026-09-06_
 
 Use this file for completed work only. Keep destination/architecture details in `HANDOFF_2.md` and `new_spec.md`.
 Hard limit: 100 lines.
 
 ## Done
+- Target Module ownership and multi-file composition guidance are recorded in ADR 0025 and `docs/agents/topology.md`; an AST/resolver-based import gate adds 20 tests without production-source or dependency changes.
 - Architecture, MVP scope, library choices, state layout, provider integration direction, and implementation order are captured in `HANDOFF_2.md`, `new_spec.md`, and `.agent/task_progress.md`.
 - Node/TypeScript CLI scaffold is in place with strict ESM TypeScript, `devflow` bin mapping, `tsup`, package lock, runtime/dev dependencies, and repo `.gitignore`.
 - CLI/bootstrap foundation is complete: free-form task parsing, help/version passthrough, Git-root resolution, provider/model overrides, first-run provider setup, default-provider config validation/repair, and concise provider/session error mapping.
@@ -40,9 +41,9 @@ Hard limit: 100 lines.
 - Only Claude and Codex are user-selectable Supported providers; Gemini/OpenCode remain wired Deferred adapters outside discovery, first-run selection, saved-default resolution, and explicit-provider selection.
 - Codex hook/JSONL and Claude hook/JSONL structured paths use the shared PTY control harness for process control and normalized provider events as the data plane.
 - End-user release-facing files now exist and align with the supported-provider boundary: `README.md`, `LICENSE`, and publish metadata in `package.json`.
-- The canonical clean-install verification path is `npm ci` followed by `npm run check`; its latest isolated run passed all 539 tests and the installed-package smoke.
+- Latest isolated tracked-source verification used `npm ci --offline` and `TZ=UTC npm run check`: all 559 tests, lint/types/format, build, and installed-package smoke passed. UTC aligns an existing Git-date test; untracked `ai-resume.md` prevents the shared worktree's full format check.
 - No AFK issues remain in `.agent/task_progress.md` or `.agent/issues/done` for the current release/docs, project-context freshness, managed-session/retry, bootstrap, grill/PRD, issue decomposition, execution, MVP CLI UX, structured transcript, provider-session recovery, Codex JSONL resume, Claude hook-mode, Claude JSONL, diagnostic logging, completion-marker prompt, provider selection deferral, or PTY control harness workstreams.
-- Latest completed maintenance entry: Claude completed-session cleanup now deletes scoped materialized credentials and is verified with `npm run test` and `npm run typecheck`.
+- Latest completed maintenance: topology import enforcement and Interface-focused test fixtures are verified through the full isolated gate.
 
 ## Known Remaining Work
 1. Future provider work:

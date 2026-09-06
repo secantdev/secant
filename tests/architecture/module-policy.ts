@@ -1,0 +1,183 @@
+/** Target ownership from the topology decision; directories are created only by implementation slices. */
+export const modules = [
+  {
+    name: "cli",
+    root: "src/cli/",
+    entry: "main.ts",
+    imports: ["composition", "tui", "headless"],
+  },
+  {
+    name: "composition",
+    root: "src/composition/",
+    entry: "main.ts",
+    imports: [
+      "application",
+      "workflow",
+      "bundle",
+      "catalog",
+      "execution",
+      "store",
+      "harness",
+      "tui",
+      "renderer",
+      "headless",
+    ],
+  },
+  {
+    name: "application",
+    root: "src/application/",
+    entry: "application.ts",
+    contracts: ["projection-port.ts", "bundle-management.ts"],
+    imports: ["workflow", "bundle", "catalog", "execution", "store", "harness"],
+  },
+  {
+    name: "workflow",
+    root: "src/workflow/",
+    entry: "workflow.ts",
+    imports: [],
+  },
+  {
+    name: "bundle",
+    root: "src/bundle/",
+    entry: "bundle.ts",
+    imports: ["workflow"],
+  },
+  {
+    name: "catalog",
+    root: "src/catalog/",
+    entry: "catalog.ts",
+    imports: ["workflow"],
+  },
+  {
+    name: "execution",
+    root: "src/run/execution/",
+    entry: "execution.ts",
+    imports: ["workflow", "store", "harness"],
+  },
+  {
+    name: "store",
+    root: "src/run/store/",
+    entry: "store.ts",
+    imports: ["workflow", "harness", "artifacts"],
+  },
+  {
+    name: "artifacts",
+    root: "src/run/store/artifacts/",
+    entry: "artifacts.ts",
+    imports: ["workflow"],
+  },
+  { name: "harness", root: "src/harness/", entry: "harness.ts", imports: [] },
+  {
+    name: "tui",
+    root: "src/tui/",
+    entry: "tui.ts",
+    imports: ["application", "renderer"],
+  },
+  {
+    name: "renderer",
+    root: "src/tui/renderer/",
+    entry: "renderer.ts",
+    imports: [],
+  },
+  {
+    name: "headless",
+    root: "src/headless/",
+    entry: "headless.ts",
+    imports: ["application"],
+  },
+] as const;
+
+export type ModuleName = (typeof modules)[number]["name"];
+
+// A frozen list of legacy paths, never a directory wildcard. Remove an entry when that path migrates.
+// New behavior belongs to target owners; edits crossing a legacy Seam must follow the baseline ratchet.
+export const legacyFiles = new Set([
+  "src/adapters/adapterTrace.ts",
+  "src/adapters/builtInManagedSessionAdapter.ts",
+  "src/adapters/claudeAdapter.ts",
+  "src/adapters/claudeHookArtifacts.ts",
+  "src/adapters/claudeHookDrivenSessionRunner.ts",
+  "src/adapters/claudeHookEventSource.ts",
+  "src/adapters/claudeHookSettings.ts",
+  "src/adapters/claudeJsonlEventSource.ts",
+  "src/adapters/claudeJsonlSessionRunner.ts",
+  "src/adapters/claudeProviderHome.ts",
+  "src/adapters/claudeSessionLogLocator.ts",
+  "src/adapters/codexAdapter.ts",
+  "src/adapters/codexHookArtifacts.ts",
+  "src/adapters/codexHookDrivenSessionRunner.ts",
+  "src/adapters/codexHookEventSource.ts",
+  "src/adapters/codexJsonlEventSource.ts",
+  "src/adapters/codexJsonlSessionRunner.ts",
+  "src/adapters/codexProviderHome.ts",
+  "src/adapters/codexSessionLogLocator.ts",
+  "src/adapters/commandManagedSessionAdapter.ts",
+  "src/adapters/ensureSpawnHelperExecutable.ts",
+  "src/adapters/geminiAdapter.ts",
+  "src/adapters/hookSocketPath.ts",
+  "src/adapters/hookSocketServer.ts",
+  "src/adapters/jsonlTailEventSource.ts",
+  "src/adapters/managedSessionAdapter.ts",
+  "src/adapters/opencodeAdapter.ts",
+  "src/adapters/phaseManager.ts",
+  "src/adapters/providerDiscovery.ts",
+  "src/adapters/providers.ts",
+  "src/adapters/ptyControlHarness.ts",
+  "src/adapters/ptyManagedSessionRunner.ts",
+  "src/adapters/readMacosKeychainCredential.ts",
+  "src/bootstrapProvider.ts",
+  "src/cli.ts",
+  "src/devflowState.ts",
+  "src/executionLedger.ts",
+  "src/grillTranscriptRecorder.ts",
+  "src/logger.ts",
+  "src/orchestrator.ts",
+  "src/projectRoot.ts",
+  "src/runSummary.ts",
+]);
+
+export function ownerOf(path: string) {
+  return [...modules]
+    .sort((left, right) => right.root.length - left.root.length)
+    .find((module) => path.startsWith(module.root));
+}
+
+export function externalViolation(
+  owner: ModuleName,
+  specifier: string,
+): string | undefined {
+  const name = specifier.replace(/^node:/, "");
+  if (
+    specifier.startsWith("@opencode-ai/") ||
+    specifier.startsWith("bun:") ||
+    specifier === "node-pty"
+  ) {
+    return "Target Modules cannot depend on OpenCode domain packages, Bun, or PTY transport";
+  }
+  if (
+    specifier.startsWith("@opentui/") &&
+    owner !== "tui" &&
+    owner !== "renderer"
+  ) {
+    return "OpenTUI belongs to presentation and renderer ownership";
+  }
+  if (
+    (name === "sqlite" || specifier === "better-sqlite3") &&
+    owner !== "store" &&
+    owner !== "catalog"
+  ) {
+    return "SQLite belongs to Run Store or Catalog";
+  }
+  if (name === "module" || name === "vm") {
+    return "Custom loaders and evaluated module graphs need an explicit topology decision";
+  }
+  if (
+    /^(?:@anthropic-ai\/|@agentclientprotocol\/|@modelcontextprotocol\/|@google\/genai|@openai\/|openai(?:\/|$))/.test(
+      specifier,
+    ) &&
+    owner !== "harness"
+  ) {
+    return "Harness-native SDK and protocol dependencies belong to Harness";
+  }
+  return undefined;
+}

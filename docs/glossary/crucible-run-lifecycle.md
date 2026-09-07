@@ -18,10 +18,11 @@ This cluster defines the target Crucible terms for a **Run** and everything that
 - **Iteration** — one logical occurrence of a **Repeat group**. A numbered scope, not an entity.
 - **Repeat group** — a contiguous span of **Steps** in a **Routing**, repeated until a named **Verdict** reads `pass`. The condition is evaluated
   before every **Iteration** including the first, so a group whose verdict already passes runs zero times.
-- **Iteration checkpoint** — the **Human Gate** Crucible raises when a **Repeat group** reaches its Bundle-authored review cadence without its
+- **Review checkpoint** — the **Human Gate** Crucible raises when a **Repeat group** reaches its Bundle-authored review cadence without its
   **Verdict** passing. Every Repeat group declares a positive-integer interval and plain-text message; Crucible adds current runtime evidence and
   enforces an engine-owned safety ceiling. Continuing grants another interval and stopping ends the **Run** `failed`. The cadence is not a maximum
-  and is not adjustable at launch.
+  and is not adjustable at launch. _Avoid_: Iteration checkpoint (the name used before the
+  [Review checkpoint amendment](https://github.com/DevFlow-HQ/devflow-cli/issues/13#issuecomment-5528817597)).
 - **Step Attempt** — one execution of one **Step**, identified by its Step, **Iteration**, and attempt number. Retries and **Iterations** are
   bounded separately.
 - **Attempt outcome** — how a **Step Attempt** ended: `succeeded`, `failed`, `indeterminate`, or `cancelled`.

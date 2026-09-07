@@ -43,3 +43,10 @@ sacrifice cross-Run byte deduplication and create more small stores, but make de
 durability promise covers process, OS, and power failure while the local storage survives; disk loss, manual store deletion, and remote backup are not
 part of it. Canonical Run content remains exact even when sensitive, protected by filesystem permissions or future transparent encryption rather than
 truth-altering redaction. This decision resolves [Define durable Run truth, outputs, Artifacts, transcripts, and recovery](https://github.com/DevFlow-HQ/devflow-cli/issues/16).
+
+## Amendment (2026-09-07): home directory
+
+The global store tree lives at `~/.secant` on every platform (`%USERPROFILE%\.secant` on Windows), overridable with the `SECANT_HOME` environment
+variable. Platform-specific data directories (XDG, `Application Support`, `%LOCALAPPDATA%`) were rejected as three code paths for no user benefit;
+the initial Harnesses use the same dotfile convention. Recorded while
+[approving the migration handoff](https://github.com/DevFlow-HQ/devflow-cli/issues/22).

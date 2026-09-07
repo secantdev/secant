@@ -27,8 +27,11 @@ A pseudo-terminal is not a terminal, and ConPTY gave wrong answers twice before 
 per-release checklist issue. The reviewer approves the `release` environment only once the checklist is complete; the digest stops an old report
 from covering a new build.
 
-- The legacy Windows conhost check is required only when the OpenTUI pin, `engines.node`, or `src/tui/renderer/` changed since the previous tag;
-  the release workflow states which in its approval summary and otherwise cites the carried-forward report.
+- On Windows the CI terminal suite runs under ConPTY and proves only that terminal modes are restored; it cannot observe the console-death class.
+  Both Windows support-matrix rows (Windows Terminal and legacy conhost) therefore rest on the human real-terminal check, required only when
+  the OpenTUI pin, `engines.node`, or `src/tui/renderer/` changed since the previous tag; the release workflow states which in its approval
+  summary and otherwise cites the carried-forward report. macOS and Linux terminal rows rest on the CI suite plus a spot check per major TUI
+  change ([amended 2026-09-07](https://github.com/DevFlow-HQ/devflow-cli/issues/22)).
 - One real installed-Harness run per Harness on one operating system per release. Real Harnesses never run in CI.
 - `docs/support-matrix.md` lists every claimed OS, architecture, and terminal row with its evidence source. A row without evidence is not claimed.
 

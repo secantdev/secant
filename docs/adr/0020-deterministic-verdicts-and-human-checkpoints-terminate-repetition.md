@@ -21,7 +21,8 @@ remaining job, and permitting both would leave a door through which a future wor
 which is exactly what Crucible orchestrating _around_ the Harness forbids. The same reasoning ends an **Interactive agent step** on an explicit
 human control rather than on a marker or a recognised phrase: Crucible must never read meaning out of a turn.
 
-ADR 0010's fixed cap of `2N + 5` iterations is replaced by an **Iteration checkpoint**, and **no Bundle declares any iteration bound**. A workflow is
+ADR 0010's fixed cap of `2N + 5` iterations is replaced by a **Review checkpoint** (named Iteration checkpoint before the
+[#13 amendment](https://github.com/DevFlow-HQ/devflow-cli/issues/13#issuecomment-5528817597)), and **no Bundle declares any iteration bound**. A workflow is
 problem-agnostic — one **Routing** serves "repair a single function" and "build the whole application" — so an author cannot know how many
 iterations are enough, and the goal was never to choose a maximum but to make unattended repetition stop for review. Every Repeat group instead
 declares a required positive-integer review interval and plain-text message. When that cadence is reached without the verdict passing, the group

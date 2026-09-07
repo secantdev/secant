@@ -80,3 +80,14 @@ the real artifact. Taking the themes does **not** make Crucible accessible: the 
 That belongs to the command and projection interface, not here. Finally, the trade this ADR consciously accepts: because the presentation subset is
 copied rather than depended upon, upstream can never break it — and can never fix it either. Every bug in the copied code is permanently Crucible's.
 That is the strongest reason the copied subset stays small and the state-coupled components are rebuilt rather than adapted.
+
+## Amendment (2026-09-07): rebuild tiebreak
+
+Two rules sharpen the vendor/rebuild split, recorded while
+[approving the migration handoff](https://github.com/DevFlow-HQ/devflow-cli/issues/22). First, when a component fits both a vendored category and
+a state-coupled rebuild row, **state-coupled wins and it is rebuilt**. Second, a rebuild is never a blank-page design: before rebuilding a
+component, study its OpenCode counterpart for architecture, low-level design, and behaviour, and record in the implementing issue what was taken
+and what was deliberately changed. The concrete vendored-versus-rebuilt list is spec-level work for the shell milestone and is materialized by the
+`UPSTREAM` record. The shipped third-party notices file is `THIRD-PARTY-NOTICES.md` at the repository root, created by the same extraction commit as
+`UPSTREAM`, listed in `package.json` `files`, and verified by the release gate of
+[ADR 0027](./0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md).

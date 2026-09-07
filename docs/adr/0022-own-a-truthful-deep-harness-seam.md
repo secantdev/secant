@@ -68,3 +68,14 @@ rejected a minimal `qualify/turn/close` facade because it hides stateful interac
 mechanism and invites caller coupling, and a whole-Step `execute` API because it drags orchestration below the Seam. The chosen prepared-Harness
 hybrid is narrower in vocabulary but deeper in guarantees; its cost is a stricter Adapter and conformance burden in exchange for truthful differences
 and one stable caller contract.
+
+## Amendment (2026-09-07): skills, protocol drift, and model lists
+
+Recorded while [approving the migration handoff](https://github.com/DevFlow-HQ/devflow-cli/issues/22). A `skill` Bundle Asset reaches every
+Harness by **plain-path delivery** in v1: the Adapter places the skill directory in the Run's read-only asset space and the rendered prompt tells the
+agent to read its `SKILL.md`. Native skill delivery is a later version and, when it arrives, becomes a profile fact (`native` or `plain-path`)
+rather than a Preflight requirement, because plain-path is a real delivery and not an emulated control. Qualification of an installed Harness whose
+protocol is unversioned (Codex app-server) runs the pinned conformance probe against whatever is installed: pass means usable, fail means the
+Harness is `unavailable` with a typed reason, never best-effort parsing. A Workflow Bundle never selects or constrains a model in v1; the Adapter
+profile supplies the model list when the Harness exposes one and declares free-text entry otherwise. A non-binding recommended model authored in
+the Bundle is deferred to a later version.

@@ -6,6 +6,7 @@ Read the line that matches your task, then the file it names. The canonical gate
 
 - Before reading or changing an issue or spec, follow `docs/agents/issue-tracker.md`.
 - Before applying or interpreting triage labels, follow `docs/agents/triage-labels.md`.
+- Before opening or closing a milestone, gate, or spec issue, follow `docs/agents/milestones.md`.
 - Before exploring or changing a domain area, follow `docs/agents/domain.md`.
 
 ## Engineering

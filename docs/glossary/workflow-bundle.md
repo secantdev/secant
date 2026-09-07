@@ -13,8 +13,13 @@ what integrity and trust mean before execution.
   assets, and routing. _Avoid_: Metadata file, configuration file.
 - **Installed Bundle** — the exact `.wfb` bytes copied into Crucible's managed store and named by one **Catalog Entry**. Original authoring folders
   and imported files are not Installed Bundles and remain outside Crucible's ownership. _Avoid_: Archive copy, Bundle Snapshot.
-- **Bundle origin** — advisory Catalog metadata describing where Crucible obtained an Installed Bundle: an app release, local build directory,
-  imported local file, or later a portal coordinate. It is not consulted during execution. _Avoid_: Trust, authority.
+- **Bundle origin** — advisory Catalog metadata describing where Crucible obtained an Installed Bundle: an app release (recorded with the Secant
+  version that shipped it), local build directory, imported local file, or later a portal coordinate. It is not consulted during execution.
+  _Avoid_: Trust, authority.
+- **Shipped Bundle** — the exact `.wfb` bytes carried inside a Secant release package beside the CLI. Like an imported file it is not an Installed
+  Bundle and stays outside the managed store; Secant reads it only to install it. _Avoid_: Built-in (that is the Installed Bundle), fixture.
+- **Built-in Workflow Bundle** — an Installed Bundle whose origin is a Secant release, installed from a **Shipped Bundle** at startup. It inherits
+  app-release trust and cannot be removed in v1. _Avoid_: Default Bundle, embedded workflow.
 - **Trust grant** — local approval to execute one installed Bundle digest. It persists while that exact Bundle remains installed, has no separate
   revocation path, and says nothing about another digest even when the two Bundles claim the same publisher or id.
 - **Execution summary** — Crucible's generated account of the authority an Installed Bundle can exercise on the selected platform, shown before
@@ -81,8 +86,13 @@ what integrity and trust mean before execution.
 ## Build, trust, and lifecycle rules
 
 - `bundle build <folder>` validates and normalizes an authoring folder, creates exact `.wfb` bytes, calculates their digest, and atomically installs
-  them. `--output` additionally exports those same bytes. `bundle install <file.wfb>` imports a file obtained elsewhere through the identical
-  validator, managed store, and Catalog path. Neither operation modifies its input, executes content, loads code, or fetches remote content.
+  them. `--output` additionally exports those same bytes; `--no-install` skips only the store and Catalog write and requires `--output`.
+  `bundle install <file.wfb>` imports a file obtained elsewhere through the identical validator, managed store, and Catalog path. Neither operation
+  modifies its input, executes content, loads code, or fetches remote content.
+- Built-in Bundles are built once in CI as Shipped Bundles, ship inside the package, and are installed through `bundle install` ingestion at every
+  startup when their identity is absent. Their version is authored, independent of the package version, and locked with its digest so a content
+  change forces a version bump. Upgrades install the new version beside the old one; see
+  [ADR 0029](../adr/0029-ship-built-in-workflow-bundles-as-release-built-wfb-files-installed-at-startup.md).
 - Built-in, local-build, local-file, and future portal Bundles share one ingestion and runtime contract. Versions install side by side; interactive
   selection defaults to the highest stable installed version, prereleases require explicit selection, and Crucible never auto-updates.
 - External Bundles install untrusted. Before the first attempted Run for a digest, Crucible presents its generated Execution summary and asks once;
@@ -108,3 +118,6 @@ what integrity and trust mean before execution.
   contract and alternatives resolved during grilling.
 - [Decide which Git operations Crucible performs for a Workflow and where they sit in the routing](https://github.com/DevFlow-HQ/devflow-cli/issues/14)
   adds authored **Workspace prerequisites** while keeping command-tool dependencies and Git effects outside static Bundle inference.
+- [Define built-in Workflow Bundle shipping, installation, and upgrade](https://github.com/DevFlow-HQ/devflow-cli/issues/41) and
+  [ADR 0029](../adr/0029-ship-built-in-workflow-bundles-as-release-built-wfb-files-installed-at-startup.md) fix how a **Shipped Bundle** becomes a
+  **Built-in Workflow Bundle** and survives upgrades.

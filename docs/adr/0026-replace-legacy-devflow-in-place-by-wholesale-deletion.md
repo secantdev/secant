@@ -19,9 +19,9 @@ The cut is the first implementation slice; its position in the sequence belongs 
   every runtime dependency. ADR numbering keeps its gap so later ADRs and their pinned links stay valid.
 - Keeps the toolchain configuration, gate scripts, CI workflow, architecture suite, and temp-dir test helper, realigned to Node 24 in `engines`,
   Node types, the build target, and CI. The `legacyFiles` set and the checker's exemption branch are removed rather than left empty.
-- Leaves a stub CLI entry answering `--help` and `--version` so the installed-package smoke passes, renames the package, bin, repository, and
-  organization to Secant as [ADR 0028](./0028-adopt-secant-as-the-product-package-and-command-name.md) decides, and replaces the README with an
-  in-development notice. Nothing is published.
+- Leaves a stub CLI entry answering `--help` and `--version` so the installed-package smoke passes, renames the package and bin to Secant as
+  [ADR 0028](./0028-adopt-secant-as-the-product-package-and-command-name.md) decides (the organization and repository were already renamed to
+  `secantdev/secant` on 2026-09-07, before the cut), and replaces the README with an in-development notice. Nothing is published.
 
 ## Disposition rule
 

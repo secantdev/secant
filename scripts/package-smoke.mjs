@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
   readFile,
   readdir,
-  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -136,7 +136,9 @@ try {
     { cwd: workspaceDirectory, env: workspaceEnv },
   );
   const snapshot = JSON.parse(workspaceJson);
-  const canonicalWorkspace = await realpath(workspaceDirectory);
+  // Match the CLI's own canonicalization (realpathSync.native), so a Windows
+  // 8.3 short name in the temp path does not read as a different directory.
+  const canonicalWorkspace = realpathSync.native(workspaceDirectory);
   if (snapshot.approval?.state !== "approved") {
     throw new Error(
       `Installed package did not report the approved Workspace: ${workspaceJson}`,

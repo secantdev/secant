@@ -14,7 +14,10 @@ import { runHeadless } from "../headless/headless.js";
 export function run(args: readonly string[]): number {
   const secantHome =
     process.env.SECANT_HOME?.trim() || join(homedir(), ".secant");
-  const launchWorkspacePath = realpathSync(process.cwd());
+  // .native canonicalizes fully (on Windows it expands 8.3 short names), so the
+  // launch path and an approve input resolve to the same string for the exact
+  // comparison the Workspace approval relies on.
+  const launchWorkspacePath = realpathSync.native(process.cwd());
 
   const catalog = openCatalog(secantHome);
   try {

@@ -16,7 +16,7 @@ async function fixture(
 ): Promise<{ port: ProjectionPort; workspace: string }> {
   const catalog = await openCatalog(makeTempDir("secant-port-home-"));
   t.after(() => catalog.close());
-  const workspace = realpathSync(makeTempDir("secant-port-ws-"));
+  const workspace = realpathSync.native(makeTempDir("secant-port-ws-"));
   const { projectionPort } = createApplication({
     catalog,
     launchWorkspacePath: workspace,

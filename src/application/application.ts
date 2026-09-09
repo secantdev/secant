@@ -62,7 +62,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
   function applyApproval(rawPath: string): OperationOutcome {
     let canonicalPath: string;
     try {
-      canonicalPath = realpathSync(rawPath); // case preserved, symlinks resolved
+      // .native fully canonicalizes (Windows 8.3 short names expanded) so equal
+      // directories reached by different spellings compare equal.
+      canonicalPath = realpathSync.native(rawPath);
     } catch (error) {
       return { status: "not-applied", problem: pathNotFound(rawPath, error) };
     }

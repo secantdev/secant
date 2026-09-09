@@ -10,7 +10,7 @@ import { makeTempDir } from "../helpers/tempDir.js";
 async function harness(t: TestContext) {
   const catalog = await openCatalog(makeTempDir("secant-headless-home-"));
   t.after(() => catalog.close());
-  const workspace = realpathSync(makeTempDir("secant-headless-ws-"));
+  const workspace = realpathSync.native(makeTempDir("secant-headless-ws-"));
   const { projectionPort } = createApplication({
     catalog,
     launchWorkspacePath: workspace,

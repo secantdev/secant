@@ -28,7 +28,7 @@ implementation-ticket packet are in [issue tracker](./issue-tracker.md); this fi
 
 - A `/to-spec` session first reads the milestone issue with comments, then invokes the skill against that context, never against the map. The spec
   issue links the milestone and carries no triage label.
-- A `/to-tickets` session cuts tracer bullets from the spec under the slicing rulebook in the spine, publishes them as sub-issues of the milestone
+- A `/to-tickets` session cuts tracer bullets from the spec under the [slicing rulebook](./slicing.md) in the spine, publishes them as sub-issues of the milestone
   with native blocking edges, and leaves them without `ready-for-agent`. The packet and ready rules in the issue tracker then apply.
 - Slice sessions are one ticket each. A session that finishes early curates newly unblocked tickets rather than starting a second slice.
 

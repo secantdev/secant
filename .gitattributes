@@ -1,0 +1,4 @@
+# Normalize every text file to LF in the index and on checkout across all
+# platforms, so the ADR 0027 three-OS Prettier gate agrees on Windows, where
+# core.autocrlf would otherwise hand Prettier CRLF line endings.
+* text=auto eol=lf

@@ -1,3 +1,0 @@
-# Keep Grill-to-PRD Live Continuation With Resumable Recovery
-
-DevFlow should keep PRD synthesis as a live continuation of the accepted grill session when that provider session is still running, because PRD's job is to extract the volatile grill discussion into a durable artifact before the session can be discarded. If the provider session is interrupted, DevFlow should attempt provider session recovery when reliable session metadata and adapter resume support exist, then fall back to durable artifacts. This live-continuation preference is specific to the tightly coupled grill-to-PRD handoff; later stages, issue generation, and each issue-solving loop should use dedicated provider sessions unless another tight coupling is explicitly designed.

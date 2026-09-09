@@ -1,3 +1,0 @@
-# Keep Structured Grill Transcript Policy In Orchestration
-
-Adapters should own provider-specific event normalization and submitted-message origin classification, while orchestration owns the durable grill transcript artifact policy. A structured transcript-capable provider must emit `turn-completed.assistantMessage` for final assistant text and origin-bearing `submitted-user-message` events; only human-origin submitted messages belong in the grill transcript, while managed-origin and unknown-origin messages are excluded. PTY fallback behavior remains available for providers without structured transcript support, and `ProviderSessionEventCaptureError` and `ProviderSessionTranscriptCaptureError` stay separate so failures preserve the boundary that broke.

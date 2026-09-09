@@ -1,46 +1,13 @@
-# DevFlow
+# Secant
 
-> Early and experimental: DevFlow is usable for local development trials, but its workflows and storage formats may still change. Expect rough edges and keep normal review discipline around any generated changes.
+> In development. Nothing is published to npm yet, and there is no usable command beyond `--help` and `--version`. Everything here will change.
 
-DevFlow is a CLI orchestrator for AI-assisted software work. You give it a development task, it drives a supported coding provider through project context, planning, issue decomposition, and execution, then leaves you with repository changes to review.
+Secant reaches an outcome by routing between Steps: it drives an external coding Harness through a Workflow Bundle against a Workspace. The
+implementation is being built from an empty, green baseline — see the migration decisions in [docs/adr](./docs/adr/) and the domain model in
+[CONTEXT.md](./CONTEXT.md).
 
-Supported providers today:
-
-- Claude
-- Codex
-
-DevFlow is published as the `devflow-cli` package, but the command you run is `devflow`.
-
-## Install From Source
-
-```sh
-git clone https://github.com/DevFlow-HQ/devflow-cli.git
-cd devflow-cli
-npm install
-npm run build
-npm link
-```
-
-The package is intended to install globally this way once published, but it is not yet on npm:
-
-```sh
-npm install -g devflow-cli
-```
-
-## First Run
-
-Make sure your chosen provider CLI is installed and authenticated, then run DevFlow from the repository you want it to work on:
-
-```sh
-devflow "add dark mode"
-```
-
-DevFlow writes run artifacts under the target repository's `.devflow/` directory and prints progress in the terminal.
+The package is `@secantdev/secant` and the command is `secant`.
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). Agents working in this repository start from `AGENTS.md`.
-
-## Architecture
-
-For the deeper architecture model, provider terminology, and current design decisions, read [CONTEXT.md](./CONTEXT.md).
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Agents working in this repository start from [AGENTS.md](./AGENTS.md).

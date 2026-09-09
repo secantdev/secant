@@ -6,12 +6,17 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows x64, macOS arm64, and Linux x64 per ADR 0027; a red job on any OS blocks merge.
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20.19.0
+          node-version: 24.0.0
           cache: npm
       - run: npm ci
       - run: npm run check

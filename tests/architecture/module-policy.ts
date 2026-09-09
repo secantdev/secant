@@ -89,53 +89,6 @@ export const modules = [
 
 export type ModuleName = (typeof modules)[number]["name"];
 
-// A frozen list of legacy paths, never a directory wildcard. Remove an entry when that path migrates.
-// New behavior belongs to target owners; edits crossing a legacy Seam must follow the baseline ratchet.
-export const legacyFiles = new Set([
-  "src/adapters/adapterTrace.ts",
-  "src/adapters/builtInManagedSessionAdapter.ts",
-  "src/adapters/claudeAdapter.ts",
-  "src/adapters/claudeHookArtifacts.ts",
-  "src/adapters/claudeHookDrivenSessionRunner.ts",
-  "src/adapters/claudeHookEventSource.ts",
-  "src/adapters/claudeHookSettings.ts",
-  "src/adapters/claudeJsonlEventSource.ts",
-  "src/adapters/claudeJsonlSessionRunner.ts",
-  "src/adapters/claudeProviderHome.ts",
-  "src/adapters/claudeSessionLogLocator.ts",
-  "src/adapters/codexAdapter.ts",
-  "src/adapters/codexHookArtifacts.ts",
-  "src/adapters/codexHookDrivenSessionRunner.ts",
-  "src/adapters/codexHookEventSource.ts",
-  "src/adapters/codexJsonlEventSource.ts",
-  "src/adapters/codexJsonlSessionRunner.ts",
-  "src/adapters/codexProviderHome.ts",
-  "src/adapters/codexSessionLogLocator.ts",
-  "src/adapters/commandManagedSessionAdapter.ts",
-  "src/adapters/ensureSpawnHelperExecutable.ts",
-  "src/adapters/geminiAdapter.ts",
-  "src/adapters/hookSocketPath.ts",
-  "src/adapters/hookSocketServer.ts",
-  "src/adapters/jsonlTailEventSource.ts",
-  "src/adapters/managedSessionAdapter.ts",
-  "src/adapters/opencodeAdapter.ts",
-  "src/adapters/phaseManager.ts",
-  "src/adapters/providerDiscovery.ts",
-  "src/adapters/providers.ts",
-  "src/adapters/ptyControlHarness.ts",
-  "src/adapters/ptyManagedSessionRunner.ts",
-  "src/adapters/readMacosKeychainCredential.ts",
-  "src/bootstrapProvider.ts",
-  "src/cli.ts",
-  "src/devflowState.ts",
-  "src/executionLedger.ts",
-  "src/grillTranscriptRecorder.ts",
-  "src/logger.ts",
-  "src/orchestrator.ts",
-  "src/projectRoot.ts",
-  "src/runSummary.ts",
-]);
-
 export function ownerOf(path: string) {
   return [...modules]
     .sort((left, right) => right.root.length - left.root.length)

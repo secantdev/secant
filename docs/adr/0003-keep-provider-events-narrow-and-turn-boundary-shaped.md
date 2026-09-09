@@ -1,3 +1,0 @@
-# Keep Provider Events Narrow And Turn-Boundary-Shaped
-
-`ManagedProviderSessionEvent` should remain a narrow normalized event vocabulary owned by the adapter boundary: `session-start`, `submitted-user-message`, `turn-completed`, and `session-completed`. Native hook payloads, JSONL records, and PTY text must be normalized inside adapters before orchestration sees them; final assistant content belongs on `turn-completed.assistantMessage` when a structured source can provide it. DevFlow should not model intra-turn streaming, tool events, or `session-failed` events until a concrete provider-backed need appears; authoritative failures remain typed errors thrown from `runSession()`.

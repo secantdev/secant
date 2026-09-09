@@ -1,3 +1,0 @@
-# Treat Provider Session State As Recovery Metadata
-
-DevFlow should persist provider session state for provider-backed managed sessions as soon as reliable provider session metadata is observed, but completed durable artifacts remain the authority for stage boundaries. Provider session recovery is allowed only when the adapter has both a reliable provider session id and truthful resume support; adapters own provider-specific resume mechanics, while orchestration owns the phase-specific prompt injected into the resumed session. If a resume attempt cannot launch or the provider rejects the session id, DevFlow should fall back to durable artifacts when possible instead of looping on the same bad session id.

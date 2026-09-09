@@ -28,7 +28,7 @@ test("the declared ownership graph names existing owners and has no cycles", () 
 });
 
 async function audit(files: Record<string, string>, compilerOptions = {}) {
-  const root = makeTempDir("devflow-module-boundaries-");
+  const root = makeTempDir("secant-module-boundaries-");
   const contents = {
     "tsconfig.json": JSON.stringify({
       compilerOptions: {
@@ -140,11 +140,11 @@ test("a public contract cannot launder storage types through an internal re-expo
   );
 });
 
-test("target code cannot import a legacy orchestrator, and new legacy neighbors are not exempt", async () => {
+test("target code cannot import unowned implementation, and unowned source is rejected", async () => {
   const result = await audit({
-    "src/run/execution/execution.ts": 'import "../../orchestrator.js";',
-    "src/orchestrator.ts": "export const legacy = true;",
-    "src/adapters/newLegacy.ts": "export const newlyAdded = true;",
+    "src/run/execution/execution.ts": 'import "../../stray.js";',
+    "src/stray.ts": "export const value = true;",
+    "src/adapters/stray.ts": "export const other = true;",
   });
   assert.ok(
     result.issues.some((issue) => issue.message.includes("legacy or unowned")),
@@ -152,7 +152,7 @@ test("target code cannot import a legacy orchestrator, and new legacy neighbors 
   assert.ok(
     result.issues.some(
       (issue) =>
-        issue.file === "src/adapters/newLegacy.ts" &&
+        issue.file === "src/adapters/stray.ts" &&
         issue.message.includes("no target owner"),
     ),
   );

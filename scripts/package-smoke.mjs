@@ -33,7 +33,7 @@ function run(command, args, options = {}) {
   return result.stdout;
 }
 
-const smokeRoot = await mkdtemp(join(tmpdir(), "devflow-package-smoke-"));
+const smokeRoot = await mkdtemp(join(tmpdir(), "secant-package-smoke-"));
 
 try {
   run(npmCommand, ["pack", "--pack-destination", smokeRoot]);
@@ -63,14 +63,19 @@ try {
     { cwd: smokeRoot },
   );
 
-  const packageDirectory = join(smokeRoot, "node_modules", "devflow-cli");
+  const packageDirectory = join(
+    smokeRoot,
+    "node_modules",
+    "@secantdev",
+    "secant",
+  );
   const packageJson = JSON.parse(
     await readFile(join(packageDirectory, "package.json"), "utf8"),
   );
-  const entrypoint = packageJson.bin?.devflow;
+  const entrypoint = packageJson.bin?.secant;
 
   if (typeof entrypoint !== "string") {
-    throw new Error("The installed package does not declare the devflow bin.");
+    throw new Error("The installed package does not declare the secant bin.");
   }
 
   const installedEntrypoint = resolve(packageDirectory, entrypoint);
@@ -83,8 +88,8 @@ try {
     { cwd: smokeRoot },
   );
 
-  if (!helpOutput.includes("Usage: devflow")) {
-    throw new Error("Installed package help output did not identify devflow.");
+  if (!helpOutput.includes("Usage: secant")) {
+    throw new Error("Installed package help output did not identify secant.");
   }
 
   if (versionOutput.trim() !== packageJson.version) {
@@ -94,7 +99,7 @@ try {
   }
 
   process.stdout.write(
-    `Installed package smoke passed for devflow-cli@${packageJson.version}.\n`,
+    `Installed package smoke passed for @secantdev/secant@${packageJson.version}.\n`,
   );
 } finally {
   await rm(smokeRoot, { recursive: true, force: true });

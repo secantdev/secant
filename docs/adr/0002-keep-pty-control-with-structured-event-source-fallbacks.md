@@ -1,3 +1,0 @@
-# Keep PTY Control With Structured Event-Source Fallbacks
-
-DevFlow should keep `node-pty` as the control transport for provider CLIs while moving durable data capture to structured provider event sources where available. Structured sources should prefer hooks, use JSONL/log tailing as the structured fallback for providers with stable session logs, and use PTY synthesis only as the bottom fallback for providers without a usable structured source. Claude Code is the next required JSONL provider after Codex, but its adapter must prove hook-independent session log discovery first; JSONL support must not rely on hook `transcript_path` payloads or global directory guessing.

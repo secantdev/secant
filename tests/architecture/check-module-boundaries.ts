@@ -2,7 +2,7 @@ import { isBuiltin } from "node:module";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import ts from "typescript";
-import { externalViolation, legacyFiles, ownerOf } from "./module-policy.js";
+import { externalViolation, ownerOf } from "./module-policy.js";
 
 export interface BoundaryIssue {
   file: string;
@@ -14,7 +14,6 @@ export interface BoundaryIssue {
 export function checkModuleBoundaries(root: string): {
   issues: BoundaryIssue[];
   targetFiles: number;
-  legacyFiles: number;
 } {
   root = realpathSync(root);
   const issues: BoundaryIssue[] = [];
@@ -35,7 +34,6 @@ export function checkModuleBoundaries(root: string): {
     );
   }
   let targetCount = 0;
-  let legacyCount = 0;
   const pathOf = (path: string) => relative(root, path).split(sep).join("/");
   const files: string[] = [];
   function discover(directory: string) {
@@ -58,17 +56,15 @@ export function checkModuleBoundaries(root: string): {
     const path = pathOf(file);
     const isTest = path.startsWith("tests/");
     const owner = ownerOf(path);
-    const legacy = legacyFiles.has(path);
-    if (!owner && !legacy && !isTest) {
+    if (!owner && !isTest) {
       issues.push({
         file: path,
         line: 1,
-        message: "Source has no target owner or explicit legacy classification",
+        message: "Source has no target owner",
       });
       continue;
     }
     if (owner) targetCount++;
-    else if (legacy) legacyCount++;
     const source = ts.createSourceFile(
       file,
       readFileSync(file, "utf8"),
@@ -138,12 +134,7 @@ export function checkModuleBoundaries(root: string): {
             "Cross-Module import must use a declared public entrypoint: " +
               target,
           );
-        if (
-          other.name === "composition" &&
-          !isTest &&
-          owner?.name !== "cli" &&
-          path !== "src/cli.ts"
-        ) {
+        if (other.name === "composition" && !isTest && owner?.name !== "cli") {
           report(
             node,
             "Only the CLI host may invoke the outer composition root",
@@ -274,5 +265,5 @@ export function checkModuleBoundaries(root: string): {
     }
     visit(source);
   }
-  return { issues, targetFiles: targetCount, legacyFiles: legacyCount };
+  return { issues, targetFiles: targetCount };
 }

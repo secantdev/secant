@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,6 +115,36 @@ try {
   if (versionOutput.trim() !== packageJson.version) {
     throw new Error(
       `Installed package reported version ${versionOutput.trim()} instead of ${packageJson.version}.`,
+    );
+  }
+
+  // Approve a temporary Workspace under a temporary SECANT_HOME from the
+  // installed package, then read it back with --json (issue #50, AC7).
+  const secantHome = join(smokeRoot, "secant-home");
+  const workspaceDirectory = join(smokeRoot, "workspace");
+  await mkdir(workspaceDirectory, { recursive: true });
+  const workspaceEnv = { ...process.env, SECANT_HOME: secantHome };
+
+  run(process.execPath, [installedEntrypoint, "workspace", "approve"], {
+    cwd: workspaceDirectory,
+    env: workspaceEnv,
+  });
+
+  const workspaceJson = run(
+    process.execPath,
+    [installedEntrypoint, "workspace", "--json"],
+    { cwd: workspaceDirectory, env: workspaceEnv },
+  );
+  const snapshot = JSON.parse(workspaceJson);
+  const canonicalWorkspace = await realpath(workspaceDirectory);
+  if (snapshot.approval?.state !== "approved") {
+    throw new Error(
+      `Installed package did not report the approved Workspace: ${workspaceJson}`,
+    );
+  }
+  if (snapshot.path !== canonicalWorkspace) {
+    throw new Error(
+      `Installed package reported Workspace path ${snapshot.path} instead of ${canonicalWorkspace}.`,
     );
   }
 

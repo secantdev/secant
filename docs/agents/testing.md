@@ -5,8 +5,9 @@ Read this when changing tests or fixtures.
 The default suite discovers tests recursively and is deterministic: it requires no network, credentials, installed Harness, real terminal, arbitrary
 sleep, or other unstable external state. Tests requiring those resources are opt-in.
 
-Package smoke tests install the produced package in an isolated temporary location and exercise its packaged entrypoint with `--help` and `--version`.
-They do not invoke a real Harness.
+Package smoke tests install the produced package in an isolated temporary location and exercise its packaged entrypoint: `--help` and `--version`, plus
+the headless commands a slice lands (currently approving a Workspace under a temporary `SECANT_HOME` and reading it back with `--json`). They are the
+CI acceptance seam for headless work and do not invoke a real Harness.
 
 Test observable behavior through the same Interface callers use. Internal refactoring should not require test rewrites. When shallow Modules are
 replaced by a deeper Module, replace their implementation-coupled tests rather than retaining both suites.

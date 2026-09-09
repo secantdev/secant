@@ -5,7 +5,16 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+// Per the runtime decision (#21), resolve the Windows npm shim to npm's real
+// JavaScript entry and run it under this Node directly, never through a shell.
+// npm sets npm_execpath to npm-cli.js for every `npm run` script, which is how
+// this smoke is always invoked.
+const npmCliPath = process.env.npm_execpath;
+if (!npmCliPath || !/\.[cm]?js$/i.test(npmCliPath)) {
+  throw new Error(
+    "package smoke must run under an npm script so npm_execpath resolves to npm's JavaScript entry.",
+  );
+}
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -33,10 +42,14 @@ function run(command, args, options = {}) {
   return result.stdout;
 }
 
+function npm(args, options = {}) {
+  return run(process.execPath, [npmCliPath, ...args], options);
+}
+
 const smokeRoot = await mkdtemp(join(tmpdir(), "secant-package-smoke-"));
 
 try {
-  run(npmCommand, ["pack", "--pack-destination", smokeRoot]);
+  npm(["pack", "--pack-destination", smokeRoot]);
 
   const archiveName = (await readdir(smokeRoot)).find((entry) =>
     entry.endsWith(".tgz"),
@@ -51,8 +64,7 @@ try {
     `${JSON.stringify({ private: true }, null, 2)}\n`,
   );
 
-  run(
-    npmCommand,
+  npm(
     [
       "install",
       "--no-audit",

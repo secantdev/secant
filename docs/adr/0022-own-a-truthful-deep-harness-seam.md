@@ -47,7 +47,7 @@ new progress. A settled result is immutable; later evidence is appended as recon
 
 Operational failures are typed values, preserving phase, category, possible effects, partial output, native code, retry evidence, useful diagnostics,
 and the original cause; only trusted caller-contract violations throw. Authentication failures direct the user to log in separately through the
-named Harness. Unlike the legacy metadata-only diagnostic default in [ADR 0011](./0011-adapter-diagnostic-tracing-is-metadata-only.md), this target
+named Harness. Unlike the legacy metadata-only diagnostic default in [ADR 0011](https://github.com/secantdev/secant/blob/legacy-devflow/docs/adr/0011-adapter-diagnostic-tracing-is-metadata-only.md), this target
 Interface exposes all useful Harness-originated diagnostic information to the Harness owner and preserves its cause. It redacts only secrets Crucible
 itself introduces; excluding raw protocol, private reasoning, and duplicate transcript content is Interface design, not generic secret redaction.
 Requested and effective models remain distinct, native read-only evidence is used proactively, provider fallback is shown, and an unconfirmed

@@ -11,7 +11,7 @@ verdict before the group is entered, so an already-green test runs zero iteratio
 "fix" passing code. Naming a Step cannot express this, since the baseline run and the in-loop run are necessarily distinct **Step** ids and the named
 one has no attempt to read before the first iteration.
 
-This **retires the agent-emitted terminal marker of [ADR 0010](./0010-devflow-owned-dumb-execution-loop.md)**. That marker existed only because the
+This **retires the agent-emitted terminal marker of [ADR 0010](https://github.com/secantdev/secant/blob/legacy-devflow/docs/adr/0010-devflow-owned-dumb-execution-loop.md)**. That marker existed only because the
 legacy implementation had no deterministic step kind to carry the question, and ADR 0010 already names the absolute empty-directory check as an
 honest signal. Expressed as a **Routing**, the legacy execution loop becomes `[check issues remain] → repeat { [agent iteration, fresh session] →
 [check issues remain] } until drained`: the `no-file` exit becomes the zero-iteration case, and the per-iteration marker becomes an agent step

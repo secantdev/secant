@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import test from "node:test";
 
 import { cleanupTempDirsForTest, makeTempDir } from "./tempDir.js";
@@ -29,14 +29,14 @@ async function listTestSourceFiles(directory: string): Promise<string[]> {
 }
 
 test("makeTempDir creates temp directories under the OS temp directory", () => {
-  const directory = makeTempDir("devflow-temp-helper-");
+  const directory = makeTempDir("secant-temp-helper-");
 
   assert.equal(dirname(directory), tmpdir());
   assert.equal(existsSync(directory), true);
 });
 
 test("registered temp directories are removed when cleanup runs", async () => {
-  const directory = makeTempDir("devflow-temp-helper-cleanup-");
+  const directory = makeTempDir("secant-temp-helper-cleanup-");
 
   await cleanupTempDirsForTest();
 
@@ -51,14 +51,17 @@ test("test temp directories are allocated through the shared helper", async () =
   const offenders: string[] = [];
 
   for (const sourceFile of sourceFiles) {
-    if (relative(testsDirectory, sourceFile) === "helpers/tempDir.ts") {
+    const relativeToTests = relative(testsDirectory, sourceFile)
+      .split(sep)
+      .join("/");
+    if (relativeToTests === "helpers/tempDir.ts") {
       continue;
     }
 
     const source = await readFile(sourceFile, "utf8");
 
     if (inlineTempDirPattern.test(source)) {
-      offenders.push(relative(process.cwd(), sourceFile));
+      offenders.push(relative(process.cwd(), sourceFile).split(sep).join("/"));
     }
   }
 

@@ -1,0 +1,87 @@
+{
+  "formatVersion": 1,
+  "bundle": {
+    "id": "dev.secant.test-repair",
+    "version": "1.0.0",
+    "name": "Test Repair Workflow",
+    "description": "Given a failing test, drive it to green through a bounded repair loop, then commit after a human approves."
+  },
+  "platforms": ["windows", "macos", "linux"],
+  "inputs": {
+    "failing-test": {
+      "type": "file",
+      "description": "Path to the failing test to repair."
+    }
+  },
+  "assets": [
+    { "path": "prompts/fix.md", "kind": "prompt" },
+    { "path": "scripts/run-test.sh", "kind": "script" },
+    { "path": "scripts/run-test.ps1", "kind": "script" }
+  ],
+  "routing": [
+    {
+      "repeat": {
+        "until": "test-verdict",
+        "reviewCheckpoint": {
+          "interval": 5,
+          "message": "The repair loop has run several iterations without the test passing. Continue repairing or stop?"
+        },
+        "steps": [
+          {
+            "id": "fix",
+            "kind": "agent",
+            "session": "repair",
+            "requires": ["failing-test"],
+            "prompt": { "asset": "prompts/fix.md" }
+          },
+          {
+            "id": "run-test",
+            "kind": "command",
+            "requires": ["failing-test"],
+            "produces": [
+              { "name": "test-verdict", "type": "verdict" },
+              { "name": "test-output", "type": "text" }
+            ],
+            "command": {
+              "executable": "bash",
+              "arguments": [
+                { "asset": "scripts/run-test.sh" },
+                { "artifact": "failing-test" }
+              ],
+              "workingDirectory": ".",
+              "platforms": {
+                "windows": {
+                  "executable": "pwsh",
+                  "arguments": [
+                    { "asset": "scripts/run-test.ps1" },
+                    { "artifact": "failing-test" }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "approve-commit",
+      "kind": "human-gate",
+      "shape": "approve-reject",
+      "message": "The failing test now passes. Approve committing the fix?"
+    },
+    {
+      "id": "commit",
+      "kind": "command",
+      "prerequisites": ["git-worktree-root"],
+      "produces": [
+        { "name": "commit-verdict", "type": "verdict" },
+        { "name": "commit-output", "type": "text" }
+      ],
+      "command": {
+        "executable": "git",
+        "arguments": ["commit", "--all", "--message", "Repair failing test"],
+        "workingDirectory": "."
+      }
+    }
+  ]
+}

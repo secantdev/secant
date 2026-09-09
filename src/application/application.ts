@@ -1,5 +1,7 @@
 import { realpathSync } from "node:fs";
 import type { Catalog } from "../catalog/catalog.js";
+import type { BundleManagement } from "./bundle-management.js";
+import { createBundleManagement } from "./build-bundle.js";
 import type {
   OpenedProjection,
   OperationOutcome,
@@ -30,6 +32,7 @@ export interface ApplicationDependencies {
 
 export interface Application {
   readonly projectionPort: ProjectionPort;
+  readonly bundleManagement: BundleManagement;
 }
 
 export function createApplication(deps: ApplicationDependencies): Application {
@@ -142,7 +145,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     },
   };
 
-  return { projectionPort };
+  return { projectionPort, bundleManagement: createBundleManagement() };
 }
 
 function pathNotFound(rawPath: string, error: unknown): Problem {

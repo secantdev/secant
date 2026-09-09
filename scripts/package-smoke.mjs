@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -147,6 +147,40 @@ try {
   if (snapshot.path !== canonicalWorkspace) {
     throw new Error(
       `Installed package reported Workspace path ${snapshot.path} instead of ${canonicalWorkspace}.`,
+    );
+  }
+
+  // Build the Proof Bundle from the installed package with --no-install
+  // --output on this OS (issue #51, AC8). The authoring folder is an input, so
+  // it need not ship in the package; assert the digest is printed and the file
+  // is written.
+  const proofBundleFolder = join(
+    projectRoot,
+    "bundles",
+    "test-repair-workflow",
+  );
+  const outputWfb = join(smokeRoot, "proof.wfb");
+  const buildOutput = run(
+    process.execPath,
+    [
+      installedEntrypoint,
+      "bundle",
+      "build",
+      proofBundleFolder,
+      "--no-install",
+      "--output",
+      outputWfb,
+    ],
+    { cwd: smokeRoot, env: workspaceEnv },
+  );
+  if (!/Digest: sha256:[0-9a-f]{64}/.test(buildOutput)) {
+    throw new Error(
+      `Installed package did not print the Proof Bundle digest: ${buildOutput}`,
+    );
+  }
+  if (!existsSync(outputWfb)) {
+    throw new Error(
+      "Installed package did not write the Proof Bundle output file.",
     );
   }
 

@@ -63,6 +63,8 @@ const helpText = `Usage: secant <command> [options]
 Commands:
   workspace [--json]              show the Workspace path and approval state
   workspace approve [path]        approve a directory as the Workspace
+  bundle build <folder> --no-install --output <file>
+                                  build an authoring folder into a .wfb file
 
 Options:
   -V, --version  output the version number
@@ -87,7 +89,7 @@ async function main(argv: readonly string[]): Promise<void> {
     process.stdout.write(`${manifest.version}\n`);
     return;
   }
-  if (argv[0] === "workspace") {
+  if (argv[0] === "workspace" || argv[0] === "bundle") {
     // Loaded lazily so the Catalog's node:sqlite is never reached until the
     // engine gate above has passed.
     const { run } = await import("../composition/main.js");

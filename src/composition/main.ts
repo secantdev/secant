@@ -21,11 +21,11 @@ export function run(args: readonly string[]): number {
 
   const catalog = openCatalog(secantHome);
   try {
-    const { projectionPort } = createApplication({
+    const { projectionPort, bundleManagement } = createApplication({
       catalog,
       launchWorkspacePath,
     });
-    return runHeadless(projectionPort, args, {
+    return runHeadless({ projectionPort, bundleManagement }, args, {
       out: (text) => void process.stdout.write(text),
       err: (text) => void process.stderr.write(text),
       cwd: () => process.cwd(),

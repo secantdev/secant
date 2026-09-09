@@ -4,3 +4,8 @@
 .devflow
 dist
 node_modules
+
+# Proof Bundle script assets are authored workflow content, not repo source, and
+# Prettier has no parser for them.
+bundles/**/*.sh
+bundles/**/*.ps1

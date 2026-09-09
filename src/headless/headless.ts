@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import type { BundleManagement } from "../application/bundle-management.js";
 import type {
   OperationSnapshot,
   Problem,
@@ -6,10 +8,16 @@ import type {
   WorkspaceSnapshot,
 } from "../application/projection-port.js";
 
-// The headless client speaks the Projection Port and nothing else. It prints
-// plain text with status carried by words; `--json` prints the Projection
-// snapshot or Operation result verbatim; any Problem prints its code,
-// explanation, and remediation and exits non-zero.
+// The headless client speaks the Application Interfaces and nothing else: the
+// Projection Port for the Workspace and Bundle-management for `bundle build`.
+// It prints plain text with status carried by words; `--json` prints the
+// Projection snapshot, Operation result, or build report verbatim; any Problem
+// prints its code, explanation, and remediation and exits non-zero.
+
+export interface HeadlessClients {
+  readonly projectionPort: ProjectionPort;
+  readonly bundleManagement: BundleManagement;
+}
 
 export interface HeadlessIO {
   out(text: string): void;
@@ -19,19 +27,23 @@ export interface HeadlessIO {
 
 /** Runs one headless invocation. `args` is everything after `secant`. */
 export function runHeadless(
-  port: ProjectionPort,
+  clients: HeadlessClients,
   args: readonly string[],
   io: HeadlessIO,
 ): number {
+  if (args[0] === "bundle") {
+    return bundleCommand(clients.bundleManagement, io, args.slice(1));
+  }
   if (args[0] !== "workspace") {
     return fail(io, false, {
       code: "unknown-command",
       explanation: `Unknown command: ${args.join(" ") || "(none)"}.`,
       remediation:
-        "Run `secant workspace` or `secant workspace approve [path]`.",
+        "Run `secant workspace`, `secant workspace approve [path]`, or `secant bundle build <folder>`.",
       possibleEffects: "none",
     });
   }
+  const port = clients.projectionPort;
 
   const rest = args.slice(1);
   const json = rest.includes("--json");
@@ -101,6 +113,64 @@ function showWorkspace(
   } finally {
     opened.close();
   }
+}
+
+function bundleCommand(
+  bundle: BundleManagement,
+  io: HeadlessIO,
+  rest: readonly string[],
+): number {
+  // Single pass so a flag before the folder can't be mistaken for a positional
+  // (`--output` consumes the next token as its value, getopt-style).
+  const positional: string[] = [];
+  let json = false;
+  let noInstall = false;
+  let output: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i];
+    if (token === "--json") json = true;
+    else if (token === "--no-install") noInstall = true;
+    else if (token === "--output") output = rest[++i];
+    else if (token.startsWith("--output="))
+      output = token.slice("--output=".length);
+    else if (!token.startsWith("-")) positional.push(token);
+  }
+
+  if (positional[0] !== "build") {
+    return fail(io, json, {
+      code: "unknown-command",
+      explanation: `Unknown bundle command: ${rest.join(" ") || "(none)"}.`,
+      remediation:
+        "Run `secant bundle build <folder> --no-install --output <file>`.",
+      possibleEffects: "none",
+    });
+  }
+  const folder = positional[1];
+  if (folder === undefined) {
+    return fail(io, json, {
+      code: "missing-folder",
+      explanation: "bundle build needs an authoring folder path.",
+      remediation:
+        "Run `secant bundle build <folder> --no-install --output <file>`.",
+      possibleEffects: "none",
+    });
+  }
+
+  const result = bundle.build(resolve(io.cwd(), folder), {
+    noInstall,
+    output: output === undefined ? undefined : resolve(io.cwd(), output),
+  });
+  if (!result.ok) return fail(io, json, result.problem);
+
+  if (json) {
+    io.out(`${JSON.stringify(result.report, null, 2)}\n`);
+    return 0;
+  }
+  io.out(`Digest: sha256:${result.report.digest}\n`);
+  if (result.report.outputPath !== undefined) {
+    io.out(`Wrote ${result.report.outputPath}\n`);
+  }
+  return 0;
 }
 
 function fail(io: HeadlessIO, json: boolean, problem: Problem): number {

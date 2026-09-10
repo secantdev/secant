@@ -41,3 +41,11 @@ tracing rule from retired ADR 0011 carries forward: diagnostics record Harness a
 - **Clean repository.** Breaks every commit-pinned link in the map, ADRs, and research, and discards the working CI, gate, and boundary checker.
 - **Extracting the hook socket server.** The only cross-platform legacy IPC code serves a transport the target retires; the permission bridge's
   transport is undecided, and extraction needs a demonstrated consumer.
+
+## Amendment — Bun toolchain (2026-09-10, ADR 0030)
+
+[ADR 0030](./0030-ship-the-shell-as-a-bun-compiled-single-file-executable.md), taken after the
+[#60](https://github.com/secantdev/secant/issues/60#issuecomment-5623212589) Windows soak passed, supersedes the "realigned to Node 24 in
+`engines`, Node types, the build target, and CI" clause above: the retained toolchain realigns to an **exactly pinned Bun** with
+`bun build --compile` and `bun test`, not Node 24. The deletion, disposition, and diagnostics rules are unchanged. Where this ADR and ADR 0030
+differ on runtime or toolchain, ADR 0030 governs.

@@ -55,3 +55,12 @@ remedy of uninstalling the other Bundle does not exist for built-ins.
 The package smoke asserts from the installed tarball that it contains exactly the expected `dist/builtin/*.wfb` set and no `bundles/` path, that a
 first launch against a fresh `SECANT_HOME` leaves a Catalog Entry for each built-in with origin `built-in` and the locked digest, and that a second
 launch changes nothing.
+
+## Amendment — built-ins embedded in the binary (2026-09-10, ADR 0030)
+
+[ADR 0030](./0030-ship-the-shell-as-a-bun-compiled-single-file-executable.md), taken after the
+[#60](https://github.com/secantdev/secant/issues/60#issuecomment-5623212589) Windows soak passed, changes only where the built-in bytes live: each
+built-in `.wfb` is **embedded in the compiled binary as an asset** and installed at startup **from the embedded bytes**, replacing the "beside the
+CLI's own `dist/`" npm-tarball placement; the tarball assertion above becomes the compiled-binary smoke. Shipping (CI builds the exact `.wfb` with
+`bundle build --no-install --output`), versioning (`bundles/builtin.lock.json`, the gate's digest rebuild, the LF `.gitattributes`), the startup
+ensure semantics, and upgrade/coexistence are all unchanged. Where this ADR and ADR 0030 differ, ADR 0030 governs.

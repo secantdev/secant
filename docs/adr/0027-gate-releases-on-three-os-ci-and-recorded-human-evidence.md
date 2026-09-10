@@ -41,3 +41,19 @@ from covering a new build.
 - **Publishing from a laptop.** Lets the three-OS gate and the checklist be skipped by accident.
 - **In-process fake Adapter as the only end-to-end double.** Never exercises spawning or shim resolution, and cannot be reached from the installed package.
 - **Recording real-terminal evidence nowhere.** A gate nobody can automate still needs a record of what was checked against which build.
+
+## Amendment — Bun-compiled release artefacts (2026-09-10, ADR 0030)
+
+[ADR 0030](./0030-ship-the-shell-as-a-bun-compiled-single-file-executable.md), taken after the
+[#60](https://github.com/secantdev/secant/issues/60#issuecomment-5623212589) Windows soak passed, changes this ADR:
+
+- **One pinned Node version** → one **exactly pinned Bun**; the gate runs the canonical check under it on the three-OS matrix.
+- **Publishes to npm from CI** → CI publishes **per-platform single-file binaries** (Windows x64, macOS arm64, Linux x64) plus the
+  `@secantdev/secant` npm launcher; the packed-tarball package smoke becomes the compiled-binary smoke.
+- The human real-terminal check retargets from legacy conhost to **Windows Terminal**, and its trigger changes from `engines.node` to the **Bun
+  pin** (alongside the OpenTUI pin and `src/tui/renderer/`); a Bun bump re-arms it. The legacy-conhost support-matrix row is **removed**, reduced to
+  a startup notice.
+- The real-terminal lifecycle suite runs under **`Bun.Terminal`**; the `node-pty` devDependency is removed.
+
+The three-OS gate, what CI proves, what only a human proves, the shared report shape, and `docs/support-matrix.md` are otherwise unchanged. Where
+this ADR and ADR 0030 differ, ADR 0030 governs.

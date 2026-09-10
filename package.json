@@ -19,11 +19,15 @@
     "typecheck": "tsc --noEmit"
   },
   "files": [
-    "dist"
+    "dist",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "devDependencies": {
+    "@babel/core": "^7.29.7",
+    "@babel/preset-typescript": "^7.29.7",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
+    "babel-preset-solid": "1.9.12",
     "eslint": "^10.8.1",
     "globals": "^17.11.0",
     "prettier": "^3.9.6",
@@ -49,9 +53,15 @@
     "devtools"
   ],
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=26.4.0"
   },
   "contributors": [
     "Rohan Garg <gargrohan831@gmail.com> (https://rgdev.xyz)"
-  ]
+  ],
+  "dependencies": {
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@opentui/solid": "0.4.5",
+    "solid-js": "1.9.12"
+  }
 }

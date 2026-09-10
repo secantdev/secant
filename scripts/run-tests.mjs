@@ -12,7 +12,7 @@ async function findTestFiles(directory) {
         return findTestFiles(path);
       }
 
-      return entry.isFile() && entry.name.endsWith(".test.ts") ? [path] : [];
+      return entry.isFile() && /\.test\.tsx?$/.test(entry.name) ? [path] : [];
     }),
   );
 
@@ -27,7 +27,19 @@ if (testFiles.length === 0) {
 
 const child = spawn(
   process.execPath,
-  ["--import", "tsx", "--test", ...process.argv.slice(2), ...testFiles],
+  [
+    // OpenTUI's native render library loads via node:ffi (renderer tests), and
+    // `browser` resolves solid-js to its reactive build so it shares one
+    // instance with @opentui/solid. tsx compiles `.ts`; the Solid loader
+    // compiles `.tsx` with Solid's universal transform.
+    "--experimental-ffi",
+    "--conditions=browser",
+    "--import",
+    "./scripts/solid-test-register.mjs",
+    "--test",
+    ...process.argv.slice(2),
+    ...testFiles,
+  ],
   { stdio: "inherit" },
 );
 

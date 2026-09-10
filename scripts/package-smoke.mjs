@@ -184,6 +184,30 @@ try {
     );
   }
 
+  // Launch the installed shell with no interactive terminal (issue #55, AC9).
+  // The launch re-execs, loads OpenTUI from the installed package (proving its
+  // ESM entry points resolve), then rejects with the precise startup Problem and
+  // a non-zero exit. A resolution failure would surface as a different error, so
+  // asserting the precise Problem proves the installed package resolves OpenTUI.
+  const shellResult = spawnSync(process.execPath, [installedEntrypoint], {
+    cwd: smokeRoot,
+    encoding: "utf8",
+    env: workspaceEnv,
+  });
+  if (shellResult.error) {
+    throw shellResult.error;
+  }
+  if (shellResult.status === 0) {
+    throw new Error(
+      "Installed shell should reject a non-interactive launch with a non-zero exit.",
+    );
+  }
+  if (!shellResult.stderr.includes("no-interactive-terminal")) {
+    throw new Error(
+      `Installed shell did not print the startup Problem: ${shellResult.stdout}\n${shellResult.stderr}`,
+    );
+  }
+
   process.stdout.write(
     `Installed package smoke passed for @secantdev/secant@${packageJson.version}.\n`,
   );

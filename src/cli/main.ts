@@ -46,19 +46,28 @@ function readManifest(): Manifest {
   }
 }
 
-// ponytail: major-version floor compare; the engines floor is a `.0.0` major.
-// Tighten to full semver only if a non-zero minor floor is ever set.
+// Major.minor floor compare: the engines floor gained a non-zero minor
+// (`26.4.0`) when OpenTUI's Node path pinned the experimental-FFI Node line, so
+// a bare major compare would wrongly pass 26.0.0–26.3.x. Patch is not part of
+// the floor. ponytail: extend to patch only if a non-zero patch floor is set.
 export function withinEngineFloor(
   engineRange: string,
   nodeVersion: string,
 ): boolean {
-  const floor = engineRange.match(/\d+/);
-  const current = nodeVersion.match(/\d+/);
+  const floor = engineRange.match(/(\d+)\.(\d+)/);
+  const current = nodeVersion.match(/(\d+)\.(\d+)/);
   if (floor === null || current === null) return true;
-  return Number(current[0]) >= Number(floor[0]);
+  const floorMajor = Number(floor[1]);
+  const floorMinor = Number(floor[2]);
+  const currentMajor = Number(current[1]);
+  const currentMinor = Number(current[2]);
+  if (currentMajor !== floorMajor) return currentMajor > floorMajor;
+  return currentMinor >= floorMinor;
 }
 
-const helpText = `Usage: secant <command> [options]
+const helpText = `Usage: secant [command] [options]
+
+Running \`secant\` with no command opens the interactive workspace shell.
 
 Commands:
   workspace [--json]              show the Workspace path and approval state
@@ -81,12 +90,19 @@ async function main(argv: readonly string[]): Promise<void> {
     return;
   }
 
-  if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
+  if (argv.includes("-h") || argv.includes("--help")) {
     process.stdout.write(helpText);
     return;
   }
   if (argv.includes("-V") || argv.includes("--version")) {
     process.stdout.write(`${manifest.version}\n`);
+    return;
+  }
+  if (argv.length === 0) {
+    // No subcommand launches the interactive shell. Loaded lazily so Solid and
+    // OpenTUI's native library are never reached on the headless paths.
+    const { launchTui } = await import("../composition/main.js");
+    process.exitCode = await launchTui(argv);
     return;
   }
   if (argv[0] === "workspace" || argv[0] === "bundle") {
@@ -96,7 +112,7 @@ async function main(argv: readonly string[]): Promise<void> {
     process.exitCode = run(argv);
     return;
   }
-  // Unknown command: keep printing help until the shell slice replaces it.
+  // Unknown command: print help rather than launch the shell.
   process.stdout.write(helpText);
 }
 

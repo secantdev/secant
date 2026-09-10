@@ -8,7 +8,10 @@ import { runHeadless } from "../headless/headless.js";
 // The outer composition root wires the runtime: it resolves the Secant home and
 // the launch Workspace, opens the Catalog, constructs the Application, and hands
 // its Projection Port to the headless client. It owns the Catalog's lifetime and
-// closes it on every exit path. A TUI child root joins here in a later slice.
+// closes it on every exit path. The TUI child root is `launchTui`, re-exported
+// here so the CLI host reaches both surfaces through this one composition entry.
+
+export { launchTui } from "./tui-main.js";
 
 /** Runs one CLI invocation past the engine gate; returns the process exit code. */
 export function run(args: readonly string[]): number {

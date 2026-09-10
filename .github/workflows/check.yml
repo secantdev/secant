@@ -16,7 +16,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24.0.0
+          # OpenTUI 0.4.5's Node path needs experimental FFI, first available in
+          # official Node 26.4.0 (ADR 0018 adoption; the extraction research's
+          # required Node line). `npm run check` compiles the Solid build and
+          # runs the renderer frame tests on all three OS.
+          node-version: 26.4.0
           cache: npm
       - run: npm ci
       - run: npm run check

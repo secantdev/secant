@@ -1,0 +1,157 @@
+UPSTREAM PROVENANCE RECORD
+==========================
+
+This file is the living inventory mandated by ADR 0018 ("Adopt OpenCode's
+Presentation Layer as a Pinned Reduced Vendor Behind Two Crucible-Owned
+Ports"). It records, for every vendored or vendored-and-modified path, the
+upstream source it was copied from, the local modifications applied, and the
+date of the copy. It is created by the first extraction commit and updated by
+every extraction commit after it, because extraction is ongoing rather than
+one-shot.
+
+The companion licence file is THIRD-PARTY-NOTICES.md at the repository root.
+
+
+UPSTREAM SOURCES
+----------------
+
+OpenCode (the "OpenCode" project; github.com/sst/opencode)
+    Commit: 1ead9e3d7f
+    Extracted from a local checkout of OpenCode pinned at that commit.
+    Licence: MIT (see THIRD-PARTY-NOTICES.md)
+    Status: a reduced subset of OpenCode's presentation layer is VENDORED
+        (copied by hand) into src/tui/vendor/. Copied files become Crucible's
+        own code; upstream can neither break nor fix them (ADR 0018).
+
+OpenTUI (@opentui/core, @opentui/keymap, @opentui/solid)
+    Pinned version: 0.4.5
+    Licence: MIT (see THIRD-PARTY-NOTICES.md)
+    Status: NOT VENDORED. OpenTUI stays a real npm dependency pinned at
+        0.4.5, unpatched and unforked. No OpenTUI source is copied into this
+        repository. It is recorded here only because it is the runtime the
+        vendored presentation code renders through.
+
+
+VENDORED PATHS
+--------------
+
+All entries below were copied on 2026-09-10 from the OpenCode checkout at
+commit 1ead9e3d7f.
+
+1. src/tui/vendor/theme.ts
+   Copied from: packages/tui/src/theme/index.ts
+   Date: 2026-09-10
+   Local modifications:
+     - Theme assets are imported as `.ts` modules rather than via JSON
+       import-attributes.
+     - The upstream set of 33 themes is pruned to 25 (see THEME ASSETS and
+       DROPPED THEMES below).
+     - OpenCode's runtime theme-management surface is removed: plugin/custom
+       themes, subscription, and the allThemes / isTheme / addTheme /
+       upsertTheme / hasTheme / setCustomThemes / setSystemTheme functions.
+     - The syntax-rule list is trimmed to a representative subset.
+   Faithful (unchanged) parts: the pure computation is otherwise carried over
+     unchanged -- the Theme type, the resolver, ANSI-to-RGBA conversion,
+     generateSystem, and generateSyntax.
+
+2. src/tui/vendor/themes/*.ts   (25 files)
+   Copied from: packages/tui/src/theme/assets/<name>.json
+   Date: 2026-09-10
+   Local modifications: none to the palette values. Each theme is vendored
+     unmodified as data. The only change is form: an upstream `<name>.json`
+     asset becomes a `<name>.ts` module, and upstream hyphenated filenames
+     become underscored filenames (e.g. catppuccin-frappe.json ->
+     catppuccin_frappe.ts, one-dark.json -> one_dark.ts,
+     osaka-jade.json -> osaka_jade.ts). The full mapping is under THEME ASSETS.
+
+3. src/tui/vendor/dialog.tsx
+   Copied from: packages/tui/src/ui/dialog.tsx
+   Date: 2026-09-10
+   Local modifications:
+     - Dropped the toast / clipboard copy-on-select handlers.
+     - Dropped the OPENCODE_EXPERIMENTAL flag branches.
+     - Dropped the useOpencodeModeStack("modal") push; modal gating is now an
+       `enabled` accessor instead.
+   Kept: the backdrop plus centred panel, the dialog stack, focus
+     save/restore, and Escape / Ctrl+C dismissal.
+
+4. src/tui/vendor/context-helper.tsx
+   Copied from: packages/tui/src/context/helper.tsx
+   Date: 2026-09-10
+   Local modifications: none. Vendored unmodified.
+
+5. src/tui/vendor/exit.tsx
+   Copied from: packages/tui/src/context/exit.tsx
+   Date: 2026-09-10
+   Local modifications: none. Vendored unmodified.
+
+6. src/tui/vendor/epilogue.tsx
+   Copied from: packages/tui/src/context/epilogue.tsx
+   Date: 2026-09-10
+   Local modifications: none. Vendored unmodified.
+
+
+REBUILT AGAINST (NOT VENDORED COPIES)
+-------------------------------------
+
+Per ADR 0018 and its 2026-09-07 amendment, state-coupled components are
+rebuilt against Crucible-owned Ports rather than copied. No OpenCode source
+crosses for these; they are listed only to record which upstream file was
+studied for architecture and behaviour.
+
+  src/tui/vendor/theme-context.tsx   rebuilt against packages/tui/src/context/theme.tsx
+  src/tui/approval-dialog.tsx        rebuilt against packages/tui/src/ui/dialog-confirm.tsx
+  src/tui/home.tsx                   rebuilt against OpenCode's Home route
+  src/tui/app.tsx                    rebuilt against packages/tui/src/app.tsx
+
+
+THEME ASSETS (25 vendored, unmodified palettes)
+-----------------------------------------------
+
+Vendored file (src/tui/vendor/themes/)   Upstream asset (packages/tui/src/theme/assets/)
+  aura.ts                                  aura.json
+  ayu.ts                                   ayu.json
+  carbonfox.ts                             carbonfox.json
+  catppuccin.ts                            catppuccin.json
+  catppuccin_frappe.ts                     catppuccin-frappe.json
+  catppuccin_macchiato.ts                  catppuccin-macchiato.json
+  cobalt2.ts                               cobalt2.json
+  dracula.ts                               dracula.json
+  everforest.ts                            everforest.json
+  flexoki.ts                               flexoki.json
+  gruvbox.ts                               gruvbox.json
+  kanagawa.ts                              kanagawa.json
+  matrix.ts                                matrix.json
+  mercury.ts                               mercury.json
+  nightowl.ts                              nightowl.json
+  nord.ts                                  nord.json
+  one_dark.ts                              one-dark.json
+  osaka_jade.ts                            osaka-jade.json
+  palenight.ts                             palenight.json
+  rosepine.ts                              rosepine.json
+  solarized.ts                             solarized.json
+  synthwave84.ts                           synthwave84.json
+  tokyonight.ts                            tokyonight.json
+  vesper.ts                                vesper.json
+  zenburn.ts                               zenburn.json
+
+Count: 25.
+
+
+DROPPED THEMES (8 of the upstream 33 not vendored)
+--------------------------------------------------
+
+Dropped for product-name reasons -- shipping a theme named for another
+company's product inside a competing tool raises a naming question (ADR 0018):
+  cursor    (cursor.json)
+  vercel    (vercel.json)
+  github    (github.json)
+  material  (material.json)   -- also warranted an individual licence check
+  monokai   (monokai.json)    -- also warranted an individual licence check
+
+Dropped as OpenCode-branded (the "three extra" drops):
+  opencode     (opencode.json)
+  orng         (orng.json)
+  lucent-orng  (lucent-orng.json)
+
+33 upstream themes - 8 dropped = 25 vendored.

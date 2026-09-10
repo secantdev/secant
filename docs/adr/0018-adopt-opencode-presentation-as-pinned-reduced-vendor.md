@@ -91,3 +91,13 @@ and what was deliberately changed. The concrete vendored-versus-rebuilt list is 
 `UPSTREAM` record. The shipped third-party notices file is `THIRD-PARTY-NOTICES.md` at the repository root, created by the same extraction commit as
 `UPSTREAM`, listed in `package.json` `files`, and verified by the release gate of
 [ADR 0027](./0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md).
+
+## Amendment (2026-09-10): the three extra OpenCode-branded theme drops
+
+The first extraction ([#55](https://github.com/secantdev/secant/issues/55)) vendored the theme set, and beyond the five product-named themes
+this ADR already drops — Cursor, Vercel, GitHub, Material, and Monokai — it dropped **three more** because they are OpenCode-branded rather than
+generic community palettes: `opencode`, `orng`, and `lucent-orng` (OpenCode's signature theme and its two orange house palettes). Shipping a theme
+that carries the upstream tool's own identity inside Crucible raises the same naming question the product-named five did, so the same answer applies.
+That leaves 25 of the 33 upstream theme assets shipped, each attributed by one line in `THIRD-PARTY-NOTICES.md`. Because the default OpenCode theme was
+among the drops, Crucible's shipped default is `nord` — a widely-known MIT community palette — and there is no theme picker and no persisted preference
+yet.

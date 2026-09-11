@@ -44,11 +44,15 @@ export interface StdinRelease {
  * The one lifecycle invariant OpenTUI's defect forces on us (ADR 0018): release
  * `process.stdin` fully BEFORE `renderer.destroy()`, or legacy conhost wedges on
  * the next loop turn — see https://github.com/anomalyco/opentui/issues/1405. The
- * returned teardown runs exactly once no matter how many exit paths call it.
+ * returned teardown runs exactly once no matter how many exit paths call it, and
+ * `onTeardown` runs on that one admitted call — the guard is the single source of
+ * truth for "this call did the work", so callers never re-derive it from a side
+ * effect of `port.destroy()`.
  */
 export function createTeardown(
   stdin: StdinRelease,
   port: RendererPort,
+  onTeardown?: () => void,
 ): () => void {
   let torndown = false;
   return () => {
@@ -58,6 +62,7 @@ export function createTeardown(
     // swap away — see anomalyco/opentui#1405.
     stdin.release();
     port.destroy();
+    onTeardown?.();
   };
 }
 

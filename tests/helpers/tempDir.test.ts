@@ -50,11 +50,18 @@ test("test temp directories are allocated through the shared helper", async () =
     /mkdtemp(?:Sync)?\s*\(\s*(?:path\.)?join\s*\(\s*(?:os\.)?tmpdir\s*\(/;
   const offenders: string[] = [];
 
+  // The shared helper registers a `node:test` `after` cleanup hook, so it can
+  // only be used from files the `bun test` runner drives. The helper itself is
+  // exempt, and so is the real-terminal lifecycle suite (#56): a standalone
+  // script run under `bun`, not `bun test`, which cannot import the helper and
+  // removes its own temp directories in a `finally`.
+  const exempt = new Set(["helpers/tempDir.ts", "terminal/lifecycle.ts"]);
+
   for (const sourceFile of sourceFiles) {
     const relativeToTests = relative(testsDirectory, sourceFile)
       .split(sep)
       .join("/");
-    if (relativeToTests === "helpers/tempDir.ts") {
+    if (exempt.has(relativeToTests)) {
       continue;
     }
 

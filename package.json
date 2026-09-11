@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "test": "bun test",
     "test:package": "bun scripts/package-smoke.mjs",
+    "test:terminal": "bun tests/terminal/lifecycle.ts",
     "typecheck": "tsc --noEmit"
   },
   "files": [

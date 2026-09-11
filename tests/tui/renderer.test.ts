@@ -42,10 +42,16 @@ test("teardown releases stdin before destroying the renderer", () => {
 test("teardown runs exactly once across every exit path", () => {
   const order: string[] = [];
   const port = recordingPort(order);
-  const teardown = createTeardown(recordingStdin(order), port);
+  let onTeardownCalls = 0;
+  const teardown = createTeardown(recordingStdin(order), port, () => {
+    onTeardownCalls++;
+  });
   teardown();
   teardown();
   teardown();
   assert.deepEqual(order, ["stdin", "destroy"]);
   assert.equal(port.destroyed, true);
+  // onTeardown fires on the one admitted call, so the diagnostic side channel
+  // records the single teardown exactly once no matter how many paths call it.
+  assert.equal(onTeardownCalls, 1);
 });

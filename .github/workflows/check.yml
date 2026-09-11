@@ -76,3 +76,36 @@ jobs:
         if: runner.os != 'Windows'
         run: chmod +x "dist/${{ matrix.binary }}"
       - run: bun scripts/package-smoke.mjs "dist/${{ matrix.binary }}"
+
+  # The real-terminal lifecycle suite (#56), a separate blocking three-OS job
+  # outside `bun run check` (ADR 0027 / ADR 0030). It drives the cross-compiled
+  # binary for this OS under a `Bun.Terminal` pseudo-terminal and proves one
+  # class — a terminal left broken after exit — over the quit, Ctrl+C, and
+  # (POSIX) SIGHUP paths. No retries: a flaky case is fixed or moved to the
+  # opt-in suite, never re-run to green.
+  terminal:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            binary: secant-windows-x64.exe
+          - os: macos-latest
+            binary: secant-darwin-arm64
+          - os: ubuntu-latest
+            binary: secant-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist
+      - name: Restore the executable bit
+        if: runner.os != 'Windows'
+        run: chmod +x "dist/${{ matrix.binary }}"
+      - run: bun tests/terminal/lifecycle.ts "dist/${{ matrix.binary }}"

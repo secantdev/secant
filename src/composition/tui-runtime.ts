@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { appendFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createApplication } from "../application/application.js";
@@ -31,6 +31,19 @@ export const NO_TTY_PROBLEM = {
     "Run `secant` in a terminal, or use a headless command such as `secant workspace`.",
 } as const;
 
+// A test-only diagnostic side channel for the real-terminal lifecycle suite
+// (#56). When SECANT_TERMINAL_LOG names a file, the shell appends `ready` once
+// mounted and `teardown` when the single teardown runs, so the suite reads
+// readiness and the exactly-once teardown from a file instead of scraping the
+// PTY stream — unreadable under ConPTY on Windows, where the shell's own output
+// is absorbed into the alternate-screen buffer. Unset in production: a no-op.
+// node:fs only, never a Bun API, so it stays outside the runtime-neutrality
+// allowlist.
+function recordTerminalEvent(line: string): void {
+  const path = process.env.SECANT_TERMINAL_LOG;
+  if (path) appendFileSync(path, `${line}\n`);
+}
+
 export async function runTuiApp(): Promise<number> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     process.stderr.write(
@@ -57,7 +70,11 @@ export async function runTuiApp(): Promise<number> {
       launchWorkspacePath,
     });
     const { port, renderer } = await createProductionRenderer();
-    const teardown = createTeardown(createProcessStdinRelease(), port);
+    // The diagnostic records the single teardown from createTeardown's own
+    // once-guard, so it sees one `teardown` no matter how many exit paths fire.
+    const teardown = createTeardown(createProcessStdinRelease(), port, () =>
+      recordTerminalEvent("teardown"),
+    );
 
     let epilogue: string | undefined;
     let failure: unknown;
@@ -87,6 +104,9 @@ export async function runTuiApp(): Promise<number> {
           epilogue = value;
         },
       });
+      // Mounted: the renderer holds the terminal in raw mode and Home's quit
+      // bindings are live, so the suite may now drive an exit path.
+      recordTerminalEvent("ready");
       await shutdown;
     } catch (error) {
       finish(error instanceof Error ? error : new Error(String(error)));

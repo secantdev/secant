@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { createApplication } from "../application/application.js";
 import { openCatalog } from "../catalog/catalog.js";
 import {
+  conhostConsoleProbe,
   createProcessStdinRelease,
   createProductionRenderer,
   createTeardown,
+  printConhostNotice,
 } from "../tui/renderer/renderer.js";
 import { mountTui } from "../tui/tui.js";
 
@@ -37,6 +39,13 @@ export async function runTuiApp(): Promise<number> {
     process.stderr.write(`Remediation: ${NO_TTY_PROBLEM.remediation}\n`);
     return 1;
   }
+
+  // The one named seam for the legacy-conhost notice: after the no-TTY
+  // rejection, before the renderer is created. Suppressed everywhere but a
+  // visible conhost window (see conhost-notice.ts). To stdout, not stderr: the
+  // gate above guarantees stdout is the (visible) console TTY, whereas stderr
+  // may be redirected — so this is where the warning is certain to be seen.
+  printConhostNotice(conhostConsoleProbe, (text) => process.stdout.write(text));
 
   const secantHome =
     process.env.SECANT_HOME?.trim() || join(homedir(), ".secant");

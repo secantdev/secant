@@ -29,11 +29,12 @@ const BUN_API_USE = /\bBun\.|["'`]bun:/;
 // must touch a Bun API because no runtime-neutral equivalent exists. The CLI
 // entry needs `Bun.main` to detect the compiled-binary entry (`import.meta.main`
 // is false in a Bun binary on Windows). The Catalog adapter imports `bun:sqlite`
-// behind its Interface. The Windows console guard adds its own entry when that
-// slice creates the file.
+// behind its Interface. The Windows console guard imports `bun:ffi` for its
+// `GetConsoleWindow` + `IsWindowVisible` conhost probe.
 const BUN_API_ALLOWLIST = new Set([
   "src/cli/main.ts",
   "src/catalog/catalog.ts",
+  "src/tui/renderer/conhost-notice.ts",
 ]);
 
 export function checkVendorProvenance(root: string): ProvenanceIssue[] {

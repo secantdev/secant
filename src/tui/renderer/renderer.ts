@@ -4,6 +4,16 @@ import {
   type CliRenderer,
 } from "@opentui/core";
 
+// The legacy-conhost startup notice is a renderer-module terminal concern (it
+// complements the stdin-release teardown wedge below); re-exported here so the
+// composition launch path reaches it through the module entrypoint.
+export {
+  CONHOST_NOTICE,
+  conhostConsoleProbe,
+  printConhostNotice,
+  type ConsoleProbe,
+} from "./conhost-notice.js";
+
 // The Renderer Port is narrowed to lifecycle only (ADR 0018): size, onKey,
 // onResize, destroy, destroyed. Drawing and input reach view components through
 // OpenTUI's Solid integration directly, never through this Port. The Port earns

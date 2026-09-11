@@ -1,6 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { chmod, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
+import { chmod, copyFile, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -147,6 +152,71 @@ try {
   if (!existsSync(outputWfb)) {
     throw new Error(
       "Compiled binary did not write the Proof Bundle output file.",
+    );
+  }
+
+  // Install the built Proof Bundle into the temporary SECANT_HOME, re-install it
+  // (equal digest → already installed), then install a byte-different archive of
+  // the same identity (→ identity collision) — the full first-install-wins path
+  // from the installed binary on each OS (issue #53, AC7).
+  const firstInstall = run(binary, ["bundle", "install", outputWfb], {
+    cwd: smokeRoot,
+    env: workspaceEnv,
+  });
+  if (!/Installed \(generation \d+\)/.test(firstInstall)) {
+    throw new Error(
+      `Compiled binary did not install the Proof Bundle: ${firstInstall}`,
+    );
+  }
+
+  const secondInstall = run(binary, ["bundle", "install", outputWfb], {
+    cwd: smokeRoot,
+    env: workspaceEnv,
+  });
+  if (!/Already installed/.test(secondInstall)) {
+    throw new Error(
+      `Re-installing the equal digest was not reported as already installed: ${secondInstall}`,
+    );
+  }
+
+  const afterInstall = JSON.parse(
+    run(binary, ["workspace", "--json"], {
+      cwd: workspaceDirectory,
+      env: workspaceEnv,
+    }),
+  );
+  if (afterInstall.installedBundleCount !== 1) {
+    throw new Error(
+      `Home reported ${afterInstall.installedBundleCount} Installed Bundles instead of 1.`,
+    );
+  }
+
+  // A byte-different archive of the same identity: rebuild a copy whose declared
+  // script asset differs, so the digest changes while id and version do not.
+  const variantFolder = join(smokeRoot, "variant-bundle");
+  await cp(proofBundleFolder, variantFolder, { recursive: true });
+  appendFileSync(
+    join(variantFolder, "scripts", "run-test.sh"),
+    "\n# package-smoke variant\n",
+  );
+  const variantWfb = join(smokeRoot, "variant.wfb");
+  run(
+    binary,
+    ["bundle", "build", variantFolder, "--no-install", "--output", variantWfb],
+    { cwd: smokeRoot, env: workspaceEnv },
+  );
+  const collision = spawnSync(binary, ["bundle", "install", variantWfb], {
+    cwd: smokeRoot,
+    encoding: "utf8",
+    env: workspaceEnv,
+  });
+  if (collision.error) throw collision.error;
+  if (
+    collision.status === 0 ||
+    !collision.stderr.includes("bundle-identity-collision")
+  ) {
+    throw new Error(
+      `A byte-different same-identity archive was not rejected as an identity collision: ${collision.stdout}\n${collision.stderr}`,
     );
   }
 

@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { DEFAULT_BUDGETS, type Budgets } from "../bundle/bundle.js";
 import type { Catalog } from "../catalog/catalog.js";
 import type { BundleManagement } from "./bundle-management.js";
 import { createBundleManagement } from "./build-bundle.js";
@@ -28,6 +29,8 @@ export interface ApplicationDependencies {
   readonly catalog: Catalog;
   /** The canonical absolute path of the one launch Workspace. */
   readonly launchWorkspacePath: string;
+  /** Install budgets a Bundle can never raise; composition wires the defaults. */
+  readonly bundleBudgets?: Budgets;
 }
 
 export interface Application {
@@ -51,6 +54,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       approval: approval
         ? { state: "approved", approvedAt: approval.approvedAt }
         : { state: "unapproved" },
+      installedBundleCount: catalog.countInstalledBundles(),
       actionOffers: approval
         ? []
         : [
@@ -145,7 +149,13 @@ export function createApplication(deps: ApplicationDependencies): Application {
     },
   };
 
-  return { projectionPort, bundleManagement: createBundleManagement() };
+  return {
+    projectionPort,
+    bundleManagement: createBundleManagement({
+      catalog,
+      budgets: deps.bundleBudgets ?? DEFAULT_BUDGETS,
+    }),
+  };
 }
 
 function pathNotFound(rawPath: string, error: unknown): Problem {

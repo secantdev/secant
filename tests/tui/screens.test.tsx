@@ -13,6 +13,7 @@ function unapproved(): WorkspaceSnapshot {
     family: "workspace",
     path: PATH,
     approval: { state: "unapproved" },
+    installedBundleCount: 0,
     actionOffers: [{ action: "approve-workspace", input: { path: PATH } }],
   };
 }
@@ -21,6 +22,7 @@ function approved(): WorkspaceSnapshot {
     family: "workspace",
     path: PATH,
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
+    installedBundleCount: 0,
     actionOffers: [],
   };
 }

@@ -51,6 +51,7 @@ test("approve then show --json reports approved with the canonical path", async 
       approvedAt: (snapshot as { approval: { approvedAt: string } }).approval
         .approvedAt,
     },
+    installedBundleCount: 0,
     actionOffers: [],
   });
 });
@@ -197,4 +198,37 @@ test("bundle build --no-install without --output refuses with a Problem", async 
     1,
   );
   assert.match(h.stderr(), /output-required/);
+});
+
+test("bundle build installs by default and the Home count reads back one", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    0,
+  );
+  assert.match(h.stdout(), /Bundle: dev\.secant\.test-repair@1\.0\.0/);
+  assert.match(h.stdout(), /Installed \(generation 1\)/);
+
+  h.reset();
+  assert.equal(runHeadless(h.clients, ["workspace", "--json"], h.io), 0);
+  const snapshot = JSON.parse(h.stdout()) as { installedBundleCount: number };
+  assert.equal(snapshot.installedBundleCount, 1);
+});
+
+test("bundle install of the built file reports already installed", async (t) => {
+  const h = await harness(t);
+  const output = join(makeTempDir("secant-headless-wfb-"), "out.wfb");
+  assert.equal(
+    runHeadless(
+      h.clients,
+      ["bundle", "build", proofBundle, "--output", output],
+      h.io,
+    ),
+    0,
+  );
+  assert.ok(existsSync(output));
+
+  h.reset();
+  assert.equal(runHeadless(h.clients, ["bundle", "install", output], h.io), 0);
+  assert.match(h.stdout(), /Already installed/);
 });

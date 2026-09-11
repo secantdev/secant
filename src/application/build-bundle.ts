@@ -1,54 +1,152 @@
-import { writeFileSync } from "node:fs";
-import { buildBundle } from "../bundle/bundle.js";
+import { readFileSync, writeFileSync } from "node:fs";
+import {
+  buildBundle,
+  readBundle,
+  type Budgets,
+  type ReadBundle,
+} from "../bundle/bundle.js";
+import type {
+  BundleInstall,
+  BundleInstallResult,
+  BundleOrigin,
+  Catalog,
+} from "../catalog/catalog.js";
 import type { CompositionFinding } from "../workflow/workflow.js";
 import type {
   BundleBuildOptions,
-  BundleBuildResult,
   BundleManagement,
+  BundleReport,
+  BundleResult,
 } from "./bundle-management.js";
 import type { Problem } from "./projection-port.js";
 
 // Application's implementation of the Bundle-management contract. It coordinates
-// the Bundle Module through its Interface, writes the exported bytes, and
-// translates a Bundle finding into the Port's normalized Problem. The store and
-// Catalog write behind the default installing path arrive with the Catalog
-// install slice; this slice serves only `--no-install --output`.
+// the Bundle Module (reading and validating archive bytes) and the Catalog
+// (the atomic store-and-commit) through their Interfaces — the two never import
+// each other. A fresh build and a received file share `installBytes`, so a built
+// and an imported Bundle are indistinguishable once installed.
 
-export function createBundleManagement(): BundleManagement {
+export interface BundleManagementDependencies {
+  readonly catalog: Catalog;
+  readonly budgets: Budgets;
+}
+
+export function createBundleManagement(
+  deps: BundleManagementDependencies,
+): BundleManagement {
+  const { catalog, budgets } = deps;
+
+  function installBytes(
+    bytes: Uint8Array,
+    origin: BundleOrigin,
+    extra: Partial<BundleReport>,
+  ): BundleResult {
+    const outcome = readBundle(bytes, budgets);
+    if (!outcome.ok) return { ok: false, problem: toProblem(outcome.finding) };
+    return commit(catalog, outcome.read, bytes, origin, extra);
+  }
+
   return {
-    build(folder: string, options: BundleBuildOptions): BundleBuildResult {
-      if (!options.noInstall) {
-        return { ok: false, problem: installUnavailable() };
-      }
-      if (options.output === undefined) {
+    build(folder: string, options: BundleBuildOptions): BundleResult {
+      if (options.noInstall && options.output === undefined) {
         return { ok: false, problem: outputRequired() };
       }
 
-      const outcome = buildBundle(folder);
-      if (!outcome.ok) {
+      const built = buildBundle(folder);
+      if (!built.ok) {
         return {
           ok: false,
           problem:
-            "composition" in outcome
-              ? compositionProblem(outcome.composition)
-              : toProblem(outcome.finding),
+            "composition" in built
+              ? compositionProblem(built.composition)
+              : toProblem(built.finding),
         };
       }
 
-      try {
-        writeFileSync(options.output, outcome.built.bytes);
-      } catch (error) {
-        return { ok: false, problem: writeFailed(options.output, error) };
+      let outputPath: string | undefined;
+      if (options.output !== undefined) {
+        try {
+          writeFileSync(options.output, built.built.bytes);
+        } catch (error) {
+          return { ok: false, problem: writeFailed(options.output, error) };
+        }
+        outputPath = options.output;
       }
-      return {
-        ok: true,
-        report: {
-          identity: outcome.built.identity,
-          digest: outcome.built.digest,
-          outputPath: options.output,
-          findings: outcome.built.findings,
-        },
+
+      const extra: Partial<BundleReport> = {
+        findings: built.built.findings,
+        ...(outputPath ? { outputPath } : {}),
       };
+      if (options.noInstall) {
+        return {
+          ok: true,
+          report: {
+            identity: built.built.identity,
+            digest: built.built.digest,
+            findings: built.built.findings,
+            ...(outputPath ? { outputPath } : {}),
+          },
+        };
+      }
+      return installBytes(
+        built.built.bytes,
+        { kind: "local-build", folder },
+        extra,
+      );
+    },
+
+    install(file: string): BundleResult {
+      let bytes: Uint8Array;
+      try {
+        bytes = readFileSync(file);
+      } catch (error) {
+        return { ok: false, problem: fileUnreadable(file, error) };
+      }
+      return installBytes(bytes, { kind: "local-file", path: file }, {});
+    },
+  };
+}
+
+function commit(
+  catalog: Catalog,
+  read: ReadBundle,
+  bytes: Uint8Array,
+  origin: BundleOrigin,
+  extra: Partial<BundleReport>,
+): BundleResult {
+  const install: BundleInstall = {
+    identity: read.identity,
+    digest: read.digest,
+    bytes,
+    origin,
+    installedAt: new Date(),
+  };
+  let result: BundleInstallResult;
+  try {
+    result = catalog.installBundle(install);
+  } catch (error) {
+    return { ok: false, problem: storageFailed(error) };
+  }
+  if (result.outcome === "identity-collision") {
+    return {
+      ok: false,
+      problem: identityCollision(read, result.existing.digest),
+    };
+  }
+  return {
+    ok: true,
+    report: {
+      identity: read.identity,
+      digest: read.digest,
+      installed:
+        result.outcome === "installed"
+          ? {
+              status: "installed",
+              generation: result.entry.installationGeneration,
+            }
+          : { status: "already-installed" },
+      findings: extra.findings ?? [],
+      ...(extra.outputPath ? { outputPath: extra.outputPath } : {}),
     },
   };
 }
@@ -62,7 +160,7 @@ function toProblem(finding: {
     code: finding.code,
     explanation: finding.message,
     remediation:
-      "Correct the named field or entry in the authoring folder, then build again.",
+      "Correct the named field or entry in the authoring folder or archive, then try again.",
     possibleEffects: "none",
     ...(finding.path
       ? {
@@ -92,6 +190,40 @@ function compositionProblem(findings: readonly CompositionFinding[]): Problem {
   };
 }
 
+function identityCollision(read: ReadBundle, installedDigest: string): Problem {
+  const { id, version } = read.identity;
+  return {
+    code: "bundle-identity-collision",
+    explanation: `A different ${id}@${version} is already installed; identities are first-install-wins.`,
+    remediation:
+      "Bump bundle.version to install this as a new identity, or remove the installed one first.",
+    possibleEffects: "none",
+    details: { id, version, installedDigest, incomingDigest: read.digest },
+  };
+}
+
+function storageFailed(error: unknown): Problem {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    code: "bundle-storage-failed",
+    explanation: `The Bundle could not be stored: ${message}`,
+    remediation:
+      "Check the Secant home is writable and has free space, then try again.",
+    possibleEffects: "none", // the atomic install cleans up on failure
+  };
+}
+
+function fileUnreadable(file: string, error: unknown): Problem {
+  const code = (error as NodeJS.ErrnoException).code;
+  return {
+    code: "bundle-file-unreadable",
+    explanation: `The archive ${file} could not be read.`,
+    remediation: "Pass the path to an existing, readable .wfb file.",
+    possibleEffects: "none",
+    details: code ? { file, errno: code } : { file },
+  };
+}
+
 function writeFailed(output: string, error: unknown): Problem {
   const code = (error as NodeJS.ErrnoException).code;
   return {
@@ -101,17 +233,6 @@ function writeFailed(output: string, error: unknown): Problem {
       "Choose an --output path in an existing, writable directory, then build again.",
     possibleEffects: "partial",
     details: code ? { output, errno: code } : { output },
-  };
-}
-
-function installUnavailable(): Problem {
-  return {
-    code: "bundle-install-unavailable",
-    explanation:
-      "Installing a Bundle is not available yet; the Catalog install slice adds it.",
-    remediation:
-      "Pass --no-install --output <file> to build without installing.",
-    possibleEffects: "none",
   };
 }
 

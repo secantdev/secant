@@ -1,4 +1,11 @@
-import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 
@@ -12,6 +19,40 @@ export interface WorkspaceApproval {
   readonly approvedAt: string; // ISO 8601
 }
 
+/** Where a Bundle came from. M6 adds `built-in`; M1 has only local origins. */
+export type BundleOrigin =
+  | { readonly kind: "local-build"; readonly folder: string }
+  | { readonly kind: "local-file"; readonly path: string };
+
+/** A recorded Installed Bundle. Its bytes live in the digest-named store. */
+export interface CatalogEntry {
+  readonly id: string;
+  readonly version: string;
+  readonly digest: string; // SHA-256 hex
+  readonly origin: BundleOrigin;
+  readonly installedAt: string; // ISO 8601
+  readonly installationGeneration: number; // private, monotonic per home
+}
+
+/** The validated bytes and metadata an install commits. */
+export interface BundleInstall {
+  readonly identity: { readonly id: string; readonly version: string };
+  readonly digest: string; // SHA-256 hex the caller computed over the bytes
+  readonly bytes: Uint8Array; // the exact `.wfb` bytes
+  readonly origin: BundleOrigin;
+  readonly installedAt: Date;
+}
+
+/**
+ * The outcome of an install. First-install-wins by identity (id, version): an
+ * equal digest is already installed, a different digest is an identity
+ * collision, and neither changes the store or the Entry.
+ */
+export type BundleInstallResult =
+  | { readonly outcome: "installed"; readonly entry: CatalogEntry }
+  | { readonly outcome: "already-installed"; readonly entry: CatalogEntry }
+  | { readonly outcome: "identity-collision"; readonly existing: CatalogEntry };
+
 export interface Catalog {
   /** The approval for an exact canonical path, or undefined when none exists. */
   getWorkspaceApproval(path: string): WorkspaceApproval | undefined;
@@ -21,6 +62,16 @@ export interface Catalog {
    * record either way.
    */
   approveWorkspace(path: string, approvedAt: Date): WorkspaceApproval;
+  /**
+   * Install a Bundle atomically: stage the bytes, store them under the digest,
+   * verify the stored bytes against the digest, and commit the Entry, all in one
+   * serialized transaction. Any failure leaves no store bytes and no Entry.
+   * Throws only on a caller-contract violation or storage fault (after cleaning
+   * up), never for the three ordinary outcomes.
+   */
+  installBundle(install: BundleInstall): BundleInstallResult;
+  /** How many Bundles are installed. */
+  countInstalledBundles(): number;
   /** Release the database; safe to call from a `finally` — it does not throw. */
   close(): void;
 }
@@ -40,6 +91,17 @@ export function openCatalog(secantHome: string): Catalog {
     "CREATE TABLE IF NOT EXISTS workspace_approvals (" +
       "path TEXT PRIMARY KEY, approved_at TEXT NOT NULL) STRICT",
   );
+  // Identity is (id, version); the digest names the store file. The generation
+  // is a private monotonic counter recording install order within this home.
+  database.exec(
+    "CREATE TABLE IF NOT EXISTS catalog_entries (" +
+      "id TEXT NOT NULL, version TEXT NOT NULL, digest TEXT NOT NULL, " +
+      "origin_kind TEXT NOT NULL, origin_location TEXT NOT NULL, " +
+      "installed_at TEXT NOT NULL, installation_generation INTEGER NOT NULL, " +
+      "PRIMARY KEY (id, version)) STRICT",
+  );
+  // The digest-named managed store holds each Bundle's exact bytes.
+  const storeDir = join(secantHome, "bundles");
 
   // `.query()` (not `.prepare()`) so the Database owns these statements and
   // finalizes them on close; with no caller-owned statement outstanding, close()
@@ -54,6 +116,126 @@ export function openCatalog(secantHome: string): Catalog {
   // failure leaves no partial row (ADR 0030's transaction helper).
   const insertApproval = database.transaction((path: string, isoTime: string) =>
     insert.run(path, isoTime),
+  );
+
+  const selectEntry = database.query(
+    "SELECT id, version, digest, origin_kind, origin_location, installed_at, " +
+      "installation_generation FROM catalog_entries WHERE id = ? AND version = ?",
+  );
+  const insertEntry = database.query(
+    "INSERT INTO catalog_entries (id, version, digest, origin_kind, " +
+      "origin_location, installed_at, installation_generation) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+  const nextGeneration = database.query(
+    "SELECT COALESCE(MAX(installation_generation), 0) + 1 AS g FROM catalog_entries",
+  );
+  const countEntries = database.query(
+    "SELECT COUNT(*) AS n FROM catalog_entries",
+  );
+
+  function toEntry(row: Record<string, unknown>): CatalogEntry {
+    const {
+      id,
+      version,
+      digest,
+      origin_kind: kind,
+      origin_location: location,
+      installed_at: installedAt,
+      installation_generation: generation,
+    } = row;
+    if (
+      typeof id !== "string" ||
+      typeof version !== "string" ||
+      typeof digest !== "string" ||
+      typeof location !== "string" ||
+      typeof installedAt !== "string" ||
+      typeof generation !== "number" ||
+      (kind !== "local-build" && kind !== "local-file")
+    ) {
+      throw new Error("Catalog: a catalog_entries row is malformed.");
+    }
+    const origin: BundleOrigin =
+      kind === "local-build"
+        ? { kind: "local-build", folder: location }
+        : { kind: "local-file", path: location };
+    return {
+      id,
+      version,
+      digest,
+      origin,
+      installedAt,
+      installationGeneration: generation,
+    };
+  }
+
+  // The atomic install: serialized by BEGIN IMMEDIATE, so a concurrent writer
+  // waits on `busy_timeout` or fails without corrupting. First-install-wins is
+  // decided under the lock; a fresh install stages the bytes, verifies the
+  // stored copy against the digest, then commits the row. On any throw the
+  // partial store file is removed before the transaction rolls the row back, so
+  // a failure leaves neither bytes nor Entry.
+  // ponytail: the byte staging (write, read-back, hash, rename) runs inside the
+  // write lock, so a large install briefly blocks other writers. Fine at M1
+  // Bundle sizes; if a multi-MB install ever stalls concurrent commands, stage
+  // and verify to a temp file before the transaction and keep only the
+  // first-install-wins check, rename, and insert under the lock.
+  const commitInstall = database.transaction(
+    (install: BundleInstall): BundleInstallResult => {
+      const { id, version } = install.identity;
+      const existing = selectEntry.get(id, version) as Record<
+        string,
+        unknown
+      > | null;
+      if (existing != null) {
+        const entry = toEntry(existing);
+        return entry.digest === install.digest
+          ? { outcome: "already-installed", entry }
+          : { outcome: "identity-collision", existing: entry };
+      }
+
+      const finalPath = join(storeDir, `${install.digest}.wfb`);
+      const stagePath = `${finalPath}.staging`;
+      try {
+        mkdirSync(storeDir, { recursive: true });
+        writeFileSync(stagePath, install.bytes);
+        const storedDigest = createHash("sha256")
+          .update(readFileSync(stagePath))
+          .digest("hex");
+        if (storedDigest !== install.digest) {
+          throw new Error(
+            `Catalog: staged bytes hash to ${storedDigest}, not the ${install.digest} the caller declared.`,
+          );
+        }
+        // Rename the verified staged copy into its digest name: an atomic
+        // placement, so the store never holds a half-written digest file.
+        rmSync(finalPath, { force: true });
+        renameSync(stagePath, finalPath);
+
+        const generation = (nextGeneration.get() as { g: number }).g;
+        insertEntry.run(
+          id,
+          version,
+          install.digest,
+          install.origin.kind,
+          install.origin.kind === "local-build"
+            ? install.origin.folder
+            : install.origin.path,
+          install.installedAt.toISOString(),
+          generation,
+        );
+        return {
+          outcome: "installed",
+          entry: toEntry(
+            selectEntry.get(id, version) as Record<string, unknown>,
+          ),
+        };
+      } catch (error) {
+        rmSync(stagePath, { force: true });
+        rmSync(finalPath, { force: true });
+        throw error;
+      }
+    },
   );
 
   function readApproval(path: string): WorkspaceApproval | undefined {
@@ -80,6 +262,12 @@ export function openCatalog(secantHome: string): Catalog {
         throw new Error("Catalog: workspace approval vanished after commit.");
       }
       return record;
+    },
+    installBundle(install) {
+      return commitInstall.immediate(install);
+    },
+    countInstalledBundles() {
+      return (countEntries.get() as { n: number }).n;
     },
     /**
      * Release the connection and the catalog file handle. Deterministic because

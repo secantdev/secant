@@ -46,6 +46,18 @@ export type ManifestResult =
   | { readonly ok: true; readonly manifest: AuthoredManifest }
   | { readonly ok: false; readonly finding: BundleFinding };
 
+/** A packaged manifest carries the builder-owned `requires.engine` too. */
+export type PackagedManifestResult =
+  | {
+      readonly ok: true;
+      readonly manifest: AuthoredManifest;
+      readonly engine: string; // the declared `>=x.y.z` range
+    }
+  | { readonly ok: false; readonly finding: BundleFinding };
+
+// The declared engine range a builder writes: `>=` then a strict release.
+const ENGINE_RANGE = /^>=(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+
 // Strict SemVer, from semver.org's official grammar.
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
@@ -81,7 +93,7 @@ export function validateManifest(text: string): ManifestResult {
     };
   }
   try {
-    return { ok: true, manifest: readManifest(raw) };
+    return { ok: true, manifest: readManifest(raw, false) };
   } catch (error) {
     if (error instanceof ManifestError)
       return { ok: false, finding: error.finding };
@@ -89,13 +101,74 @@ export function validateManifest(text: string): ManifestResult {
   }
 }
 
-function readManifest(raw: unknown): AuthoredManifest {
+/**
+ * Validate a *packaged* manifest — the one a build wrote and an installer reads
+ * back from the archive. It is the authored shape plus the builder-owned
+ * `requires.engine` and a mandatory `platforms`. This is the same non-executing
+ * validator the build runs; the installer additionally re-derives the engine to
+ * reject an understated range (see bundle.ts).
+ */
+export function validatePackagedManifest(text: string): PackagedManifestResult {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return {
+      ok: false,
+      finding: {
+        code: "manifest-not-json",
+        message: `manifest.json is not valid JSON: ${(error as Error).message}`,
+        path: "manifest.json",
+      },
+    };
+  }
+  try {
+    const manifest = readManifest(raw, true);
+    if (manifest.platforms === undefined) {
+      fail(
+        "invalid-field",
+        "A packaged manifest must declare platforms.",
+        "platforms",
+      );
+    }
+    return { ok: true, manifest, engine: readEngine(raw) };
+  } catch (error) {
+    if (error instanceof ManifestError)
+      return { ok: false, finding: error.finding };
+    throw error;
+  }
+}
+
+function readEngine(raw: unknown): string {
+  const requires = obj(obj(raw, "manifest").requires, "requires");
+  reject(requires, ["engine"], "requires");
+  const engine = str(requires.engine, "requires.engine");
+  if (!ENGINE_RANGE.test(engine)) {
+    fail(
+      "invalid-engine",
+      `requires.engine "${engine}" must be a ">=x.y.z" release range.`,
+      "requires.engine",
+    );
+  }
+  return engine;
+}
+
+function readManifest(raw: unknown, packaged: boolean): AuthoredManifest {
   const root = obj(raw, "manifest");
-  // `requires` and `platforms` are builder-owned; authors omit them. Everything
-  // else in the closed seven-field set is authored here.
+  // `requires` and `platforms` are builder-owned; authors omit them. A packaged
+  // manifest additionally carries `requires`. Everything else in the closed set
+  // is authored.
   reject(
     root,
-    ["formatVersion", "bundle", "platforms", "inputs", "assets", "routing"],
+    [
+      "formatVersion",
+      "bundle",
+      "platforms",
+      "inputs",
+      "assets",
+      "routing",
+      ...(packaged ? ["requires"] : []),
+    ],
     "",
   );
   if (root.formatVersion !== 1) {

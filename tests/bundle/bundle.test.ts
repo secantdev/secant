@@ -4,7 +4,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
 import test from "node:test";
-import { buildBundle } from "../../src/bundle/bundle.js";
+import {
+  buildBundle,
+  DEFAULT_BUDGETS,
+  readBundle,
+  readZip,
+  writeZip,
+  type Budgets,
+  type ZipEntry,
+} from "../../src/bundle/bundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 const proofBundle = join(
@@ -270,4 +278,199 @@ test("a shape-valid but non-composing folder fails the build with its findings",
     outcome.composition.map((finding) => finding.code),
     ["verdict-unbound-before-entry"],
   );
+});
+
+// --- constrained reader (readZip) and install validation (readBundle) -------
+
+function proofBytes(): Uint8Array {
+  const outcome = buildBundle(proofBundle);
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  return outcome.built.bytes;
+}
+
+function decode(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("utf8");
+}
+
+// Round-trip a real archive's entries through the reader and writer, replacing
+// one entry, so a tampered-but-well-formed archive can be built for a test.
+function repack(
+  bytes: Uint8Array,
+  replace: (entries: readonly ZipEntry[]) => ZipEntry[],
+): Uint8Array {
+  const read = readZip(bytes, DEFAULT_BUDGETS);
+  assert.ok(read.ok, JSON.stringify(read));
+  return writeZip(replace(read.entries));
+}
+
+// Overwrite the general-purpose flag and method in both the local and central
+// header of a single-entry archive, so an otherwise-valid archive can carry an
+// unsupported shape a writer never emits.
+function corruptSingleEntry(
+  bytes: Uint8Array,
+  patch: { flags?: number; method?: number },
+): Uint8Array {
+  const buffer = Buffer.from(bytes);
+  const nameLen = buffer.readUInt16LE(26);
+  const compSize = buffer.readUInt32LE(18);
+  const central = 30 + nameLen + compSize;
+  if (patch.flags !== undefined) {
+    buffer.writeUInt16LE(patch.flags, 6);
+    buffer.writeUInt16LE(patch.flags, central + 8);
+  }
+  if (patch.method !== undefined) {
+    buffer.writeUInt16LE(patch.method, 8);
+    buffer.writeUInt16LE(patch.method, central + 10);
+  }
+  return buffer;
+}
+
+test("readBundle accepts real Proof Bundle bytes with its identity and digest", () => {
+  const built = buildBundle(proofBundle);
+  assert.ok(built.ok);
+  const outcome = readBundle(built.built.bytes, DEFAULT_BUDGETS);
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+  assert.deepEqual(outcome.read.identity, built.built.identity);
+  assert.equal(outcome.read.digest, built.built.digest);
+});
+
+const archiveRejections: {
+  name: string;
+  bytes: () => Uint8Array;
+  budgets?: Budgets;
+  code: string;
+}[] = [
+  {
+    name: "an absolute or traversing path",
+    bytes: () => writeZip([{ path: "../evil.txt", data: Buffer.from("x") }]),
+    code: "unsafe-path",
+  },
+  {
+    name: "a directory entry",
+    bytes: () => writeZip([{ path: "dir/", data: Buffer.alloc(0) }]),
+    code: "directory-entry",
+  },
+  {
+    name: "a duplicate path",
+    bytes: () =>
+      writeZip([
+        { path: "a.txt", data: Buffer.from("1") },
+        { path: "a.txt", data: Buffer.from("2") },
+      ]),
+    code: "duplicate-path",
+  },
+  {
+    name: "a case-colliding path",
+    bytes: () =>
+      writeZip([
+        { path: "a.txt", data: Buffer.from("1") },
+        { path: "A.txt", data: Buffer.from("2") },
+      ]),
+    code: "case-colliding-path",
+  },
+  {
+    name: "an encrypted entry",
+    bytes: () =>
+      corruptSingleEntry(
+        writeZip([{ path: "note.txt", data: Buffer.from("x") }]),
+        { flags: 0x0801 },
+      ),
+    code: "encrypted-archive",
+  },
+  {
+    name: "an unsupported compression method",
+    bytes: () =>
+      corruptSingleEntry(
+        writeZip([{ path: "note.txt", data: Buffer.from("x") }]),
+        { method: 99 },
+      ),
+    code: "unsupported-compression",
+  },
+  {
+    name: "a multipart archive",
+    bytes: () => {
+      const buffer = Buffer.from(
+        writeZip([{ path: "note.txt", data: Buffer.from("x") }]),
+      );
+      buffer.writeUInt16LE(1, buffer.length - 22 + 4); // this-disk number
+      return buffer;
+    },
+    code: "multipart-archive",
+  },
+  {
+    name: "an over-budget input size",
+    bytes: () => writeZip([{ path: "note.txt", data: Buffer.from("x") }]),
+    budgets: { ...DEFAULT_BUDGETS, maxInputBytes: 1 },
+    code: "archive-too-large",
+  },
+  {
+    name: "an over-budget entry count",
+    bytes: () =>
+      writeZip([
+        { path: "a.txt", data: Buffer.from("1") },
+        { path: "b.txt", data: Buffer.from("2") },
+      ]),
+    budgets: { ...DEFAULT_BUDGETS, maxEntries: 1 },
+    code: "too-many-entries",
+  },
+  {
+    name: "an over-budget expanded size",
+    bytes: () => writeZip([{ path: "a.txt", data: Buffer.from("hello") }]),
+    budgets: { ...DEFAULT_BUDGETS, maxExpandedBytes: 1 },
+    code: "expanded-too-large",
+  },
+];
+
+for (const rejection of archiveRejections) {
+  test(`readZip rejects ${rejection.name}`, () => {
+    const result = readZip(
+      rejection.bytes(),
+      rejection.budgets ?? DEFAULT_BUDGETS,
+    );
+    assert.ok(!result.ok, "expected a rejection");
+    assert.equal(result.finding.code, rejection.code);
+  });
+}
+
+test("readBundle rejects an archive with no manifest.json", () => {
+  const bytes = writeZip([{ path: "note.txt", data: Buffer.from("x") }]);
+  const outcome = readBundle(bytes, DEFAULT_BUDGETS);
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.finding.code, "manifest-missing");
+});
+
+test("readBundle rejects an understated engine range", () => {
+  const bytes = repack(proofBytes(), (entries) =>
+    entries.map((entry) =>
+      entry.path === "manifest.json"
+        ? {
+            path: entry.path,
+            data: Buffer.from(
+              decode(entry.data).replace('">=0.1.0"', '">=0.0.0"'),
+            ),
+          }
+        : entry,
+    ),
+  );
+  const outcome = readBundle(bytes, DEFAULT_BUDGETS);
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.finding.code, "engine-understated");
+});
+
+test("readZip rejects a decompression bomb that understates its expanded size", () => {
+  // A single entry whose declared uncompressed size is tiny but whose deflate
+  // stream really expands to a megabyte: the pre-extraction budget sums the
+  // understated size and passes, so the per-entry output cap is what must catch
+  // it during inflation.
+  const buffer = Buffer.from(
+    writeZip([{ path: "bomb.txt", data: Buffer.alloc(1_000_000, 0x41) }]),
+  );
+  const nameLen = buffer.readUInt16LE(26);
+  const compSize = buffer.readUInt32LE(18);
+  const central = 30 + nameLen + compSize;
+  buffer.writeUInt32LE(10, 22); // local uncompressed size
+  buffer.writeUInt32LE(10, central + 24); // central uncompressed size
+  const result = readZip(buffer, DEFAULT_BUDGETS);
+  assert.ok(!result.ok, "expected the bomb to be rejected");
+  assert.equal(result.finding.code, "corrupt-entry");
 });

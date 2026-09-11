@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateManifest, type BundleFinding } from "./manifest.js";
+import {
+  validateManifest,
+  validatePackagedManifest,
+  type BundleFinding,
+} from "./manifest.js";
 import {
   checkComposition,
   PLATFORMS,
@@ -10,7 +14,20 @@ import {
   type CompositionFinding,
   type Platform,
 } from "../workflow/workflow.js";
-import { writeZip, type ZipEntry } from "./zip.js";
+import { readZip, writeZip, type Budgets, type ZipEntry } from "./zip.js";
+
+// The Bundle Module's ZIP surface is public through this entry: the writer the
+// build uses, the constrained reader install uses, and the budgets.
+export {
+  DEFAULT_BUDGETS,
+  readZip,
+  writeZip,
+  type Budgets,
+  type ZipEntry,
+  type ZipReadResult,
+} from "./zip.js";
+
+const MANIFEST_ENTRY = "manifest.json";
 
 // The Bundle Module reads an authoring folder into validated `.wfb` bytes and
 // their digest without executing, loading, or fetching anything. It validates
@@ -32,7 +49,15 @@ export type BuildOutcome =
   | { readonly ok: false; readonly finding: BundleFinding }
   | { readonly ok: false; readonly composition: readonly CompositionFinding[] };
 
-const MANIFEST_ENTRY = "manifest.json";
+/** What an installer needs from validated archive bytes: identity and digest. */
+export interface ReadBundle {
+  readonly identity: { readonly id: string; readonly version: string };
+  readonly digest: string; // SHA-256 hex over the exact bytes
+}
+
+export type ReadOutcome =
+  | { readonly ok: true; readonly read: ReadBundle }
+  | { readonly ok: false; readonly finding: BundleFinding };
 
 // Every v1 feature maps to the Secant version that introduced format version 1.
 // The builder derives requires.engine as the max over features actually used;
@@ -126,6 +151,67 @@ export function buildBundle(folder: string): BuildOutcome {
 
 function finding(code: string, message: string, path?: string): BuildOutcome {
   return { ok: false, finding: { code, message, ...(path ? { path } : {}) } };
+}
+
+/**
+ * Read validated `.wfb` bytes for install: enforce the archive rules and budgets
+ * (zip.ts), validate the packaged manifest with the same validator the build
+ * runs, and independently re-derive the engine to reject an understated range.
+ * Executes, loads, and fetches nothing. Both a fresh build and a received file
+ * install through here, so the two are indistinguishable once stored.
+ * ponytail: install does not re-run the Composition check — the digest makes a
+ * built and an imported archive identical, and archive shape, manifest shape,
+ * and engine range are the install-time contract. Add it if a foreign archive
+ * must be proven to compose before it is stored.
+ */
+export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
+  const archive = readZip(bytes, budgets);
+  if (!archive.ok) return archive;
+
+  const bad = (code: string, message: string, path?: string): ReadOutcome => ({
+    ok: false,
+    finding: { code, message, ...(path ? { path } : {}) },
+  });
+
+  const manifestEntry = archive.entries.find(
+    (entry) => entry.path === MANIFEST_ENTRY,
+  );
+  if (manifestEntry === undefined) {
+    return bad("manifest-missing", `Archive has no ${MANIFEST_ENTRY}.`);
+  }
+  let manifestText: string;
+  try {
+    manifestText = new TextDecoder("utf8", { fatal: true }).decode(
+      manifestEntry.data,
+    );
+  } catch {
+    return bad("manifest-not-utf8", `${MANIFEST_ENTRY} is not valid UTF-8.`);
+  }
+
+  const parsed = validatePackagedManifest(manifestText);
+  if (!parsed.ok) return { ok: false, finding: parsed.finding };
+
+  const declared = parsed.engine.slice(">=".length);
+  const required = deriveEngine(parsed.manifest);
+  if (compareVersions(declared, required) < 0) {
+    return bad(
+      "engine-understated",
+      `requires.engine "${parsed.engine}" understates the ${required} this Bundle actually needs.`,
+      "requires.engine",
+    );
+  }
+
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  return {
+    ok: true,
+    read: {
+      identity: {
+        id: parsed.manifest.bundle.id,
+        version: parsed.manifest.bundle.version,
+      },
+      digest,
+    },
+  };
 }
 
 // The Composition check inspects prompt and schema asset *content*; it cannot

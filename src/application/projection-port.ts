@@ -41,6 +41,7 @@ export interface WorkspaceSnapshot {
   readonly family: "workspace";
   readonly path: string;
   readonly approval: WorkspaceApprovalState;
+  readonly installedBundleCount: number;
   readonly actionOffers: readonly ActionOffer[];
 }
 export type WorkspaceApprovalState =

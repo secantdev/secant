@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import type { BundleManagement } from "../application/bundle-management.js";
+import type {
+  BundleManagement,
+  BundleResult,
+} from "../application/bundle-management.js";
 import type {
   OperationSnapshot,
   Problem,
@@ -109,6 +112,7 @@ function showWorkspace(
       io.out("Status: unapproved\n");
       io.out("Run `secant workspace approve` to approve this workspace.\n");
     }
+    io.out(`Installed Bundles: ${snapshot.installedBundleCount}\n`);
     return 0;
   } finally {
     opened.close();
@@ -136,39 +140,59 @@ function bundleCommand(
     else if (!token.startsWith("-")) positional.push(token);
   }
 
-  if (positional[0] !== "build") {
-    return fail(io, json, {
-      code: "unknown-command",
-      explanation: `Unknown bundle command: ${rest.join(" ") || "(none)"}.`,
-      remediation:
-        "Run `secant bundle build <folder> --no-install --output <file>`.",
-      possibleEffects: "none",
-    });
+  const target = positional[1];
+  if (positional[0] === "build") {
+    if (target === undefined) {
+      return fail(io, json, {
+        code: "missing-folder",
+        explanation: "bundle build needs an authoring folder path.",
+        remediation: "Run `secant bundle build <folder>`.",
+        possibleEffects: "none",
+      });
+    }
+    return report(
+      io,
+      json,
+      bundle.build(resolve(io.cwd(), target), {
+        noInstall,
+        output: output === undefined ? undefined : resolve(io.cwd(), output),
+      }),
+    );
   }
-  const folder = positional[1];
-  if (folder === undefined) {
-    return fail(io, json, {
-      code: "missing-folder",
-      explanation: "bundle build needs an authoring folder path.",
-      remediation:
-        "Run `secant bundle build <folder> --no-install --output <file>`.",
-      possibleEffects: "none",
-    });
+  if (positional[0] === "install") {
+    if (target === undefined) {
+      return fail(io, json, {
+        code: "missing-file",
+        explanation: "bundle install needs a .wfb file path.",
+        remediation: "Run `secant bundle install <file.wfb>`.",
+        possibleEffects: "none",
+      });
+    }
+    return report(io, json, bundle.install(resolve(io.cwd(), target)));
   }
-
-  const result = bundle.build(resolve(io.cwd(), folder), {
-    noInstall,
-    output: output === undefined ? undefined : resolve(io.cwd(), output),
+  return fail(io, json, {
+    code: "unknown-command",
+    explanation: `Unknown bundle command: ${rest.join(" ") || "(none)"}.`,
+    remediation:
+      "Run `secant bundle build <folder>` or `secant bundle install <file.wfb>`.",
+    possibleEffects: "none",
   });
-  if (!result.ok) return fail(io, json, result.problem);
+}
 
+function report(io: HeadlessIO, json: boolean, result: BundleResult): number {
+  if (!result.ok) return fail(io, json, result.problem);
   if (json) {
     io.out(`${JSON.stringify(result.report, null, 2)}\n`);
     return 0;
   }
-  io.out(`Digest: sha256:${result.report.digest}\n`);
-  if (result.report.outputPath !== undefined) {
-    io.out(`Wrote ${result.report.outputPath}\n`);
+  const { identity, digest, outputPath, installed } = result.report;
+  io.out(`Bundle: ${identity.id}@${identity.version}\n`);
+  io.out(`Digest: sha256:${digest}\n`);
+  if (outputPath !== undefined) io.out(`Wrote ${outputPath}\n`);
+  if (installed?.status === "installed") {
+    io.out(`Installed (generation ${installed.generation}).\n`);
+  } else if (installed?.status === "already-installed") {
+    io.out("Already installed.\n");
   }
   return 0;
 }

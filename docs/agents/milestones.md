@@ -34,8 +34,12 @@ implementation-ticket packet are in [issue tracker](./issue-tracker.md); this fi
 
 ## Closing a milestone and gates
 
-- Close-out comment on the milestone issue: tickets closed, the gate introduced and its CI evidence, deletions performed, dependencies re-earned,
-  and anything handed to the next milestone. Then close the issue.
+- The session that closes the last implementation ticket creates `Audit: M<n>` under [milestone audit](./milestone-audit.md). The milestone
+  closes only after the audit's decision comment exists and every fix-now ticket it cut is closed.
+- Close-out comment on the milestone issue: tickets closed, the gate introduced and its CI evidence, deletions performed, one audit line (a link to
+  the audit, fix-now tickets closed, hand-over rows named), and anything handed to the next milestone. Then close the issue.
 - If the spine names a refactoring gate after this milestone (G1 after M2, G2 after M4, G3 after M5, G4 after M6), open `G<n>: <title>` as a
-  human-in-the-loop review issue carrying the gate checklist from the resolution. A gate may reorder remaining slices; it never reopens an ADR.
+  human-in-the-loop **plan** review. Its checklist: the full-tree guidance-relevance pass with one representative task per Harness and a transcript
+  check, and the `UPSTREAM` record and support matrix current. A gate may reorder remaining slices; it never reopens an ADR. Module cohesion,
+  dependency re-earning, and deletion of unused code belong to the audit, not the gate.
 - Whoever closes a milestone opens and curates the next one before considering the closure complete.

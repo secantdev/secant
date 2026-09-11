@@ -48,8 +48,9 @@ decision: better-sqlite3 is moot under Bun (it needed a Bun fix to load at all a
 ## Runtime neutrality
 
 [ADR 0018](./0018-adopt-opencode-presentation-as-pinned-reduced-vendor.md)'s runtime-neutrality rule extends from vendored presentation source to
-**all target source**, with a named allowlist where `bun:` and `Bun.` are permitted: the SQLite adapter and the Windows console guard. The mechanical
-check in `tests/architecture/check-module-boundaries.ts` becomes an allowlist instead of a blanket ban. No Node twin implementations exist —
+**all target source**, with a named allowlist where `bun:` and `Bun.` are permitted: the SQLite adapter, the Windows console guard, and the CLI entry
+check (which needs `Bun.main` to detect the compiled-binary entry, since `import.meta.main` is false in a Bun binary on Windows). The mechanical `Bun.*`
+ban in `tests/architecture/check-vendor-provenance.ts` becomes an allowlist instead of a blanket ban. No Node twin implementations exist —
 OpenCode's `#sqlite`/`#pty`/`#fff` Node sides serve only its Electron desktop build and are untested. This is achievable: OpenCode touches Bun APIs
 in 12 of 833 source files and cut from 321 call sites to 48 by replacing Bun calls with Node builtins.
 

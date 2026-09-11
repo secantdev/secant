@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 // The CLI hosts command dispatch and answers --help/--version directly. The
 // version is embedded at build time by the Bun standalone compile (see
 // scripts/build.ts `define`); there is no runtime manifest to read and no Node
@@ -52,11 +54,22 @@ async function main(argv: readonly string[]): Promise<void> {
   process.stdout.write(helpText);
 }
 
-// `import.meta.main` is true only when this module is the process entry — the
-// compiled Bun binary, `bun src/cli/main.ts`, and a Node entry alike — and false
-// when a test imports it, so main never runs under test. One check, both
-// runtimes.
-if (import.meta.main) {
+// The entry check for both runtimes. `import.meta.main` is unusable here — it is
+// false inside a Bun single-file executable on Windows (a Bun quirk verified in
+// #62) — so key off `Bun.main`, the entry path Bun exposes under the compiled
+// binary and `bun src/cli/main.ts` alike. Normalise separators because `Bun.main`
+// uses "/" while `fileURLToPath` yields the platform's. The Node test runner
+// imports this module (no `Bun` global, and not the entry), so main never runs
+// under test. This is the one target-source site allowed to touch a Bun API
+// (ADR 0030 runtime-neutrality allowlist).
+function isMainEntry(): boolean {
+  const bunMain = (globalThis as { Bun?: { main?: string } }).Bun?.main;
+  if (bunMain === undefined) return false;
+  const normalise = (path: string): string => path.replace(/\\/g, "/");
+  return normalise(bunMain) === normalise(fileURLToPath(import.meta.url));
+}
+
+if (isMainEntry()) {
   void main(process.argv.slice(2)).catch((error: unknown) => {
     const message =
       error instanceof Error ? (error.stack ?? error.message) : String(error);

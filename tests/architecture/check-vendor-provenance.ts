@@ -1,12 +1,12 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-// A structural check that guards the vendored-copy policy (ADR 0018): target
-// source must never call a `Bun.*` runtime API, and once any vendored file
-// exists the repository must carry both provenance records — `UPSTREAM` and
-// `THIRD-PARTY-NOTICES.md`. A file is "vendored" when it carries the copy
-// marker below. Pure over a directory tree, so it is exercised with synthetic
-// graphs as well as the real repository.
+// A structural check that guards the vendored-copy policy (ADR 0018, as extended
+// by ADR 0030): target source may call a `Bun.*` runtime API only from the
+// allowlisted sites below, and once any vendored file exists the repository must
+// carry both provenance records — `UPSTREAM` and `THIRD-PARTY-NOTICES.md`. A file
+// is "vendored" when it carries the copy marker below. Pure over a directory
+// tree, so it is exercised with synthetic graphs as well as the real repository.
 
 export interface ProvenanceIssue {
   file: string;
@@ -15,6 +15,12 @@ export interface ProvenanceIssue {
 
 const VENDOR_MARKER = "Vendored from OpenCode";
 const SOURCE_EXTENSION = /\.(?:[cm]?[jt]s|[jt]sx)$/;
+
+// The runtime-neutrality allowlist (ADR 0030): the few target-source sites that
+// must touch a Bun API because no runtime-neutral equivalent exists. The CLI
+// entry needs `Bun.main` to detect the compiled-binary entry (`import.meta.main`
+// is false in a Bun binary on Windows).
+const BUN_API_ALLOWLIST = new Set(["src/cli/main.ts"]);
 
 export function checkVendorProvenance(root: string): ProvenanceIssue[] {
   const issues: ProvenanceIssue[] = [];
@@ -35,7 +41,7 @@ export function checkVendorProvenance(root: string): ProvenanceIssue[] {
 
   for (const file of files.sort()) {
     const text = readFileSync(file, "utf8");
-    if (/\bBun\./.test(text)) {
+    if (/\bBun\./.test(text) && !BUN_API_ALLOWLIST.has(pathOf(file))) {
       issues.push({
         file: pathOf(file),
         message: "Target source must not call Bun runtime APIs",

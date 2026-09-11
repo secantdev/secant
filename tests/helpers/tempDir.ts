@@ -15,7 +15,9 @@ export function makeTempDir(prefix: string): string {
 // Under `bun test` every test file shares one process, so this cleanup can hit a
 // temp dir whose owning file has already closed its handles but whose files
 // Windows still briefly reports as locked (a just-closed SQLite database is the
-// usual culprit). Retry the removal until the lock clears.
+// usual culprit). Retry the removal until the lock clears; if it never does,
+// cleanup is best-effort — a leftover temp dir is reclaimed with the rest of the
+// OS temp directory and must not fail the gate.
 async function removeTempDir(directory: string): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -25,7 +27,12 @@ async function removeTempDir(directory: string): Promise<void> {
       const code = (error as NodeJS.ErrnoException).code;
       const transient =
         code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY";
-      if (!transient || attempt >= 20) throw error;
+      if (!transient || attempt >= 20) {
+        process.stderr.write(
+          `warning: could not remove temp dir ${directory}: ${String(error)}\n`,
+        );
+        return;
+      }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }

@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { Database } from "bun:sqlite";
 
 // The Catalog owns the catalog database under the Secant home. Everything about
 // SQLite stays behind this Interface: no SQLite type, row shape, or storage path
@@ -21,18 +21,19 @@ export interface Catalog {
    * record either way.
    */
   approveWorkspace(path: string, approvedAt: Date): WorkspaceApproval;
+  /** Release the database; safe to call from a `finally` — it does not throw. */
   close(): void;
 }
 
 /**
  * Open the catalog database at `<secantHome>/catalog.db`, creating the home when
- * absent. The Catalog Module is loaded lazily by the composition root (behind
- * the CLI's engine gate), so `node:sqlite` is never reached on an unsupported
- * Node before the fail-fast names the required range.
+ * absent. `bun:sqlite` is a Bun built-in, so the driver ships inside the
+ * compiled binary; it is the sole SQLite dependency and lives only behind this
+ * Interface (ADR 0030, runtime-neutrality allowlist).
  */
 export function openCatalog(secantHome: string): Catalog {
   mkdirSync(secantHome, { recursive: true });
-  const database = new DatabaseSync(join(secantHome, "catalog.db"));
+  const database = new Database(join(secantHome, "catalog.db"));
   // Serialize concurrent Secant processes at the database rather than corrupt.
   database.exec("PRAGMA busy_timeout = 5000");
   database.exec(
@@ -40,16 +41,25 @@ export function openCatalog(secantHome: string): Catalog {
       "path TEXT PRIMARY KEY, approved_at TEXT NOT NULL) STRICT",
   );
 
-  const insert = database.prepare(
+  // `.query()` (not `.prepare()`) so the Database owns these statements and
+  // finalizes them on close; with no caller-owned statement outstanding, close()
+  // then releases the file handle immediately (see `close` below).
+  const insert = database.query(
     "INSERT OR IGNORE INTO workspace_approvals (path, approved_at) VALUES (?, ?)",
   );
-  const select = database.prepare(
+  const select = database.query(
     "SELECT path, approved_at FROM workspace_approvals WHERE path = ?",
+  );
+  // BEGIN IMMEDIATE with automatic COMMIT on return and ROLLBACK on throw, so a
+  // failure leaves no partial row (ADR 0030's transaction helper).
+  const insertApproval = database.transaction((path: string, isoTime: string) =>
+    insert.run(path, isoTime),
   );
 
   function readApproval(path: string): WorkspaceApproval | undefined {
+    // `bun:sqlite` returns null (not undefined) when no row matches.
     const row = select.get(path);
-    if (row === undefined) return undefined;
+    if (row == null) return undefined;
     // Validate the persisted shape at this ingress rather than trust it blindly.
     const { path: storedPath, approved_at: approvedAt } = row as Record<
       string,
@@ -64,25 +74,20 @@ export function openCatalog(secantHome: string): Catalog {
   return {
     getWorkspaceApproval: readApproval,
     approveWorkspace(path, approvedAt) {
-      // BEGIN IMMEDIATE with guarded rollback: a failure leaves no partial row.
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        insert.run(path, approvedAt.toISOString());
-        database.exec("COMMIT");
-      } catch (error) {
-        try {
-          database.exec("ROLLBACK");
-        } catch {
-          // A failed rollback must not mask the original failure below.
-        }
-        throw error;
-      }
+      insertApproval.immediate(path, approvedAt.toISOString());
       const record = readApproval(path);
       if (record === undefined) {
         throw new Error("Catalog: workspace approval vanished after commit.");
       }
       return record;
     },
+    /**
+     * Release the connection and the catalog file handle. Deterministic because
+     * the Database owns every statement here; reopening the same home does not
+     * race a lingering lock (the Windows close() failure `node:sqlite` could not
+     * avoid, ADR 0030). Default `close()` does not throw, so callers may close
+     * in a `finally` without masking a successful command.
+     */
     close() {
       database.close();
     },

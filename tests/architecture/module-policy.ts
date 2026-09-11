@@ -99,8 +99,8 @@ export function externalViolation(
   owner: ModuleName,
   specifier: string,
 ): string | undefined {
-  // Strip either runtime's builtin prefix so `bun:sqlite` and `node:sqlite`
-  // reach the same ownership rules (runtime neutrality is the allowlist's job).
+  // Strip the runtime builtin prefix so a runtime-agnostic rule below can key on
+  // the bare name (runtime neutrality itself is the allowlist's job).
   const name = specifier.replace(/^(?:node|bun):/, "");
   if (specifier.startsWith("@opencode-ai/") || specifier === "node-pty") {
     return "Target Modules cannot depend on OpenCode domain packages or PTY transport";
@@ -112,12 +112,15 @@ export function externalViolation(
   ) {
     return "OpenTUI belongs to presentation and renderer ownership";
   }
-  if (
-    (name === "sqlite" || specifier === "better-sqlite3") &&
-    owner !== "store" &&
-    owner !== "catalog"
-  ) {
-    return "SQLite belongs to Run Store or Catalog";
+  // `bun:sqlite` is the sole admitted SQLite driver (ADR 0030), fenced to the
+  // Run Store and Catalog. `node:sqlite` (its Windows close() lock) and
+  // better-sqlite3 are no longer admitted anywhere.
+  if (specifier === "bun:sqlite") {
+    if (owner !== "store" && owner !== "catalog") {
+      return "SQLite belongs to Run Store or Catalog";
+    }
+  } else if (name === "sqlite" || specifier === "better-sqlite3") {
+    return "SQLite uses bun:sqlite only; node:sqlite and better-sqlite3 are not admitted";
   }
   if (name === "module" || name === "vm") {
     return "Custom loaders and evaluated module graphs need an explicit topology decision";

@@ -28,9 +28,13 @@ const BUN_API_USE = /\bBun\.|["'`]bun:/;
 // The runtime-neutrality allowlist (ADR 0030): the few target-source sites that
 // must touch a Bun API because no runtime-neutral equivalent exists. The CLI
 // entry needs `Bun.main` to detect the compiled-binary entry (`import.meta.main`
-// is false in a Bun binary on Windows). The SQLite adapter and the Windows
-// console guard each add their own entry when that slice creates the file.
-const BUN_API_ALLOWLIST = new Set(["src/cli/main.ts"]);
+// is false in a Bun binary on Windows). The Catalog adapter imports `bun:sqlite`
+// behind its Interface. The Windows console guard adds its own entry when that
+// slice creates the file.
+const BUN_API_ALLOWLIST = new Set([
+  "src/cli/main.ts",
+  "src/catalog/catalog.ts",
+]);
 
 export function checkVendorProvenance(root: string): ProvenanceIssue[] {
   const issues: ProvenanceIssue[] = [];

@@ -197,17 +197,27 @@ test("Artifact storage is private to Run Store and child composition is private 
 
 test("the bun: spelling of a driver obeys the same ownership as its node: spelling", async () => {
   const result = await audit({
-    // `bun:sqlite` is the SQLite driver: outside Run Store or Catalog it is
-    // rejected exactly like `node:sqlite`, and it is never reported as an
+    // `bun:sqlite` is the only admitted SQLite driver (ADR 0030): outside Run
+    // Store or Catalog it is rejected, and it is never reported as an
     // unresolvable dependency (runtime neutrality is the allowlist's concern).
     "src/tui/tui.ts": 'import { Database } from "bun:sqlite";',
     "src/run/store/store.ts":
       'import { Database } from "bun:sqlite"; import { dlopen } from "bun:ffi";',
+    // `node:sqlite` is no longer admitted anywhere — not even in the Catalog,
+    // where it used to be allowed before `bun:sqlite` replaced it.
+    "src/catalog/catalog.ts": 'import { DatabaseSync } from "node:sqlite";',
   });
   assert.ok(
     result.issues.some(
       (issue) =>
         issue.file === "src/tui/tui.ts" && issue.message.includes("SQLite"),
+    ),
+  );
+  assert.ok(
+    result.issues.some(
+      (issue) =>
+        issue.file === "src/catalog/catalog.ts" &&
+        issue.message.includes("SQLite"),
     ),
   );
   assert.deepEqual(

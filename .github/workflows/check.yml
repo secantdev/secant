@@ -5,22 +5,82 @@ on:
   pull_request:
 
 jobs:
+  # Typecheck, format, lint, and the deterministic suite on all three OS
+  # (Windows x64, macOS arm64, Linux x64 per ADR 0027). The suite still runs on
+  # the Node runner (retired in #64), so Node is set up for that step only; Bun
+  # provides node_modules and drives the other scripts.
   check:
     strategy:
       fail-fast: false
       matrix:
-        # Windows x64, macOS arm64, and Linux x64 per ADR 0027; a red job on any OS blocks merge.
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Reads the exact Bun pin from package.json's packageManager field.
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
       - uses: actions/setup-node@v4
         with:
-          # OpenTUI 0.4.5's Node path needs experimental FFI, first available in
-          # official Node 26.4.0 (ADR 0018 adoption; the extraction research's
-          # required Node line). `npm run check` compiles the Solid build and
-          # runs the renderer frame tests on all three OS.
+          # OpenTUI 0.4.5's Node path needs experimental FFI, first in Node
+          # 26.4.0; the renderer frame tests run under it on all three OS.
           node-version: 26.4.0
-          cache: npm
-      - run: npm ci
-      - run: npm run check
+      - run: bun run typecheck
+      - run: bun run format:check
+      - run: bun run lint
+      - run: bun run test
+
+  # One Linux runner cross-compiles all three gated targets (ADR 0030). The wide
+  # install fetches every platform's @opentui native package so the compile can
+  # embed the right one per target.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
+      # @opentui/core@0.4.5 matches the dependency pin; a bump is a deliberate
+      # gated PR (ADR 0027). The wide flags pull the native package for every
+      # platform, not just this host's.
+      - run: bun install --os="*" --cpu="*" "@opentui/core@0.4.5"
+      - run: bun run scripts/build.ts --all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/secant-*
+          if-no-files-found: error
+
+  # Each cross-compiled binary is smoked on its own OS: the seven-assertion
+  # compiled-binary smoke (help, version, no-TTY refusal, workspace approve then
+  # read, Proof Bundle build), plus codesign --verify on macOS. The smoke harness
+  # is a Node script; the binary it exercises is standalone.
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            binary: secant-windows-x64.exe
+          - os: macos-latest
+            binary: secant-darwin-arm64
+          - os: ubuntu-latest
+            binary: secant-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.4.0
+      - name: Restore the executable bit
+        if: runner.os != 'Windows'
+        run: chmod +x "dist/${{ matrix.binary }}"
+      - run: node scripts/package-smoke.mjs "dist/${{ matrix.binary }}"

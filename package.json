@@ -3,14 +3,11 @@
   "version": "0.1.0",
   "author": "secantdev",
   "type": "module",
-  "main": "dist/cli.js",
-  "bin": {
-    "secant": "./dist/cli.js"
-  },
+  "packageManager": "bun@1.4.2",
   "scripts": {
-    "build": "tsup",
+    "build": "bun run scripts/build.ts",
     "check": "npm run typecheck && npm run format:check && npm run lint && npm test && npm run build && npm run test:package",
-    "dev": "tsx src/cli/main.ts",
+    "dev": "bun src/cli/main.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
@@ -31,8 +28,6 @@
     "eslint": "^10.8.1",
     "globals": "^17.11.0",
     "prettier": "^3.9.6",
-    "tsup": "^8.5.1",
-    "tsx": "^4.21.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.67.0"
   },

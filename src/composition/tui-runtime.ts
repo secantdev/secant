@@ -10,15 +10,14 @@ import {
 } from "../tui/renderer/renderer.js";
 import { mountTui } from "../tui/tui.js";
 
-// The TUI child composition root: it opens the Catalog, constructs the
-// Application, creates the production renderer, mounts the shell, and owns the
-// single teardown site through every exit path — quit binding, Ctrl+C, SIGHUP,
+// The TUI composition root: it opens the Catalog, constructs the Application,
+// creates the production renderer, mounts the shell, and owns the single
+// teardown site through every exit path — quit binding, Ctrl+C, SIGHUP,
 // SIGTERM, render failure, and unhandled error. `process.exit` is never called
-// on the normal path; the returned code becomes `process.exitCode`. Reached only
-// in the FFI re-exec'd child, so `createCliRenderer` and its native library are
-// safe to touch here — and OpenTUI's ESM has already resolved from the installed
-// package by the time the no-terminal case rejects, which is what the no-TTY
-// package smoke proves.
+// on the normal path; the returned code becomes `process.exitCode`. Runs
+// in-process under the compiled binary, which carries OpenTUI's native library;
+// the no-terminal case rejects before the renderer is created, which is what the
+// no-TTY smoke proves.
 
 // The precise startup Problem when there is no interactive terminal. Kept stable
 // so CI's no-TTY package smoke can assert on it (ADR 0027).

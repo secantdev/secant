@@ -30,8 +30,8 @@ const child = spawn(
   [
     // OpenTUI's native render library loads via node:ffi (renderer tests), and
     // `browser` resolves solid-js to its reactive build so it shares one
-    // instance with @opentui/solid. tsx compiles `.ts`; the Solid loader
-    // compiles `.tsx` with Solid's universal transform.
+    // instance with @opentui/solid. The Solid loader compiles `.ts` by stripping
+    // types and `.tsx` with Solid's universal transform.
     "--experimental-ffi",
     "--conditions=browser",
     "--import",

@@ -1,69 +1,14 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+// The CLI hosts command dispatch and answers --help/--version directly. The
+// version is embedded at build time by the Bun standalone compile (see
+// scripts/build.ts `define`); there is no runtime manifest to read and no Node
+// engine gate — a compiled binary carries its own runtime.
 
-// The CLI hosts command dispatch and answers --help/--version directly. It fails
-// fast when the running Node is below the engines floor, naming the required
-// range, before the composition root opens the Catalog database.
-
-interface Manifest {
-  readonly version: string;
-  readonly engineRange: string;
-}
-
-function readManifest(): Manifest {
-  // The nearest package.json above this module is the package's own manifest
-  // (dist/cli.js sits directly under the package root); it is authoritative.
-  let directory = dirname(fileURLToPath(import.meta.url));
-  for (;;) {
-    const candidate = join(directory, "package.json");
-    if (existsSync(candidate)) {
-      const manifest: unknown = JSON.parse(readFileSync(candidate, "utf8"));
-      const record =
-        typeof manifest === "object" && manifest !== null
-          ? (manifest as Record<string, unknown>)
-          : {};
-      const version = record.version;
-      const engines = record.engines as { node?: unknown } | undefined;
-      const engineRange = engines?.node;
-      if (typeof version !== "string") {
-        throw new Error(`${candidate} has no string version to report.`);
-      }
-      if (typeof engineRange !== "string" || !/\d/.test(engineRange)) {
-        // The package's own manifest is authoritative; a range with no numeric
-        // floor is a build defect, so fail loudly rather than pass every Node.
-        throw new Error(
-          `${candidate} has no numeric engines.node floor to enforce.`,
-        );
-      }
-      return { version, engineRange };
-    }
-    const parent = dirname(directory);
-    if (parent === directory) {
-      throw new Error("Could not locate package.json to read the manifest.");
-    }
-    directory = parent;
-  }
-}
-
-// Major.minor floor compare: the engines floor gained a non-zero minor
-// (`26.4.0`) when OpenTUI's Node path pinned the experimental-FFI Node line, so
-// a bare major compare would wrongly pass 26.0.0–26.3.x. Patch is not part of
-// the floor. ponytail: extend to patch only if a non-zero patch floor is set.
-export function withinEngineFloor(
-  engineRange: string,
-  nodeVersion: string,
-): boolean {
-  const floor = engineRange.match(/(\d+)\.(\d+)/);
-  const current = nodeVersion.match(/(\d+)\.(\d+)/);
-  if (floor === null || current === null) return true;
-  const floorMajor = Number(floor[1]);
-  const floorMinor = Number(floor[2]);
-  const currentMajor = Number(current[1]);
-  const currentMinor = Number(current[2]);
-  if (currentMajor !== floorMajor) return currentMajor > floorMajor;
-  return currentMinor >= floorMinor;
-}
+// Build-time constant substituted by the Bun compile. It is a free identifier
+// under `bun src/cli/main.ts` (dev) and the Node test runner, where `typeof`
+// reads "undefined" and the dev sentinel below stands in.
+declare const __SECANT_VERSION__: string;
+const version =
+  typeof __SECANT_VERSION__ === "string" ? __SECANT_VERSION__ : "0.0.0-dev";
 
 const helpText = `Usage: secant [command] [options]
 
@@ -81,33 +26,24 @@ Options:
 `;
 
 async function main(argv: readonly string[]): Promise<void> {
-  const manifest = readManifest();
-  if (!withinEngineFloor(manifest.engineRange, process.version)) {
-    process.stderr.write(
-      `Secant requires Node ${manifest.engineRange}, but this is ${process.version}.\n`,
-    );
-    process.exitCode = 1;
-    return;
-  }
-
   if (argv.includes("-h") || argv.includes("--help")) {
     process.stdout.write(helpText);
     return;
   }
   if (argv.includes("-V") || argv.includes("--version")) {
-    process.stdout.write(`${manifest.version}\n`);
+    process.stdout.write(`${version}\n`);
     return;
   }
   if (argv.length === 0) {
     // No subcommand launches the interactive shell. Loaded lazily so Solid and
     // OpenTUI's native library are never reached on the headless paths.
     const { launchTui } = await import("../composition/main.js");
-    process.exitCode = await launchTui(argv);
+    process.exitCode = await launchTui();
     return;
   }
   if (argv[0] === "workspace" || argv[0] === "bundle") {
-    // Loaded lazily so the Catalog's node:sqlite is never reached until the
-    // engine gate above has passed.
+    // Loaded lazily so the Catalog's SQLite driver is never reached on the
+    // --help/--version paths.
     const { run } = await import("../composition/main.js");
     process.exitCode = run(argv);
     return;
@@ -116,19 +52,11 @@ async function main(argv: readonly string[]): Promise<void> {
   process.stdout.write(helpText);
 }
 
-function isMainEntry(): boolean {
-  const entry = process.argv[1];
-  if (entry === undefined) return false;
-  try {
-    // realpath both sides so an npm bin symlink still matches the real cli.js,
-    // while importing this module (e.g. from a test) never runs main().
-    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
-  } catch {
-    return false;
-  }
-}
-
-if (isMainEntry()) {
+// `import.meta.main` is true only when this module is the process entry — the
+// compiled Bun binary, `bun src/cli/main.ts`, and a Node entry alike — and false
+// when a test imports it, so main never runs under test. One check, both
+// runtimes.
+if (import.meta.main) {
   void main(process.argv.slice(2)).catch((error: unknown) => {
     const message =
       error instanceof Error ? (error.stack ?? error.message) : String(error);

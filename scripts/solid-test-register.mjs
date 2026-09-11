@@ -1,5 +1,5 @@
 import { register } from "node:module";
 
-// Registers the Solid `.tsx` test loader. Passed via `--import` alongside tsx,
-// which keeps handling `.ts`.
+// Registers the TypeScript test loader via `--import`: it compiles `.tsx` with
+// Solid's universal transform and `.ts` by stripping types.
 register("./solid-test-loader.mjs", import.meta.url);

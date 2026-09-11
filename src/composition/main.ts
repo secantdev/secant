@@ -13,7 +13,7 @@ import { runHeadless } from "../headless/headless.js";
 
 export { launchTui } from "./tui-main.js";
 
-/** Runs one CLI invocation past the engine gate; returns the process exit code. */
+/** Runs one headless CLI invocation; returns the process exit code. */
 export function run(args: readonly string[]): number {
   const secantHome =
     process.env.SECANT_HOME?.trim() || join(homedir(), ".secant");

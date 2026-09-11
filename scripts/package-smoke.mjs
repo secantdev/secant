@@ -1,26 +1,36 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { chmod, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+// @ts-expect-error JS helper, no types
+import { TARGETS, hostTargetKey } from "./targets.mjs";
+
+// Smokes the Bun compiled single-file executable (ADR 0030). It replaces the
+// npm-tarball smoke and keeps its install-then-run shape: copy the standalone
+// binary into an isolated temporary location (proving it is self-contained),
+// then run every non-interactive path against that copy. CI passes the
+// cross-compiled artefact for this OS as argv[2]; with no argument it smokes the
+// host binary that `npm run build` wrote to dist/. #52, #53, #54 extend it.
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-// Per the runtime decision (#21), resolve the Windows npm shim to npm's real
-// JavaScript entry and run it under this Node directly, never through a shell.
-// npm sets npm_execpath to npm-cli.js for every `npm run` script, which is how
-// this smoke is always invoked.
-const npmCliPath = process.env.npm_execpath;
-if (!npmCliPath || !/\.[cm]?js$/i.test(npmCliPath)) {
+const pkg = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
+
+function hostBinary() {
+  const key = hostTargetKey(process.platform, process.arch);
+  if (key === undefined) {
+    throw new Error(
+      `No gated target for ${process.platform}-${process.arch}; pass a binary path.`,
+    );
+  }
+  return join(projectRoot, "dist", TARGETS[key].outfile);
+}
+
+const source = process.argv[2] ? resolve(process.argv[2]) : hostBinary();
+if (!existsSync(source)) {
   throw new Error(
-    "package smoke must run under an npm script so npm_execpath resolves to npm's JavaScript entry.",
+    `Compiled binary not found at ${source}. Run \`npm run build\` first, or pass a binary path.`,
   );
 }
 
@@ -30,11 +40,7 @@ function run(command, args, options = {}) {
     encoding: "utf8",
     ...options,
   });
-
-  if (result.error) {
-    throw result.error;
-  }
-
+  if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(
       [
@@ -46,114 +52,71 @@ function run(command, args, options = {}) {
         .join("\n"),
     );
   }
-
   return result.stdout;
 }
 
-function npm(args, options = {}) {
-  return run(process.execPath, [npmCliPath, ...args], options);
-}
-
-const smokeRoot = await mkdtemp(join(tmpdir(), "secant-package-smoke-"));
+const smokeRoot = await mkdtemp(join(tmpdir(), "secant-binary-smoke-"));
 
 try {
-  npm(["pack", "--pack-destination", smokeRoot]);
+  // "Install" the binary into the isolated location and run it from there, so a
+  // stray sibling in dist/ or the working directory cannot mask a non-self-
+  // contained binary.
+  const binary = join(smokeRoot, basename(source));
+  await copyFile(source, binary);
+  if (process.platform !== "win32") await chmod(binary, 0o755);
 
-  const archiveName = (await readdir(smokeRoot)).find((entry) =>
-    entry.endsWith(".tgz"),
-  );
-
-  if (archiveName === undefined) {
-    throw new Error("npm pack did not produce a package archive.");
+  // Apple silicon refuses arm64 code without at least Bun's ad-hoc signature,
+  // which has regressed twice (ADR 0030); verify it before running the binary.
+  if (process.platform === "darwin") {
+    run("codesign", ["--verify", "--deep", "--strict", binary]);
   }
 
-  await writeFile(
-    join(smokeRoot, "package.json"),
-    `${JSON.stringify({ private: true }, null, 2)}\n`,
-  );
-
-  npm(
-    [
-      "install",
-      "--no-audit",
-      "--no-fund",
-      "--package-lock=false",
-      join(smokeRoot, archiveName),
-    ],
-    { cwd: smokeRoot },
-  );
-
-  const packageDirectory = join(
-    smokeRoot,
-    "node_modules",
-    "@secantdev",
-    "secant",
-  );
-  const packageJson = JSON.parse(
-    await readFile(join(packageDirectory, "package.json"), "utf8"),
-  );
-  const entrypoint = packageJson.bin?.secant;
-
-  if (typeof entrypoint !== "string") {
-    throw new Error("The installed package does not declare the secant bin.");
-  }
-
-  const installedEntrypoint = resolve(packageDirectory, entrypoint);
-  const helpOutput = run(process.execPath, [installedEntrypoint, "--help"], {
-    cwd: smokeRoot,
-  });
-  const versionOutput = run(
-    process.execPath,
-    [installedEntrypoint, "--version"],
-    { cwd: smokeRoot },
-  );
-
+  const helpOutput = run(binary, ["--help"], { cwd: smokeRoot });
   if (!helpOutput.includes("Usage: secant")) {
-    throw new Error("Installed package help output did not identify secant.");
+    throw new Error("Compiled binary help output did not identify secant.");
   }
 
-  if (versionOutput.trim() !== packageJson.version) {
+  const versionOutput = run(binary, ["--version"], { cwd: smokeRoot });
+  // The embedded version must print exactly, and nothing else.
+  if (versionOutput !== `${pkg.version}\n`) {
     throw new Error(
-      `Installed package reported version ${versionOutput.trim()} instead of ${packageJson.version}.`,
+      `Compiled binary reported version ${JSON.stringify(versionOutput)} instead of ${JSON.stringify(`${pkg.version}\n`)}.`,
     );
   }
 
-  // Approve a temporary Workspace under a temporary SECANT_HOME from the
-  // installed package, then read it back with --json (issue #50, AC7).
+  // Approve a temporary Workspace under a temporary SECANT_HOME, then read it
+  // back with --json — the SQLite write→read round-trip (issue #50, AC7).
   const secantHome = join(smokeRoot, "secant-home");
   const workspaceDirectory = join(smokeRoot, "workspace");
   await mkdir(workspaceDirectory, { recursive: true });
   const workspaceEnv = { ...process.env, SECANT_HOME: secantHome };
 
-  run(process.execPath, [installedEntrypoint, "workspace", "approve"], {
+  run(binary, ["workspace", "approve"], {
     cwd: workspaceDirectory,
     env: workspaceEnv,
   });
 
-  const workspaceJson = run(
-    process.execPath,
-    [installedEntrypoint, "workspace", "--json"],
-    { cwd: workspaceDirectory, env: workspaceEnv },
-  );
+  const workspaceJson = run(binary, ["workspace", "--json"], {
+    cwd: workspaceDirectory,
+    env: workspaceEnv,
+  });
   const snapshot = JSON.parse(workspaceJson);
   // Match the CLI's own canonicalization (realpathSync.native), so a Windows
   // 8.3 short name in the temp path does not read as a different directory.
   const canonicalWorkspace = realpathSync.native(workspaceDirectory);
   if (snapshot.approval?.state !== "approved") {
     throw new Error(
-      `Installed package did not report the approved Workspace: ${workspaceJson}`,
+      `Compiled binary did not report the approved Workspace: ${workspaceJson}`,
     );
   }
   if (snapshot.path !== canonicalWorkspace) {
     throw new Error(
-      `Installed package reported Workspace path ${snapshot.path} instead of ${canonicalWorkspace}.`,
+      `Compiled binary reported Workspace path ${snapshot.path} instead of ${canonicalWorkspace}.`,
     );
   }
 
-  // Build the Proof Bundle from the installed package with --no-install
-  // --output on this OS (issue #51, AC8). The authoring folder is an input, so
-  // it need not ship in the package; assert the digest is printed and the file
-  // is written.
+  // Build the Proof Bundle with --no-install --output on this OS (issue #51,
+  // AC8): assert the digest is printed and the file is written.
   const proofBundleFolder = join(
     projectRoot,
     "bundles",
@@ -161,9 +124,8 @@ try {
   );
   const outputWfb = join(smokeRoot, "proof.wfb");
   const buildOutput = run(
-    process.execPath,
+    binary,
     [
-      installedEntrypoint,
       "bundle",
       "build",
       proofBundleFolder,
@@ -175,41 +137,37 @@ try {
   );
   if (!/Digest: sha256:[0-9a-f]{64}/.test(buildOutput)) {
     throw new Error(
-      `Installed package did not print the Proof Bundle digest: ${buildOutput}`,
+      `Compiled binary did not print the Proof Bundle digest: ${buildOutput}`,
     );
   }
   if (!existsSync(outputWfb)) {
     throw new Error(
-      "Installed package did not write the Proof Bundle output file.",
+      "Compiled binary did not write the Proof Bundle output file.",
     );
   }
 
-  // Launch the installed shell with no interactive terminal (issue #55, AC9).
-  // The launch re-execs, loads OpenTUI from the installed package (proving its
-  // ESM entry points resolve), then rejects with the precise startup Problem and
-  // a non-zero exit. A resolution failure would surface as a different error, so
-  // asserting the precise Problem proves the installed package resolves OpenTUI.
-  const shellResult = spawnSync(process.execPath, [installedEntrypoint], {
+  // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
+  // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
+  // startup Problem and a non-zero exit before the renderer is created.
+  const shellResult = spawnSync(binary, [], {
     cwd: smokeRoot,
     encoding: "utf8",
     env: workspaceEnv,
   });
-  if (shellResult.error) {
-    throw shellResult.error;
-  }
+  if (shellResult.error) throw shellResult.error;
   if (shellResult.status === 0) {
     throw new Error(
-      "Installed shell should reject a non-interactive launch with a non-zero exit.",
+      "Compiled shell should reject a non-interactive launch with a non-zero exit.",
     );
   }
   if (!shellResult.stderr.includes("no-interactive-terminal")) {
     throw new Error(
-      `Installed shell did not print the startup Problem: ${shellResult.stdout}\n${shellResult.stderr}`,
+      `Compiled shell did not print the startup Problem: ${shellResult.stdout}\n${shellResult.stderr}`,
     );
   }
 
   process.stdout.write(
-    `Installed package smoke passed for @secantdev/secant@${packageJson.version}.\n`,
+    `Compiled binary smoke passed for ${source} (@secantdev/secant@${pkg.version}).\n`,
   );
 } finally {
   await rm(smokeRoot, { recursive: true, force: true });

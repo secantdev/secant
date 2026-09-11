@@ -195,12 +195,33 @@ test("Artifact storage is private to Run Store and child composition is private 
   );
 });
 
+test("the bun: spelling of a driver obeys the same ownership as its node: spelling", async () => {
+  const result = await audit({
+    // `bun:sqlite` is the SQLite driver: outside Run Store or Catalog it is
+    // rejected exactly like `node:sqlite`, and it is never reported as an
+    // unresolvable dependency (runtime neutrality is the allowlist's concern).
+    "src/tui/tui.ts": 'import { Database } from "bun:sqlite";',
+    "src/run/store/store.ts":
+      'import { Database } from "bun:sqlite"; import { dlopen } from "bun:ffi";',
+  });
+  assert.ok(
+    result.issues.some(
+      (issue) =>
+        issue.file === "src/tui/tui.ts" && issue.message.includes("SQLite"),
+    ),
+  );
+  assert.deepEqual(
+    result.issues.filter((issue) => issue.file === "src/run/store/store.ts"),
+    [],
+  );
+});
+
 test("native mechanisms stay with their owners and uncheckable loaders fail visibly", async () => {
   const result = await audit({
     "src/workflow/workflow.ts":
       'import "node:fs"; const x = "./x.js"; void import(x);',
     "src/application/internal.ts":
-      'import "node:sqlite"; import "@opentui/core"; import "@opencode-ai/sdk"; import "bun:ffi"; import "node-pty"; require("x"); import "node:module";',
+      'import "node:sqlite"; import "@opentui/core"; import "@opencode-ai/sdk"; import "node-pty"; require("x"); import "node:module";',
   });
   for (const expected of [
     "execution-free",

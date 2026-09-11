@@ -4,16 +4,16 @@ This page is for people. Agents read `AGENTS.md`, and every engineering rule liv
 
 ## Set up
 
-Use the Node version declared in `package.json` under `engines`, then run a clean install:
+Install the Bun version pinned in `package.json` under `packageManager` — the whole toolchain runs on Bun alone, no Node required — then run a clean install:
 
 ```sh
-npm ci
+bun install --frozen-lockfile
 ```
 
 ## Run
 
 ```sh
-npm run dev -- --help
+bun run dev -- --help
 ```
 
 ## Verify
@@ -21,7 +21,7 @@ npm run dev -- --help
 One command is the canonical gate. CI runs the same command after a clean install, and a change is done when it passes:
 
 ```sh
-npm run check
+bun run check
 ```
 
 It covers type checking, formatting, lint, the recursively discovered deterministic tests, the production build, and installed-package smoke tests.
@@ -37,6 +37,6 @@ Checks that need an installed Harness, network access, or a real terminal are op
 ## Pull requests
 
 - Reference the issue the change implements. Keep the change small enough to review in one sitting.
-- Say how you verified it beyond `npm run check`, especially for anything touching a real Harness or terminal.
+- Say how you verified it beyond `bun run check`, especially for anything touching a real Harness or terminal.
 - Short imperative titles, optionally prefixed `type(#issue):`, for example `docs(#18): record in-place legacy replacement as ADR 0026`.
 - No Co-author trailers in commit messages.

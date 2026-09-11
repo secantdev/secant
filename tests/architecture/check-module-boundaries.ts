@@ -178,8 +178,12 @@ export function checkModuleBoundaries(root: string): {
           node,
           "Workflow composition is execution-free and cannot import Node mechanisms",
         );
+      // A `bun:` builtin does not resolve to an installed dependency; the
+      // allowlist (check-vendor-provenance) governs whether it is permitted at
+      // all, but ownership rules above (e.g. SQLite) still apply here.
       if (
         !isBuiltin(specifier) &&
+        !specifier.startsWith("bun:") &&
         (!resolved || !resolved.isExternalLibraryImport)
       ) {
         report(
@@ -200,15 +204,6 @@ export function checkModuleBoundaries(root: string): {
       );
     }
     function visit(node: ts.Node) {
-      if (
-        owner &&
-        (ts.isPropertyAccessExpression(node) ||
-          ts.isElementAccessExpression(node)) &&
-        ts.isIdentifier(node.expression) &&
-        node.expression.text === "Bun"
-      ) {
-        report(node, "Target code cannot use Bun runtime APIs");
-      }
       if (
         (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
         node.moduleSpecifier &&

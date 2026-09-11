@@ -48,7 +48,9 @@ An `index.ts` is valid for one cohesive Module after declaring it in that table.
 - Each Interface owns its exposed types. Import another owner's public contract when the meaning is identical; Application translates facts for
   clients. Extract a small common value only for demonstrated consumers. A central `types/`, `models/`, or utility barrel is not a default owner.
 - SQLite belongs to Catalog and Run Store; OpenTUI belongs to presentation/renderer; Harness-native dependencies belong to Harness. Target code
-  excludes OpenCode domain imports, Bun APIs, and PTY transport. Renderer drawing may use OpenTUI directly; the Renderer Port covers lifecycle only.
+  excludes OpenCode domain imports and PTY transport; Bun APIs (`Bun.*` calls and `bun:` imports) are confined to a named allowlist of target files —
+  the CLI entry check, and later the SQLite adapter and the Windows console guard. Renderer drawing may use OpenTUI directly; the Renderer Port covers
+  lifecycle only.
 
 ## Enforcement And Tests
 

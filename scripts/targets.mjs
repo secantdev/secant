@@ -1,6 +1,6 @@
 // The three gated compile targets (ADR 0030) and the host's target, shared by
 // the build script and the smoke so the binary filenames have one source of
-// truth. Plain data with no Bun dependency, so both the Bun build and the Node
+// truth. Plain data with no Bun dependency, so both the Bun build and the Bun
 // smoke can import it. `outfile` is the basename under dist/.
 
 export const TARGETS = {

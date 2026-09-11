@@ -6,13 +6,13 @@
   "packageManager": "bun@1.4.2",
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "check": "npm run typecheck && npm run format:check && npm run lint && npm test && npm run build && npm run test:package",
+    "check": "bun run typecheck && bun run format:check && bun run lint && bun test && bun run build && bun run test:package",
     "dev": "bun src/cli/main.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "test": "node scripts/run-tests.mjs",
-    "test:package": "node scripts/package-smoke.mjs",
+    "test": "bun test",
+    "test:package": "bun scripts/package-smoke.mjs",
     "typecheck": "tsc --noEmit"
   },
   "files": [
@@ -20,11 +20,8 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "devDependencies": {
-    "@babel/core": "^7.29.7",
-    "@babel/preset-typescript": "^7.29.7",
     "@eslint/js": "^10.0.1",
-    "@types/node": "^24.0.0",
-    "babel-preset-solid": "1.9.12",
+    "@types/bun": "^1.4.2",
     "eslint": "^10.8.1",
     "globals": "^17.11.0",
     "prettier": "^3.9.6",
@@ -47,9 +44,6 @@
     "orchestrator",
     "devtools"
   ],
-  "engines": {
-    "node": ">=26.4.0"
-  },
   "contributors": [
     "Rohan Garg <gargrohan831@gmail.com> (https://rgdev.xyz)"
   ],

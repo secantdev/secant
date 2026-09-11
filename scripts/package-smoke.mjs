@@ -12,7 +12,7 @@ import { TARGETS, hostTargetKey } from "./targets.mjs";
 // binary into an isolated temporary location (proving it is self-contained),
 // then run every non-interactive path against that copy. CI passes the
 // cross-compiled artefact for this OS as argv[2]; with no argument it smokes the
-// host binary that `npm run build` wrote to dist/. #52, #53, #54 extend it.
+// host binary that `bun run build` wrote to dist/. #52, #53, #54 extend it.
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
@@ -30,7 +30,7 @@ function hostBinary() {
 const source = process.argv[2] ? resolve(process.argv[2]) : hostBinary();
 if (!existsSync(source)) {
   throw new Error(
-    `Compiled binary not found at ${source}. Run \`npm run build\` first, or pass a binary path.`,
+    `Compiled binary not found at ${source}. Run \`bun run build\` first, or pass a binary path.`,
   );
 }
 

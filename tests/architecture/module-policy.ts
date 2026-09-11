@@ -99,13 +99,11 @@ export function externalViolation(
   owner: ModuleName,
   specifier: string,
 ): string | undefined {
-  const name = specifier.replace(/^node:/, "");
-  if (
-    specifier.startsWith("@opencode-ai/") ||
-    specifier.startsWith("bun:") ||
-    specifier === "node-pty"
-  ) {
-    return "Target Modules cannot depend on OpenCode domain packages, Bun, or PTY transport";
+  // Strip either runtime's builtin prefix so `bun:sqlite` and `node:sqlite`
+  // reach the same ownership rules (runtime neutrality is the allowlist's job).
+  const name = specifier.replace(/^(?:node|bun):/, "");
+  if (specifier.startsWith("@opencode-ai/") || specifier === "node-pty") {
+    return "Target Modules cannot depend on OpenCode domain packages or PTY transport";
   }
   if (
     specifier.startsWith("@opentui/") &&

@@ -36,6 +36,49 @@ test("a synthetic Bun.* call in target source is rejected", () => {
   );
 });
 
+test("a synthetic bun: import in target source is rejected", () => {
+  const root = synthetic((r) => {
+    writeFileSync(
+      join(r, "src", "adapter.ts"),
+      'import { Database } from "bun:sqlite";\nexport const db = Database;\n',
+    );
+  });
+  assert.ok(
+    checkVendorProvenance(root).some((issue) =>
+      /Bun-API allowlist/.test(issue.message),
+    ),
+    "expected a bun: import violation",
+  );
+});
+
+test("a bun: specifier written as a template literal does not evade the check", () => {
+  const root = synthetic((r) => {
+    writeFileSync(
+      join(r, "src", "sneaky.ts"),
+      "export const db = await import(`bun:sqlite`);\n",
+    );
+  });
+  assert.ok(
+    checkVendorProvenance(root).some((issue) =>
+      /Bun-API allowlist/.test(issue.message),
+    ),
+    "expected the backtick-quoted bun: import to be flagged",
+  );
+});
+
+test("an allowlisted target file may touch a Bun API", () => {
+  const root = synthetic((r) => {
+    mkdirSync(join(r, "src", "cli"), { recursive: true });
+    // Both forms the check flags — a `bun:` import and a `Bun.*` call — pass
+    // here only because src/cli/main.ts is on the allowlist.
+    writeFileSync(
+      join(r, "src", "cli", "main.ts"),
+      'import { Database } from "bun:sqlite";\nexport const w = Bun.stringWidth("x");\nexport const d = Database;\n',
+    );
+  });
+  assert.deepEqual(checkVendorProvenance(root), []);
+});
+
 test("a vendored file without the provenance records is rejected", () => {
   const root = synthetic((r) => {
     writeFileSync(

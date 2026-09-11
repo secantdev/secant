@@ -1,0 +1,8 @@
+# Bun test runner config (ADR 0030). `@opentui/solid/preload` registers Solid's
+# universal transform so `.tsx` presentation tests are reactive and the OpenTUI
+# native renderer loads its FFI — the same transform `bun build --compile` gets
+# from `@opentui/solid/bun-plugin`. A bare `bun test` picks this up, so the gate
+# and a contributor's local run agree. Replaces the deleted Node runner + Babel
+# loader.
+[test]
+preload = ["@opentui/solid/preload"]

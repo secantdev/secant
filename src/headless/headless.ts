@@ -178,6 +178,9 @@ function fail(io: HeadlessIO, json: boolean, problem: Problem): number {
     io.out(`${JSON.stringify(problem, null, 2)}\n`);
   } else {
     io.err(`Error [${problem.code}]: ${problem.explanation}\n`);
+    for (const violation of problem.fieldViolations ?? []) {
+      io.err(`- ${violation.field}: ${violation.explanation}\n`);
+    }
     io.err(`Remediation: ${problem.remediation}\n`);
   }
   return 1;

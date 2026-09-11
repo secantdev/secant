@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
@@ -134,6 +134,56 @@ test("bundle build parses the folder even when flags precede it", async (t) => {
   );
   assert.match(h.stdout(), /Digest: sha256:[0-9a-f]{64}/);
   assert.ok(existsSync(output));
+});
+
+test("bundle build on a non-composing folder exits non-zero, prints the findings, and writes nothing", async (t) => {
+  const h = await harness(t);
+  const folder = makeTempDir("secant-headless-noncompose-");
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify({
+      formatVersion: 1,
+      bundle: {
+        id: "io.example.x",
+        version: "1.0.0",
+        name: "X",
+        description: "x",
+      },
+      inputs: {},
+      assets: [{ path: "p.md", kind: "prompt" }],
+      routing: [
+        {
+          repeat: {
+            until: "never-bound",
+            reviewCheckpoint: { interval: 1, message: "continue?" },
+            steps: [
+              {
+                id: "a",
+                kind: "agent",
+                session: "s",
+                prompt: { asset: "p.md" },
+              },
+            ],
+          },
+        },
+      ],
+    }),
+  );
+  writeFileSync(join(folder, "p.md"), "do the work");
+
+  const output = join(makeTempDir("secant-headless-wfb-"), "out.wfb");
+  assert.equal(
+    runHeadless(
+      h.clients,
+      ["bundle", "build", folder, "--no-install", "--output", output],
+      h.io,
+    ),
+    1,
+  );
+  assert.match(h.stderr(), /composition-check-failed/);
+  assert.match(h.stderr(), /verdict-unbound-before-entry/);
+  assert.equal(existsSync(output), false);
+  assert.equal(h.stdout(), "");
 });
 
 test("bundle build --no-install without --output refuses with a Problem", async (t) => {

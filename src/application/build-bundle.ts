@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { buildBundle } from "../bundle/bundle.js";
+import type { CompositionFinding } from "../workflow/workflow.js";
 import type {
   BundleBuildOptions,
   BundleBuildResult,
@@ -24,8 +25,15 @@ export function createBundleManagement(): BundleManagement {
       }
 
       const outcome = buildBundle(folder);
-      if (!outcome.ok)
-        return { ok: false, problem: toProblem(outcome.finding) };
+      if (!outcome.ok) {
+        return {
+          ok: false,
+          problem:
+            "composition" in outcome
+              ? compositionProblem(outcome.composition)
+              : toProblem(outcome.finding),
+        };
+      }
 
       try {
         writeFileSync(options.output, outcome.built.bytes);
@@ -64,6 +72,23 @@ function toProblem(finding: {
           ],
         }
       : {}),
+  };
+}
+
+// A non-composing Bundle carries every Composition finding to the client as one
+// Problem, each finding a field violation keyed by the Step or field it targets.
+function compositionProblem(findings: readonly CompositionFinding[]): Problem {
+  const errors = findings.filter((finding) => finding.severity === "error");
+  return {
+    code: "composition-check-failed",
+    explanation: `The Bundle does not compose: ${errors.length} error-severity finding${errors.length === 1 ? "" : "s"}.`,
+    remediation:
+      "Correct the named Steps or fields in the authoring folder, then build again.",
+    possibleEffects: "none",
+    fieldViolations: errors.map((finding) => ({
+      field: finding.target,
+      explanation: `[${finding.code}] ${finding.explanation}`,
+    })),
   };
 }
 

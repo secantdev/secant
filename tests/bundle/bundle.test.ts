@@ -232,7 +232,42 @@ for (const rejection of rejections) {
   test(`rejects ${rejection.title} with a distinct Problem`, () => {
     const outcome = buildBundle(rejection.folder());
     assert.ok(!outcome.ok, `expected ${rejection.code}`);
+    assert.ok("finding" in outcome, `expected a validation finding`);
     assert.equal(outcome.finding.code, rejection.code);
     assert.equal(outcome.finding.path, rejection.path);
   });
 }
+
+test("a shape-valid but non-composing folder fails the build with its findings", () => {
+  const outcome = buildBundle(
+    authoringFolder(
+      {
+        ...base(),
+        assets: [{ path: "p.md", kind: "prompt" }],
+        routing: [
+          {
+            repeat: {
+              until: "never-bound",
+              reviewCheckpoint: { interval: 1, message: "continue?" },
+              steps: [
+                {
+                  id: "a",
+                  kind: "agent",
+                  session: "s",
+                  prompt: { asset: "p.md" },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      { "p.md": "do the work" },
+    ),
+  );
+  assert.ok(!outcome.ok);
+  assert.ok("composition" in outcome, "expected composition findings");
+  assert.deepEqual(
+    outcome.composition.map((finding) => finding.code),
+    ["verdict-unbound-before-entry"],
+  );
+});

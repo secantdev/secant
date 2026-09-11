@@ -116,7 +116,11 @@ try {
   }
 
   // Build the Proof Bundle with --no-install --output on this OS (issue #51,
-  // AC8): assert the digest is printed and the file is written.
+  // AC8; issue #52, AC5). `run` throws on a non-zero exit, and `bundle build`
+  // now gates on the Composition check — refusing with a non-zero exit and no
+  // output file on any error-severity finding — so a printed digest and a
+  // written file from the installed binary is the standing assertion, on each of
+  // the three operating systems, that the Proof Bundle reports zero error findings.
   const proofBundleFolder = join(
     projectRoot,
     "bundles",

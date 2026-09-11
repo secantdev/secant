@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { validateManifest, type BundleFinding } from "./manifest.js";
 import {
-  validateManifest,
+  checkComposition,
+  PLATFORMS,
   type AssetDecl,
   type AuthoredManifest,
-  type BundleFinding,
+  type CompositionFinding,
   type Platform,
-  PLATFORMS,
-} from "./manifest.js";
+} from "../workflow/workflow.js";
 import { writeZip, type ZipEntry } from "./zip.js";
 
 // The Bundle Module reads an authoring folder into validated `.wfb` bytes and
@@ -28,7 +29,8 @@ export interface BuiltBundle {
 
 export type BuildOutcome =
   | { readonly ok: true; readonly built: BuiltBundle }
-  | { readonly ok: false; readonly finding: BundleFinding };
+  | { readonly ok: false; readonly finding: BundleFinding }
+  | { readonly ok: false; readonly composition: readonly CompositionFinding[] };
 
 const MANIFEST_ENTRY = "manifest.json";
 
@@ -61,6 +63,19 @@ export function buildBundle(folder: string): BuildOutcome {
 
   const assetCheck = checkAssetTrees(folder, manifest.assets, entries.files);
   if (assetCheck) return { ok: false, finding: assetCheck };
+
+  // The manifest and asset tree are valid; prove it composes before packaging.
+  // The check reads no files: it is handed the prompt and schema asset text.
+  const composition = checkComposition(
+    manifest,
+    readTextAssets(folder, manifest),
+  );
+  // ponytail: every rule emits error-severity today, so a warning-only build
+  // still packages. When a warning rule first lands, carry warnings onto the
+  // success path (BuiltBundle) too, or they are computed and silently dropped.
+  if (composition.some((finding) => finding.severity === "error")) {
+    return { ok: false, composition };
+  }
 
   const host = buildHost();
   if (host === undefined) {
@@ -111,6 +126,30 @@ export function buildBundle(folder: string): BuildOutcome {
 
 function finding(code: string, message: string, path?: string): BuildOutcome {
   return { ok: false, finding: { code, message, ...(path ? { path } : {}) } };
+}
+
+// The Composition check inspects prompt and schema asset *content*; it cannot
+// read files itself (Workflow imports no Node mechanism), so the build decodes
+// them here. checkAssetKind already proved each exists as a single file; strict
+// UTF-8 decode maps a non-UTF-8 schema to `null` (an invalid schema finding).
+function readTextAssets(
+  folder: string,
+  manifest: AuthoredManifest,
+): ReadonlyMap<string, string | null> {
+  const texts = new Map<string, string | null>();
+  const decoder = new TextDecoder("utf8", { fatal: true });
+  for (const asset of manifest.assets) {
+    if (asset.kind !== "prompt" && asset.kind !== "schema") continue;
+    try {
+      texts.set(
+        asset.path,
+        decoder.decode(readFileSync(join(folder, asset.path))),
+      );
+    } catch {
+      texts.set(asset.path, null);
+    }
+  }
+  return texts;
 }
 
 function buildHost(): Platform | undefined {

@@ -20,6 +20,32 @@
   ],
   "routing": [
     {
+      "id": "baseline-test",
+      "kind": "command",
+      "requires": ["failing-test"],
+      "produces": [
+        { "name": "test-verdict", "type": "verdict" },
+        { "name": "test-output", "type": "text" }
+      ],
+      "command": {
+        "executable": "bash",
+        "arguments": [
+          { "asset": "scripts/run-test.sh" },
+          { "artifact": "failing-test" }
+        ],
+        "workingDirectory": ".",
+        "platforms": {
+          "windows": {
+            "executable": "pwsh",
+            "arguments": [
+              { "asset": "scripts/run-test.ps1" },
+              { "artifact": "failing-test" }
+            ]
+          }
+        }
+      }
+    },
+    {
       "repeat": {
         "until": "test-verdict",
         "reviewCheckpoint": {

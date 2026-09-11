@@ -1,23 +1,38 @@
 import {
   ARTIFACT_HOMES,
   ARTIFACT_TYPES,
+  ASSET_KINDS,
   HUMAN_GATE_SHAPES,
+  PLATFORMS,
   STEP_KIND_NAMES,
   WORKSPACE_PREREQUISITES,
   type ArtifactHome,
   type ArtifactType,
+  type AssetDecl,
+  type AssetKind,
+  type AuthoredManifest,
+  type BundleMeta,
+  type CommandInvocation,
+  type CommandParams,
   type HumanGateShape,
+  type LaunchInput,
+  type Platform,
+  type PlatformOverride,
+  type ProducedArtifact,
   type Reference,
+  type RepeatGroup,
+  type RoutingNode,
+  type Step,
+  type StepCommon,
   type StepKindName,
   type WorkspacePrerequisite,
 } from "../workflow/workflow.js";
 
-// Strict, non-executing validation of a Bundle manifest into trusted domain
-// values. Every rejection names the offending field or entry path so an author
-// can find it. This slice validates *shape* only; the Composition check that
-// resolves references and bindings arrives next slice. Semantic-only checks a
-// build cannot answer (does a named schema asset exist, does a Prompt slot bind)
-// are deliberately left to that check.
+// Strict, non-executing validation of a Bundle manifest into the trusted
+// authored vocabulary (workflow/workflow.ts). Every rejection names the
+// offending field or entry path so an author can find it. This validates *shape*
+// only; the Composition check that resolves references and bindings is the
+// Workflow Module's `checkComposition`, run by the build over the result here.
 
 /** One reason a Bundle was rejected. Application translates this to a Problem. */
 export interface BundleFinding {
@@ -25,110 +40,6 @@ export interface BundleFinding {
   readonly message: string;
   /** Dotted manifest field path or an archive entry path. */
   readonly path?: string;
-}
-
-export type Platform = "windows" | "macos" | "linux";
-export const PLATFORMS: readonly Platform[] = ["windows", "macos", "linux"];
-
-export type AssetKind = "prompt" | "skill" | "schema" | "script" | "resource";
-const ASSET_KINDS: readonly AssetKind[] = [
-  "prompt",
-  "skill",
-  "schema",
-  "script",
-  "resource",
-];
-
-export interface BundleMeta {
-  readonly id: string;
-  readonly version: string;
-  readonly name: string;
-  readonly description: string;
-  readonly authors?: readonly string[];
-  readonly license?: string;
-  readonly homepage?: string;
-  readonly repository?: string;
-  readonly keywords?: readonly string[];
-  readonly notices?: readonly string[];
-}
-
-export interface LaunchInput {
-  readonly type: ArtifactType;
-  readonly description: string;
-  readonly schema?: string;
-  readonly choices?: readonly string[];
-}
-
-export interface AssetDecl {
-  readonly path: string;
-  readonly kind: AssetKind;
-}
-
-export interface ProducedArtifact {
-  readonly name: string;
-  readonly type: ArtifactType;
-  readonly home?: ArtifactHome;
-  readonly path?: string;
-}
-
-export interface CommandInvocation {
-  readonly executable: string;
-  readonly arguments: readonly (string | Reference)[];
-  readonly workingDirectory?: string;
-  readonly env?: Readonly<Record<string, string | Reference>>;
-}
-
-export interface CommandParams extends CommandInvocation {
-  readonly platforms?: Readonly<Partial<Record<Platform, PlatformOverride>>>;
-}
-export type PlatformOverride = Partial<CommandInvocation>;
-
-interface StepCommon {
-  readonly id: string;
-  readonly kind: StepKindName;
-  readonly requires?: readonly string[];
-  readonly produces?: readonly ProducedArtifact[];
-  readonly prerequisites?: readonly WorkspacePrerequisite[];
-  readonly retry?: number;
-}
-export interface AgentStep extends StepCommon {
-  readonly kind: "agent" | "interactive-agent";
-  readonly prompt: Reference;
-  readonly session: string;
-  readonly uses?: readonly Reference[];
-}
-export interface CommandStep extends StepCommon {
-  readonly kind: "command";
-  readonly command: CommandParams;
-}
-export interface HumanGateStep extends StepCommon {
-  readonly kind: "human-gate";
-  readonly shape: HumanGateShape;
-  readonly prompt?: Reference;
-  readonly message?: string;
-}
-export type Step = AgentStep | CommandStep | HumanGateStep;
-
-export interface ReviewCheckpoint {
-  readonly interval: number;
-  readonly message: string;
-}
-export interface RepeatGroup {
-  readonly repeat: {
-    readonly until: string;
-    readonly reviewCheckpoint: ReviewCheckpoint;
-    readonly steps: readonly Step[];
-  };
-}
-export type RoutingNode = Step | RepeatGroup;
-
-export interface AuthoredManifest {
-  readonly formatVersion: 1;
-  readonly bundle: BundleMeta;
-  readonly platforms?: readonly Platform[];
-  readonly inputs: Readonly<Record<string, LaunchInput>>;
-  readonly assets: readonly AssetDecl[];
-  readonly routing: readonly RoutingNode[];
 }
 
 export type ManifestResult =

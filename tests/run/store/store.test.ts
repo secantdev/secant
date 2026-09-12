@@ -1,0 +1,377 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import test from "node:test";
+import { Database } from "bun:sqlite";
+import { openRunGroup, type RunGroup } from "../../../src/run/store/store.js";
+import { makeTempDir } from "../../helpers/tempDir.js";
+
+const WORKSPACE = "/work/example-project";
+const AT = new Date("2026-09-12T12:00:00.000Z");
+
+function create(
+  group: RunGroup,
+  operationId: string,
+  overrides: { digest?: string; launch?: unknown } = {},
+) {
+  return group.createRun({
+    operationId,
+    bundleSnapshotDigest: overrides.digest ?? "sha256:deadbeef",
+    launch: overrides.launch ?? { goal: "ship it" },
+    at: AT,
+  });
+}
+
+/** The group directory Secant home resolves for the test Workspace. */
+function groupDirOf(home: string): string {
+  const runs = join(home, "runs");
+  return join(runs, readdirSync(runs)[0]!);
+}
+
+test("creating a Run produces the grouped directory and its store", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+
+  const result = create(group, "op-1");
+  assert.equal(result.outcome, "created");
+  assert.ok(result.outcome === "created");
+  assert.deepEqual(result.record.launch, { goal: "ship it" });
+  assert.equal(result.record.workspacePath, WORKSPACE);
+  assert.equal(result.record.bundleSnapshotDigest, "sha256:deadbeef");
+
+  const runs = readdirSync(join(home, "runs"));
+  assert.equal(runs.length, 1);
+  const [slugDigest] = runs;
+  assert.match(slugDigest!, /^example-project--[0-9a-f]{16}$/);
+
+  const runDir = join(home, "runs", slugDigest!, result.runId);
+  assert.ok(existsSync(join(runDir, "run.db")));
+  assert.ok(existsSync(join(runDir, "staging")));
+  assert.ok(existsSync(join(runDir, "diagnostics")));
+
+  const read = group.readRun(result.runId);
+  assert.ok(read.ok);
+  assert.deepEqual(read.run, result.record);
+});
+
+test("a second create while a Run is live is refused with a Problem", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+
+  const first = create(group, "op-1");
+  assert.ok(first.outcome === "created");
+  const second = create(group, "op-2");
+  assert.equal(second.outcome, "workspace-busy");
+  assert.ok(second.outcome === "workspace-busy");
+  assert.equal(second.liveRunId, first.runId);
+  assert.equal(group.listRuns().length, 1);
+});
+
+test("create is idempotent per operation id", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+
+  const first = create(group, "op-1");
+  const replay = create(group, "op-1");
+  assert.ok(first.outcome === "created");
+  assert.equal(replay.outcome, "already-created");
+  assert.ok(replay.outcome === "already-created");
+  assert.equal(replay.runId, first.runId);
+  assert.equal(
+    readdirSync(groupDirOf(home)).filter((n) => !n.endsWith(".db")).length,
+    1,
+  );
+});
+
+test("delete releases the claim so the Workspace can host a new Run", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+
+  const first = create(group, "op-1");
+  assert.ok(first.outcome === "created");
+  const deleted = group.deleteRun({
+    operationId: "op-del",
+    runId: first.runId,
+  });
+  assert.equal(deleted.outcome, "deleted");
+  assert.equal(group.listRuns().length, 0);
+  // The run directory was reclaimed.
+  assert.ok(!existsSync(join(groupDirOf(home), first.runId)));
+
+  const second = create(group, "op-2");
+  assert.equal(second.outcome, "created");
+});
+
+test("delete is idempotent per operation id, even for an absent Run", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+
+  const first = create(group, "op-1");
+  assert.ok(first.outcome === "created");
+  const a = group.deleteRun({ operationId: "op-del", runId: first.runId });
+  const b = group.deleteRun({ operationId: "op-del", runId: first.runId });
+  assert.equal(a.outcome, "deleted");
+  assert.equal(b.outcome, "already-deleted");
+
+  // Deleting a Run that never existed still succeeds (nothing to release).
+  const c = group.deleteRun({ operationId: "op-ghost", runId: "no-such-run" });
+  assert.equal(c.outcome, "deleted");
+});
+
+test("a stale owner cannot write after being fenced", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+
+  const stale = group.acquireRun(created.runId);
+  assert.ok(stale);
+  t.after(() => stale.close());
+  assert.deepEqual(stale.writeState("running"), { ok: true });
+
+  // A second acquisition fences the first: its epoch is now behind.
+  const fresh = group.acquireRun(created.runId);
+  assert.ok(fresh);
+  t.after(() => fresh.close());
+  assert.deepEqual(stale.writeState("cancelled"), {
+    ok: false,
+    reason: "fenced",
+  });
+  assert.deepEqual(fresh.writeState("done"), { ok: true });
+
+  const read = group.readRun(created.runId);
+  assert.ok(read.ok);
+  assert.equal(read.run.state, "done");
+});
+
+test("a crash after staging leaves only a .creating quarantine the next open removes", async (t) => {
+  const home = makeTempDir("secant-store-");
+  // Poison the operations table so the admitted create faults on its INSERT,
+  // after the run.db has been staged into `.creating` and before the rename.
+  const groupDir = join(home, "runs", exampleGroupName());
+  mkdirSync(groupDir, { recursive: true });
+  const raw = new Database(join(groupDir, "coordination.db"));
+  raw.exec(
+    "CREATE TABLE runs (run_id TEXT PRIMARY KEY, state TEXT NOT NULL, " +
+      "owner_epoch INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT",
+  );
+  raw.exec(
+    "CREATE UNIQUE INDEX one_live_run ON runs(state) WHERE state = 'live'",
+  );
+  raw.exec(
+    "CREATE TABLE operations (operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL, " +
+      "run_id TEXT NOT NULL, recorded_at TEXT NOT NULL, CHECK (0)) STRICT",
+  );
+  raw.close();
+
+  const group = openRunGroup(home, WORKSPACE);
+  assert.throws(() => create(group, "op-1"));
+  // The staged store remains as a `.creating` quarantine; nothing was published.
+  const quarantines = readdirSync(groupDir).filter((n) =>
+    n.endsWith(".creating"),
+  );
+  assert.equal(quarantines.length, 1);
+  assert.equal(group.listRuns().length, 0);
+  group.close();
+
+  // The next open removes the quarantine.
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  assert.equal(
+    readdirSync(groupDir).filter((n) => n.endsWith(".creating")).length,
+    0,
+  );
+});
+
+test("a .deleting quarantine from a crashed delete is removed on the next open", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  group.close();
+
+  // Simulate a delete that crashed after moving the store to its `.deleting`
+  // quarantine but before reclaiming it.
+  const groupDir = groupDirOf(home);
+  renameSync(
+    join(groupDir, created.runId),
+    join(groupDir, `${created.runId}.deleting`),
+  );
+
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  assert.equal(
+    readdirSync(groupDir).filter((n) => n.endsWith(".deleting")).length,
+    0,
+  );
+});
+
+test("an unregistered Run directory left by a crashed delete is swept on the next open", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  group.close();
+
+  // Simulate a delete that committed (registration gone) but crashed before its
+  // directory was reclaimed: an intact coordination DB no longer lists the Run.
+  const groupDir = groupDirOf(home);
+  const raw = new Database(join(groupDir, "coordination.db"));
+  raw.run("DELETE FROM runs WHERE run_id = ?", [created.runId]);
+  raw.close();
+  assert.ok(existsSync(join(groupDir, created.runId)));
+
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  // The orphan directory is gone, and it is not resurrected as a Run.
+  assert.ok(!existsSync(join(groupDir, created.runId)));
+  assert.equal(reopened.listRuns().length, 0);
+});
+
+test("an owned Run can still be deleted; the handle is closed before reclaim", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  const deleted = group.deleteRun({
+    operationId: "op-del",
+    runId: created.runId,
+  });
+  assert.equal(deleted.outcome, "deleted");
+  assert.ok(!existsSync(join(groupDirOf(home), created.runId)));
+  // The now-orphaned owner is fenced out of further canonical writes.
+  assert.deepEqual(owner.writeState("running"), {
+    ok: false,
+    reason: "fenced",
+  });
+});
+
+test("a create retried long after the Run was deleted starts a fresh Run", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+
+  const first = create(group, "op-1");
+  assert.ok(first.outcome === "created");
+  group.deleteRun({ operationId: "op-del", runId: first.runId });
+  // Replaying the original create id no longer maps to the deleted Run.
+  const retry = create(group, "op-1");
+  assert.equal(retry.outcome, "created");
+  assert.ok(retry.outcome === "created");
+  assert.notEqual(retry.runId, first.runId);
+});
+
+test("a corrupt coordination.db is rebuilt from readable Run Stores with no owner or claim", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  group.close();
+
+  // Corrupt the coordination database.
+  const groupDir = groupDirOf(home);
+  writeFileSync(join(groupDir, "coordination.db"), "not a database at all");
+
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  const listed = reopened.listRuns();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.runId, created.runId);
+  // Rebuilt with no claim: the Workspace is free, so a fresh create is admitted.
+  assert.equal(listed[0]!.live, false);
+  const again = create(reopened, "op-2");
+  assert.equal(again.outcome, "created");
+});
+
+test("a corrupt run.db reports a Problem for that Run while siblings stay readable", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  const a = create(group, "op-a");
+  assert.ok(a.outcome === "created");
+  // End Run a (its store persists) so a sibling Run can share the group.
+  group.endRun(a.runId);
+  const b = create(group, "op-b");
+  assert.ok(b.outcome === "created");
+  group.close();
+
+  // Corrupt only Run b's store.
+  const groupDir = groupDirOf(home);
+  writeFileSync(join(groupDir, b.runId, "run.db"), "garbage");
+
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  const problem = reopened.readRun(b.runId);
+  assert.ok(!problem.ok);
+  assert.deepEqual(problem.problem, {
+    kind: "run-store-damaged",
+    runId: b.runId,
+  });
+  // The sibling stays fully readable.
+  const sibling = reopened.readRun(a.runId);
+  assert.ok(sibling.ok);
+  assert.equal(sibling.run.runId, a.runId);
+});
+
+test("canonical truth survives reopening the same home", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const first = openRunGroup(home, WORKSPACE);
+  const created = create(first, "op-1", { launch: { pinned: true } });
+  assert.ok(created.outcome === "created");
+  first.close();
+
+  const second = openRunGroup(home, WORKSPACE);
+  t.after(() => second.close());
+  const read = second.readRun(created.runId);
+  assert.ok(read.ok);
+  assert.deepEqual(read.run.launch, { pinned: true });
+  assert.equal(read.run.bundleSnapshotDigest, "sha256:deadbeef");
+});
+
+test("SECANT_HOME-style separate homes keep separate Workspaces apart", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const groupA = openRunGroup(home, "/work/project-a");
+  const groupB = openRunGroup(home, "/work/project-b");
+  t.after(() => {
+    groupA.close();
+    groupB.close();
+  });
+
+  const a = create(groupA, "op-a");
+  const b = create(groupB, "op-b");
+  assert.equal(a.outcome, "created");
+  assert.equal(b.outcome, "created");
+  // Two distinct group directories, each with one live Run.
+  assert.equal(readdirSync(join(home, "runs")).length, 2);
+  assert.equal(groupA.listRuns().length, 1);
+  assert.equal(groupB.listRuns().length, 1);
+});
+
+/** The `<slug>--<digest>` directory openRunGroup derives for WORKSPACE, recomputed
+ *  here so the poisoned-coordination test can pre-seed it. */
+function exampleGroupName(): string {
+  const digest = createHash("sha256")
+    .update(WORKSPACE)
+    .digest("hex")
+    .slice(0, 16);
+  return `example-project--${digest}`;
+}

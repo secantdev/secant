@@ -243,9 +243,7 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
     },
   };
   const t = await testRender(
-    () => (
-      <App view={approvedWorkspace()} bundles={view} exit={() => {}} />
-    ),
+    () => <App view={approvedWorkspace()} bundles={view} exit={() => {}} />,
     { width: 80, height: 40 },
   );
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));

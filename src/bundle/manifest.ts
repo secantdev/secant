@@ -27,6 +27,7 @@ import {
   type StepKindName,
   type WorkspacePrerequisite,
 } from "../workflow/workflow.js";
+import { normalizeRelativePath } from "./relative-path.js";
 
 // Strict, non-executing validation of a Bundle manifest into the trusted
 // authored vocabulary (workflow/workflow.ts). Every rejection names the
@@ -633,12 +634,8 @@ function nonNegativeInt(value: unknown, path: string): number {
 }
 function relativePath(value: unknown, path: string): string {
   const s = nonEmpty(value, path);
-  const normalized = s.replace(/\\/g, "/");
-  if (
-    normalized.startsWith("/") ||
-    /^[A-Za-z]:/.test(normalized) ||
-    normalized.split("/").includes("..")
-  ) {
+  const normalized = normalizeRelativePath(s);
+  if (normalized === undefined) {
     fail(
       "invalid-field",
       `${path} "${s}" must be a relative path without traversal.`,

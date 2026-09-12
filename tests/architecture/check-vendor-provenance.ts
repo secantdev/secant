@@ -31,6 +31,11 @@ const BUN_API_USE = /\bBun\.|["'`]bun:/;
 // is false in a Bun binary on Windows). The Catalog adapter imports `bun:sqlite`
 // behind its Interface. The Windows console guard imports `bun:ffi` for its
 // `GetConsoleWindow` + `IsWindowVisible` conhost probe.
+//
+// Scope: the scan below walks `src/` only, so `scripts/` (e.g. `Bun.build` in
+// scripts/build.ts) and `tests/` (e.g. `Bun.spawn` in the terminal suite) are
+// outside the allowlist by design — runtime neutrality is a shipped-target-code
+// rule, and build/test tooling runs under Bun (ADR 0030).
 const BUN_API_ALLOWLIST = new Set([
   "src/cli/main.ts",
   "src/catalog/catalog.ts",

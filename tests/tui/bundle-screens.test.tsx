@@ -278,6 +278,44 @@ test("q quits from both the list and the inspection view", async () => {
   assert.equal(inspectRun.exits.length, 1);
 });
 
+test("inspection fits 80×24, clipping a long Bundle instead of corrupting it", async () => {
+  async function openInspect(height: number) {
+    const { t } = await mount(ROWS, 80, height);
+    await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+    t.mockInput.pressEnter(); // Home -> list
+    await t.waitForFrame((f) => f.includes("Proof Bundle"));
+    t.mockInput.pressArrow("down"); // select Proof Bundle 2.0.0
+    await t.waitForFrame(() =>
+      selectedLine(t.captureCharFrame()).includes("Proof Bundle"),
+    );
+    t.mockInput.pressEnter(); // list -> inspection
+    await t.waitForFrame((f) => f.includes("Proof of the pipeline"));
+    return t;
+  }
+
+  // Tall enough to show the whole focus, then too short for it. `captureCharFrame`
+  // ends with a trailing newline, so drop the final empty element.
+  const rows = (frame: string) => {
+    const lines = frame.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    return lines;
+  };
+  const full = rows((await openInspect(40)).captureCharFrame());
+  const clipped = rows((await openInspect(24)).captureCharFrame());
+
+  // No horizontal overflow, and no rows past the box height.
+  for (const line of clipped) {
+    assert.ok(line.length <= 80, `overflows 80 cols: ${JSON.stringify(line)}`);
+  }
+  assert.ok(clipped.length <= 24, `rendered ${clipped.length} rows past 24`);
+
+  // The overflow guard clips the bottom and keeps every visible row intact, so
+  // the top of the short render matches the tall one line-for-line. Without
+  // overflow="hidden" + flexShrink={0} the fixed-height column shrinks every row
+  // and the two diverge.
+  assert.deepEqual(clipped.slice(0, 10), full.slice(0, 10));
+});
+
 test("list fits a small width and after resize without overflow", async () => {
   const { t } = await mount(ROWS, 40, 20);
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));

@@ -18,7 +18,8 @@ import { useTheme } from "./theme-context.js";
 // flag branches, and the `useOpencodeModeStack("modal")` push — modal gating is
 // the `enabled` accessor on the dismissal layer, so no mode stack is needed.
 
-export function Dialog(
+// Module-private: only `DialogProvider` below renders it (audit A12).
+function Dialog(
   props: ParentProps<{
     onClose: () => void;
   }>,

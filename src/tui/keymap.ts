@@ -9,7 +9,7 @@ import type { CliRenderer } from "@opentui/core";
 // uses the upstream Solid integration directly and gates its one modal dialog
 // with a binding-layer `enabled` accessor instead of a mode stack.
 
-export { KeymapProvider, useKeymap, useBindings } from "@opentui/keymap/solid";
+export { KeymapProvider, useBindings } from "@opentui/keymap/solid";
 
 /** Builds the default OpenTUI keymap bound to the mounted renderer. */
 export function createTuiKeymap() {

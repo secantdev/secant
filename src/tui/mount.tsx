@@ -14,7 +14,6 @@ import { createLiveWorkspaceView } from "./workspace-view.js";
 export interface MountOptions {
   readonly projectionPort: ProjectionPort;
   readonly exit: Exit;
-  readonly onEpilogue?: (value?: string) => void;
 }
 
 export function mountTui(
@@ -27,7 +26,6 @@ export function mountTui(
         view={createLiveWorkspaceView(options.projectionPort)}
         bundles={createLiveBundleCatalogView(options.projectionPort)}
         exit={options.exit}
-        onEpilogue={options.onEpilogue}
       />
     ),
     renderer,

@@ -12,25 +12,28 @@ import {
   PLATFORMS,
   type AssetDecl,
   type AuthoredManifest,
-  type CommandInvocation,
-  type CommandParams,
   type CompositionFinding,
-  flattenSteps,
   type Platform,
-  type StepKindName,
 } from "../workflow/workflow.js";
 import { readZip, writeZip, type Budgets, type ZipEntry } from "./zip.js";
 
-// The Bundle Module's ZIP surface is public through this entry: the writer the
-// build uses, the constrained reader install uses, and the budgets.
+// The Bundle Module's ZIP writer and budgets are public through this entry; the
+// constrained reader stays private (install goes through `readBundle`, which
+// returns the identical findings).
 export {
   DEFAULT_BUDGETS,
-  readZip,
   writeZip,
   type Budgets,
   type ZipEntry,
-  type ZipReadResult,
 } from "./zip.js";
+
+// The Execution summary is a private submodule re-exported by the entry.
+export {
+  EXECUTION_AUTHORITY_WARNING,
+  generateExecutionSummary,
+  type BundleExecutionCommand,
+  type BundleExecutionSummary,
+} from "./execution-summary.js";
 
 const MANIFEST_ENTRY = "manifest.json";
 
@@ -204,14 +207,15 @@ export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
   };
 }
 
-// --- inspection & execution summary ----------------------------------------
+// --- inspection ------------------------------------------------------------
 //
 // The read-only facts the `bundle-catalog` Projection needs from stored `.wfb`
-// bytes (#54): the validated manifest to shape into a focus, and the generated
-// Execution summary. Both parse the same packaged manifest `readBundle` accepts;
-// neither executes, loads, or fetches. Application joins these with the Catalog
-// Entry's origin and the running engine version — Bundle imports neither, so it
-// returns manifest-derived facts and Application translates them for the client.
+// bytes (#54): the validated manifest to shape into a focus, plus its Composition
+// findings. The generated Execution summary is the sibling `execution-summary`
+// submodule. inspectBundle parses the same packaged manifest `readBundle`
+// accepts; it executes, loads, and fetches nothing. Application joins these with
+// the Catalog Entry's origin and the running engine version — Bundle imports
+// neither, so it returns manifest-derived facts and Application translates them.
 
 /** Validated, execution-free facts read from stored Bundle bytes. */
 export interface BundleInspection {
@@ -226,31 +230,6 @@ export interface BundleInspection {
 export type InspectOutcome =
   | { readonly ok: true; readonly inspection: BundleInspection }
   | { readonly ok: false; readonly finding: BundleFinding };
-
-/** One command Step resolved for a single platform. */
-export interface BundleExecutionCommand {
-  readonly stepId: string;
-  readonly executable: string;
-  readonly workingDirectory?: string;
-  readonly environmentVariableNames: readonly string[];
-  readonly scripts: readonly string[]; // script asset paths the command runs
-}
-
-/** Crucible's generated account of the authority a Bundle can exercise on one
- *  platform (#9 glossary). Origin is joined in by Application. */
-export interface BundleExecutionSummary {
-  readonly platform: Platform;
-  readonly identity: { readonly id: string; readonly version: string };
-  readonly digest: string;
-  readonly platforms: readonly Platform[];
-  readonly stepKindCounts: Readonly<Partial<Record<StepKindName, number>>>;
-  readonly commands: readonly BundleExecutionCommand[];
-  readonly warning: string;
-}
-
-/** The fixed authority warning every Execution summary carries (#9 glossary). */
-export const EXECUTION_AUTHORITY_WARNING =
-  "Commands and Harness actions run with the current user's authority and cannot have all their effects predicted statically.";
 
 /**
  * Read stored `.wfb` bytes into inspection facts: the same packaged-manifest
@@ -291,90 +270,6 @@ export function inspectBundle(
       manifest: parsed.manifest,
       composition,
     },
-  };
-}
-
-/**
- * Generate the Execution summary from a validated manifest for one platform:
- * Step-kind counts, each command resolved for that platform (executable,
- * working directory, environment variable names, and the script assets it runs),
- * and the fixed authority warning. Purely a function of the manifest, the
- * platform, and the digest — no filesystem, no execution.
- */
-export function generateExecutionSummary(
-  manifest: AuthoredManifest,
-  digest: string,
-  platform: Platform,
-): BundleExecutionSummary {
-  const scriptAssets = new Set(
-    manifest.assets
-      .filter((asset) => asset.kind === "script")
-      .map((asset) => asset.path),
-  );
-  const steps = flattenSteps(manifest.routing);
-  const stepKindCounts: Partial<Record<StepKindName, number>> = {};
-  const commands: BundleExecutionCommand[] = [];
-  for (const step of steps) {
-    stepKindCounts[step.kind] = (stepKindCounts[step.kind] ?? 0) + 1;
-    if (step.kind === "command") {
-      commands.push(
-        resolveCommand(step.id, step.command, platform, scriptAssets),
-      );
-    }
-  }
-  return {
-    platform,
-    identity: { id: manifest.bundle.id, version: manifest.bundle.version },
-    digest,
-    platforms: manifest.platforms ?? [],
-    stepKindCounts,
-    commands,
-    warning: EXECUTION_AUTHORITY_WARNING,
-  };
-}
-
-function resolveCommand(
-  stepId: string,
-  command: CommandParams,
-  platform: Platform,
-  scriptAssets: ReadonlySet<string>,
-): BundleExecutionCommand {
-  // A per-platform override replaces only the fields it names; the base command
-  // supplies the rest (#9 per-platform parameter overrides).
-  const override = command.platforms?.[platform] ?? {};
-  const invocation: CommandInvocation = {
-    executable: override.executable ?? command.executable,
-    arguments: override.arguments ?? command.arguments,
-    workingDirectory: override.workingDirectory ?? command.workingDirectory,
-    env: override.env ?? command.env,
-  };
-  const scripts: string[] = [];
-  for (const token of invocation.arguments) {
-    if (
-      typeof token !== "string" &&
-      "asset" in token &&
-      scriptAssets.has(token.asset)
-    ) {
-      scripts.push(token.asset);
-    }
-  }
-  for (const value of Object.values(invocation.env ?? {})) {
-    if (
-      typeof value !== "string" &&
-      "asset" in value &&
-      scriptAssets.has(value.asset)
-    ) {
-      scripts.push(value.asset);
-    }
-  }
-  return {
-    stepId,
-    executable: invocation.executable,
-    ...(invocation.workingDirectory !== undefined
-      ? { workingDirectory: invocation.workingDirectory }
-      : {}),
-    environmentVariableNames: Object.keys(invocation.env ?? {}).sort(),
-    scripts,
   };
 }
 

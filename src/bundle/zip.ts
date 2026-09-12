@@ -1,5 +1,6 @@
 import { crc32, deflateRawSync, inflateRawSync } from "node:zlib";
 import type { BundleFinding } from "./manifest.js";
+import { normalizeRelativePath } from "./relative-path.js";
 
 // A deterministic ZIP-container writer for `.wfb` bytes. Files only, sorted by
 // path, with a fixed DOS timestamp and fixed permissions, so the same entries
@@ -135,6 +136,16 @@ const S_IFMT = 0o170000;
 const S_IFREG = 0o100000;
 const DOS_DIRECTORY = 0x10;
 
+// Zip64 markers (D6). A Bundle is never a Zip64 archive; reject one explicitly
+// rather than let it fail incidentally as `corrupt-archive`/`expanded-too-large`
+// downstream. These are the end-of-central-directory record and its locator
+// signatures, the `0x0001` extra-field id, and the sentinels a 16-bit count or a
+// 32-bit size/offset carries to say the true value lives in a Zip64 record.
+const SIG_ZIP64_LOCATOR = 0x07064b50;
+const ZIP64_EXTRA_ID = 0x0001;
+const ZIP64_U16 = 0xffff;
+const ZIP64_U32 = 0xffffffff;
+
 const UTF8 = new TextDecoder("utf8", { fatal: true });
 
 /** Read and validate untrusted archive bytes into entries, or a finding. */
@@ -156,6 +167,29 @@ class ArchiveError extends Error {
 function reject(code: string, message: string, path?: string): never {
   throw new ArchiveError({ code, message, ...(path ? { path } : {}) });
 }
+function rejectZip64(path?: string): never {
+  reject(
+    "zip64-unsupported",
+    path === undefined
+      ? "The archive uses the Zip64 format; a Bundle is never a Zip64 archive."
+      : `Entry "${path}" uses the Zip64 format; a Bundle is never a Zip64 archive.`,
+    path,
+  );
+}
+
+// True when a central-directory extra field carries the Zip64 header id.
+function hasZip64ExtraField(
+  buffer: Buffer,
+  start: number,
+  length: number,
+): boolean {
+  for (let cursor = start; cursor + 4 <= start + length;) {
+    const id = buffer.readUInt16LE(cursor);
+    if (id === ZIP64_EXTRA_ID) return true;
+    cursor += 4 + buffer.readUInt16LE(cursor + 2);
+  }
+  return false;
+}
 
 interface CentralEntry {
   readonly name: string;
@@ -175,11 +209,26 @@ function readEntries(buffer: Buffer, budgets: Budgets): ZipEntry[] {
   }
 
   const eocd = findEocd(buffer);
+  // Zip64 (D6): its locator sits immediately before the EOCD, and a sentinel in
+  // the EOCD's counts, size, or offset says the true value lives in a Zip64
+  // record. Reject either before parsing the central directory as 32-bit.
+  if (eocd >= 20 && buffer.readUInt32LE(eocd - 20) === SIG_ZIP64_LOCATOR) {
+    rejectZip64();
+  }
   const diskNo = buffer.readUInt16LE(eocd + 4);
   const cdStartDisk = buffer.readUInt16LE(eocd + 6);
   const cdRecordsThisDisk = buffer.readUInt16LE(eocd + 8);
   const total = buffer.readUInt16LE(eocd + 10);
+  const centralSize = buffer.readUInt32LE(eocd + 12);
   let cursor = buffer.readUInt32LE(eocd + 16);
+  if (
+    total === ZIP64_U16 ||
+    cdRecordsThisDisk === ZIP64_U16 ||
+    centralSize === ZIP64_U32 ||
+    cursor === ZIP64_U32
+  ) {
+    rejectZip64();
+  }
   if (diskNo !== 0 || cdStartDisk !== 0 || cdRecordsThisDisk !== total) {
     reject("multipart-archive", "A Bundle must be a single-part archive.");
   }
@@ -213,14 +262,27 @@ function readEntries(buffer: Buffer, budgets: Budgets): ZipEntry[] {
     const externalAttrs = buffer.readUInt32LE(cursor + 38);
     const localOffset = buffer.readUInt32LE(cursor + 42);
     const nameStart = cursor + 46;
-    if (nameStart + nameLen > buffer.length) {
+    // Bound the name AND the extra field against the real buffer before either is
+    // read: nameLen and extraLen are attacker-controlled, so an overrun must be a
+    // `corrupt-archive` finding, never an uncaught RangeError from the reads below
+    // (readZip only translates ArchiveError).
+    if (nameStart + nameLen + extraLen > buffer.length) {
       reject(
         "corrupt-archive",
-        "A central directory entry name runs past the archive.",
+        "A central directory entry runs past the archive.",
       );
     }
     const name = decodePath(buffer.subarray(nameStart, nameStart + nameLen));
 
+    if (
+      compSize === ZIP64_U32 ||
+      uncompSize === ZIP64_U32 ||
+      localOffset === ZIP64_U32 ||
+      diskStart === ZIP64_U16 ||
+      hasZip64ExtraField(buffer, nameStart + nameLen, extraLen)
+    ) {
+      rejectZip64(name);
+    }
     if (diskStart !== 0) {
       reject("multipart-archive", "A Bundle must be a single-part archive.");
     }
@@ -355,19 +417,15 @@ function decodePath(raw: Buffer): string {
   } catch {
     reject("non-utf8-path", "An archive entry name is not valid UTF-8.");
   }
-  if (
-    name.includes("\\") ||
-    name.startsWith("/") ||
-    /^[A-Za-z]:/.test(name) ||
-    name.split("/").includes("..")
-  ) {
+  const safe = normalizeRelativePath(name);
+  if (safe === undefined) {
     reject(
       "unsafe-path",
       `Entry "${name}" is an absolute or traversing path; a Bundle stores relative paths only.`,
       name,
     );
   }
-  return name;
+  return safe;
 }
 
 // Scan backward for the End Of Central Directory record. Our own writer emits no

@@ -53,6 +53,9 @@ export function BundleInspect(props: {
     ],
   }));
 
+  // The content can exceed the terminal height (a long Bundle at 80×24); clip it
+  // rather than let the fixed-height column shrink and corrupt the rows (tui
+  // AGENTS.md invariant 2), matching the list screen. Scroll is a later slice.
   return (
     <box
       width={dimensions().width}
@@ -60,20 +63,25 @@ export function BundleInspect(props: {
       flexDirection="column"
       padding={1}
       gap={1}
+      overflow="hidden"
       backgroundColor={theme.background}
     >
-      <Show
-        when={snapshot().result.found}
-        fallback={
-          <NotFound
-            selector={props.selector}
-            problem={notFoundProblem(snapshot().result)}
-          />
-        }
-      >
-        <Focus bundle={foundBundle(snapshot().result)} />
-      </Show>
-      <text fg={theme.textMuted}>esc back · q quit</text>
+      <box flexDirection="column" flexGrow={1} overflow="hidden">
+        <Show
+          when={snapshot().result.found}
+          fallback={
+            <NotFound
+              selector={props.selector}
+              problem={notFoundProblem(snapshot().result)}
+            />
+          }
+        >
+          <Focus bundle={foundBundle(snapshot().result)} />
+        </Show>
+      </box>
+      <text fg={theme.textMuted} flexShrink={0}>
+        esc back · q quit
+      </text>
     </box>
   );
 }
@@ -88,7 +96,7 @@ function NotFound(props: {
       ? `${props.selector.id}@${props.selector.version}`
       : props.selector.id;
   return (
-    <box flexDirection="column">
+    <box flexDirection="column" flexShrink={0}>
       <text attributes={TextAttributes.BOLD} fg={theme.text}>
         {`Not found: ${label()}`}
       </text>
@@ -112,7 +120,7 @@ function Focus(props: { bundle: InstalledBundleFocus }) {
   const b = () => props.bundle;
   const author = () => b().author;
   return (
-    <box flexDirection="column" gap={1}>
+    <box flexDirection="column" gap={1} flexShrink={0}>
       <box flexDirection="column">
         <text attributes={TextAttributes.BOLD} fg={theme.text}>
           {b().name}

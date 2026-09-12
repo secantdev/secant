@@ -40,7 +40,7 @@ commit 1ead9e3d7f.
 
 1. src/tui/vendor/theme.ts
    Copied from: packages/tui/src/theme/index.ts
-   Date: 2026-09-10
+   Date: 2026-09-10 (dead exports pruned 2026-09-12, #71 audit A12)
    Local modifications:
      - Theme assets are imported as `.ts` modules rather than via JSON
        import-attributes.
@@ -50,9 +50,13 @@ commit 1ead9e3d7f.
        themes, subscription, and the allThemes / isTheme / addTheme /
        upsertTheme / hasTheme / setCustomThemes / setSystemTheme functions.
      - The syntax-rule list is trimmed to a representative subset.
-   Faithful (unchanged) parts: the pure computation is otherwise carried over
-     unchanged -- the Theme type, the resolver, ANSI-to-RGBA conversion,
-     generateSystem, and generateSyntax.
+     - The never-called exports selectedForeground, terminalMode, generateSystem,
+       generateSyntax, generateSubtleSyntax, and the SyntaxStyleOverrides type are
+       removed along with their private helpers (generateGrayScale,
+       generateMutedTextColor, getSyntaxRules); no picker or highlighter uses them
+       yet (#71 audit A12).
+   Faithful (unchanged) parts: the pure computation kept is carried over
+     unchanged -- the Theme type, the resolver, ANSI-to-RGBA conversion, and tint.
 
 2. src/tui/vendor/themes/*.ts   (25 files)
    Copied from: packages/tui/src/theme/assets/<name>.json
@@ -66,27 +70,25 @@ commit 1ead9e3d7f.
 
 3. src/tui/vendor/dialog.tsx
    Copied from: packages/tui/src/ui/dialog.tsx
-   Date: 2026-09-10
+   Date: 2026-09-10 (Dialog un-exported 2026-09-12, #71 audit A12)
    Local modifications:
      - Dropped the toast / clipboard copy-on-select handlers.
      - Dropped the OPENCODE_EXPERIMENTAL flag branches.
      - Dropped the useOpencodeModeStack("modal") push; modal gating is now an
        `enabled` accessor instead.
+     - The Dialog component is module-private (only DialogProvider renders it);
+       nothing imports it (#71 audit A12).
    Kept: the backdrop plus centred panel, the dialog stack, focus
      save/restore, and Escape / Ctrl+C dismissal.
 
 4. src/tui/vendor/context-helper.tsx
    Copied from: packages/tui/src/context/helper.tsx
-   Date: 2026-09-10
-   Local modifications: none. Vendored unmodified.
+   Date: 2026-09-10 (context field dropped 2026-09-12, #71 audit A12)
+   Local modifications: the unused `context` field is dropped from the returned
+     object; the raw context is only ever used through `provider`/`use`.
 
 5. src/tui/vendor/exit.tsx
    Copied from: packages/tui/src/context/exit.tsx
-   Date: 2026-09-10
-   Local modifications: none. Vendored unmodified.
-
-6. src/tui/vendor/epilogue.tsx
-   Copied from: packages/tui/src/context/epilogue.tsx
    Date: 2026-09-10
    Local modifications: none. Vendored unmodified.
 

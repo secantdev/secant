@@ -1,8 +1,9 @@
 import { createContext, Show, useContext, type ParentProps } from "solid-js";
 
 // Vendored from OpenCode packages/tui/src/context/helper.tsx at commit
-// 1ead9e3d7f (unmodified). A tiny provider/hook factory the exit and epilogue
-// contexts build on.
+// 1ead9e3d7f. A tiny provider/hook factory the exit context builds on. Local
+// modification: the unused `context` field is dropped from the returned object
+// (audit A12); the raw context is only ever used through `provider`/`use`.
 
 export function createSimpleContext<
   T,
@@ -11,7 +12,6 @@ export function createSimpleContext<
   const ctx = createContext<T>();
 
   return {
-    context: ctx,
     provider: (props: ParentProps<Props>) => {
       const init = input.init(props);
       return (

@@ -2,18 +2,17 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inflateRawSync } from "node:zlib";
 import test from "node:test";
 import {
   buildBundle,
   DEFAULT_BUDGETS,
   readBundle,
-  readZip,
   writeZip,
   type Budgets,
   type ZipEntry,
 } from "../../src/bundle/bundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { readArchiveEntries } from "../helpers/zip.js";
 
 const proofBundle = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -55,23 +54,11 @@ function base(): Record<string, unknown> {
   };
 }
 
-/** Inflate one entry's bytes from the deterministic ZIP the builder writes. */
+/** One entry's decompressed bytes from the deterministic ZIP the builder writes. */
 function readZipEntry(bytes: Uint8Array, name: string): Buffer {
-  const buffer = Buffer.from(bytes);
-  let offset = 0;
-  while (buffer.readUInt32LE(offset) === 0x04034b50) {
-    const compressedSize = buffer.readUInt32LE(offset + 18);
-    const nameLength = buffer.readUInt16LE(offset + 26);
-    const extraLength = buffer.readUInt16LE(offset + 28);
-    const entryName = buffer
-      .subarray(offset + 30, offset + 30 + nameLength)
-      .toString("utf8");
-    const dataStart = offset + 30 + nameLength + extraLength;
-    const data = buffer.subarray(dataStart, dataStart + compressedSize);
-    if (entryName === name) return inflateRawSync(data);
-    offset = dataStart + compressedSize;
-  }
-  throw new Error(`Entry ${name} not found in archive.`);
+  const entry = readArchiveEntries(bytes).find((e) => e.path === name);
+  if (!entry) throw new Error(`Entry ${name} not found in archive.`);
+  return entry.data;
 }
 
 test("building the Proof Bundle yields its identity and a sha-256 digest", () => {
@@ -280,7 +267,7 @@ test("a shape-valid but non-composing folder fails the build with its findings",
   );
 });
 
-// --- constrained reader (readZip) and install validation (readBundle) -------
+// --- constrained reader and install validation (readBundle) -----------------
 
 function proofBytes(): Uint8Array {
   const outcome = buildBundle(proofBundle);
@@ -298,9 +285,7 @@ function repack(
   bytes: Uint8Array,
   replace: (entries: readonly ZipEntry[]) => ZipEntry[],
 ): Uint8Array {
-  const read = readZip(bytes, DEFAULT_BUDGETS);
-  assert.ok(read.ok, JSON.stringify(read));
-  return writeZip(replace(read.entries));
+  return writeZip(replace(readArchiveEntries(bytes)));
 }
 
 // Overwrite the general-purpose flag and method in both the local and central
@@ -419,11 +404,58 @@ const archiveRejections: {
     budgets: { ...DEFAULT_BUDGETS, maxExpandedBytes: 1 },
     code: "expanded-too-large",
   },
+  {
+    // Zip64 (D6): a 0xFFFFFFFF size sentinel says the true size lives in a Zip64
+    // record; before, this failed incidentally as corrupt/expanded-too-large.
+    name: "a Zip64 size sentinel in the central directory",
+    bytes: () => {
+      const buffer = Buffer.from(
+        writeZip([{ path: "note.txt", data: Buffer.from("x") }]),
+      );
+      const nameLen = buffer.readUInt16LE(26);
+      const compSize = buffer.readUInt32LE(18);
+      const central = 30 + nameLen + compSize;
+      buffer.writeUInt32LE(0xffffffff, central + 24); // uncompressed-size sentinel
+      return buffer;
+    },
+    code: "zip64-unsupported",
+  },
+  {
+    // Zip64 (D6): the end-of-central-directory locator, sitting just before the
+    // EOCD, is the other primary Zip64 marker.
+    name: "a Zip64 end-of-central-directory locator",
+    bytes: () => {
+      const buffer = Buffer.from(
+        writeZip([{ path: "note.txt", data: Buffer.from("x") }]),
+      );
+      const eocd = buffer.length - 22;
+      buffer.writeUInt32LE(0x07064b50, eocd - 20); // Zip64 EOCD locator signature
+      return buffer;
+    },
+    code: "zip64-unsupported",
+  },
+  {
+    // A central extra-field length that overruns the buffer must be a graceful
+    // finding, not an uncaught RangeError from the Zip64 extra-field scan that
+    // reads that (attacker-controlled) range.
+    name: "a central extra field that runs past the archive",
+    bytes: () => {
+      const buffer = Buffer.from(
+        writeZip([{ path: "note.txt", data: Buffer.from("x") }]),
+      );
+      const nameLen = buffer.readUInt16LE(26);
+      const compSize = buffer.readUInt32LE(18);
+      const central = 30 + nameLen + compSize;
+      buffer.writeUInt16LE(0xfff0, central + 30); // central extra-field length
+      return buffer;
+    },
+    code: "corrupt-archive",
+  },
 ];
 
 for (const rejection of archiveRejections) {
-  test(`readZip rejects ${rejection.name}`, () => {
-    const result = readZip(
+  test(`readBundle rejects ${rejection.name}`, () => {
+    const result = readBundle(
       rejection.bytes(),
       rejection.budgets ?? DEFAULT_BUDGETS,
     );
@@ -457,7 +489,7 @@ test("readBundle rejects an understated engine range", () => {
   assert.equal(outcome.finding.code, "engine-understated");
 });
 
-test("readZip rejects a decompression bomb that understates its expanded size", () => {
+test("readBundle rejects a decompression bomb that understates its expanded size", () => {
   // A single entry whose declared uncompressed size is tiny but whose deflate
   // stream really expands to a megabyte: the pre-extraction budget sums the
   // understated size and passes, so the per-entry output cap is what must catch
@@ -470,7 +502,46 @@ test("readZip rejects a decompression bomb that understates its expanded size", 
   const central = 30 + nameLen + compSize;
   buffer.writeUInt32LE(10, 22); // local uncompressed size
   buffer.writeUInt32LE(10, central + 24); // central uncompressed size
-  const result = readZip(buffer, DEFAULT_BUDGETS);
+  const result = readBundle(buffer, DEFAULT_BUDGETS);
   assert.ok(!result.ok, "expected the bomb to be rejected");
   assert.equal(result.finding.code, "corrupt-entry");
 });
+
+// The manifest validator's `relativePath` and the ZIP reader's `decodePath` share
+// one private helper (D8), so an asset path in a manifest and an entry name in an
+// archive accept or reject identically. Drive the two public ingress paths with
+// the same inputs and assert they agree on every one.
+for (const { input, safe } of [
+  { input: "ok/file.txt", safe: true },
+  { input: "a\\b.txt", safe: true }, // backslash normalizes to a forward slash
+  { input: "../evil.txt", safe: false },
+  { input: "/abs.txt", safe: false },
+  { input: "C:\\win.txt", safe: false },
+]) {
+  test(`the relative-path rule agrees on ${JSON.stringify(input)}`, () => {
+    // Manifest ingress: the path rule fires in validateManifest (before any file
+    // is read), so a bad path is `invalid-field`; a safe one reaches the asset
+    // existence check (`asset-not-found`) instead.
+    const folder = authoringFolder({
+      ...base(),
+      assets: [{ path: input, kind: "resource" }],
+    });
+    const manifest = buildBundle(folder);
+    const manifestRejected =
+      !manifest.ok &&
+      "finding" in manifest &&
+      manifest.finding.code === "invalid-field";
+
+    // ZIP ingress: the path rule fires in decodePath; a safe path reaches the
+    // manifest-missing check instead.
+    const archive = readBundle(
+      writeZip([{ path: input, data: Buffer.from("x") }]),
+      DEFAULT_BUDGETS,
+    );
+    const archiveRejected =
+      !archive.ok && archive.finding.code === "unsafe-path";
+
+    assert.equal(manifestRejected, !safe, `manifest disagreed on ${input}`);
+    assert.equal(archiveRejected, !safe, `archive disagreed on ${input}`);
+  });
+}

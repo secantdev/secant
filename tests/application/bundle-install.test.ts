@@ -7,12 +7,12 @@ import { createApplication } from "../../src/application/application.js";
 import {
   buildBundle,
   DEFAULT_BUDGETS,
-  readZip,
   writeZip,
   type Budgets,
 } from "../../src/bundle/bundle.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { readArchiveEntries } from "../helpers/zip.js";
 
 // The Bundle-management contract end to end, against a temporary home with real
 // bytes built from the Proof Bundle (issue #53 acceptance).
@@ -84,10 +84,8 @@ test("a byte-different archive of the same identity is an identity collision", a
 
   // Same manifest (same identity) but an extra entry, so the bytes and digest
   // differ while the identity does not.
-  const read = readZip(proofBytes(), DEFAULT_BUDGETS);
-  assert.ok(read.ok);
   const different = writeZip([
-    ...read.entries,
+    ...readArchiveEntries(proofBytes()),
     { path: "extra.txt", data: Buffer.from("different") },
   ]);
   const collision = h.bundle.install(writeArchive(different));

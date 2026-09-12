@@ -22,8 +22,9 @@ import { mountTui } from "../tui/tui.js";
 // no-TTY smoke proves.
 
 // The precise startup Problem when there is no interactive terminal. Kept stable
-// so CI's no-TTY package smoke can assert on it (ADR 0027).
-export const NO_TTY_PROBLEM = {
+// so CI's no-TTY package smoke can assert the literal against the binary's output
+// (ADR 0027); module-private, since nothing imports it.
+const NO_TTY_PROBLEM = {
   code: "no-interactive-terminal",
   explanation:
     "Secant's interactive shell needs an interactive terminal, but stdin or stdout is not a TTY.",
@@ -80,7 +81,6 @@ export async function runTuiApp(): Promise<number> {
       recordTerminalEvent("teardown"),
     );
 
-    let epilogue: string | undefined;
     let failure: unknown;
     let resolveShutdown!: () => void;
     const shutdown = new Promise<void>((resolve) => {
@@ -104,9 +104,6 @@ export async function runTuiApp(): Promise<number> {
       await mountTui(renderer, {
         projectionPort,
         exit: (reason) => finish(reason),
-        onEpilogue: (value) => {
-          epilogue = value;
-        },
       });
       // Mounted: the renderer holds the terminal in raw mode and Home's quit
       // bindings are live, so the suite may now drive an exit path.
@@ -119,7 +116,7 @@ export async function runTuiApp(): Promise<number> {
       teardown();
     }
 
-    // Print any epilogue or error to the restored terminal, after teardown.
+    // Print any error to the restored terminal, after teardown.
     if (failure !== undefined) {
       const message =
         failure instanceof Error
@@ -128,7 +125,6 @@ export async function runTuiApp(): Promise<number> {
       process.stderr.write(`${message}\n`);
       return 1;
     }
-    if (epilogue !== undefined) process.stdout.write(`${epilogue}\n`);
     return 0;
   } finally {
     catalog.close();

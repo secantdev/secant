@@ -17,7 +17,6 @@ import {
 import { Home } from "./home.js";
 import { createTuiKeymap, KeymapProvider } from "./keymap.js";
 import { DialogProvider, useDialog } from "./vendor/dialog.js";
-import { EpilogueProvider } from "./vendor/epilogue.js";
 import { useExit, type Exit, ExitProvider } from "./vendor/exit.js";
 import { ThemeProvider, useTheme } from "./vendor/theme-context.js";
 import {
@@ -114,30 +113,27 @@ export function App(props: {
   view: WorkspaceView;
   bundles: BundleCatalogView;
   exit: Exit;
-  onEpilogue?: (value?: string) => void;
 }) {
   const keymap = createTuiKeymap();
   return (
     <ExitProvider exit={props.exit}>
-      <EpilogueProvider set={props.onEpilogue ?? (() => {})}>
-        <ThemeProvider>
-          <KeymapProvider keymap={keymap}>
-            <WorkspaceViewProvider view={props.view}>
-              <BundleCatalogViewProvider view={props.bundles}>
-                <DialogProvider>
-                  <ErrorBoundary
-                    fallback={(error) => (
-                      <Fallback error={error} exit={props.exit} />
-                    )}
-                  >
-                    <Route />
-                  </ErrorBoundary>
-                </DialogProvider>
-              </BundleCatalogViewProvider>
-            </WorkspaceViewProvider>
-          </KeymapProvider>
-        </ThemeProvider>
-      </EpilogueProvider>
+      <ThemeProvider>
+        <KeymapProvider keymap={keymap}>
+          <WorkspaceViewProvider view={props.view}>
+            <BundleCatalogViewProvider view={props.bundles}>
+              <DialogProvider>
+                <ErrorBoundary
+                  fallback={(error) => (
+                    <Fallback error={error} exit={props.exit} />
+                  )}
+                >
+                  <Route />
+                </ErrorBoundary>
+              </DialogProvider>
+            </BundleCatalogViewProvider>
+          </WorkspaceViewProvider>
+        </KeymapProvider>
+      </ThemeProvider>
     </ExitProvider>
   );
 }

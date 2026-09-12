@@ -24,6 +24,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.4.2",
+    "@types/semver": "7.7.1",
     "eslint": "^10.8.1",
     "globals": "^17.11.0",
     "prettier": "^3.9.6",
@@ -53,6 +54,8 @@
     "@opentui/core": "0.4.5",
     "@opentui/keymap": "0.4.5",
     "@opentui/solid": "0.4.5",
+    "commander": "14.0.2",
+    "semver": "7.7.4",
     "solid-js": "1.9.12"
   }
 }

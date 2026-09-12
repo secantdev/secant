@@ -27,6 +27,7 @@ import {
   type StepKindName,
   type WorkspacePrerequisite,
 } from "../workflow/workflow.js";
+import semver from "semver";
 import { normalizeRelativePath } from "./relative-path.js";
 
 // Strict, non-executing validation of a Bundle manifest into the trusted
@@ -56,18 +57,25 @@ export type PackagedManifestResult =
     }
   | { readonly ok: false; readonly finding: BundleFinding };
 
-// The declared engine range a builder writes: `>=` then a strict release.
-const ENGINE_RANGE = /^>=(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
-
-// Strict SemVer, from semver.org's official grammar.
-const SEMVER =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 // Lowercase reverse-domain: at least two dot-separated lowercase alnum/hyphen
 // segments, no leading/trailing hyphen in a segment.
 const REVERSE_DOMAIN =
   /^[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+$/;
 // A bare PATH-resolved executable name: no separators, spaces, or shell tokens.
 const BARE_EXECUTABLE = /^[A-Za-z0-9._+-]+$/;
+
+// `semver.valid` decides the grammar, but it is lenient about a leading `v`/`=`
+// and surrounding whitespace. Reject those so a version stays byte-identical to
+// what an author wrote — Bundle identity is `id@version` compared as an exact
+// string, and this is an install-time validation boundary.
+function isStrictSemver(value: string): boolean {
+  return (
+    semver.valid(value) !== null &&
+    value === value.trim() &&
+    value[0] !== "v" &&
+    value[0] !== "="
+  );
+}
 
 class ManifestError extends Error {
   constructor(readonly finding: BundleFinding) {
@@ -144,7 +152,9 @@ function readEngine(raw: unknown): string {
   const requires = obj(obj(raw, "manifest").requires, "requires");
   reject(requires, ["engine"], "requires");
   const engine = str(requires.engine, "requires.engine");
-  if (!ENGINE_RANGE.test(engine)) {
+  // A builder always writes `>=` then a single semantic version; the `>=` shape
+  // is load-bearing (readBundle and the Catalog Projection slice it off).
+  if (!engine.startsWith(">=") || !isStrictSemver(engine.slice(2))) {
     fail(
       "invalid-engine",
       `requires.engine "${engine}" must be a ">=x.y.z" release range.`,
@@ -216,7 +226,7 @@ function readBundleMeta(b: Record<string, unknown>): BundleMeta {
     );
   }
   const version = str(b.version, "bundle.version");
-  if (!SEMVER.test(version)) {
+  if (!isStrictSemver(version)) {
     fail(
       "invalid-bundle-version",
       `bundle.version "${version}" is not a strict semantic version.`,

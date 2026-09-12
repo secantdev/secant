@@ -489,6 +489,26 @@ test("readBundle rejects an understated engine range", () => {
   assert.equal(outcome.finding.code, "engine-understated");
 });
 
+test("readBundle accepts a prerelease engine floor at or above the required version (no NaN path)", () => {
+  // The old hand-rolled comparator did `"0.1.1-rc.1".split(".").map(Number)`,
+  // yielding NaN; semver compares prereleases correctly. A floor of 0.1.1-rc.1
+  // is above the required 0.1.0, so the range is not understated.
+  const bytes = repack(proofBytes(), (entries) =>
+    entries.map((entry) =>
+      entry.path === "manifest.json"
+        ? {
+            path: entry.path,
+            data: Buffer.from(
+              decode(entry.data).replace('">=0.1.0"', '">=0.1.1-rc.1"'),
+            ),
+          }
+        : entry,
+    ),
+  );
+  const outcome = readBundle(bytes, DEFAULT_BUDGETS);
+  assert.ok(outcome.ok, JSON.stringify(outcome));
+});
+
 test("readBundle rejects a decompression bomb that understates its expanded size", () => {
   // A single entry whose declared uncompressed size is tiny but whose deflate
   // stream really expands to a megabyte: the pre-extraction budget sums the

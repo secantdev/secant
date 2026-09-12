@@ -1,3 +1,4 @@
+import semver from "semver";
 import type {
   BundleOrigin,
   Catalog,
@@ -21,7 +22,6 @@ import type {
   BundleFocusSelector,
   BundleFocusSnapshot,
   BundleOriginView,
-  BundleStability,
   EngineRange,
   InstalledBundleFocus,
   InstalledBundleSummary,
@@ -76,7 +76,7 @@ export function listSnapshot(
   bundles.sort(
     (a, b) =>
       a.name.localeCompare(b.name) ||
-      -compareSemver(a.version, b.version) ||
+      semver.rcompare(a.version, b.version) ||
       a.id.localeCompare(b.id),
   );
   return {
@@ -137,8 +137,8 @@ function selectEntry(
   // Version omitted: the highest stable installed version; a prerelease must be
   // named (#9, #49). With no stable version installed, there is nothing to pick.
   const stable = matching
-    .filter((entry) => stabilityOf(entry.version) === "stable")
-    .sort((a, b) => -compareSemver(a.version, b.version));
+    .filter((entry) => semver.prerelease(entry.version) === null)
+    .sort((a, b) => semver.rcompare(a.version, b.version));
   return stable.length > 0
     ? { entry: stable[0] }
     : { problem: noStableVersion(selection.id) };
@@ -179,7 +179,8 @@ function summaryOf(
     name: bundle.name,
     description: bundle.description,
     origin: originView(entry.origin),
-    stability: stabilityOf(entry.version),
+    stability:
+      semver.prerelease(entry.version) === null ? "stable" : "prerelease",
     platforms: inspection.platforms,
     engine: engineRange(inspection.engine, deps.engineVersion),
     // M1 origins are all local (External Bundles), which are not yet trusted;
@@ -315,54 +316,22 @@ function selectPlatform(
 
 // --- version facts ---------------------------------------------------------
 
-function stabilityOf(version: string): BundleStability {
-  // A SemVer prerelease is the `-` segment before any `+` build metadata; build
-  // metadata alone (which may itself contain `-`) does not make a prerelease.
-  return version.split("+")[0].includes("-") ? "prerelease" : "stable";
-}
-
 function engineRange(engine: string, engineVersion: string): EngineRange {
   const floor = engine.slice(">=".length);
-  const satisfied = compareSemver(engineVersion, floor) >= 0;
-  const [major, minor] = core3(floor);
+  // includePrerelease so a prerelease Secant build above the floor (e.g. an RC)
+  // still satisfies the range; without it semver excludes every prerelease host.
+  const satisfied = semver.satisfies(engineVersion, engine, {
+    includePrerelease: true,
+  });
   return {
     range: engine,
     satisfied,
-    ...(satisfied ? {} : { note: `needs Secant ≥ ${major}.${minor}` }),
+    ...(satisfied
+      ? {}
+      : {
+          note: `needs Secant ≥ ${semver.major(floor)}.${semver.minor(floor)}`,
+        }),
   };
-}
-
-function core3(version: string): [number, number, number] {
-  const core = version.split("+")[0].split("-")[0];
-  const parts = core.split(".").map((part) => {
-    const value = Number(part);
-    return Number.isFinite(value) ? value : 0;
-  });
-  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
-}
-
-// ponytail: a pragmatic SemVer compare — numeric core, then stable outranks a
-// prerelease, then a dotted-identifier compare for two prereleases. Enough for
-// sorting rows and picking the highest stable; swap in a full spec comparator if
-// prerelease ordering ever needs the numeric-vs-alphanumeric identifier rules.
-function compareSemver(a: string, b: string): number {
-  const ac = core3(a);
-  const bc = core3(b);
-  for (let i = 0; i < 3; i++) {
-    if (ac[i] !== bc[i]) return ac[i] - bc[i];
-  }
-  const ap = prerelease(a);
-  const bp = prerelease(b);
-  if (ap === undefined && bp === undefined) return 0;
-  if (ap === undefined) return 1; // a is stable, outranks a prerelease
-  if (bp === undefined) return -1;
-  return ap === bp ? 0 : ap < bp ? -1 : 1;
-}
-
-function prerelease(version: string): string | undefined {
-  const core = version.split("+")[0];
-  const dash = core.indexOf("-");
-  return dash === -1 ? undefined : core.slice(dash + 1);
 }
 
 // --- problems --------------------------------------------------------------

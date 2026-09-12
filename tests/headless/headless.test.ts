@@ -123,6 +123,52 @@ test("an unknown command exits non-zero with guidance", async (t) => {
   assert.match(h.stderr(), /unknown-command/);
 });
 
+test("an unknown top-level command exits non-zero", async (t) => {
+  const h = await harness(t);
+  assert.equal(runHeadless(h.clients, ["frobnicate"], h.io), 1);
+  assert.match(h.stderr(), /unknown-command/);
+});
+
+test("an unknown flag exits non-zero", async (t) => {
+  const h = await harness(t);
+  assert.equal(runHeadless(h.clients, ["bundle", "list", "--bogus"], h.io), 1);
+  assert.match(h.stderr(), /unknown-option/);
+});
+
+test("--help lists every command, including bundle install, and exits zero", async (t) => {
+  const h = await harness(t);
+  assert.equal(runHeadless(h.clients, ["--help"], h.io), 0);
+  const text = h.stdout();
+  assert.match(text, /Usage: secant/);
+  for (const command of [
+    "workspace",
+    "workspace approve",
+    "bundle list",
+    "bundle inspect",
+    "bundle build",
+    "bundle install",
+  ]) {
+    assert.match(text, new RegExp(command.replace(/ /g, "\\s")));
+  }
+  assert.equal(h.stderr(), "");
+});
+
+test("a subcommand's --help prints that subcommand and exits zero", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    runHeadless(h.clients, ["bundle", "inspect", "--help"], h.io),
+    0,
+  );
+  assert.match(h.stdout(), /secant bundle inspect/);
+  assert.match(h.stdout(), /id@version/);
+});
+
+test("--version prints the embedded version and exits zero", async (t) => {
+  const h = await harness(t);
+  assert.equal(runHeadless(h.clients, ["--version"], h.io), 0);
+  assert.equal(h.stdout(), "0.0.0-dev\n");
+});
+
 const proofBundle = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",

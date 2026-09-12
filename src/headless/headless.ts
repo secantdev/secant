@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { Command, CommanderError } from "commander";
 import type {
   BundleManagement,
   BundleResult,
@@ -15,6 +16,13 @@ import { renderFocus, renderRow } from "./render.js";
 // It prints plain text with status carried by words; `--json` prints the
 // Projection snapshot, Operation result, or build report verbatim; any Problem
 // prints its code, explanation, and remediation and exits non-zero.
+//
+// One `commander` command tree owns all argument parsing (help is generated, so
+// it never drifts from the commands that exist). The tree is built once by
+// `buildProgram` and driven two ways: `runHeadless` parses synchronously with
+// clients in hand (tests, and any in-process caller); `runHeadlessCli` parses
+// asynchronously behind a `CommandExecutor` the CLI host uses to wire the
+// composition root lazily, so SQLite stays off the `--help`/`--version` paths.
 
 export interface HeadlessClients {
   readonly projectionPort: ProjectionPort;
@@ -27,43 +35,300 @@ export interface HeadlessIO {
   cwd(): string;
 }
 
-/** Runs one headless invocation. `args` is everything after `secant`. */
+/**
+ * Runs one headless command against the Application Interfaces. The tests and
+ * any in-process caller pass clients directly (synchronous); the CLI host passes
+ * an executor that wires the composition root only when a command actually runs
+ * (asynchronous), which is what keeps the Catalog's SQLite driver off the help
+ * and version paths.
+ */
+export type CommandExecutor = (
+  run: (clients: HeadlessClients) => number,
+) => number | Promise<number>;
+
+/** Runs one headless invocation with clients in hand. `args` is everything after
+ *  `secant`. */
 export function runHeadless(
   clients: HeadlessClients,
   args: readonly string[],
   io: HeadlessIO,
 ): number {
-  if (args[0] === "bundle") {
-    return bundleCommand(clients, io, args.slice(1));
+  const { program, state } = buildProgram(io, "0.0.0-dev", (run) =>
+    run(clients),
+  );
+  try {
+    program.parse(args as string[], { from: "user" });
+  } catch (error) {
+    return translateCommanderError(error, io);
   }
-  if (args[0] !== "workspace") {
-    return fail(io, false, {
-      code: "unknown-command",
-      explanation: `Unknown command: ${args.join(" ") || "(none)"}.`,
-      remediation:
-        "Run `secant workspace`, `secant workspace approve [path]`, `secant bundle list`, `secant bundle inspect <id>`, or `secant bundle build <folder>`.",
-      possibleEffects: "none",
-    });
-  }
-  const port = clients.projectionPort;
-
-  const rest = args.slice(1);
-  const json = rest.includes("--json");
-  const positional = rest.filter((argument) => !argument.startsWith("-"));
-
-  if (positional[0] === "approve") {
-    // Resolve a relative path against the injected cwd, like `bundle build` and
-    // `bundle install` (#74 A5) — not the process cwd realpathSync would use.
-    const target = positional[1];
-    return approve(
-      port,
-      io,
-      json,
-      target === undefined ? io.cwd() : resolve(io.cwd(), target),
-    );
-  }
-  return showWorkspace(port, io, json);
+  return state.code;
 }
+
+/** Drives the same command tree for the CLI host: it supplies the embedded
+ *  version and an executor that lazily wires the composition root. */
+export async function runHeadlessCli(
+  args: readonly string[],
+  io: HeadlessIO,
+  version: string,
+  execute: CommandExecutor,
+): Promise<number> {
+  const { program, state } = buildProgram(io, version, execute);
+  try {
+    await program.parseAsync(args as string[], { from: "user" });
+  } catch (error) {
+    return translateCommanderError(error, io);
+  }
+  return state.code;
+}
+
+// --- command tree ----------------------------------------------------------
+
+function buildProgram(
+  io: HeadlessIO,
+  version: string,
+  execute: CommandExecutor,
+): { program: Command; state: { code: number } } {
+  const state = { code: 0 };
+  // An action returns the executor's result; when it is a Promise, return it so
+  // `parseAsync` awaits it, otherwise set the exit code synchronously for `parse`.
+  const settle = (result: number | Promise<number>): void | Promise<void> => {
+    if (typeof result === "number") {
+      state.code = result;
+      return;
+    }
+    return result.then((code) => {
+      state.code = code;
+    });
+  };
+
+  const program = new Command();
+  program
+    .name("secant")
+    .description("Secant reaches an outcome by routing between Steps.")
+    .version(version, "-V, --version", "output the version number")
+    .helpOption("-h, --help", "display help for command")
+    // So `--json` after a subcommand reaches that subcommand rather than being
+    // eaten by a same-named parent option (`workspace approve --json`).
+    .enablePositionalOptions()
+    // Settings below are copied into every subcommand as it is added, so they
+    // must be configured before the `.command(...)` calls.
+    .exitOverride()
+    .configureOutput({
+      writeOut: (str) => io.out(str),
+      writeErr: (str) => io.err(str),
+      // Parse errors become Problems in translateCommanderError; suppress
+      // Commander's own error line so it is not printed twice.
+      outputError: () => {},
+    })
+    // Top-level `--help` lists every command by its full path — including
+    // `bundle install` — by flattening the tree, so the listing can never omit a
+    // command that exists (A21). Nested help stays scoped to its own children.
+    .configureHelp({
+      visibleCommands: (cmd) => {
+        const listed: Command[] = [];
+        const walk = (parent: Command, recurse: boolean): void => {
+          for (const sub of parent.commands) {
+            if (sub.name() === "help") continue;
+            listed.push(sub);
+            if (recurse) walk(sub, true);
+          }
+        };
+        walk(cmd, cmd === program);
+        return listed;
+      },
+      subcommandTerm: (cmd) => `${commandPath(cmd)} ${cmd.usage()}`.trim(),
+    });
+  program.addHelpText(
+    "before",
+    "Running `secant` with no command opens the interactive workspace shell.\n",
+  );
+
+  const workspace = program
+    .command("workspace")
+    .description("show the Workspace path and approval state")
+    .option("--json", "print the Projection snapshot as JSON")
+    .action((options: { json?: boolean }) =>
+      settle(
+        execute((clients) =>
+          showWorkspace(clients.projectionPort, io, options.json ?? false),
+        ),
+      ),
+    );
+  workspace
+    .command("approve")
+    .description("approve a directory as the Workspace")
+    .argument("[path]", "directory to approve (defaults to the current one)")
+    .option("--json", "print the Operation result as JSON")
+    .action((path: string | undefined, options: { json?: boolean }) =>
+      settle(
+        execute((clients) =>
+          approve(
+            clients.projectionPort,
+            io,
+            options.json ?? false,
+            // Resolve a relative path against the injected cwd, like `bundle
+            // build`/`install` (#74 A5), not the process cwd.
+            path === undefined ? io.cwd() : resolve(io.cwd(), path),
+          ),
+        ),
+      ),
+    );
+
+  // No `bundle` action: with subcommands and none given, Commander rejects an
+  // unknown token as an unknown command (not an excess argument) and a bare
+  // `bundle` as a missing command — both a usage error, exiting non-zero.
+  const bundle = program
+    .command("bundle")
+    .description("build, install, list, and inspect Bundles");
+  bundle
+    .command("list")
+    .description("list every Installed Bundle")
+    .option("--json", "print the Projection snapshot as JSON")
+    .action((options: { json?: boolean }) =>
+      settle(
+        execute((clients) =>
+          listBundles(clients.projectionPort, io, options.json ?? false),
+        ),
+      ),
+    );
+  bundle
+    .command("inspect")
+    .description("show one Installed Bundle in full")
+    .argument("[id@version]", "Bundle id, optionally with @version")
+    .option("--json", "print the Bundle as JSON")
+    .action((selector: string | undefined, options: { json?: boolean }) => {
+      const json = options.json ?? false;
+      if (selector === undefined) {
+        return settle(
+          fail(io, json, {
+            code: "missing-bundle-id",
+            explanation: "bundle inspect needs a Bundle id.",
+            remediation: "Run `secant bundle inspect <id>[@<version>]`.",
+            possibleEffects: "none",
+          }),
+        );
+      }
+      return settle(
+        execute((clients) =>
+          inspectBundle(clients.projectionPort, io, json, selector),
+        ),
+      );
+    });
+  bundle
+    .command("build")
+    .description("build an authoring folder into a .wfb file")
+    .argument("[folder]", "authoring folder to build")
+    .option("--no-install", "build without installing the result")
+    .option("--output <file>", "write the built .wfb to this path")
+    .option("--json", "print the build report as JSON")
+    .action(
+      (
+        folder: string | undefined,
+        options: { install?: boolean; output?: string; json?: boolean },
+      ) => {
+        const json = options.json ?? false;
+        if (folder === undefined) {
+          return settle(
+            fail(io, json, {
+              code: "missing-folder",
+              explanation: "bundle build needs an authoring folder path.",
+              remediation: "Run `secant bundle build <folder>`.",
+              possibleEffects: "none",
+            }),
+          );
+        }
+        return settle(
+          execute((clients) =>
+            report(
+              io,
+              json,
+              clients.bundleManagement.build(resolve(io.cwd(), folder), {
+                noInstall: options.install === false,
+                output:
+                  options.output === undefined
+                    ? undefined
+                    : resolve(io.cwd(), options.output),
+              }),
+            ),
+          ),
+        );
+      },
+    );
+  bundle
+    .command("install")
+    .description("install a .wfb file")
+    .argument("[file]", "the .wfb file to install")
+    .option("--json", "print the install report as JSON")
+    .action((file: string | undefined, options: { json?: boolean }) => {
+      const json = options.json ?? false;
+      if (file === undefined) {
+        return settle(
+          fail(io, json, {
+            code: "missing-file",
+            explanation: "bundle install needs a .wfb file path.",
+            remediation: "Run `secant bundle install <file.wfb>`.",
+            possibleEffects: "none",
+          }),
+        );
+      }
+      return settle(
+        execute((clients) =>
+          report(
+            io,
+            json,
+            clients.bundleManagement.install(resolve(io.cwd(), file)),
+          ),
+        ),
+      );
+    });
+
+  return { program, state };
+}
+
+/** The space-joined path from the root program to `cmd`, e.g. `bundle install`. */
+function commandPath(cmd: Command): string {
+  const parts: string[] = [];
+  for (let c: Command | null = cmd; c?.parent; c = c.parent) {
+    parts.unshift(c.name());
+  }
+  return parts.join(" ");
+}
+
+// Help and version are written by Commander before it throws; a parse error
+// (unknown command, unknown flag, excess arguments) becomes a Problem so the
+// output stays uniform with the rest of the headless surface. A non-Commander
+// throw is a genuine failure and propagates to the host's catch.
+function translateCommanderError(error: unknown, io: HeadlessIO): number {
+  if (!(error instanceof CommanderError)) throw error;
+  // Help (including the help shown for a bare command group) and version were
+  // already written; the help text is itself the usage message, so just carry
+  // Commander's exit code (0 for `--help`/`--version`, non-zero for a group).
+  if (
+    error.code === "commander.helpDisplayed" ||
+    error.code === "commander.help" ||
+    error.code === "commander.version"
+  ) {
+    return error.exitCode;
+  }
+  const code =
+    error.code === "commander.unknownOption"
+      ? "unknown-option"
+      : error.code === "commander.excessArguments"
+        ? "unexpected-argument"
+        : error.code === "commander.missingArgument" ||
+            error.code === "commander.optionMissingArgument"
+          ? "missing-argument"
+          : "unknown-command";
+  return fail(io, false, {
+    code,
+    explanation: error.message,
+    remediation:
+      "Run `secant --help` to see the available commands and options.",
+    possibleEffects: "none",
+  });
+}
+
+// --- command implementations -----------------------------------------------
 
 function approve(
   port: ProjectionPort,
@@ -126,74 +391,6 @@ function showWorkspace(
   }
 }
 
-function bundleCommand(
-  clients: HeadlessClients,
-  io: HeadlessIO,
-  rest: readonly string[],
-): number {
-  // Single pass so a flag before the folder can't be mistaken for a positional
-  // (`--output` consumes the next token as its value, getopt-style).
-  const positional: string[] = [];
-  let json = false;
-  let noInstall = false;
-  let output: string | undefined;
-  for (let i = 0; i < rest.length; i++) {
-    const token = rest[i];
-    if (token === "--json") json = true;
-    else if (token === "--no-install") noInstall = true;
-    else if (token === "--output") output = rest[++i];
-    else if (token.startsWith("--output="))
-      output = token.slice("--output=".length);
-    else if (!token.startsWith("-")) positional.push(token);
-  }
-
-  if (positional[0] === "list") {
-    return listBundles(clients.projectionPort, io, json);
-  }
-  if (positional[0] === "inspect") {
-    return inspectBundle(clients.projectionPort, io, json, positional[1]);
-  }
-
-  const bundle = clients.bundleManagement;
-  const target = positional[1];
-  if (positional[0] === "build") {
-    if (target === undefined) {
-      return fail(io, json, {
-        code: "missing-folder",
-        explanation: "bundle build needs an authoring folder path.",
-        remediation: "Run `secant bundle build <folder>`.",
-        possibleEffects: "none",
-      });
-    }
-    return report(
-      io,
-      json,
-      bundle.build(resolve(io.cwd(), target), {
-        noInstall,
-        output: output === undefined ? undefined : resolve(io.cwd(), output),
-      }),
-    );
-  }
-  if (positional[0] === "install") {
-    if (target === undefined) {
-      return fail(io, json, {
-        code: "missing-file",
-        explanation: "bundle install needs a .wfb file path.",
-        remediation: "Run `secant bundle install <file.wfb>`.",
-        possibleEffects: "none",
-      });
-    }
-    return report(io, json, bundle.install(resolve(io.cwd(), target)));
-  }
-  return fail(io, json, {
-    code: "unknown-command",
-    explanation: `Unknown bundle command: ${rest.join(" ") || "(none)"}.`,
-    remediation:
-      "Run `secant bundle list`, `secant bundle inspect <id>[@<version>]`, `secant bundle build <folder>`, or `secant bundle install <file.wfb>`.",
-    possibleEffects: "none",
-  });
-}
-
 function listBundles(
   port: ProjectionPort,
   io: HeadlessIO,
@@ -227,16 +424,8 @@ function inspectBundle(
   port: ProjectionPort,
   io: HeadlessIO,
   json: boolean,
-  selector: string | undefined,
+  selector: string,
 ): number {
-  if (selector === undefined) {
-    return fail(io, json, {
-      code: "missing-bundle-id",
-      explanation: "bundle inspect needs a Bundle id.",
-      remediation: "Run `secant bundle inspect <id>[@<version>]`.",
-      possibleEffects: "none",
-    });
-  }
   // The id is lowercase reverse-domain (no `@`); the optional version follows an
   // `@`, so the first `@` splits them.
   const at = selector.indexOf("@");

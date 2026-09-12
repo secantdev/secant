@@ -138,6 +138,15 @@ test("a Bundle whose engine excludes the running Secant shows the needs-Secant n
   assert.equal(row.engine.note, "needs Secant ≥ 0.1");
 });
 
+test("a prerelease Secant build above the floor still satisfies the engine range", async (t) => {
+  const h = await harness(t, "0.2.0-rc.1");
+  h.build(proofBundle);
+
+  const [row] = listRows(h.port);
+  assert.equal(row.engine.satisfied, true);
+  assert.equal(row.engine.note, undefined);
+});
+
 test("the exact focus carries every fact including the Execution summary and zero error findings", async (t) => {
   const h = await harness(t);
   h.build(proofBundle);

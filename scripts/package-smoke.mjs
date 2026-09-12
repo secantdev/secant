@@ -89,6 +89,26 @@ try {
     );
   }
 
+  // An unknown command and an unknown flag exit non-zero with a usage message,
+  // before any composition wiring (issue #72). `run` throws on a non-zero exit,
+  // so use spawnSync directly to assert the failure.
+  for (const args of [["frobnicate"], ["bundle", "list", "--bogus"]]) {
+    const result = spawnSync(binary, args, {
+      cwd: smokeRoot,
+      encoding: "utf8",
+    });
+    if (result.error) throw result.error;
+    if (result.status === 0) {
+      throw new Error(`\`secant ${args.join(" ")}\` should exit non-zero.`);
+    }
+    const output = `${result.stdout}${result.stderr}`;
+    if (!/unknown-(command|option)/.test(output)) {
+      throw new Error(
+        `\`secant ${args.join(" ")}\` did not print a usage message: ${output}`,
+      );
+    }
+  }
+
   // Approve a temporary Workspace under a temporary SECANT_HOME, then read it
   // back with --json — the SQLite write→read round-trip (issue #50, AC7).
   const secantHome = join(smokeRoot, "secant-home");

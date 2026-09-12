@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import semver from "semver";
 import {
   validateManifest,
   validatePackagedManifest,
@@ -186,7 +187,7 @@ export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
 
   const declared = parsed.engine.slice(">=".length);
   const required = deriveEngine(parsed.manifest);
-  if (compareVersions(declared, required) < 0) {
+  if (semver.lt(declared, required)) {
     return bad(
       "engine-understated",
       `requires.engine "${parsed.engine}" understates the ${required} this Bundle actually needs.`,
@@ -503,7 +504,7 @@ function deriveEngine(manifest: AuthoredManifest): string {
   let min = V1;
   for (const feature of features) {
     const floor = FEATURE_MINIMUMS[feature] ?? V1;
-    if (compareVersions(floor, min) > 0) min = floor;
+    if (semver.gt(floor, min)) min = floor;
   }
   return min;
 }
@@ -563,13 +564,4 @@ function canonicalize(value: unknown): unknown {
     );
   }
   return value;
-}
-
-function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    if (pa[i] !== pb[i]) return pa[i] - pb[i];
-  }
-  return 0;
 }

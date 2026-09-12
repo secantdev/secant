@@ -10,6 +10,7 @@ import {
   type Reference,
   type RoutingNode,
   type Step,
+  STEP_KINDS,
 } from "./workflow.js";
 
 // ---------------------------------------------------------------------------
@@ -189,6 +190,23 @@ export function checkComposition(
           step.id,
           `Command step "${step.id}" does not resolve exactly one invocation on ${unresolved.join(", ")}.`,
         );
+      }
+    }
+
+    // A Step kind with a fixed `produces` (Command: verdict + text) may only
+    // author outputs of those types, so execution's deterministic-Verdict mapping
+    // (exit status -> verdict, captured output -> text) covers every output. A
+    // kind that authors its outputs (agents) fixes nothing here.
+    const fixedProduces = STEP_KINDS[step.kind].produces;
+    if (Array.isArray(fixedProduces)) {
+      for (const produced of step.produces ?? []) {
+        if (!fixedProduces.includes(produced.type)) {
+          error(
+            "produces-type-unsupported",
+            step.id,
+            `Step "${step.id}" produces "${produced.name}" as ${produced.type}, but a ${step.kind} Step produces only ${fixedProduces.join(" or ")}.`,
+          );
+        }
       }
     }
 

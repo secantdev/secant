@@ -263,6 +263,25 @@ const cases: ReadonlyArray<{
     code: "asset-reference-kind-mismatch",
     target: "a",
   },
+  {
+    title: "a Command producing a type outside its fixed verdict/text contract",
+    manifest: manifest({
+      routing: routing({
+        seed: {
+          id: "seed",
+          kind: "command",
+          requires: ["doc"],
+          produces: [
+            { name: "v", type: "verdict" },
+            { name: "f", type: "file" },
+          ],
+          command: { executable: "bash", arguments: [{ asset: "run.sh" }] },
+        },
+      }),
+    }),
+    code: "produces-type-unsupported",
+    target: "seed",
+  },
 ];
 
 for (const testCase of cases) {
@@ -282,8 +301,8 @@ for (const testCase of cases) {
 
 test("every composition rule owns a distinct stable code", () => {
   const codes = new Set(cases.map((testCase) => testCase.code));
-  // Nine rules; the missing/wrong-kind asset rule carries two codes, so ten.
-  assert.equal(codes.size, 10);
+  // Ten rules; the missing/wrong-kind asset rule carries two codes, so eleven.
+  assert.equal(codes.size, 11);
 });
 
 test("flags a duplicate Step id", () => {

@@ -10,11 +10,36 @@ import {
 import { join } from "node:path";
 import test from "node:test";
 import { Database } from "bun:sqlite";
-import { openRunGroup, type RunGroup } from "../../../src/run/store/store.js";
+import type { ProducedArtifact } from "../../../src/workflow/workflow.js";
+import {
+  openRunGroup,
+  type PublishAttemptResult,
+  type RunGroup,
+} from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
 
 const WORKSPACE = "/work/example-project";
 const AT = new Date("2026-09-12T12:00:00.000Z");
+
+const enc = (text: string) => new TextEncoder().encode(text);
+const dec = (bytes: Uint8Array | undefined) =>
+  bytes && new TextDecoder().decode(bytes);
+const candidate = (name: string, text: string) =>
+  ({ name, type: "text", content: enc(text) }) as const;
+const need = (...names: string[]): ProducedArtifact[] =>
+  names.map((name) => ({ name, type: "text" }));
+
+/** The private publication-ref directory of a Run's artifacts.git. */
+function publicationRefs(home: string, runId: string): string {
+  return join(
+    groupDirOf(home),
+    runId,
+    "artifacts.git",
+    "refs",
+    "secant",
+    "publications",
+  );
+}
 
 function create(
   group: RunGroup,
@@ -364,6 +389,222 @@ test("SECANT_HOME-style separate homes keep separate Workspaces apart", async (t
   assert.equal(readdirSync(join(home, "runs")).length, 2);
   assert.equal(groupA.listRuns().length, 1);
   assert.equal(groupB.listRuns().length, 1);
+});
+
+test("a succeeded Attempt publishes its whole output set as one version", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  const first = owner.publishAttempt({
+    attemptId: "a1",
+    outcome: "succeeded",
+    required: need("verdict", "text"),
+    outputs: [candidate("verdict", "pass"), candidate("text", "hello")],
+    at: AT,
+  });
+  assert.ok(first.ok && first.versionId);
+  assert.equal(owner.currentVersion("verdict"), first.versionId);
+  assert.equal(owner.currentVersion("text"), first.versionId);
+  // Exactly one commit backs the publication.
+  assert.equal(readdirSync(publicationRefs(home, created.runId)).length, 1);
+
+  // A second publication moves only `text`'s binding; the earlier version stays
+  // readable by its own id, and `verdict` still points at the first commit.
+  const second = owner.publishAttempt({
+    attemptId: "a2",
+    outcome: "succeeded",
+    required: need("text"),
+    outputs: [candidate("text", "world")],
+    at: AT,
+  });
+  assert.ok(second.ok && second.versionId);
+  assert.notEqual(second.versionId, first.versionId);
+  assert.equal(owner.currentVersion("text"), second.versionId);
+  assert.equal(owner.currentVersion("verdict"), first.versionId);
+  assert.equal(dec(owner.readArtifact(first.versionId, "text")), "hello");
+  assert.equal(dec(owner.readArtifact(second.versionId, "text")), "world");
+});
+
+test("a failure between the commit and the transaction moves no binding and leaves the Attempt unsettled", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  const first = owner.publishAttempt({
+    attemptId: "a1",
+    outcome: "succeeded",
+    required: need("text"),
+    outputs: [candidate("text", "keep")],
+    at: AT,
+  });
+  assert.ok(first.ok && first.versionId);
+
+  // Inject a fault the publication transaction hits after the commit is staged:
+  // aborting the binding move must roll the whole transaction back.
+  const runDbPath = join(groupDirOf(home), created.runId, "run.db");
+  const raw = new Database(runDbPath);
+  raw.exec(
+    "CREATE TRIGGER boom BEFORE UPDATE ON artifact_binding " +
+      "BEGIN SELECT RAISE(ABORT, 'injected'); END",
+  );
+  raw.close();
+
+  assert.throws(() =>
+    owner.publishAttempt({
+      attemptId: "a2",
+      outcome: "succeeded",
+      required: need("text"),
+      outputs: [candidate("text", "changed")],
+      at: AT,
+    }),
+  );
+  // No partial state: the binding never moved and the Attempt never settled.
+  assert.equal(owner.currentVersion("text"), first.versionId);
+  assert.deepEqual(
+    owner.attemptLog().map((entry) => entry.attemptId),
+    ["a1"],
+  );
+
+  // Recovery: drop the fault and repeat the publication — it now succeeds.
+  const raw2 = new Database(runDbPath);
+  raw2.exec("DROP TRIGGER boom");
+  raw2.close();
+  const retry = owner.publishAttempt({
+    attemptId: "a2",
+    outcome: "succeeded",
+    required: need("text"),
+    outputs: [candidate("text", "changed")],
+    at: AT,
+  });
+  assert.ok(retry.ok && retry.versionId);
+  assert.equal(owner.currentVersion("text"), retry.versionId);
+  assert.equal(dec(owner.readArtifact(retry.versionId, "text")), "changed");
+});
+
+test("failed, cancelled, and indeterminate Attempts keep the current bindings and log the outcome", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  const pub = owner.publishAttempt({
+    attemptId: "a1",
+    outcome: "succeeded",
+    required: need("text"),
+    outputs: [candidate("text", "stable")],
+    at: AT,
+  });
+  assert.ok(pub.ok && pub.versionId);
+
+  for (const outcome of ["failed", "cancelled", "indeterminate"] as const) {
+    const result: PublishAttemptResult = owner.publishAttempt({
+      attemptId: `x-${outcome}`,
+      outcome,
+      required: [],
+      outputs: [],
+      at: AT,
+    });
+    assert.deepEqual(result, { ok: true });
+  }
+  // The previous binding is still current.
+  assert.equal(owner.currentVersion("text"), pub.versionId);
+  // Every outcome landed in the append-only log, in order.
+  assert.deepEqual(
+    owner.attemptLog().map((entry) => entry.outcome),
+    ["succeeded", "failed", "cancelled", "indeterminate"],
+  );
+});
+
+test("a missing required output is refused with a Problem and nothing is published", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  const result = owner.publishAttempt({
+    attemptId: "a1",
+    outcome: "succeeded",
+    required: need("verdict", "text"),
+    outputs: [candidate("text", "only text")],
+    at: AT,
+  });
+  assert.ok(!result.ok && "problem" in result);
+  assert.deepEqual(result.problem, { kind: "missing-output", name: "verdict" });
+  // Nothing committed and nothing settled.
+  assert.equal(owner.currentVersion("text"), undefined);
+  assert.deepEqual(owner.attemptLog(), []);
+});
+
+test("publishing the same Attempt id twice yields one version", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  const request = {
+    attemptId: "a1",
+    outcome: "succeeded" as const,
+    required: need("text"),
+    outputs: [candidate("text", "once")],
+    at: AT,
+  };
+  const one = owner.publishAttempt(request);
+  const two = owner.publishAttempt(request);
+  assert.ok(one.ok && two.ok);
+  assert.equal(two.versionId, one.versionId);
+  assert.equal(readdirSync(publicationRefs(home, created.runId)).length, 1);
+});
+
+test("a fenced owner cannot publish", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+
+  const stale = group.acquireRun(created.runId);
+  assert.ok(stale);
+  t.after(() => stale.close());
+  const fresh = group.acquireRun(created.runId);
+  assert.ok(fresh);
+  t.after(() => fresh.close());
+
+  const request = {
+    attemptId: "a1",
+    outcome: "succeeded" as const,
+    required: need("text"),
+    outputs: [candidate("text", "x")],
+    at: AT,
+  };
+  assert.deepEqual(stale.publishAttempt(request), {
+    ok: false,
+    reason: "fenced",
+  });
+  const ok = fresh.publishAttempt(request);
+  assert.ok(ok.ok && ok.versionId);
 });
 
 /** The `<slug>--<digest>` directory openRunGroup derives for WORKSPACE, recomputed

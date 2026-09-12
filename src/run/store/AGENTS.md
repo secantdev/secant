@@ -15,3 +15,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Owner fencing is a monotonic `owner_epoch` bumped on every `acquireRun`; a canonical write re-checks the epoch, so a stale owner (a returned crashed
   process) is refused. Ending a Run releases only the claim; its store stays until an explicit delete.
 - Every `run.db` handle a Run Store opens is closed before its directory is renamed or the group closes, so Windows temp cleanup is never blocked by a lock.
+- Artifact publication (#80) is all-or-nothing: the private Artifact Module stages one Git commit (its id is the version id) into `artifacts.git`, then one
+  `run.db` transaction records the versions, moves the bindings, and settles the Attempt. A staged commit or ref alone is invisible candidate storage — only
+  that transaction publishes — so a fault between the commit and the transaction leaves no binding moved, and republishing the same attempt id is a no-op.
+- Git mechanics shell out to the `git` executable (no library); `artifacts.git` is created lazily on first publication, and an absent `git` is a precise
+  `git-unavailable` Problem, not a throw. Bindings/attempt reads validate their row at the read ingress like the coordination reads (D7).

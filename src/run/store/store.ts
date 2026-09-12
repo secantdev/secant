@@ -9,6 +9,12 @@ import {
 import { basename, join } from "node:path";
 import { Database } from "bun:sqlite";
 import { z } from "zod";
+import type {
+  ArtifactType,
+  AttemptOutcome,
+  ProducedArtifact,
+} from "../../workflow/workflow.js";
+import { openArtifactRepo, type StageProblem } from "./artifacts/artifacts.js";
 
 // The Run Store owns each Run's canonical truth and the cross-Run coordination
 // for one Workspace. Runs sharing a resolved absolute Workspace path are grouped
@@ -81,6 +87,42 @@ export type DeleteRunResult =
 export type WriteResult =
   { readonly ok: true } | { readonly ok: false; readonly reason: "fenced" };
 
+/** A candidate output a producer wrote once, ready to publish together. */
+export interface CandidateOutput {
+  readonly name: string;
+  readonly type: ArtifactType;
+  /** Portable regular-file bytes. */
+  readonly content: Uint8Array;
+}
+
+/** One Step Attempt's outcome and, when it succeeded, the outputs to publish. */
+export interface PublishAttemptRequest {
+  readonly attemptId: string;
+  readonly outcome: AttemptOutcome;
+  /** The Step contract's required outputs, validated before anything commits.
+   *  Only consulted for a succeeded Attempt. */
+  readonly required: readonly ProducedArtifact[];
+  /** The candidate outputs; empty unless the Attempt succeeded. */
+  readonly outputs: readonly CandidateOutput[];
+  readonly at: Date;
+  /** Optional canonical Run state to advance to in the same transaction. */
+  readonly advanceState?: string;
+}
+
+/** The outcome of a publication attempt. A fenced owner or an unstageable set
+ *  moves no binding and settles nothing. */
+export type PublishAttemptResult =
+  | { readonly ok: true; readonly versionId?: string }
+  | { readonly ok: false; readonly reason: "fenced" }
+  | { readonly ok: false; readonly problem: StageProblem };
+
+/** One append-only record of how an Attempt ended. */
+export interface AttemptLogEntry {
+  readonly attemptId: string;
+  readonly outcome: AttemptOutcome;
+  readonly at: string;
+}
+
 /**
  * Ownership of one Run's canonical store. Acquiring bumps a fencing epoch, so a
  * stale owner (a crashed process that comes back) is fenced: its canonical
@@ -92,6 +134,20 @@ export interface RunOwner {
   readonly record: RunRecord;
   /** Record the Run's canonical state, unless this owner has been fenced. */
   writeState(state: string): WriteResult;
+  /**
+   * Publish one Step Attempt all-or-nothing. A succeeded Attempt stages one
+   * commit (the version id) for its whole output set, then a single `run.db`
+   * transaction records every version, moves every binding, settles the Attempt,
+   * and optionally advances the Run. A failed/cancelled/indeterminate Attempt
+   * settles and logs its outcome, moving no binding. Idempotent per attempt id.
+   */
+  publishAttempt(request: PublishAttemptRequest): PublishAttemptResult;
+  /** The current version id bound to an artifact name, or undefined if unbound. */
+  currentVersion(name: string): string | undefined;
+  /** The bytes of an artifact at a version, or undefined if that path is absent. */
+  readArtifact(versionId: string, name: string): Uint8Array | undefined;
+  /** Every Attempt outcome in append order. */
+  attemptLog(): readonly AttemptLogEntry[];
   close(): void;
 }
 
@@ -145,6 +201,16 @@ const registrationRow = z.object({
   state: z.string(),
   owner_epoch: z.number(),
   created_at: z.string(),
+});
+const bindingRow = z.object({ version_id: z.string() });
+const attemptRow = z.object({
+  outcome: z.string(),
+  version_id: z.string().nullable(),
+});
+const attemptLogRow = z.object({
+  attempt_id: z.string(),
+  outcome: z.string(),
+  at: z.string(),
 });
 
 const DAMAGED = Symbol("run-store-damaged");
@@ -211,6 +277,32 @@ function stageRunStore(dir: string, record: RunRecord): void {
         "run_id TEXT PRIMARY KEY, workspace_path TEXT NOT NULL, " +
         "bundle_snapshot_digest TEXT NOT NULL, launch TEXT NOT NULL, " +
         "state TEXT NOT NULL, created_at TEXT NOT NULL) STRICT",
+    );
+    // Artifact publication tables (#80). A version row records one artifact of one
+    // publication commit; a binding names the current version per artifact; an
+    // attempt row settles an Attempt once (its PK makes publication idempotent);
+    // the log appends every outcome. The private `artifacts.git` beside `run.db`
+    // holds the content and is created lazily on the first publication.
+    database.exec(
+      "CREATE TABLE IF NOT EXISTS artifact_version (" +
+        "version_id TEXT NOT NULL, artifact_name TEXT NOT NULL, " +
+        "artifact_type TEXT NOT NULL, attempt_id TEXT NOT NULL, " +
+        "created_at TEXT NOT NULL, PRIMARY KEY (version_id, artifact_name)) STRICT",
+    );
+    database.exec(
+      "CREATE TABLE IF NOT EXISTS artifact_binding (" +
+        "artifact_name TEXT PRIMARY KEY, version_id TEXT NOT NULL, " +
+        "updated_at TEXT NOT NULL) STRICT",
+    );
+    database.exec(
+      "CREATE TABLE IF NOT EXISTS attempt (" +
+        "attempt_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, " +
+        "version_id TEXT, settled_at TEXT NOT NULL) STRICT",
+    );
+    database.exec(
+      "CREATE TABLE IF NOT EXISTS attempt_log (" +
+        "seq INTEGER PRIMARY KEY, attempt_id TEXT NOT NULL, " +
+        "outcome TEXT NOT NULL, at TEXT NOT NULL) STRICT",
     );
     database
       .query(
@@ -519,26 +611,135 @@ export function openRunGroup(
       const bumped = bumpEpoch.get(runId) as { owner_epoch: number } | null;
       if (bumped == null) return undefined;
       const epoch = bumped.owner_epoch;
-      const runDatabase = new Database(join(groupDir, runId, "run.db"));
+      const runDir = join(groupDir, runId);
+      const runDatabase = new Database(join(runDir, "run.db"));
       runDatabase.exec("PRAGMA busy_timeout = 5000");
       const handles = runHandles.get(runId) ?? new Set<Database>();
       handles.add(runDatabase);
       runHandles.set(runId, handles);
+      const repo = openArtifactRepo(runDir);
       const updateState = runDatabase.query(
         "UPDATE run_record SET state = ? WHERE run_id = ?",
       );
+      const findAttempt = runDatabase.query(
+        "SELECT outcome, version_id FROM attempt WHERE attempt_id = ?",
+      );
+      const findBinding = runDatabase.query(
+        "SELECT version_id FROM artifact_binding WHERE artifact_name = ?",
+      );
+      const listLog = runDatabase.query(
+        "SELECT attempt_id, outcome, at FROM attempt_log ORDER BY seq",
+      );
+      const insertVersion = runDatabase.query(
+        "INSERT INTO artifact_version (version_id, artifact_name, artifact_type, " +
+          "attempt_id, created_at) VALUES (?, ?, ?, ?, ?)",
+      );
+      const upsertBinding = runDatabase.query(
+        "INSERT INTO artifact_binding (artifact_name, version_id, updated_at) " +
+          "VALUES (?, ?, ?) ON CONFLICT (artifact_name) DO UPDATE SET " +
+          "version_id = excluded.version_id, updated_at = excluded.updated_at",
+      );
+      const insertAttempt = runDatabase.query(
+        "INSERT INTO attempt (attempt_id, outcome, version_id, settled_at) " +
+          "VALUES (?, ?, ?, ?)",
+      );
+      const insertLog = runDatabase.query(
+        "INSERT INTO attempt_log (attempt_id, outcome, at) VALUES (?, ?, ?)",
+      );
+
+      // The single publication transaction: record every version, move every
+      // binding, settle the Attempt, and advance the Run — all or nothing. A
+      // succeeded Attempt carries its staged version id; the others carry none.
+      const publishTransaction = runDatabase.transaction(
+        (request: PublishAttemptRequest, versionId: string | undefined) => {
+          const at = request.at.toISOString();
+          if (versionId !== undefined) {
+            for (const output of request.outputs) {
+              insertVersion.run(
+                versionId,
+                output.name,
+                output.type,
+                request.attemptId,
+                at,
+              );
+              upsertBinding.run(output.name, versionId, at);
+            }
+          }
+          insertAttempt.run(
+            request.attemptId,
+            request.outcome,
+            versionId ?? null,
+            at,
+          );
+          insertLog.run(request.attemptId, request.outcome, at);
+          if (request.advanceState !== undefined) {
+            updateState.run(request.advanceState, runId);
+          }
+        },
+      );
+
+      function fenced(): boolean {
+        const current = readEpoch.get(runId) as {
+          owner_epoch: number;
+        } | null;
+        return current == null || current.owner_epoch !== epoch;
+      }
+
       return {
         runId,
         record,
         writeState(state) {
-          const current = readEpoch.get(runId) as {
-            owner_epoch: number;
-          } | null;
-          if (current == null || current.owner_epoch !== epoch) {
-            return { ok: false, reason: "fenced" };
-          }
+          if (fenced()) return { ok: false, reason: "fenced" };
           updateState.run(state, runId);
           return { ok: true };
+        },
+        publishAttempt(request) {
+          if (fenced()) return { ok: false, reason: "fenced" };
+          // Idempotent: a settled Attempt replays its recorded outcome without
+          // staging a second commit.
+          const settled = findAttempt.get(request.attemptId);
+          if (settled != null) {
+            const parsed = attemptRow.parse(settled);
+            return { ok: true, versionId: parsed.version_id ?? undefined };
+          }
+          if (request.outcome === "succeeded") {
+            // Stage the commit (invisible candidate storage) before the
+            // transaction; a missing output or an absent `git` is a Problem here,
+            // with no `run.db` change.
+            const staged = repo.stageCommit(
+              request.attemptId,
+              request.required,
+              request.outputs,
+              request.at,
+            );
+            if (!staged.ok) return { ok: false, problem: staged.problem };
+            // Re-check the epoch after the (subprocess-slow) staging: a fresh
+            // owner may have fenced this one meanwhile, and the publication is a
+            // canonical write, so a stale owner must be refused.
+            if (fenced()) return { ok: false, reason: "fenced" };
+            publishTransaction(request, staged.versionId);
+            return { ok: true, versionId: staged.versionId };
+          }
+          // A failed/cancelled/indeterminate Attempt moves no binding.
+          publishTransaction(request, undefined);
+          return { ok: true };
+        },
+        currentVersion(name) {
+          const row = findBinding.get(name);
+          return row == null ? undefined : bindingRow.parse(row).version_id;
+        },
+        readArtifact(versionId, name) {
+          return repo.read(versionId, name);
+        },
+        attemptLog() {
+          return (listLog.all() as Record<string, unknown>[]).map((row) => {
+            const parsed = attemptLogRow.parse(row);
+            return {
+              attemptId: parsed.attempt_id,
+              outcome: parsed.outcome as AttemptOutcome,
+              at: parsed.at,
+            };
+          });
         },
         close() {
           if (handles.delete(runDatabase)) runDatabase.close();

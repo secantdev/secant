@@ -4,6 +4,27 @@ import { join } from "node:path";
 import { createApplication } from "../application/application.js";
 import { openCatalog } from "../catalog/catalog.js";
 import { runHeadless } from "../headless/headless.js";
+import type { Platform } from "../workflow/workflow.js";
+
+// The running engine version, substituted by the Bun compile (scripts/build.ts).
+// A free identifier under `bun src/cli/main.ts` (dev) and the Node test runner,
+// where the dev sentinel stands in — matching cli/main.ts.
+declare const __SECANT_VERSION__: string;
+const engineVersion =
+  typeof __SECANT_VERSION__ === "string" ? __SECANT_VERSION__ : "0.0.0-dev";
+
+function hostPlatform(): Platform | undefined {
+  switch (process.platform) {
+    case "win32":
+      return "windows";
+    case "darwin":
+      return "macos";
+    case "linux":
+      return "linux";
+    default:
+      return undefined;
+  }
+}
 
 // The outer composition root wires the runtime: it resolves the Secant home and
 // the launch Workspace, opens the Catalog, constructs the Application, and hands
@@ -24,9 +45,12 @@ export function run(args: readonly string[]): number {
 
   const catalog = openCatalog(secantHome);
   try {
+    const host = hostPlatform();
     const { projectionPort, bundleManagement } = createApplication({
       catalog,
       launchWorkspacePath,
+      engineVersion,
+      ...(host !== undefined ? { hostPlatform: host } : {}),
     });
     return runHeadless({ projectionPort, bundleManagement }, args, {
       out: (text) => void process.stdout.write(text),

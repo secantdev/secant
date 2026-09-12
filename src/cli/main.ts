@@ -19,6 +19,9 @@ Running \`secant\` with no command opens the interactive workspace shell.
 Commands:
   workspace [--json]              show the Workspace path and approval state
   workspace approve [path]        approve a directory as the Workspace
+  bundle list [--json]            list every Installed Bundle
+  bundle inspect <id>[@<version>] [--json]
+                                  show one Installed Bundle in full
   bundle build <folder> --no-install --output <file>
                                   build an authoring folder into a .wfb file
 

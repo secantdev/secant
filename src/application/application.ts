@@ -1,6 +1,12 @@
 import { realpathSync } from "node:fs";
 import { DEFAULT_BUDGETS, type Budgets } from "../bundle/bundle.js";
 import type { Catalog } from "../catalog/catalog.js";
+import type { Platform } from "../workflow/workflow.js";
+import {
+  focusSnapshot,
+  listSnapshot,
+  type BundleCatalogDependencies,
+} from "./bundle-catalog.js";
 import type { BundleManagement } from "./bundle-management.js";
 import { createBundleManagement } from "./build-bundle.js";
 import type {
@@ -31,6 +37,11 @@ export interface ApplicationDependencies {
   readonly launchWorkspacePath: string;
   /** Install budgets a Bundle can never raise; composition wires the defaults. */
   readonly bundleBudgets?: Budgets;
+  /** The running Secant engine version, for the `bundle-catalog` engine note.
+   *  Defaults to the dev sentinel when a caller has no version to declare. */
+  readonly engineVersion?: string;
+  /** The host platform the Execution summary resolves commands for. */
+  readonly hostPlatform?: Platform;
 }
 
 export interface Application {
@@ -45,6 +56,15 @@ export function createApplication(deps: ApplicationDependencies): Application {
     { readonly path: string; readonly outcome: OperationOutcome }
   >();
   const workspaceObservers = new Set<UpdateStream>();
+  const bundleCatalogObservers = new Set<UpdateStream>();
+  const bundleCatalog: BundleCatalogDependencies = {
+    catalog,
+    budgets: deps.bundleBudgets ?? DEFAULT_BUDGETS,
+    engineVersion: deps.engineVersion ?? "0.0.0-dev",
+    ...(deps.hostPlatform !== undefined
+      ? { hostPlatform: deps.hostPlatform }
+      : {}),
+  };
 
   function workspaceSnapshot(): WorkspaceSnapshot {
     const approval = catalog.getWorkspaceApproval(launchWorkspacePath);
@@ -108,6 +128,31 @@ export function createApplication(deps: ApplicationDependencies): Application {
     },
 
     openProjection(selector: ProjectionSelector): OpenedProjection {
+      if (selector.family === "bundle-catalog") {
+        if (selector.focus !== undefined) {
+          // A focus is a settled point-in-time inspection; no updates arrive.
+          const updates = new UpdateStream();
+          return {
+            snapshot: focusSnapshot(bundleCatalog, selector.focus),
+            catchUp: "fresh",
+            updates,
+            close() {
+              updates.close();
+            },
+          };
+        }
+        const updates = new UpdateStream();
+        bundleCatalogObservers.add(updates);
+        return {
+          snapshot: listSnapshot(bundleCatalog),
+          catchUp: "fresh",
+          updates,
+          close() {
+            bundleCatalogObservers.delete(updates);
+            updates.close();
+          },
+        };
+      }
       if (selector.family === "workspace") {
         const updates = new UpdateStream();
         workspaceObservers.add(updates);
@@ -153,7 +198,15 @@ export function createApplication(deps: ApplicationDependencies): Application {
     projectionPort,
     bundleManagement: createBundleManagement({
       catalog,
-      budgets: deps.bundleBudgets ?? DEFAULT_BUDGETS,
+      budgets: bundleCatalog.budgets,
+      onInstalled() {
+        // A fresh install changes the list; push the new snapshot to observers.
+        if (bundleCatalogObservers.size === 0) return;
+        const snapshot = listSnapshot(bundleCatalog);
+        for (const observer of bundleCatalogObservers) {
+          observer.push({ kind: "durable", snapshot });
+        }
+      },
     }),
   };
 }

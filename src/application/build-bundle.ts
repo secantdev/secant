@@ -29,6 +29,10 @@ import type { Problem } from "./projection-port.js";
 export interface BundleManagementDependencies {
   readonly catalog: Catalog;
   readonly budgets: Budgets;
+  /** Called after a fresh install commits, so an open `bundle-catalog`
+   *  Projection can push a durable update. Not called for an already-installed
+   *  or failed install. */
+  readonly onInstalled?: () => void;
 }
 
 export function createBundleManagement(
@@ -43,7 +47,11 @@ export function createBundleManagement(
   ): BundleResult {
     const outcome = readBundle(bytes, budgets);
     if (!outcome.ok) return { ok: false, problem: toProblem(outcome.finding) };
-    return commit(catalog, outcome.read, bytes, origin, extra);
+    const result = commit(catalog, outcome.read, bytes, origin, extra);
+    if (result.ok && result.report.installed?.status === "installed") {
+      deps.onInstalled?.();
+    }
+    return result;
   }
 
   return {

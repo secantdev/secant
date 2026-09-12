@@ -558,8 +558,10 @@ function checkSchema(
   }
 }
 
-/** Every Step in routing order, flattening one level of Repeat groups. */
-function flattenSteps(routing: readonly RoutingNode[]): Step[] {
+/** Every Step in routing order, flattening one level of Repeat groups. The
+ *  Composition check, the Bundle Execution summary, and the `bundle-catalog`
+ *  focus all traverse Steps this way; keep the rule in one place. */
+export function flattenSteps(routing: readonly RoutingNode[]): Step[] {
   const steps: Step[] = [];
   for (const node of routing) {
     if ("repeat" in node) steps.push(...node.repeat.steps);

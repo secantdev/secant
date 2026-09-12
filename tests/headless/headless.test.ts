@@ -91,7 +91,7 @@ test("approving a missing path exits non-zero and prints the Problem", async (t)
 
 test("an unknown command exits non-zero with guidance", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["bundle", "list"], h.io), 1);
+  assert.equal(runHeadless(h.clients, ["bundle", "frobnicate"], h.io), 1);
   assert.match(h.stderr(), /unknown-command/);
 });
 
@@ -213,6 +213,96 @@ test("bundle build installs by default and the Home count reads back one", async
   assert.equal(runHeadless(h.clients, ["workspace", "--json"], h.io), 0);
   const snapshot = JSON.parse(h.stdout()) as { installedBundleCount: number };
   assert.equal(snapshot.installedBundleCount, 1);
+});
+
+test("bundle list shows the installed row and --json carries the snapshot", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    0,
+  );
+
+  h.reset();
+  assert.equal(runHeadless(h.clients, ["bundle", "list"], h.io), 0);
+  const text = h.stdout();
+  assert.match(text, /dev\.secant\.test-repair@1\.0\.0/);
+  assert.match(text, /digest: sha256:[0-9a-f]{64}/);
+  assert.match(text, /platforms: windows, macos, linux/);
+  assert.match(text, /not yet trusted/);
+
+  h.reset();
+  assert.equal(runHeadless(h.clients, ["bundle", "list", "--json"], h.io), 0);
+  const snapshot = JSON.parse(h.stdout()) as {
+    family: string;
+    bundles: { id: string }[];
+  };
+  assert.equal(snapshot.family, "bundle-catalog");
+  assert.equal(snapshot.bundles[0].id, "dev.secant.test-repair");
+});
+
+test("bundle list with nothing installed says so", async (t) => {
+  const h = await harness(t);
+  assert.equal(runHeadless(h.clients, ["bundle", "list"], h.io), 0);
+  assert.match(h.stdout(), /No Bundles are installed/);
+});
+
+test("bundle inspect shows the full focus and --json carries the bundle", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    0,
+  );
+
+  h.reset();
+  assert.equal(
+    runHeadless(
+      h.clients,
+      ["bundle", "inspect", "dev.secant.test-repair"],
+      h.io,
+    ),
+    0,
+  );
+  const text = h.stdout();
+  assert.match(text, /Execution summary/);
+  assert.match(text, /current user's authority/);
+  assert.match(text, /Composition findings:/);
+  assert.match(text, /none \(0 errors\)/);
+
+  h.reset();
+  assert.equal(
+    runHeadless(
+      h.clients,
+      ["bundle", "inspect", "dev.secant.test-repair", "--json"],
+      h.io,
+    ),
+    0,
+  );
+  const bundle = JSON.parse(h.stdout()) as {
+    id: string;
+    digest: string;
+    platforms: string[];
+    compositionFindings: unknown[];
+  };
+  assert.equal(bundle.id, "dev.secant.test-repair");
+  assert.match(bundle.digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(bundle.platforms, ["windows", "macos", "linux"]);
+  assert.deepEqual(bundle.compositionFindings, []);
+});
+
+test("bundle inspect of an unknown id exits non-zero with a Problem", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    runHeadless(h.clients, ["bundle", "inspect", "io.example.absent"], h.io),
+    1,
+  );
+  assert.match(h.stderr(), /bundle-not-installed/);
+  assert.equal(h.stdout(), "");
+});
+
+test("bundle inspect without an id exits non-zero", async (t) => {
+  const h = await harness(t);
+  assert.equal(runHeadless(h.clients, ["bundle", "inspect"], h.io), 1);
+  assert.match(h.stderr(), /missing-bundle-id/);
 });
 
 test("bundle install of the built file reports already installed", async (t) => {

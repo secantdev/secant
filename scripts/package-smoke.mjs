@@ -191,6 +191,50 @@ try {
     );
   }
 
+  // List and inspect the installed Proof Bundle over the `bundle-catalog`
+  // Projection with --json (issue #54, AC6): the same read-back on all three
+  // operating systems, asserting identity, digest, all three platforms, and
+  // zero error findings.
+  const platforms = ["windows", "macos", "linux"];
+  const listSnapshot = JSON.parse(
+    run(binary, ["bundle", "list", "--json"], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    }),
+  );
+  const listed = (listSnapshot.bundles ?? []).find(
+    (bundle) => bundle.id === "dev.secant.test-repair",
+  );
+  if (
+    !listed ||
+    !/^[0-9a-f]{64}$/.test(listed.digest ?? "") ||
+    platforms.some((platform) => !(listed.platforms ?? []).includes(platform))
+  ) {
+    throw new Error(
+      `bundle list --json did not carry the installed Proof Bundle with its digest and all three platforms: ${JSON.stringify(listSnapshot)}`,
+    );
+  }
+
+  const focus = JSON.parse(
+    run(binary, ["bundle", "inspect", "dev.secant.test-repair", "--json"], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    }),
+  );
+  const errorFindings = (focus.compositionFindings ?? []).filter(
+    (finding) => finding.severity === "error",
+  );
+  if (
+    focus.id !== "dev.secant.test-repair" ||
+    !/^[0-9a-f]{64}$/.test(focus.digest ?? "") ||
+    platforms.some((platform) => !(focus.platforms ?? []).includes(platform)) ||
+    errorFindings.length !== 0
+  ) {
+    throw new Error(
+      `bundle inspect --json did not read back identity, digest, all three platforms, and zero error findings: ${JSON.stringify(focus)}`,
+    );
+  }
+
   // A byte-different archive of the same identity: rebuild a copy whose declared
   // script asset differs, so the digest changes while id and version do not.
   const variantFolder = join(smokeRoot, "variant-bundle");

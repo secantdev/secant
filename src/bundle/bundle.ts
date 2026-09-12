@@ -5,14 +5,19 @@ import {
   validateManifest,
   validatePackagedManifest,
   type BundleFinding,
+  type PackagedManifestResult,
 } from "./manifest.js";
 import {
   checkComposition,
   PLATFORMS,
   type AssetDecl,
   type AuthoredManifest,
+  type CommandInvocation,
+  type CommandParams,
   type CompositionFinding,
+  flattenSteps,
   type Platform,
+  type StepKindName,
 } from "../workflow/workflow.js";
 import { readZip, writeZip, type Budgets, type ZipEntry } from "./zip.js";
 
@@ -168,28 +173,13 @@ export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
   const archive = readZip(bytes, budgets);
   if (!archive.ok) return archive;
 
+  const parsed = parsePackagedArchive(archive.entries);
+  if (!parsed.ok) return { ok: false, finding: parsed.finding };
+
   const bad = (code: string, message: string, path?: string): ReadOutcome => ({
     ok: false,
     finding: { code, message, ...(path ? { path } : {}) },
   });
-
-  const manifestEntry = archive.entries.find(
-    (entry) => entry.path === MANIFEST_ENTRY,
-  );
-  if (manifestEntry === undefined) {
-    return bad("manifest-missing", `Archive has no ${MANIFEST_ENTRY}.`);
-  }
-  let manifestText: string;
-  try {
-    manifestText = new TextDecoder("utf8", { fatal: true }).decode(
-      manifestEntry.data,
-    );
-  } catch {
-    return bad("manifest-not-utf8", `${MANIFEST_ENTRY} is not valid UTF-8.`);
-  }
-
-  const parsed = validatePackagedManifest(manifestText);
-  if (!parsed.ok) return { ok: false, finding: parsed.finding };
 
   const declared = parsed.engine.slice(">=".length);
   const required = deriveEngine(parsed.manifest);
@@ -212,6 +202,238 @@ export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
       digest,
     },
   };
+}
+
+// --- inspection & execution summary ----------------------------------------
+//
+// The read-only facts the `bundle-catalog` Projection needs from stored `.wfb`
+// bytes (#54): the validated manifest to shape into a focus, and the generated
+// Execution summary. Both parse the same packaged manifest `readBundle` accepts;
+// neither executes, loads, or fetches. Application joins these with the Catalog
+// Entry's origin and the running engine version — Bundle imports neither, so it
+// returns manifest-derived facts and Application translates them for the client.
+
+/** Validated, execution-free facts read from stored Bundle bytes. */
+export interface BundleInspection {
+  readonly identity: { readonly id: string; readonly version: string };
+  readonly digest: string; // SHA-256 hex over the exact bytes
+  readonly engine: string; // the declared `>=x.y.z` range
+  readonly platforms: readonly Platform[];
+  readonly manifest: AuthoredManifest;
+  readonly composition: readonly CompositionFinding[];
+}
+
+export type InspectOutcome =
+  | { readonly ok: true; readonly inspection: BundleInspection }
+  | { readonly ok: false; readonly finding: BundleFinding };
+
+/** One command Step resolved for a single platform. */
+export interface BundleExecutionCommand {
+  readonly stepId: string;
+  readonly executable: string;
+  readonly workingDirectory?: string;
+  readonly environmentVariableNames: readonly string[];
+  readonly scripts: readonly string[]; // script asset paths the command runs
+}
+
+/** Crucible's generated account of the authority a Bundle can exercise on one
+ *  platform (#9 glossary). Origin is joined in by Application. */
+export interface BundleExecutionSummary {
+  readonly platform: Platform;
+  readonly identity: { readonly id: string; readonly version: string };
+  readonly digest: string;
+  readonly platforms: readonly Platform[];
+  readonly stepKindCounts: Readonly<Partial<Record<StepKindName, number>>>;
+  readonly commands: readonly BundleExecutionCommand[];
+  readonly warning: string;
+}
+
+/** The fixed authority warning every Execution summary carries (#9 glossary). */
+export const EXECUTION_AUTHORITY_WARNING =
+  "Commands and Harness actions run with the current user's authority and cannot have all their effects predicted statically.";
+
+/**
+ * Read stored `.wfb` bytes into inspection facts: the same packaged-manifest
+ * validation `readBundle` runs, plus the Composition check re-run over the
+ * archived prompt and schema text so a focus can show its findings. Executes,
+ * loads, and fetches nothing.
+ */
+export function inspectBundle(
+  bytes: Uint8Array,
+  budgets: Budgets,
+  includeComposition = true,
+): InspectOutcome {
+  const archive = readZip(bytes, budgets);
+  if (!archive.ok) return archive;
+
+  const parsed = parsePackagedArchive(archive.entries);
+  if (!parsed.ok) return { ok: false, finding: parsed.finding };
+
+  // The list view (summaryOf) never reads composition; opting out skips decoding
+  // every prompt/schema asset and re-running the check for a plain `bundle list`.
+  const composition = includeComposition
+    ? checkComposition(
+        parsed.manifest,
+        decodeArchiveTextAssets(archive.entries, parsed.manifest),
+      )
+    : [];
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  return {
+    ok: true,
+    inspection: {
+      identity: {
+        id: parsed.manifest.bundle.id,
+        version: parsed.manifest.bundle.version,
+      },
+      digest,
+      engine: parsed.engine,
+      platforms: parsed.manifest.platforms ?? [],
+      manifest: parsed.manifest,
+      composition,
+    },
+  };
+}
+
+/**
+ * Generate the Execution summary from a validated manifest for one platform:
+ * Step-kind counts, each command resolved for that platform (executable,
+ * working directory, environment variable names, and the script assets it runs),
+ * and the fixed authority warning. Purely a function of the manifest, the
+ * platform, and the digest — no filesystem, no execution.
+ */
+export function generateExecutionSummary(
+  manifest: AuthoredManifest,
+  digest: string,
+  platform: Platform,
+): BundleExecutionSummary {
+  const scriptAssets = new Set(
+    manifest.assets
+      .filter((asset) => asset.kind === "script")
+      .map((asset) => asset.path),
+  );
+  const steps = flattenSteps(manifest.routing);
+  const stepKindCounts: Partial<Record<StepKindName, number>> = {};
+  const commands: BundleExecutionCommand[] = [];
+  for (const step of steps) {
+    stepKindCounts[step.kind] = (stepKindCounts[step.kind] ?? 0) + 1;
+    if (step.kind === "command") {
+      commands.push(
+        resolveCommand(step.id, step.command, platform, scriptAssets),
+      );
+    }
+  }
+  return {
+    platform,
+    identity: { id: manifest.bundle.id, version: manifest.bundle.version },
+    digest,
+    platforms: manifest.platforms ?? [],
+    stepKindCounts,
+    commands,
+    warning: EXECUTION_AUTHORITY_WARNING,
+  };
+}
+
+function resolveCommand(
+  stepId: string,
+  command: CommandParams,
+  platform: Platform,
+  scriptAssets: ReadonlySet<string>,
+): BundleExecutionCommand {
+  // A per-platform override replaces only the fields it names; the base command
+  // supplies the rest (#9 per-platform parameter overrides).
+  const override = command.platforms?.[platform] ?? {};
+  const invocation: CommandInvocation = {
+    executable: override.executable ?? command.executable,
+    arguments: override.arguments ?? command.arguments,
+    workingDirectory: override.workingDirectory ?? command.workingDirectory,
+    env: override.env ?? command.env,
+  };
+  const scripts: string[] = [];
+  for (const token of invocation.arguments) {
+    if (
+      typeof token !== "string" &&
+      "asset" in token &&
+      scriptAssets.has(token.asset)
+    ) {
+      scripts.push(token.asset);
+    }
+  }
+  for (const value of Object.values(invocation.env ?? {})) {
+    if (
+      typeof value !== "string" &&
+      "asset" in value &&
+      scriptAssets.has(value.asset)
+    ) {
+      scripts.push(value.asset);
+    }
+  }
+  return {
+    stepId,
+    executable: invocation.executable,
+    ...(invocation.workingDirectory !== undefined
+      ? { workingDirectory: invocation.workingDirectory }
+      : {}),
+    environmentVariableNames: Object.keys(invocation.env ?? {}).sort(),
+    scripts,
+  };
+}
+
+// Find, decode, and validate the packaged manifest in a read archive — the one
+// step `readBundle` (install) and `inspectBundle` (projection) share before they
+// diverge, so the manifest-entry, UTF-8, and shape rejections stay identical.
+function parsePackagedArchive(
+  entries: readonly ZipEntry[],
+): PackagedManifestResult {
+  const manifestEntry = entries.find((entry) => entry.path === MANIFEST_ENTRY);
+  if (manifestEntry === undefined) {
+    return {
+      ok: false,
+      finding: {
+        code: "manifest-missing",
+        message: `Archive has no ${MANIFEST_ENTRY}.`,
+      },
+    };
+  }
+  let manifestText: string;
+  try {
+    manifestText = new TextDecoder("utf8", { fatal: true }).decode(
+      manifestEntry.data,
+    );
+  } catch {
+    return {
+      ok: false,
+      finding: {
+        code: "manifest-not-utf8",
+        message: `${MANIFEST_ENTRY} is not valid UTF-8.`,
+      },
+    };
+  }
+  return validatePackagedManifest(manifestText);
+}
+
+// Decode the archived prompt and schema asset bytes for the Composition check,
+// mirroring the build's folder decode: strict UTF-8, `null` on non-UTF-8 bytes.
+function decodeArchiveTextAssets(
+  entries: readonly ZipEntry[],
+  manifest: AuthoredManifest,
+): ReadonlyMap<string, string | null> {
+  const byPath = new Map(entries.map((entry) => [entry.path, entry.data]));
+  const decoder = new TextDecoder("utf8", { fatal: true });
+  const texts = new Map<string, string | null>();
+  for (const asset of manifest.assets) {
+    if (asset.kind !== "prompt" && asset.kind !== "schema") continue;
+    const data = byPath.get(asset.path);
+    if (data === undefined) {
+      texts.set(asset.path, null);
+      continue;
+    }
+    try {
+      texts.set(asset.path, decoder.decode(data));
+    } catch {
+      texts.set(asset.path, null);
+    }
+  }
+  return texts;
 }
 
 // The Composition check inspects prompt and schema asset *content*; it cannot

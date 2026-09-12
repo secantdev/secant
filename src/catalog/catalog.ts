@@ -72,6 +72,14 @@ export interface Catalog {
   installBundle(install: BundleInstall): BundleInstallResult;
   /** How many Bundles are installed. */
   countInstalledBundles(): number;
+  /** Every Installed Bundle's Entry. Order is unspecified; callers sort. */
+  listEntries(): readonly CatalogEntry[];
+  /**
+   * The exact managed `.wfb` bytes for a digest, or undefined when the store
+   * holds none. Only bytes cross — never the store path, which stays private to
+   * the Catalog (ADR 0025).
+   */
+  readManagedBytes(digest: string): Uint8Array | undefined;
   /** Release the database; safe to call from a `finally` — it does not throw. */
   close(): void;
 }
@@ -132,6 +140,10 @@ export function openCatalog(secantHome: string): Catalog {
   );
   const countEntries = database.query(
     "SELECT COUNT(*) AS n FROM catalog_entries",
+  );
+  const selectAllEntries = database.query(
+    "SELECT id, version, digest, origin_kind, origin_location, installed_at, " +
+      "installation_generation FROM catalog_entries",
   );
 
   function toEntry(row: Record<string, unknown>): CatalogEntry {
@@ -268,6 +280,18 @@ export function openCatalog(secantHome: string): Catalog {
     },
     countInstalledBundles() {
       return (countEntries.get() as { n: number }).n;
+    },
+    listEntries() {
+      return (selectAllEntries.all() as Record<string, unknown>[]).map(toEntry);
+    },
+    readManagedBytes(digest) {
+      try {
+        return readFileSync(join(storeDir, `${digest}.wfb`));
+      } catch {
+        // Absent bytes read as undefined; a corrupt read surfaces to the caller
+        // as a missing Bundle, not a thrown storage fault.
+        return undefined;
+      }
     },
     /**
      * Release the connection and the catalog file handle. Deterministic because

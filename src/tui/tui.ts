@@ -8,3 +8,7 @@ export {
   createLiveWorkspaceView,
   type WorkspaceView,
 } from "./workspace-view.js";
+export {
+  createLiveBundleCatalogView,
+  type BundleCatalogView,
+} from "./bundle-view.js";

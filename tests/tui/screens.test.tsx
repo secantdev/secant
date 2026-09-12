@@ -3,8 +3,26 @@ import { test } from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
-import type { WorkspaceView } from "../../src/tui/tui.js";
-import type { WorkspaceSnapshot } from "../../src/application/projection-port.js";
+import type { BundleCatalogView, WorkspaceView } from "../../src/tui/tui.js";
+import type {
+  BundleCatalogSnapshot,
+  WorkspaceSnapshot,
+} from "../../src/application/projection-port.js";
+
+/** A bundle view over an empty Catalog; these Workspace tests never navigate. */
+function emptyBundles(): BundleCatalogView {
+  const [list] = createSignal<BundleCatalogSnapshot>({
+    family: "bundle-catalog",
+    view: "list",
+    bundles: [],
+  });
+  return {
+    openList: () => list,
+    openFocus: () => {
+      throw new Error("not used");
+    },
+  };
+}
 
 const PATH = "/tmp/secant-demo-workspace";
 
@@ -59,7 +77,13 @@ async function mount(width = 60, height = 16) {
   const view = fakeView();
   const exits: unknown[] = [];
   const t = await testRender(
-    () => <App view={view} exit={(reason) => exits.push(reason)} />,
+    () => (
+      <App
+        view={view}
+        bundles={emptyBundles()}
+        exit={(reason) => exits.push(reason)}
+      />
+    ),
     { width, height },
   );
   return { t, view, exits };

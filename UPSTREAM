@@ -103,6 +103,34 @@ studied for architecture and behaviour.
   src/tui/approval-dialog.tsx        rebuilt against packages/tui/src/ui/dialog-confirm.tsx
   src/tui/home.tsx                   rebuilt against OpenCode's Home route
   src/tui/app.tsx                    rebuilt against packages/tui/src/app.tsx
+  src/tui/bundle-list.tsx            rebuilt against packages/tui/src/ui/dialog-select.tsx
+  src/tui/bundle-inspect.tsx         rebuilt against packages/tui/src/feature-plugins/system/diff-viewer.tsx
+
+Added 2026-09-12 for #57 (list and inspect Workflow Bundles in the TUI). Both
+screens render the read-only `bundle-catalog` Projection through the Projection
+Port; no OpenCode source crosses for them. What was taken and changed:
+
+  bundle-list.tsx (from dialog-select.tsx):
+    Taken:   the selection model (one active index moved by the arrow keys,
+             Return opens the active row) and the active-row highlight
+             (background + bold).
+    Changed: OpenCode glyph-marks only the *current* value; here the *focused*
+             row carries a leading "› " glyph as well as the highlight, so focus
+             reads without colour (ADR 0024 / #19). Movement clamps at the ends
+             rather than wrapping. OpenCode's fuzzy-filter/group/flat option
+             store collapses to the single Projection-driven list. The empty
+             state names the headless install commands. Scroll for long lists is
+             deferred (M2), so no scrollbox is vendored.
+
+  bundle-inspect.tsx (from diff-viewer.tsx):
+    Taken:   a full-size route box and Escape = navigate back to the screen you
+             came from (here restoring the list's selected row).
+    Changed: no scrollbox and no split/pane focus model (large content and the
+             timeline are M2); a plain top-to-bottom render of the focus
+             Projection, worded to match the headless `bundle inspect`.
+
+No new vendored (copied) files were needed: the screens build on the primitives
+the shell already established, so the VENDORED PATHS list is unchanged.
 
 
 THEME ASSETS (25 vendored, unmodified palettes)

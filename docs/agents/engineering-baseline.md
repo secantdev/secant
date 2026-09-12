@@ -17,6 +17,8 @@ and is complete only when the full gate passes.
   Crucible coding or prototype work begins.
 - Apply structural standards as a quality ratchet to new production code and to legacy code whose seam a change crosses.
 - Leave untouched legacy code alone unless current work depends on changing it.
+- Unused is not dead. In a project still being built, declared surface (exports, Interface members, vendored helpers, ADR-named contracts) awaits
+  its callers. Delete only what a decision, a ticket, or a retired consumer names, never because a search found no importer.
 - Apply the lightweight prototype contract; other focused rules apply only when a prototype crosses their explicit trigger.
 
 ## Architecture-Independent Rules

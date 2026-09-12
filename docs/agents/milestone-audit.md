@@ -44,7 +44,8 @@ The local OpenCode checkout is the comparison.
 1. Grown files reviewed for cohesion: split or merge.
 2. Interfaces still narrow; no adapter or storage type leaking past its Module (`application.ts` versus `projection-port.ts` is the worked example).
 3. Code that now contradicts an ADR or a guidance document.
-4. Dead code, or tests no slice uses.
+4. Dead code, or tests no slice uses. Dead means the caller was deleted or the contract was retired by a decision; declared surface with no
+   importer yet is not a finding, per the [engineering baseline](./engineering-baseline.md).
 5. Module-local `AGENTS.md` facts stale or missing.
 6. Tests mirror the source domains.
 

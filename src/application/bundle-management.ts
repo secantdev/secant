@@ -17,10 +17,11 @@ export interface BundleBuildOptions {
   readonly noInstall: boolean;
 }
 
-/** How an install settled. Absent on a `--no-install` build. */
+/** How an install settled. Absent on a `--no-install` build. The installation
+ *  generation is a private Catalog ordering fact and never crosses this contract
+ *  (#74 A4). */
 export type BundleInstallStatus =
-  | { readonly status: "installed"; readonly generation: number }
-  | { readonly status: "already-installed" };
+  { readonly status: "installed" } | { readonly status: "already-installed" };
 
 export interface BundleReport {
   readonly identity: BundleIdentity;

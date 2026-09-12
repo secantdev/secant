@@ -10,8 +10,12 @@ import {
 import type { BundleManagement } from "./bundle-management.js";
 import { createBundleManagement } from "./build-bundle.js";
 import type {
+  BundleCatalogSnapshot,
+  BundleFocusSelector,
+  BundleFocusSnapshot,
   OpenedProjection,
   OperationOutcome,
+  OperationSnapshot,
   ProjectionPort,
   ProjectionSelector,
   ProjectionUpdate,
@@ -33,7 +37,9 @@ import type {
 
 export interface ApplicationDependencies {
   readonly catalog: Catalog;
-  /** The canonical absolute path of the one launch Workspace. */
+  /** The launch Workspace path, typically the raw cwd; Application canonicalises
+   *  it (A6): the roots pass the path they were given, this Module owns the
+   *  `realpathSync.native` invariant. */
   readonly launchWorkspacePath: string;
   /** Install budgets a Bundle can never raise; composition wires the defaults. */
   readonly bundleBudgets?: Budgets;
@@ -50,7 +56,10 @@ export interface Application {
 }
 
 export function createApplication(deps: ApplicationDependencies): Application {
-  const { catalog, launchWorkspacePath } = deps;
+  const { catalog } = deps;
+  const launchWorkspacePath = canonicalizeWorkspacePath(
+    deps.launchWorkspacePath,
+  );
   const operations = new Map<
     string,
     { readonly path: string; readonly outcome: OperationOutcome }
@@ -89,9 +98,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
   function applyApproval(rawPath: string): OperationOutcome {
     let canonicalPath: string;
     try {
-      // .native fully canonicalizes (Windows 8.3 short names expanded) so equal
-      // directories reached by different spellings compare equal.
-      canonicalPath = realpathSync.native(rawPath);
+      canonicalPath = canonicalizeWorkspacePath(rawPath);
     } catch (error) {
       return { status: "not-applied", problem: pathNotFound(rawPath, error) };
     }
@@ -105,7 +112,89 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { status: "applied" };
   }
 
+  // Selector-typed per the Port overloads (#74 A8); the implementation signature
+  // returns the union and the overloads narrow it for callers. The body is one
+  // switch over the closed selector families, so no snapshot cast is needed here
+  // or in either client.
+  function openProjection(selector: {
+    readonly family: "workspace";
+  }): OpenedProjection<WorkspaceSnapshot>;
+  function openProjection(selector: {
+    readonly family: "operation";
+    readonly operationId: string;
+  }): OpenedProjection<OperationSnapshot>;
+  function openProjection(selector: {
+    readonly family: "bundle-catalog";
+    readonly focus: BundleFocusSelector;
+  }): OpenedProjection<BundleFocusSnapshot>;
+  function openProjection(selector: {
+    readonly family: "bundle-catalog";
+    readonly focus?: undefined;
+  }): OpenedProjection<BundleCatalogSnapshot>;
+  function openProjection(selector: ProjectionSelector): OpenedProjection;
+  function openProjection(selector: ProjectionSelector): OpenedProjection {
+    if (selector.family === "bundle-catalog") {
+      if (selector.focus !== undefined) {
+        // A focus is a settled point-in-time inspection; no updates arrive.
+        const updates = new UpdateStream();
+        return {
+          snapshot: focusSnapshot(bundleCatalog, selector.focus),
+          catchUp: "fresh",
+          updates,
+          close() {
+            updates.close();
+          },
+        };
+      }
+      const updates = new UpdateStream();
+      bundleCatalogObservers.add(updates);
+      return {
+        snapshot: listSnapshot(bundleCatalog),
+        catchUp: "fresh",
+        updates,
+        close() {
+          bundleCatalogObservers.delete(updates);
+          updates.close();
+        },
+      };
+    }
+    if (selector.family === "workspace") {
+      const updates = new UpdateStream();
+      workspaceObservers.add(updates);
+      return {
+        snapshot: workspaceSnapshot(),
+        catchUp: "fresh",
+        updates,
+        close() {
+          workspaceObservers.delete(updates);
+          updates.close();
+        },
+      };
+    }
+    const operation = operations.get(selector.operationId);
+    if (operation === undefined) {
+      throw new Error(
+        `No Operation ${selector.operationId} has been submitted.`,
+      );
+    }
+    // The Operation is already settled; no further updates will arrive.
+    const updates = new UpdateStream();
+    return {
+      snapshot: {
+        family: "operation",
+        operationId: selector.operationId,
+        outcome: operation.outcome,
+      },
+      catchUp: "fresh",
+      updates,
+      close() {
+        updates.close();
+      },
+    };
+  }
+
   const projectionPort: ProjectionPort = {
+    openProjection,
     submit(submission: Submission): SubmissionAdmission {
       const existing = operations.get(submission.operationId);
       if (existing !== undefined) {
@@ -125,67 +214,6 @@ export function createApplication(deps: ApplicationDependencies): Application {
         outcome,
       });
       return { admitted: true, operationId: submission.operationId };
-    },
-
-    openProjection(selector: ProjectionSelector): OpenedProjection {
-      if (selector.family === "bundle-catalog") {
-        if (selector.focus !== undefined) {
-          // A focus is a settled point-in-time inspection; no updates arrive.
-          const updates = new UpdateStream();
-          return {
-            snapshot: focusSnapshot(bundleCatalog, selector.focus),
-            catchUp: "fresh",
-            updates,
-            close() {
-              updates.close();
-            },
-          };
-        }
-        const updates = new UpdateStream();
-        bundleCatalogObservers.add(updates);
-        return {
-          snapshot: listSnapshot(bundleCatalog),
-          catchUp: "fresh",
-          updates,
-          close() {
-            bundleCatalogObservers.delete(updates);
-            updates.close();
-          },
-        };
-      }
-      if (selector.family === "workspace") {
-        const updates = new UpdateStream();
-        workspaceObservers.add(updates);
-        return {
-          snapshot: workspaceSnapshot(),
-          catchUp: "fresh",
-          updates,
-          close() {
-            workspaceObservers.delete(updates);
-            updates.close();
-          },
-        };
-      }
-      const operation = operations.get(selector.operationId);
-      if (operation === undefined) {
-        throw new Error(
-          `No Operation ${selector.operationId} has been submitted.`,
-        );
-      }
-      // The Operation is already settled; no further updates will arrive.
-      const updates = new UpdateStream();
-      return {
-        snapshot: {
-          family: "operation",
-          operationId: selector.operationId,
-          outcome: operation.outcome,
-        },
-        catchUp: "fresh",
-        updates,
-        close() {
-          updates.close();
-        },
-      };
     },
 
     readResource(_reference: ResourceReference): never {
@@ -209,6 +237,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
       },
     }),
   };
+}
+
+// The one site that canonicalizes a Workspace path (#74 A6). `.native` fully
+// resolves the path — on Windows it expands 8.3 short names — so equal
+// directories reached by different spellings compare equal for the exact-string
+// comparison Workspace approval relies on. Both the launch path (once, at
+// construction) and every approve input pass through here; it throws only when
+// the path does not resolve, which `applyApproval` translates to a Problem.
+function canonicalizeWorkspacePath(rawPath: string): string {
+  return realpathSync.native(rawPath);
 }
 
 function pathNotFound(rawPath: string, error: unknown): Problem {

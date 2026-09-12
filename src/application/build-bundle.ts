@@ -148,10 +148,7 @@ function commit(
       digest: read.digest,
       installed:
         result.outcome === "installed"
-          ? {
-              status: "installed",
-              generation: result.entry.installationGeneration,
-            }
+          ? { status: "installed" }
           : { status: "already-installed" },
       findings: extra.findings ?? [],
       ...(extra.outputPath ? { outputPath: extra.outputPath } : {}),

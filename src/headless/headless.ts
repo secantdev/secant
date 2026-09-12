@@ -5,12 +5,8 @@ import type {
   BundleResult,
 } from "../application/bundle-management.js";
 import type {
-  BundleCatalogSnapshot,
-  BundleFocusSnapshot,
-  OperationSnapshot,
   Problem,
   ProjectionPort,
-  WorkspaceSnapshot,
 } from "../application/projection-port.js";
 import { renderFocus, renderRow } from "./render.js";
 
@@ -56,7 +52,15 @@ export function runHeadless(
   const positional = rest.filter((argument) => !argument.startsWith("-"));
 
   if (positional[0] === "approve") {
-    return approve(port, io, json, positional[1] ?? io.cwd());
+    // Resolve a relative path against the injected cwd, like `bundle build` and
+    // `bundle install` (#74 A5) — not the process cwd realpathSync would use.
+    const target = positional[1];
+    return approve(
+      port,
+      io,
+      json,
+      target === undefined ? io.cwd() : resolve(io.cwd(), target),
+    );
   }
   return showWorkspace(port, io, json);
 }
@@ -81,7 +85,7 @@ function approve(
     operationId: admission.operationId,
   });
   try {
-    const snapshot = opened.snapshot as OperationSnapshot;
+    const snapshot = opened.snapshot;
     if (json) {
       io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
       return snapshot.outcome.status === "applied" ? 0 : 1;
@@ -103,7 +107,7 @@ function showWorkspace(
 ): number {
   const opened = port.openProjection({ family: "workspace" });
   try {
-    const snapshot = opened.snapshot as WorkspaceSnapshot;
+    const snapshot = opened.snapshot;
     if (json) {
       io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
       return 0;
@@ -197,16 +201,22 @@ function listBundles(
 ): number {
   const opened = port.openProjection({ family: "bundle-catalog" });
   try {
-    const snapshot = opened.snapshot as BundleCatalogSnapshot;
+    const snapshot = opened.snapshot;
+    if (!snapshot.result.found) {
+      // A listed Bundle's managed bytes are gone: print the Problem and exit
+      // non-zero, never a stack trace (#74 A3).
+      return fail(io, json, snapshot.result.problem);
+    }
+    const { bundles } = snapshot.result;
     if (json) {
       io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
       return 0;
     }
-    if (snapshot.bundles.length === 0) {
+    if (bundles.length === 0) {
       io.out("No Bundles are installed.\n");
       return 0;
     }
-    io.out(snapshot.bundles.map(renderRow).join("\n"));
+    io.out(bundles.map(renderRow).join("\n"));
     return 0;
   } finally {
     opened.close();
@@ -238,7 +248,7 @@ function inspectBundle(
     focus: { id, ...(version !== undefined ? { version } : {}) },
   });
   try {
-    const snapshot = opened.snapshot as BundleFocusSnapshot;
+    const snapshot = opened.snapshot;
     if (!snapshot.result.found) {
       return fail(io, json, snapshot.result.problem);
     }
@@ -265,7 +275,7 @@ function report(io: HeadlessIO, json: boolean, result: BundleResult): number {
   io.out(`Digest: sha256:${digest}\n`);
   if (outputPath !== undefined) io.out(`Wrote ${outputPath}\n`);
   if (installed?.status === "installed") {
-    io.out(`Installed (generation ${installed.generation}).\n`);
+    io.out("Installed.\n");
   } else if (installed?.status === "already-installed") {
     io.out("Already installed.\n");
   }

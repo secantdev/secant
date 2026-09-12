@@ -14,7 +14,7 @@ function emptyBundles(): BundleCatalogView {
   const [list] = createSignal<BundleCatalogSnapshot>({
     family: "bundle-catalog",
     view: "list",
-    bundles: [],
+    result: { found: true, bundles: [] },
   });
   return {
     openList: () => list,

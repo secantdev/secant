@@ -56,26 +56,34 @@ export interface BundleCatalogDependencies {
 export function listSnapshot(
   deps: BundleCatalogDependencies,
 ): BundleCatalogSnapshot {
-  const bundles = deps.catalog
-    .listEntries()
-    .map((entry) => {
-      // The list row never reads composition, so skip that work per entry.
-      const inspected = inspectEntry(deps, entry, false);
-      if ("problem" in inspected) {
-        // A managed-store file the Catalog still lists has been removed or
-        // corrupted out from under us: a broken Catalog invariant across the
-        // whole set, not an ordinary per-command outcome.
-        throw new Error(`Application: ${inspected.problem.explanation}`);
-      }
-      return summaryOf(entry, inspected.inspection, deps);
-    })
-    .sort(
-      (a, b) =>
-        a.name.localeCompare(b.name) ||
-        -compareSemver(a.version, b.version) ||
-        a.id.localeCompare(b.id),
-    );
-  return { family: "bundle-catalog", view: "list", bundles };
+  const bundles: InstalledBundleSummary[] = [];
+  for (const entry of deps.catalog.listEntries()) {
+    // The list row never reads composition, so skip that work per entry.
+    const inspected = inspectEntry(deps, entry, false);
+    if ("problem" in inspected) {
+      // A managed-store file the Catalog still lists has been removed or
+      // corrupted out from under us: a broken Catalog invariant across the whole
+      // set. Carry it as a typed Problem the way a focus carries the same fault
+      // (#74 A3), so `bundle list` prints it and exits non-zero, never a crash.
+      return {
+        family: "bundle-catalog",
+        view: "list",
+        result: { found: false, problem: inspected.problem },
+      };
+    }
+    bundles.push(summaryOf(entry, inspected.inspection, deps));
+  }
+  bundles.sort(
+    (a, b) =>
+      a.name.localeCompare(b.name) ||
+      -compareSemver(a.version, b.version) ||
+      a.id.localeCompare(b.id),
+  );
+  return {
+    family: "bundle-catalog",
+    view: "list",
+    result: { found: true, bundles },
+  };
 }
 
 /** The focus projection: the exact inspection of one Installed Bundle, or a

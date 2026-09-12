@@ -36,7 +36,16 @@ export function BundleList(props: {
   const dimensions = useTerminalDimensions();
   const view = useBundleCatalogView();
   const snapshot = view.openList();
-  const bundles = () => snapshot().bundles;
+  // The list resolves to rows or a Problem when a listed Bundle's bytes are gone
+  // (#74 A3); an unresolved list has no rows to select.
+  const bundles = () => {
+    const result = snapshot().result;
+    return result.found ? result.bundles : [];
+  };
+  const listProblem = () => {
+    const result = snapshot().result;
+    return result.found ? undefined : result.problem;
+  };
 
   // The active index, always clamped to the current list so a shorter list (or
   // an empty one) never selects past the end.
@@ -84,32 +93,47 @@ export function BundleList(props: {
         Workflow Bundles
       </text>
       <Show
-        when={bundles().length > 0}
+        when={listProblem()}
         fallback={
-          <box flexDirection="column" flexShrink={0}>
-            <text fg={theme.textMuted}>The Catalog is empty.</text>
-            <text fg={theme.textMuted}>
-              {"Install one with `secant bundle build <folder>` or"}
-            </text>
-            <text fg={theme.textMuted}>
-              {"`secant bundle install <file.wfb>`."}
-            </text>
-          </box>
+          <Show
+            when={bundles().length > 0}
+            fallback={
+              <box flexDirection="column" flexShrink={0}>
+                <text fg={theme.textMuted}>The Catalog is empty.</text>
+                <text fg={theme.textMuted}>
+                  {"Install one with `secant bundle build <folder>` or"}
+                </text>
+                <text fg={theme.textMuted}>
+                  {"`secant bundle install <file.wfb>`."}
+                </text>
+              </box>
+            }
+          >
+            <box flexDirection="column" gap={1} flexGrow={1} overflow="hidden">
+              <For each={bundles()}>
+                {(bundle, index) => (
+                  <Row
+                    bundle={bundle}
+                    selected={index() === active()}
+                    onOpen={() =>
+                      props.onOpen({ id: bundle.id, version: bundle.version })
+                    }
+                  />
+                )}
+              </For>
+            </box>
+          </Show>
         }
       >
-        <box flexDirection="column" gap={1} flexGrow={1} overflow="hidden">
-          <For each={bundles()}>
-            {(bundle, index) => (
-              <Row
-                bundle={bundle}
-                selected={index() === active()}
-                onOpen={() =>
-                  props.onOpen({ id: bundle.id, version: bundle.version })
-                }
-              />
-            )}
-          </For>
-        </box>
+        {(problem) => (
+          <box flexDirection="column" flexShrink={0}>
+            <text attributes={TextAttributes.BOLD} fg={theme.error}>
+              {`Catalog error: ${problem().code}`}
+            </text>
+            <text fg={theme.textMuted}>{problem().explanation}</text>
+            <text fg={theme.textMuted}>{problem().remediation}</text>
+          </box>
+        )}
       </Show>
       <text fg={theme.textMuted} flexShrink={0}>
         ↑/↓ move · enter inspect · esc back · q quit

@@ -1,57 +1,24 @@
-import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { createApplication } from "../application/application.js";
-import { openCatalog } from "../catalog/catalog.js";
 import { runHeadless } from "../headless/headless.js";
-import type { Platform } from "../workflow/workflow.js";
+import { wireApplication } from "./wiring.js";
 
-// The running engine version, substituted by the Bun compile (scripts/build.ts).
-// A free identifier under `bun src/cli/main.ts` (dev) and the Node test runner,
-// where the dev sentinel stands in — matching cli/main.ts.
-declare const __SECANT_VERSION__: string;
-const engineVersion =
-  typeof __SECANT_VERSION__ === "string" ? __SECANT_VERSION__ : "0.0.0-dev";
+// wireApplication is the one wiring path both roots take; the composition suite
+// reaches it through this entry to prove both roots agree (#74 A18).
+export {
+  wireApplication,
+  type Wiring,
+  type WiringOverrides,
+} from "./wiring.js";
 
-function hostPlatform(): Platform | undefined {
-  switch (process.platform) {
-    case "win32":
-      return "windows";
-    case "darwin":
-      return "macos";
-    case "linux":
-      return "linux";
-    default:
-      return undefined;
-  }
-}
-
-// The outer composition root wires the runtime: it resolves the Secant home and
-// the launch Workspace, opens the Catalog, constructs the Application, and hands
-// its Projection Port to the headless client. It owns the Catalog's lifetime and
-// closes it on every exit path. The TUI child root is `launchTui`, re-exported
-// here so the CLI host reaches both surfaces through this one composition entry.
-
-export { launchTui } from "./tui-main.js";
+// The composition entry: both surfaces reach the runtime through here. `run`
+// wires the Application (see wiring.ts) and hands its Ports to the headless
+// client, owning the Catalog's lifetime. `launchTui` is the TUI root, kept as a
+// thin seam so the CLI reaches the renderer only through a dynamic import: the
+// headless paths never load Solid or OpenTUI's native library.
 
 /** Runs one headless CLI invocation; returns the process exit code. */
 export function run(args: readonly string[]): number {
-  const secantHome =
-    process.env.SECANT_HOME?.trim() || join(homedir(), ".secant");
-  // .native canonicalizes fully (on Windows it expands 8.3 short names), so the
-  // launch path and an approve input resolve to the same string for the exact
-  // comparison the Workspace approval relies on.
-  const launchWorkspacePath = realpathSync.native(process.cwd());
-
-  const catalog = openCatalog(secantHome);
+  const { catalog, projectionPort, bundleManagement } = wireApplication();
   try {
-    const host = hostPlatform();
-    const { projectionPort, bundleManagement } = createApplication({
-      catalog,
-      launchWorkspacePath,
-      engineVersion,
-      ...(host !== undefined ? { hostPlatform: host } : {}),
-    });
     return runHeadless({ projectionPort, bundleManagement }, args, {
       out: (text) => void process.stdout.write(text),
       err: (text) => void process.stderr.write(text),
@@ -60,4 +27,11 @@ export function run(args: readonly string[]): number {
   } finally {
     catalog.close();
   }
+}
+
+/** Launches the interactive shell. The TUI runtime is imported lazily so the
+ *  headless paths never reach Solid or OpenTUI's native library. */
+export async function launchTui(): Promise<number> {
+  const { runTuiApp } = await import("./tui-runtime.js");
+  return runTuiApp();
 }

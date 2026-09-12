@@ -163,7 +163,7 @@ try {
     cwd: smokeRoot,
     env: workspaceEnv,
   });
-  if (!/Installed \(generation \d+\)/.test(firstInstall)) {
+  if (!/^Installed\.$/m.test(firstInstall)) {
     throw new Error(
       `Compiled binary did not install the Proof Bundle: ${firstInstall}`,
     );
@@ -202,7 +202,7 @@ try {
       env: workspaceEnv,
     }),
   );
-  const listed = (listSnapshot.bundles ?? []).find(
+  const listed = (listSnapshot.result?.bundles ?? []).find(
     (bundle) => bundle.id === "dev.secant.test-repair",
   );
   if (

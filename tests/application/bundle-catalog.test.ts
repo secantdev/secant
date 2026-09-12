@@ -12,7 +12,7 @@ import test, { type TestContext } from "node:test";
 import { createApplication } from "../../src/application/application.js";
 import type {
   BundleCatalogSnapshot,
-  BundleFocusSnapshot,
+  InstalledBundleSummary,
   ProjectionPort,
 } from "../../src/application/projection-port.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
@@ -80,10 +80,17 @@ async function harness(
 function list(port: ProjectionPort): BundleCatalogSnapshot {
   const opened = port.openProjection({ family: "bundle-catalog" });
   try {
-    return opened.snapshot as BundleCatalogSnapshot;
+    return opened.snapshot;
   } finally {
     opened.close();
   }
+}
+
+/** The list rows, asserting the list resolved (found). */
+function listRows(port: ProjectionPort): readonly InstalledBundleSummary[] {
+  const snapshot = list(port);
+  assert.ok(snapshot.result.found, JSON.stringify(snapshot.result));
+  return snapshot.result.bundles;
 }
 
 test("the list shows one row with identity, digest, platforms, engine and trust", async (t) => {
@@ -93,8 +100,9 @@ test("the list shows one row with identity, digest, platforms, engine and trust"
   const snapshot = list(h.port);
   assert.equal(snapshot.family, "bundle-catalog");
   assert.equal(snapshot.view, "list");
-  assert.equal(snapshot.bundles.length, 1);
-  const [row] = snapshot.bundles;
+  assert.ok(snapshot.result.found, JSON.stringify(snapshot.result));
+  assert.equal(snapshot.result.bundles.length, 1);
+  const [row] = snapshot.result.bundles;
   assert.equal(row.id, "dev.secant.test-repair");
   assert.equal(row.version, "1.0.0");
   assert.match(row.digest, /^[0-9a-f]{64}$/);
@@ -113,7 +121,7 @@ test("two installed versions sort by name then version descending", async (t) =>
   h.build(h.variant("1.0.0"));
   h.build(h.variant("2.0.0"));
 
-  const rows = list(h.port).bundles;
+  const rows = listRows(h.port);
   assert.deepEqual(
     rows.map((row) => row.version),
     ["2.0.0", "1.0.0"],
@@ -125,7 +133,7 @@ test("a Bundle whose engine excludes the running Secant shows the needs-Secant n
   const h = await harness(t, "0.0.5");
   h.build(proofBundle);
 
-  const [row] = list(h.port).bundles;
+  const [row] = listRows(h.port);
   assert.equal(row.engine.satisfied, false);
   assert.equal(row.engine.note, "needs Secant ≥ 0.1");
 });
@@ -139,7 +147,7 @@ test("the exact focus carries every fact including the Execution summary and zer
     focus: { id: "dev.secant.test-repair" },
   });
   t.after(() => opened.close());
-  const snapshot = opened.snapshot as BundleFocusSnapshot;
+  const snapshot = opened.snapshot;
   assert.equal(snapshot.view, "focus");
   assert.ok(snapshot.result.found, JSON.stringify(snapshot.result));
   if (!snapshot.result.found) return;
@@ -200,7 +208,7 @@ test("a per-platform override resolves the command for the chosen platform", asy
     focus: { id: "dev.secant.test-repair" },
   });
   t.after(() => opened.close());
-  const snapshot = opened.snapshot as BundleFocusSnapshot;
+  const snapshot = opened.snapshot;
   assert.ok(snapshot.result.found);
   if (!snapshot.result.found) return;
   const baseline = snapshot.result.bundle.executionSummary.commands.find(
@@ -223,7 +231,7 @@ test("version selection: exact, highest-stable default, and prerelease must be n
       focus: { id: "dev.secant.test-repair", ...(version ? { version } : {}) },
     });
     try {
-      return opened.snapshot as BundleFocusSnapshot;
+      return opened.snapshot;
     } finally {
       opened.close();
     }
@@ -261,7 +269,7 @@ test("inspecting an unknown id is a Problem", async (t) => {
     focus: { id: "io.example.absent" },
   });
   t.after(() => opened.close());
-  const snapshot = opened.snapshot as BundleFocusSnapshot;
+  const snapshot = opened.snapshot;
   assert.equal(snapshot.result.found, false);
   if (!snapshot.result.found) {
     assert.equal(snapshot.result.problem.code, "bundle-not-installed");
@@ -277,7 +285,7 @@ test("an omitted version with only prereleases installed is a Problem", async (t
     focus: { id: "dev.secant.test-repair" },
   });
   t.after(() => opened.close());
-  const snapshot = opened.snapshot as BundleFocusSnapshot;
+  const snapshot = opened.snapshot;
   assert.equal(snapshot.result.found, false);
   if (!snapshot.result.found) {
     assert.equal(snapshot.result.problem.code, "no-stable-version-installed");
@@ -288,7 +296,9 @@ test("an open list projection updates when a new Bundle installs", async (t) => 
   const h = await harness(t);
   const opened = h.port.openProjection({ family: "bundle-catalog" });
   t.after(() => opened.close());
-  assert.equal((opened.snapshot as BundleCatalogSnapshot).bundles.length, 0);
+  const initial = opened.snapshot;
+  assert.ok(initial.result.found);
+  assert.equal(initial.result.bundles.length, 0);
   const updates = opened.updates[Symbol.asyncIterator]();
 
   h.build(proofBundle);
@@ -296,10 +306,11 @@ test("an open list projection updates when a new Bundle installs", async (t) => 
   const update = await updates.next();
   assert.equal(update.done, false);
   assert.ok(update.value && update.value.kind === "durable");
-  const snapshot = update.value.snapshot as BundleCatalogSnapshot;
+  const snapshot = update.value.snapshot;
   assert.equal(snapshot.family, "bundle-catalog");
-  assert.equal(snapshot.bundles.length, 1);
-  assert.equal(snapshot.bundles[0].id, "dev.secant.test-repair");
+  assert.ok(snapshot.result.found);
+  assert.equal(snapshot.result.bundles.length, 1);
+  assert.equal(snapshot.result.bundles[0].id, "dev.secant.test-repair");
 });
 
 test("closing a bundle-catalog projection twice is a no-op", async (t) => {
@@ -320,7 +331,20 @@ test("focus on a Bundle whose stored bytes are gone is a Problem, not a crash", 
     focus: { id: "dev.secant.test-repair" },
   });
   t.after(() => opened.close());
-  const snapshot = opened.snapshot as BundleFocusSnapshot;
+  const snapshot = opened.snapshot;
+  assert.equal(snapshot.result.found, false);
+  if (!snapshot.result.found) {
+    assert.equal(snapshot.result.problem.code, "bundle-bytes-missing");
+  }
+});
+
+test("listing a Bundle whose stored bytes are gone is a Problem, not a crash", async (t) => {
+  const h = await harness(t);
+  h.build(proofBundle);
+  const [digest] = h.catalog.listEntries().map((entry) => entry.digest);
+  rmSync(join(h.home, "bundles", `${digest}.wfb`));
+
+  const snapshot = list(h.port);
   assert.equal(snapshot.result.found, false);
   if (!snapshot.result.found) {
     assert.equal(snapshot.result.problem.code, "bundle-bytes-missing");

@@ -10,8 +10,8 @@ import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
   BundleFocusSnapshot,
+  OpenedProjection,
   ProjectionPort,
-  ProjectionSelector,
   ProjectionSnapshot,
 } from "../application/projection-port.js";
 
@@ -55,20 +55,21 @@ export function useBundleCatalogView(): BundleCatalogView {
 export function createLiveBundleCatalogView(
   port: ProjectionPort,
 ): BundleCatalogView {
-  // One subscription block for both screens: open the Projection, seed a signal
-  // from its snapshot, follow durable updates, and close on cleanup. The `closed`
-  // flag stops the loop the moment cleanup runs so a late update can't set a
-  // signal after the owner is disposed.
-  function open<T extends ProjectionSnapshot>(
-    selector: ProjectionSelector,
-  ): Accessor<T> {
-    const opened = port.openProjection(selector);
-    const [snapshot, setSnapshot] = createSignal(opened.snapshot as T);
+  // One subscription block for both screens: seed a signal from the opened
+  // Projection's snapshot, follow durable updates, and close on cleanup. The
+  // Projection is opened by the caller so `openProjection`'s selector-typed
+  // overload fixes `S`, and the snapshot and each update read at that type with
+  // no cast (#74 A8). The `closed` flag stops the loop the moment cleanup runs so
+  // a late update can't set a signal after the owner is disposed.
+  function open<S extends ProjectionSnapshot>(
+    opened: OpenedProjection<S>,
+  ): Accessor<S> {
+    const [snapshot, setSnapshot] = createSignal(opened.snapshot);
     let closed = false;
     void (async () => {
       for await (const update of opened.updates) {
         if (closed) break;
-        if (update.kind === "durable") setSnapshot(() => update.snapshot as T);
+        if (update.kind === "durable") setSnapshot(() => update.snapshot);
       }
     })();
     onCleanup(() => {
@@ -79,8 +80,8 @@ export function createLiveBundleCatalogView(
   }
 
   return {
-    openList: () => open<BundleCatalogSnapshot>({ family: "bundle-catalog" }),
+    openList: () => open(port.openProjection({ family: "bundle-catalog" })),
     openFocus: (selector) =>
-      open<BundleFocusSnapshot>({ family: "bundle-catalog", focus: selector }),
+      open(port.openProjection({ family: "bundle-catalog", focus: selector })),
   };
 }

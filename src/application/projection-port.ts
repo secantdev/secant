@@ -34,11 +34,16 @@ export type SubmissionAdmission =
   | { readonly admitted: true; readonly operationId: string }
   | { readonly admitted: false; readonly problem: Problem };
 
-/** An opened Projection joins its snapshot, catch-up barrier, and updates. */
-export interface OpenedProjection {
-  readonly snapshot: ProjectionSnapshot;
+/** An opened Projection joins its snapshot, catch-up barrier, and updates. The
+ *  snapshot type is the one the selector names (#74 A8): `openProjection` is
+ *  overloaded per selector, so a client reads `snapshot` (and each durable
+ *  update's snapshot) at its exact type with no cast. */
+export interface OpenedProjection<
+  S extends ProjectionSnapshot = ProjectionSnapshot,
+> {
+  readonly snapshot: S;
   readonly catchUp: CatchUp;
-  readonly updates: AsyncIterable<ProjectionUpdate>;
+  readonly updates: AsyncIterable<ProjectionUpdate<S>>;
   /** Idempotent, performs no domain action, and permits no later updates. */
   close(): void;
 }
@@ -130,9 +135,19 @@ export interface InstalledBundleSummary {
 export interface BundleCatalogSnapshot {
   readonly family: "bundle-catalog";
   readonly view: "list";
-  /** Sorted by name, then version descending (#9, #49). */
-  readonly bundles: readonly InstalledBundleSummary[];
+  readonly result: BundleListResult;
 }
+/** The list resolved to its rows, or a Problem when a listed Entry's managed
+ *  bytes are missing or no longer validate — a broken Catalog invariant that
+ *  fails the whole set, carried the way a focus carries the same fault (#74 A3,
+ *  docs/agents/validation.md) rather than thrown. */
+export type BundleListResult =
+  /** Sorted by name, then version descending (#9, #49). */
+  | {
+      readonly found: true;
+      readonly bundles: readonly InstalledBundleSummary[];
+    }
+  | { readonly found: false; readonly problem: Problem };
 
 /** Optional Bundle author metadata, shown only in a focus. */
 export interface BundleAuthorMetadata {
@@ -234,8 +249,10 @@ export interface ActionOffer {
   readonly input: { readonly path: string };
 }
 
-export type ProjectionUpdate =
-  | { readonly kind: "durable"; readonly snapshot: ProjectionSnapshot }
+export type ProjectionUpdate<
+  S extends ProjectionSnapshot = ProjectionSnapshot,
+> =
+  | { readonly kind: "durable"; readonly snapshot: S }
   | { readonly kind: "closed"; readonly reason: ObserverEnd };
 export type ObserverEnd =
   | "subject-gone"
@@ -266,6 +283,25 @@ export type ResourceReference = never;
 export type ResourceRead = never;
 
 export interface ProjectionPort {
+  // Selector-typed overloads (#74 A8): each concrete selector resolves to the
+  // snapshot type it names, so clients drop their `as` casts. A `bundle-catalog`
+  // selector splits on `focus` — present is the focus, absent is the list. The
+  // final union signature admits a dynamically-typed selector.
+  openProjection(selector: {
+    readonly family: "workspace";
+  }): OpenedProjection<WorkspaceSnapshot>;
+  openProjection(selector: {
+    readonly family: "operation";
+    readonly operationId: string;
+  }): OpenedProjection<OperationSnapshot>;
+  openProjection(selector: {
+    readonly family: "bundle-catalog";
+    readonly focus: BundleFocusSelector;
+  }): OpenedProjection<BundleFocusSnapshot>;
+  openProjection(selector: {
+    readonly family: "bundle-catalog";
+    readonly focus?: undefined;
+  }): OpenedProjection<BundleCatalogSnapshot>;
   openProjection(selector: ProjectionSelector): OpenedProjection;
   submit(submission: Submission): SubmissionAdmission;
   readResource(reference: ResourceReference): ResourceRead;

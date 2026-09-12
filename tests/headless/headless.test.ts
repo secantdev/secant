@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
@@ -87,6 +87,34 @@ test("approving a missing path exits non-zero and prints the Problem", async (t)
   assert.match(h.stderr(), /workspace-path-not-found/);
   assert.match(h.stderr(), /Remediation:/);
   assert.equal(h.stdout(), "");
+});
+
+test("workspace approve <relative> resolves against io.cwd(), not process.cwd()", async (t) => {
+  // The launch Workspace is a child directory; io.cwd() is its parent. Approving
+  // it by the relative name "sub" must resolve against io.cwd() (#74 A5): if it
+  // resolved against the process cwd instead, "sub" would miss the launch
+  // Workspace and it would never read approved.
+  const catalog = await openCatalog(makeTempDir("secant-approve-home-"));
+  t.after(() => catalog.close());
+  const parent = realpathSync.native(makeTempDir("secant-approve-parent-"));
+  const child = join(parent, "sub");
+  mkdirSync(child);
+  const clients = createApplication({ catalog, launchWorkspacePath: child });
+  const out: string[] = [];
+  const io: HeadlessIO = {
+    out: (text) => out.push(text),
+    err: () => {},
+    cwd: () => parent,
+  };
+
+  assert.equal(runHeadless(clients, ["workspace", "approve", "sub"], io), 0);
+
+  out.length = 0;
+  assert.equal(runHeadless(clients, ["workspace", "--json"], io), 0);
+  const snapshot = JSON.parse(out.join("")) as {
+    approval: { state: string };
+  };
+  assert.equal(snapshot.approval.state, "approved");
 });
 
 test("an unknown command exits non-zero with guidance", async (t) => {
@@ -207,7 +235,7 @@ test("bundle build installs by default and the Home count reads back one", async
     0,
   );
   assert.match(h.stdout(), /Bundle: dev\.secant\.test-repair@1\.0\.0/);
-  assert.match(h.stdout(), /Installed \(generation 1\)/);
+  assert.match(h.stdout(), /^Installed\.$/m);
 
   h.reset();
   assert.equal(runHeadless(h.clients, ["workspace", "--json"], h.io), 0);
@@ -234,10 +262,10 @@ test("bundle list shows the installed row and --json carries the snapshot", asyn
   assert.equal(runHeadless(h.clients, ["bundle", "list", "--json"], h.io), 0);
   const snapshot = JSON.parse(h.stdout()) as {
     family: string;
-    bundles: { id: string }[];
+    result: { found: boolean; bundles: { id: string }[] };
   };
   assert.equal(snapshot.family, "bundle-catalog");
-  assert.equal(snapshot.bundles[0].id, "dev.secant.test-repair");
+  assert.equal(snapshot.result.bundles[0].id, "dev.secant.test-repair");
 });
 
 test("bundle list with nothing installed says so", async (t) => {

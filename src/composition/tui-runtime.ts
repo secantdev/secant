@@ -1,8 +1,4 @@
-import { appendFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { createApplication } from "../application/application.js";
-import { openCatalog } from "../catalog/catalog.js";
+import { appendFileSync } from "node:fs";
 import {
   conhostConsoleProbe,
   createProcessStdinRelease,
@@ -11,9 +7,11 @@ import {
   printConhostNotice,
 } from "../tui/renderer/renderer.js";
 import { mountTui } from "../tui/tui.js";
+import { wireApplication } from "./wiring.js";
 
-// The TUI composition root: it opens the Catalog, constructs the Application,
-// creates the production renderer, mounts the shell, and owns the single
+// The TUI composition root: it wires the Application through the one shared path
+// (see wiring.ts), creates the production renderer, mounts the shell, owns the
+// Catalog's lifetime, and owns the single
 // teardown site through every exit path — quit binding, Ctrl+C, SIGHUP,
 // SIGTERM, render failure, and unhandled error. `process.exit` is never called
 // on the normal path; the returned code becomes `process.exitCode`. Runs
@@ -65,15 +63,8 @@ export async function runTuiApp(): Promise<number> {
     process.env.WT_SESSION !== undefined,
   );
 
-  const secantHome =
-    process.env.SECANT_HOME?.trim() || join(homedir(), ".secant");
-  const launchWorkspacePath = realpathSync.native(process.cwd());
-  const catalog = openCatalog(secantHome);
+  const { catalog, projectionPort } = wireApplication();
   try {
-    const { projectionPort } = createApplication({
-      catalog,
-      launchWorkspacePath,
-    });
     const { port, renderer } = await createProductionRenderer();
     // The diagnostic records the single teardown from createTeardown's own
     // once-guard, so it sees one `teardown` no matter how many exit paths fire.

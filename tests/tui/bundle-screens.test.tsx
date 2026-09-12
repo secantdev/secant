@@ -123,7 +123,7 @@ function bundles(rows: InstalledBundleSummary[]): BundleCatalogView {
   const [list] = createSignal<BundleCatalogSnapshot>({
     family: "bundle-catalog",
     view: "list",
-    bundles: rows,
+    result: { found: true, bundles: rows },
   });
   return {
     openList: () => list,
@@ -220,6 +220,41 @@ test("empty Catalog names the headless install commands", async () => {
   const frame = t.captureCharFrame();
   assert.match(frame, /secant bundle build/);
   assert.match(frame, /secant bundle install/);
+});
+
+test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)", async () => {
+  const [list] = createSignal<BundleCatalogSnapshot>({
+    family: "bundle-catalog",
+    view: "list",
+    result: {
+      found: false,
+      problem: {
+        code: "bundle-bytes-missing",
+        explanation: "Its stored bytes are missing.",
+        remediation: "Reinstall the Bundle to restore its bytes.",
+        possibleEffects: "none",
+      },
+    },
+  });
+  const view: BundleCatalogView = {
+    openList: () => list,
+    openFocus: () => {
+      throw new Error("not used");
+    },
+  };
+  const t = await testRender(
+    () => (
+      <App view={approvedWorkspace()} bundles={view} exit={() => {}} />
+    ),
+    { width: 80, height: 40 },
+  );
+  await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((f) => f.includes("Catalog error"));
+  const frame = t.captureCharFrame();
+  assert.match(frame, /bundle-bytes-missing/);
+  assert.match(frame, /Reinstall the Bundle/);
+  assert.doesNotMatch(frame, /Catalog is empty/);
 });
 
 test("Enter inspects; Escape returns with the same row focused", async () => {

@@ -46,16 +46,14 @@ export function useWorkspaceView(): WorkspaceView {
  */
 export function createLiveWorkspaceView(port: ProjectionPort): WorkspaceView {
   const opened = port.openProjection({ family: "workspace" });
-  const [snapshot, setSnapshot] = createSignal(
-    opened.snapshot as WorkspaceSnapshot,
-  );
+  const [snapshot, setSnapshot] = createSignal(opened.snapshot);
 
   let closed = false;
   void (async () => {
     for await (const update of opened.updates) {
       if (closed) break;
       if (update.kind === "durable") {
-        setSnapshot(update.snapshot as WorkspaceSnapshot);
+        setSnapshot(update.snapshot);
       }
     }
   })();

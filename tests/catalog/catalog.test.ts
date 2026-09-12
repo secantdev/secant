@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { Database } from "bun:sqlite";
 import {
   openCatalog,
   type BundleInstall,
@@ -150,6 +151,32 @@ test("a verify failure after staging leaves no store bytes and no Entry", async 
   assert.equal(catalog.countInstalledBundles(), 0);
   const bundlesDir = join(home, "bundles");
   assert.ok(!existsSync(bundlesDir) || readdirSync(bundlesDir).length === 0);
+});
+
+test("a mistyped persisted row is a broken invariant, not a Problem", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  // Pre-create a non-STRICT table so a mistyped column survives insertion; the
+  // Catalog's own `CREATE TABLE IF NOT EXISTS` then leaves it in place. The row
+  // schema (D7) rejects the string in the integer column at read ingress.
+  const raw = new Database(join(home, "catalog.db"));
+  raw.exec(
+    "CREATE TABLE catalog_entries (id TEXT, version TEXT, digest TEXT, " +
+      "origin_kind TEXT, origin_location TEXT, installed_at TEXT, " +
+      "installation_generation TEXT)",
+  );
+  raw.exec(
+    "INSERT INTO catalog_entries VALUES " +
+      "('io.x', '1.0.0', 'abc', 'local-file', '/p', " +
+      "'2026-01-01T00:00:00.000Z', 'not-a-number')",
+  );
+  raw.close();
+
+  const catalog = await openCatalog(home);
+  t.after(() => catalog.close());
+  assert.throws(
+    () => catalog.listEntries(),
+    /catalog_entries row is malformed/,
+  );
 });
 
 test("different identities both install and persist across reopening", async (t) => {

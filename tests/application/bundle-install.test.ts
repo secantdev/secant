@@ -52,6 +52,37 @@ function writeArchive(bytes: Uint8Array): string {
   return path;
 }
 
+function authoringFolder(manifest: unknown): string {
+  const dir = makeTempDir("secant-authoring-");
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2));
+  return dir;
+}
+
+test("a manifest with two invalid fields reports both as field violations in order", async (t) => {
+  const h = await harness(t);
+  const result = h.bundle.build(
+    authoringFolder({
+      formatVersion: 1,
+      bundle: {
+        id: "Not_Reverse_Domain",
+        version: "1.0",
+        name: "Sample",
+        description: "A sample.",
+      },
+      inputs: {},
+      assets: [],
+      routing: [],
+    }),
+    { noInstall: false },
+  );
+  assert.ok(!result.ok);
+  assert.deepEqual(
+    (result.problem.fieldViolations ?? []).map((v) => v.field),
+    ["bundle.id", "bundle.version"],
+  );
+  assert.equal(h.catalog.countInstalledBundles(), 0);
+});
+
 test("building the Proof Bundle installs it and the count reads back one", async (t) => {
   const h = await harness(t);
   const result = h.bundle.build(proofBundle, { noInstall: false });

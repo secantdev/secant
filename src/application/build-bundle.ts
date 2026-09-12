@@ -3,6 +3,7 @@ import {
   buildBundle,
   readBundle,
   type Budgets,
+  type BundleFinding,
   type ReadBundle,
 } from "../bundle/bundle.js";
 import type {
@@ -46,7 +47,11 @@ export function createBundleManagement(
     extra: Partial<BundleReport>,
   ): BundleResult {
     const outcome = readBundle(bytes, budgets);
-    if (!outcome.ok) return { ok: false, problem: toProblem(outcome.finding) };
+    if (!outcome.ok)
+      return {
+        ok: false,
+        problem: toProblem(outcome.finding, outcome.findings),
+      };
     const result = commit(catalog, outcome.read, bytes, origin, extra);
     if (result.ok && result.report.installed?.status === "installed") {
       deps.onInstalled?.();
@@ -67,7 +72,7 @@ export function createBundleManagement(
           problem:
             "composition" in built
               ? compositionProblem(built.composition)
-              : toProblem(built.finding),
+              : toProblem(built.finding, built.findings),
         };
       }
 
@@ -156,23 +161,28 @@ function commit(
   };
 }
 
-function toProblem(finding: {
-  code: string;
-  message: string;
-  path?: string;
-}): Problem {
+// The primary finding sets the Problem's code and location; every finding with a
+// path (all of them, when the manifest reported several field violations at once)
+// becomes a field violation, so the client sees each bad field, not just the
+// first.
+function toProblem(
+  finding: BundleFinding,
+  findings?: readonly BundleFinding[],
+): Problem {
+  const located = (findings ?? [finding]).filter((f) => f.path !== undefined);
   return {
     code: finding.code,
     explanation: finding.message,
     remediation:
       "Correct the named field or entry in the authoring folder or archive, then try again.",
     possibleEffects: "none",
-    ...(finding.path
+    ...(finding.path ? { details: { location: finding.path } } : {}),
+    ...(located.length > 0
       ? {
-          details: { location: finding.path },
-          fieldViolations: [
-            { field: finding.path, explanation: finding.message },
-          ],
+          fieldViolations: located.map((f) => ({
+            field: f.path as string,
+            explanation: f.message,
+          })),
         }
       : {}),
   };

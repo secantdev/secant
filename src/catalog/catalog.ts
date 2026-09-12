@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
+import { z } from "zod";
 
 // The Catalog owns the catalog database under the Secant home. Everything about
 // SQLite stays behind this Interface: no SQLite type, row shape, or storage path
@@ -84,6 +85,23 @@ export interface Catalog {
   close(): void;
 }
 
+// One schema per table validates a persisted row at its ingress Seam (D7). A row
+// that fails is a broken invariant — the store is corrupt or a schema drifted —
+// not a user Problem, so the readers throw rather than return a finding.
+const catalogEntryRow = z.object({
+  id: z.string(),
+  version: z.string(),
+  digest: z.string(),
+  origin_kind: z.enum(["local-build", "local-file"]),
+  origin_location: z.string(),
+  installed_at: z.string(),
+  installation_generation: z.number(),
+});
+const approvalRow = z.object({
+  path: z.string(),
+  approved_at: z.string(),
+});
+
 /**
  * Open the catalog database at `<secantHome>/catalog.db`, creating the home when
  * absent. `bun:sqlite` is a Bun built-in, so the driver ships inside the
@@ -147,37 +165,22 @@ export function openCatalog(secantHome: string): Catalog {
   );
 
   function toEntry(row: Record<string, unknown>): CatalogEntry {
-    const {
-      id,
-      version,
-      digest,
-      origin_kind: kind,
-      origin_location: location,
-      installed_at: installedAt,
-      installation_generation: generation,
-    } = row;
-    if (
-      typeof id !== "string" ||
-      typeof version !== "string" ||
-      typeof digest !== "string" ||
-      typeof location !== "string" ||
-      typeof installedAt !== "string" ||
-      typeof generation !== "number" ||
-      (kind !== "local-build" && kind !== "local-file")
-    ) {
+    const parsed = catalogEntryRow.safeParse(row);
+    if (!parsed.success) {
       throw new Error("Catalog: a catalog_entries row is malformed.");
     }
+    const r = parsed.data;
     const origin: BundleOrigin =
-      kind === "local-build"
-        ? { kind: "local-build", folder: location }
-        : { kind: "local-file", path: location };
+      r.origin_kind === "local-build"
+        ? { kind: "local-build", folder: r.origin_location }
+        : { kind: "local-file", path: r.origin_location };
     return {
-      id,
-      version,
-      digest,
+      id: r.id,
+      version: r.version,
+      digest: r.digest,
       origin,
-      installedAt,
-      installationGeneration: generation,
+      installedAt: r.installed_at,
+      installationGeneration: r.installation_generation,
     };
   }
 
@@ -255,14 +258,11 @@ export function openCatalog(secantHome: string): Catalog {
     const row = select.get(path);
     if (row == null) return undefined;
     // Validate the persisted shape at this ingress rather than trust it blindly.
-    const { path: storedPath, approved_at: approvedAt } = row as Record<
-      string,
-      unknown
-    >;
-    if (typeof storedPath !== "string" || typeof approvedAt !== "string") {
+    const parsed = approvalRow.safeParse(row);
+    if (!parsed.success) {
       throw new Error("Catalog: a workspace_approvals row is malformed.");
     }
-    return { path: storedPath, approvedAt };
+    return { path: parsed.data.path, approvedAt: parsed.data.approved_at };
   }
 
   return {

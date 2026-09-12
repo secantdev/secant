@@ -16,8 +16,9 @@ what integrity and trust mean before execution.
 - **Bundle origin** — advisory Catalog metadata describing where Crucible obtained an Installed Bundle: an app release (recorded with the Secant
   version that shipped it), local build directory, imported local file, or later a portal coordinate. It is not consulted during execution.
   _Avoid_: Trust, authority.
-- **Shipped Bundle** — the exact `.wfb` bytes carried inside a Secant release package beside the CLI. Like an imported file it is not an Installed
-  Bundle and stays outside the managed store; Secant reads it only to install it. _Avoid_: Built-in (that is the Installed Bundle), fixture.
+- **Shipped Bundle** — the exact `.wfb` bytes embedded in the Secant single-file executable as an asset, since
+  [ADR 0030](../adr/0030-ship-the-shell-as-a-bun-compiled-single-file-executable.md) leaves no package to sit beside. Like an imported file it is not
+  an Installed Bundle and stays outside the managed store; Secant reads it only to install it. _Avoid_: Built-in (that is the Installed Bundle), fixture.
 - **Built-in Workflow Bundle** — an Installed Bundle whose origin is a Secant release, installed from a **Shipped Bundle** at startup. It inherits
   app-release trust and cannot be removed in v1. _Avoid_: Default Bundle, embedded workflow.
 - **Trust grant** — local approval to execute one installed Bundle digest. It persists while that exact Bundle remains installed, has no separate

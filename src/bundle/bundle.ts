@@ -28,6 +28,10 @@ export {
   type ZipEntry,
 } from "./zip.js";
 
+// The finding shape Application translates into a Problem; re-exported so callers
+// name it from the Module entry rather than reaching into `manifest.ts`.
+export type { BundleFinding } from "./manifest.js";
+
 // The Execution summary is a private submodule re-exported by the entry.
 export {
   EXECUTION_AUTHORITY_WARNING,
@@ -55,7 +59,13 @@ export interface BuiltBundle {
 
 export type BuildOutcome =
   | { readonly ok: true; readonly built: BuiltBundle }
-  | { readonly ok: false; readonly finding: BundleFinding }
+  | {
+      readonly ok: false;
+      readonly finding: BundleFinding;
+      // Every manifest field violation, when the manifest failed shape
+      // validation; a single-cause failure (archive, asset tree) omits it.
+      readonly findings?: readonly BundleFinding[];
+    }
   | { readonly ok: false; readonly composition: readonly CompositionFinding[] };
 
 /** What an installer needs from validated archive bytes: identity and digest. */
@@ -66,7 +76,11 @@ export interface ReadBundle {
 
 export type ReadOutcome =
   | { readonly ok: true; readonly read: ReadBundle }
-  | { readonly ok: false; readonly finding: BundleFinding };
+  | {
+      readonly ok: false;
+      readonly finding: BundleFinding;
+      readonly findings?: readonly BundleFinding[];
+    };
 
 // Every v1 feature maps to the Secant version that introduced format version 1.
 // The builder derives requires.engine as the max over features actually used;
@@ -89,7 +103,8 @@ export function buildBundle(folder: string): BuildOutcome {
   }
 
   const parsed = validateManifest(manifestText);
-  if (!parsed.ok) return { ok: false, finding: parsed.finding };
+  if (!parsed.ok)
+    return { ok: false, finding: parsed.finding, findings: parsed.findings };
   const manifest = parsed.manifest;
 
   const entries = walk(folder);
@@ -178,7 +193,8 @@ export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
   if (!archive.ok) return archive;
 
   const parsed = parsePackagedArchive(archive.entries);
-  if (!parsed.ok) return { ok: false, finding: parsed.finding };
+  if (!parsed.ok)
+    return { ok: false, finding: parsed.finding, findings: parsed.findings };
 
   const bad = (code: string, message: string, path?: string): ReadOutcome => ({
     ok: false,
@@ -230,7 +246,11 @@ export interface BundleInspection {
 
 export type InspectOutcome =
   | { readonly ok: true; readonly inspection: BundleInspection }
-  | { readonly ok: false; readonly finding: BundleFinding };
+  | {
+      readonly ok: false;
+      readonly finding: BundleFinding;
+      readonly findings?: readonly BundleFinding[];
+    };
 
 /**
  * Read stored `.wfb` bytes into inspection facts: the same packaged-manifest
@@ -247,7 +267,8 @@ export function inspectBundle(
   if (!archive.ok) return archive;
 
   const parsed = parsePackagedArchive(archive.entries);
-  if (!parsed.ok) return { ok: false, finding: parsed.finding };
+  if (!parsed.ok)
+    return { ok: false, finding: parsed.finding, findings: parsed.findings };
 
   // The list view (summaryOf) never reads composition; opting out skips decoding
   // every prompt/schema asset and re-running the check for a plain `bundle list`.
@@ -282,13 +303,11 @@ function parsePackagedArchive(
 ): PackagedManifestResult {
   const manifestEntry = entries.find((entry) => entry.path === MANIFEST_ENTRY);
   if (manifestEntry === undefined) {
-    return {
-      ok: false,
-      finding: {
-        code: "manifest-missing",
-        message: `Archive has no ${MANIFEST_ENTRY}.`,
-      },
+    const finding = {
+      code: "manifest-missing",
+      message: `Archive has no ${MANIFEST_ENTRY}.`,
     };
+    return { ok: false, finding, findings: [finding] };
   }
   let manifestText: string;
   try {
@@ -296,13 +315,11 @@ function parsePackagedArchive(
       manifestEntry.data,
     );
   } catch {
-    return {
-      ok: false,
-      finding: {
-        code: "manifest-not-utf8",
-        message: `${MANIFEST_ENTRY} is not valid UTF-8.`,
-      },
+    const finding = {
+      code: "manifest-not-utf8",
+      message: `${MANIFEST_ENTRY} is not valid UTF-8.`,
     };
+    return { ok: false, finding, findings: [finding] };
   }
   return validatePackagedManifest(manifestText);
 }

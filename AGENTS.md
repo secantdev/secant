@@ -28,7 +28,7 @@ Read the line that matches your task, then the file it names. The canonical gate
 
 Before editing under a Module root that carries its own `AGENTS.md`, read that file. Each one is listed here by path when it is created:
 
-- None yet.
+- `src/tui/AGENTS.md` — presentation Module: OpenTUI layout invariants for screen authors.
 
 ## Commits
 

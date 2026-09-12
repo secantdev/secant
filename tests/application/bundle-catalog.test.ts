@@ -116,6 +116,60 @@ test("the list shows one row with identity, digest, platforms, engine and trust"
   assert.equal(row.origin.kind, "local-build");
 });
 
+test("a recorded Trust grant makes the list row and focus report trusted", async (t) => {
+  const h = await harness(t);
+  h.build(proofBundle);
+  const [entry] = h.catalog.listEntries();
+  h.catalog.grantTrust({
+    operationId: "op-trust-1",
+    digest: entry.digest,
+    installationGeneration: entry.installationGeneration,
+    grantedAt: new Date("2026-09-12T09:00:00.000Z"),
+  });
+
+  const [row] = listRows(h.port);
+  assert.deepEqual(row.trust, {
+    state: "trusted",
+    operationId: "op-trust-1",
+    grantedAt: "2026-09-12T09:00:00.000Z",
+  });
+
+  const opened = h.port.openProjection({
+    family: "bundle-catalog",
+    focus: { id: "dev.secant.test-repair" },
+  });
+  t.after(() => opened.close());
+  const snapshot = opened.snapshot;
+  assert.ok(snapshot.result.found);
+  if (snapshot.result.found) {
+    assert.deepEqual(snapshot.result.bundle.trust, {
+      state: "trusted",
+      operationId: "op-trust-1",
+      grantedAt: "2026-09-12T09:00:00.000Z",
+    });
+  }
+});
+
+test("a grant does not make a different installed digest trusted", async (t) => {
+  const h = await harness(t);
+  h.build(h.variant("1.0.0"));
+  h.build(h.variant("2.0.0"));
+  const entries = h.catalog.listEntries();
+  const v1 = entries.find((entry) => entry.version === "1.0.0");
+  assert.ok(v1);
+  h.catalog.grantTrust({
+    operationId: "op-trust-1",
+    digest: v1.digest,
+    installationGeneration: v1.installationGeneration,
+    grantedAt: new Date("2026-09-12T09:00:00.000Z"),
+  });
+
+  const rows = listRows(h.port);
+  const byVersion = new Map(rows.map((row) => [row.version, row.trust.state]));
+  assert.equal(byVersion.get("1.0.0"), "trusted");
+  assert.equal(byVersion.get("2.0.0"), "not-yet-trusted");
+});
+
 test("two installed versions sort by name then version descending", async (t) => {
   const h = await harness(t);
   h.build(h.variant("1.0.0"));

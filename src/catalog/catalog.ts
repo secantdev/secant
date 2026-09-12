@@ -35,6 +35,17 @@ export interface CatalogEntry {
   readonly installationGeneration: number; // private, monotonic per home
 }
 
+/**
+ * The receipt of a Trust grant: the caller's operation id and when it was
+ * recorded. A grant is bound to the exact installed digest at its private
+ * installation generation, so it never carries to a later install of the same
+ * identity with different bytes (ADR 0021).
+ */
+export interface TrustGrant {
+  readonly operationId: string;
+  readonly grantedAt: string; // ISO 8601
+}
+
 /** The validated bytes and metadata an install commits. */
 export interface BundleInstall {
   readonly identity: { readonly id: string; readonly version: string };
@@ -71,6 +82,35 @@ export interface Catalog {
    * up), never for the three ordinary outcomes.
    */
   installBundle(install: BundleInstall): BundleInstallResult;
+  /**
+   * Record a Trust grant for an installed Bundle under a caller-generated
+   * operation id, committed atomically (its own BEGIN IMMEDIATE, like an
+   * install): any failure leaves no grant. The grant is bound to the exact
+   * installed `(digest, installationGeneration)` the caller names — both come
+   * from the `CatalogEntry` being trusted — so it never authorizes a later
+   * install of the same identity with a different digest, nor a re-install of the
+   * same digest at a fresh generation. First-grant-wins: re-granting the same
+   * installed Bundle (any operation id) keeps the original receipt and writes
+   * nothing new. Throws on a caller-contract violation (nothing is installed at
+   * that `(digest, generation)`) or a storage fault. Trust is never derived from
+   * what a Bundle declares — only from this recorded grant.
+   */
+  grantTrust(request: {
+    readonly operationId: string;
+    readonly digest: string;
+    readonly installationGeneration: number;
+    readonly grantedAt: Date;
+  }): TrustGrant;
+  /**
+   * The Trust grant for an installed Bundle's exact `(digest,
+   * installationGeneration)` — pass both from the Entry — or undefined when none
+   * was recorded. This is the sole source of trust; a grant against an earlier
+   * generation of the same digest does not count.
+   */
+  getTrustGrant(
+    digest: string,
+    installationGeneration: number,
+  ): TrustGrant | undefined;
   /** How many Bundles are installed. */
   countInstalledBundles(): number;
   /** Every Installed Bundle's Entry. Order is unspecified; callers sort. */
@@ -101,6 +141,10 @@ const approvalRow = z.object({
   path: z.string(),
   approved_at: z.string(),
 });
+const trustGrantRow = z.object({
+  operation_id: z.string(),
+  granted_at: z.string(),
+});
 
 /**
  * Open the catalog database at `<secantHome>/catalog.db`, creating the home when
@@ -125,6 +169,17 @@ export function openCatalog(secantHome: string): Catalog {
       "origin_kind TEXT NOT NULL, origin_location TEXT NOT NULL, " +
       "installed_at TEXT NOT NULL, installation_generation INTEGER NOT NULL, " +
       "PRIMARY KEY (id, version)) STRICT",
+  );
+  // A Trust grant is keyed by the exact installed (digest, generation): a
+  // re-installed digest gets a fresh generation the earlier grant no longer
+  // matches, and two Entries that ever shared a digest are still told apart by
+  // their distinct generations. Both come from the CatalogEntry the caller holds.
+  // (ADR 0021.)
+  database.exec(
+    "CREATE TABLE IF NOT EXISTS trust_grants (" +
+      "digest TEXT NOT NULL, installation_generation INTEGER NOT NULL, " +
+      "operation_id TEXT NOT NULL, granted_at TEXT NOT NULL, " +
+      "PRIMARY KEY (digest, installation_generation)) STRICT",
   );
   // The digest-named managed store holds each Bundle's exact bytes.
   const storeDir = join(secantHome, "bundles");
@@ -162,6 +217,38 @@ export function openCatalog(secantHome: string): Catalog {
   const selectAllEntries = database.query(
     "SELECT id, version, digest, origin_kind, origin_location, installed_at, " +
       "installation_generation FROM catalog_entries",
+  );
+  const entryAtGeneration = database.query(
+    "SELECT 1 AS present FROM catalog_entries " +
+      "WHERE digest = ? AND installation_generation = ?",
+  );
+  const insertGrant = database.query(
+    "INSERT OR IGNORE INTO trust_grants (digest, installation_generation, " +
+      "operation_id, granted_at) VALUES (?, ?, ?, ?)",
+  );
+  const selectGrant = database.query(
+    "SELECT operation_id, granted_at FROM trust_grants " +
+      "WHERE digest = ? AND installation_generation = ?",
+  );
+  // The grant is written inside BEGIN IMMEDIATE with automatic COMMIT/ROLLBACK,
+  // so the installed-at-this-generation check and the insert are one serialized
+  // step and a fault (a corrupt store schema, say) leaves no grant row. Trusting
+  // a (digest, generation) that is not installed is a caller-contract violation,
+  // so it throws (and rolls back) rather than recording a dangling grant.
+  const commitGrant = database.transaction(
+    (
+      digest: string,
+      generation: number,
+      operationId: string,
+      isoTime: string,
+    ) => {
+      if (entryAtGeneration.get(digest, generation) == null) {
+        throw new Error(
+          `Catalog: cannot grant trust for digest ${digest}; it is not installed at generation ${generation}.`,
+        );
+      }
+      insertGrant.run(digest, generation, operationId, isoTime);
+    },
   );
 
   function toEntry(row: Record<string, unknown>): CatalogEntry {
@@ -265,6 +352,24 @@ export function openCatalog(secantHome: string): Catalog {
     return { path: parsed.data.path, approvedAt: parsed.data.approved_at };
   }
 
+  function readGrant(
+    digest: string,
+    generation: number,
+  ): TrustGrant | undefined {
+    const row = selectGrant.get(digest, generation);
+    if (row == null) return undefined;
+    // Validate the persisted shape at this ingress; a malformed row is a broken
+    // invariant (the store is corrupt), not a caller Problem (D7).
+    const parsed = trustGrantRow.safeParse(row);
+    if (!parsed.success) {
+      throw new Error("Catalog: a trust_grants row is malformed.");
+    }
+    return {
+      operationId: parsed.data.operation_id,
+      grantedAt: parsed.data.granted_at,
+    };
+  }
+
   return {
     getWorkspaceApproval: readApproval,
     approveWorkspace(path, approvedAt) {
@@ -277,6 +382,28 @@ export function openCatalog(secantHome: string): Catalog {
     },
     installBundle(install) {
       return commitInstall.immediate(install);
+    },
+    grantTrust(request) {
+      // The transaction rejects a (digest, generation) that is not installed as
+      // a caller-contract violation (throws); Application translates that to a
+      // Problem at the Seam.
+      commitGrant.immediate(
+        request.digest,
+        request.installationGeneration,
+        request.operationId,
+        request.grantedAt.toISOString(),
+      );
+      // Read back the effective grant: first-grant-wins means this is the
+      // original receipt when a grant already existed for this (digest,
+      // generation), and the just-recorded one otherwise.
+      const grant = readGrant(request.digest, request.installationGeneration);
+      if (grant === undefined) {
+        throw new Error("Catalog: trust grant vanished after commit.");
+      }
+      return grant;
+    },
+    getTrustGrant(digest, installationGeneration) {
+      return readGrant(digest, installationGeneration);
     },
     countInstalledBundles() {
       return (countEntries.get() as { n: number }).n;

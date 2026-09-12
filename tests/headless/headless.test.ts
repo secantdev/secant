@@ -25,6 +25,7 @@ async function harness(t: TestContext) {
   };
   return {
     clients,
+    catalog,
     workspace,
     io,
     stdout: () => out.join(""),
@@ -312,6 +313,53 @@ test("bundle list shows the installed row and --json carries the snapshot", asyn
   };
   assert.equal(snapshot.family, "bundle-catalog");
   assert.equal(snapshot.result.bundles[0].id, "dev.secant.test-repair");
+});
+
+test("bundle list and inspect show a trusted Bundle once a grant is recorded", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    0,
+  );
+  const [entry] = h.catalog.listEntries();
+  h.catalog.grantTrust({
+    operationId: "op-trust-1",
+    digest: entry.digest,
+    installationGeneration: entry.installationGeneration,
+    grantedAt: new Date("2026-09-12T09:00:00.000Z"),
+  });
+
+  h.reset();
+  assert.equal(runHeadless(h.clients, ["bundle", "list"], h.io), 0);
+  assert.match(
+    h.stdout(),
+    /trust: trusted \(granted 2026-09-12T09:00:00\.000Z\)/,
+  );
+
+  h.reset();
+  assert.equal(runHeadless(h.clients, ["bundle", "list", "--json"], h.io), 0);
+  const snapshot = JSON.parse(h.stdout()) as {
+    result: { bundles: { trust: { state: string; operationId?: string } }[] };
+  };
+  assert.deepEqual(snapshot.result.bundles[0].trust, {
+    state: "trusted",
+    operationId: "op-trust-1",
+    grantedAt: "2026-09-12T09:00:00.000Z",
+  });
+
+  h.reset();
+  assert.equal(
+    runHeadless(
+      h.clients,
+      ["bundle", "inspect", "dev.secant.test-repair"],
+      h.io,
+    ),
+    0,
+  );
+  assert.match(
+    h.stdout(),
+    /Trust: trusted \(granted 2026-09-12T09:00:00\.000Z\)/,
+  );
 });
 
 test("bundle list with nothing installed says so", async (t) => {

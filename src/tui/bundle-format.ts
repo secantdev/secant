@@ -13,7 +13,12 @@ export function formatEngine(engine: EngineRange): string {
 }
 
 export function formatTrust(trust: BundleTrustState): string {
-  return trust.state === "not-yet-trusted"
-    ? "not yet trusted"
-    : "trusted (app release)";
+  switch (trust.state) {
+    case "not-yet-trusted":
+      return "not yet trusted";
+    case "app-release":
+      return "trusted (app release)";
+    case "trusted":
+      return `trusted (granted ${trust.grantedAt})`;
+  }
 }

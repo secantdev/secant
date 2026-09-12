@@ -22,6 +22,7 @@ import type {
   BundleFocusSelector,
   BundleFocusSnapshot,
   BundleOriginView,
+  BundleTrustState,
   EngineRange,
   InstalledBundleFocus,
   InstalledBundleSummary,
@@ -183,10 +184,26 @@ function summaryOf(
       semver.prerelease(entry.version) === null ? "stable" : "prerelease",
     platforms: inspection.platforms,
     engine: engineRange(inspection.engine, deps.engineVersion),
-    // M1 origins are all local (External Bundles), which are not yet trusted;
-    // no trust action exists (#9, #49). Built-in trust lands with M6 origins.
-    trust: { state: "not-yet-trusted" },
+    trust: trustState(deps.catalog, entry),
   };
+}
+
+// Trust is read from the Catalog's recorded grant for this exact installed
+// digest (#78), never derived from anything the Bundle declares. No grant reads
+// as not-yet-trusted; External Bundles have no other trust in M1/M2, and
+// built-in `app-release` trust lands with M6 origins.
+function trustState(catalog: Catalog, entry: CatalogEntry): BundleTrustState {
+  const grant = catalog.getTrustGrant(
+    entry.digest,
+    entry.installationGeneration,
+  );
+  return grant === undefined
+    ? { state: "not-yet-trusted" }
+    : {
+        state: "trusted",
+        operationId: grant.operationId,
+        grantedAt: grant.grantedAt,
+      };
 }
 
 function focusOf(

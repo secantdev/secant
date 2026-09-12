@@ -179,6 +179,164 @@ test("a mistyped persisted row is a broken invariant, not a Problem", async (t) 
   );
 });
 
+test("granting trust for an installed digest is readable and idempotent", async (t) => {
+  const catalog = await openCatalog(makeTempDir("secant-catalog-"));
+  t.after(() => catalog.close());
+
+  const bytes = new Uint8Array([7, 7, 7]);
+  const digest = digestOf(bytes);
+  const installed = catalog.installBundle(
+    install("io.example.a", "1.0.0", bytes),
+  );
+  assert.ok(installed.outcome === "installed");
+  const generation = installed.entry.installationGeneration;
+  assert.equal(catalog.getTrustGrant(digest, generation), undefined);
+
+  const grant = catalog.grantTrust({
+    operationId: "op-1",
+    digest,
+    installationGeneration: generation,
+    grantedAt: new Date("2026-09-12T09:00:00.000Z"),
+  });
+  assert.deepEqual(grant, {
+    operationId: "op-1",
+    grantedAt: "2026-09-12T09:00:00.000Z",
+  });
+  assert.deepEqual(catalog.getTrustGrant(digest, generation), grant);
+
+  // Re-granting keeps the first receipt and writes nothing new — the same
+  // operation id and a different one both replay the original grant.
+  assert.deepEqual(
+    catalog.grantTrust({
+      operationId: "op-1",
+      digest,
+      installationGeneration: generation,
+      grantedAt: new Date("2026-10-10T00:00:00.000Z"),
+    }),
+    grant,
+  );
+  assert.deepEqual(
+    catalog.grantTrust({
+      operationId: "op-2",
+      digest,
+      installationGeneration: generation,
+      grantedAt: new Date("2026-11-11T00:00:00.000Z"),
+    }),
+    grant,
+  );
+});
+
+test("a grant persists across reopening the same home", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  const bytes = new Uint8Array([4, 2]);
+  const digest = digestOf(bytes);
+  const first = await openCatalog(home);
+  const installed = first.installBundle(
+    install("io.example.a", "1.0.0", bytes),
+  );
+  assert.ok(installed.outcome === "installed");
+  const generation = installed.entry.installationGeneration;
+  first.grantTrust({
+    operationId: "op-1",
+    digest,
+    installationGeneration: generation,
+    grantedAt: new Date("2026-09-12T09:00:00.000Z"),
+  });
+  first.close();
+
+  const second = await openCatalog(home);
+  t.after(() => second.close());
+  assert.deepEqual(second.getTrustGrant(digest, generation), {
+    operationId: "op-1",
+    grantedAt: "2026-09-12T09:00:00.000Z",
+  });
+});
+
+test("granting trust for a digest that is not installed throws", async (t) => {
+  const catalog = await openCatalog(makeTempDir("secant-catalog-"));
+  t.after(() => catalog.close());
+
+  assert.throws(
+    () =>
+      catalog.grantTrust({
+        operationId: "op-1",
+        digest: "0".repeat(64),
+        installationGeneration: 1,
+        grantedAt: new Date(),
+      }),
+    /not installed/,
+  );
+});
+
+test("an injected failure inside the grant leaves no grant and no receipt", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  // Pre-create trust_grants with an always-failing CHECK so the grant's insert
+  // faults inside its transaction; the Catalog's own CREATE IF NOT EXISTS then
+  // leaves this table in place.
+  const raw = new Database(join(home, "catalog.db"));
+  raw.exec(
+    "CREATE TABLE trust_grants (digest TEXT NOT NULL, " +
+      "installation_generation INTEGER NOT NULL, operation_id TEXT NOT NULL, " +
+      "granted_at TEXT NOT NULL, PRIMARY KEY (digest, installation_generation), " +
+      "CHECK (0)) STRICT",
+  );
+  raw.close();
+
+  const catalog = await openCatalog(home);
+  t.after(() => catalog.close());
+  const bytes = new Uint8Array([1, 1, 1]);
+  const digest = digestOf(bytes);
+  const installed = catalog.installBundle(
+    install("io.example.a", "1.0.0", bytes),
+  );
+  assert.ok(installed.outcome === "installed");
+  const generation = installed.entry.installationGeneration;
+
+  assert.throws(() =>
+    catalog.grantTrust({
+      operationId: "op-1",
+      digest,
+      installationGeneration: generation,
+      grantedAt: new Date(),
+    }),
+  );
+  // The transaction rolled back: no grant, no receipt.
+  assert.equal(catalog.getTrustGrant(digest, generation), undefined);
+});
+
+test("a grant is bound to the installed generation, not the digest alone", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  const bytes = new Uint8Array([3, 3]);
+  const digest = digestOf(bytes);
+  const catalog = await openCatalog(home);
+  const installed = catalog.installBundle(
+    install("io.example.a", "1.0.0", bytes),
+  );
+  assert.ok(installed.outcome === "installed");
+  const generation = installed.entry.installationGeneration;
+  catalog.grantTrust({
+    operationId: "op-1",
+    digest,
+    installationGeneration: generation,
+    grantedAt: new Date("2026-09-12T09:00:00.000Z"),
+  });
+  assert.ok(catalog.getTrustGrant(digest, generation));
+  catalog.close();
+
+  // Simulate a later reinstall of the same digest at a fresh generation: the
+  // grant recorded against the earlier generation no longer counts.
+  const raw = new Database(join(home, "catalog.db"));
+  raw.exec(
+    "UPDATE catalog_entries SET installation_generation = " +
+      "installation_generation + 1",
+  );
+  raw.close();
+
+  const reopened = await openCatalog(home);
+  t.after(() => reopened.close());
+  assert.equal(reopened.getTrustGrant(digest, generation + 1), undefined);
+});
+
 test("different identities both install and persist across reopening", async (t) => {
   const home = makeTempDir("secant-catalog-");
   const first = await openCatalog(home);

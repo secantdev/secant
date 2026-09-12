@@ -116,10 +116,18 @@ export interface EngineRange {
   readonly note?: string;
 }
 
-/** M1 shows External Bundles as not yet trusted and offers no trust action;
- *  Built-in Bundles inherit app-release trust (#9). */
+/** An External Bundle reads `not-yet-trusted` until a Trust grant is recorded
+ *  for its exact installed digest, then `trusted` with the grant's receipt
+ *  (#78, ADR 0021). Built-in Bundles inherit `app-release` trust (#9). Trust is
+ *  part of Start a Run, never a catalog action: there is no revocation. */
 export type BundleTrustState =
-  { readonly state: "not-yet-trusted" } | { readonly state: "app-release" };
+  | { readonly state: "not-yet-trusted" }
+  | { readonly state: "app-release" }
+  | {
+      readonly state: "trusted";
+      readonly operationId: string; // the grant's operation id
+      readonly grantedAt: string; // ISO 8601
+    };
 
 /** One Installed Bundle as a list row (#9, #49). */
 export interface InstalledBundleSummary {

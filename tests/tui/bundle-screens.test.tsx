@@ -212,6 +212,53 @@ test("Home opens the Bundle list showing every summary fact, sorted", async () =
   assert.match(selectedLine(frame), /Alpha Flow/);
 });
 
+test("a trusted Bundle reads as trusted in the list and inspection", async () => {
+  const trustedSummary = summary({
+    id: "com.example.trusted",
+    version: "1.0.0",
+    name: "Trusted Flow",
+    trust: {
+      state: "trusted",
+      operationId: "op-1",
+      grantedAt: "2026-09-12T09:00:00.000Z",
+    },
+  });
+  const trustedFocus: InstalledBundleFocus = {
+    ...PROOF_FOCUS,
+    ...trustedSummary,
+    description: "A trusted pipeline",
+  };
+  const [list] = createSignal<BundleCatalogSnapshot>({
+    family: "bundle-catalog",
+    view: "list",
+    result: { found: true, bundles: [trustedSummary] },
+  });
+  const view: BundleCatalogView = {
+    openList: () => list,
+    openFocus(selector: BundleFocusSelector) {
+      const [focus] = createSignal<BundleFocusSnapshot>({
+        family: "bundle-catalog",
+        view: "focus",
+        selection: selector,
+        result: { found: true, bundle: trustedFocus },
+      });
+      return focus;
+    },
+  };
+  const t = await testRender(
+    () => <App view={approvedWorkspace()} bundles={view} exit={() => {}} />,
+    { width: 80, height: 40 },
+  );
+  await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((f) => f.includes("Trusted Flow"));
+  assert.match(t.captureCharFrame(), /trusted \(granted 2026-09-12/);
+
+  t.mockInput.pressEnter(); // list -> inspection
+  await t.waitForFrame((f) => f.includes("A trusted pipeline"));
+  assert.match(t.captureCharFrame(), /trusted \(granted 2026-09-12/);
+});
+
 test("empty Catalog names the headless install commands", async () => {
   const { t } = await mount([]);
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));

@@ -1,4 +1,5 @@
 import type {
+  BundleTrustState,
   EngineRange,
   ExecutionSummary,
   InstalledBundleFocus,
@@ -20,7 +21,7 @@ export function renderRow(bundle: InstalledBundleSummary): string {
     `  origin: ${bundle.origin.kind} ${bundle.origin.location}`,
     `  platforms: ${bundle.platforms.join(", ")}`,
     `  engine: ${renderEngine(bundle.engine)}`,
-    `  trust: ${renderTrust(bundle.trust.state)}`,
+    `  trust: ${renderTrust(bundle.trust)}`,
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -34,7 +35,7 @@ export function renderFocus(bundle: InstalledBundleFocus): string {
     `Origin: ${bundle.origin.kind} ${bundle.origin.location}`,
     `Platforms: ${bundle.platforms.join(", ")}`,
     `Engine: ${renderEngine(bundle.engine)}`,
-    `Trust: ${renderTrust(bundle.trust.state)}`,
+    `Trust: ${renderTrust(bundle.trust)}`,
   ];
   const author = bundle.author;
   if (author.authors) lines.push(`Authors: ${author.authors.join(", ")}`);
@@ -143,8 +144,13 @@ function renderEngine(engine: EngineRange): string {
   return engine.satisfied ? engine.range : `${engine.range} (${engine.note})`;
 }
 
-function renderTrust(state: "not-yet-trusted" | "app-release"): string {
-  return state === "not-yet-trusted"
-    ? "not yet trusted"
-    : "trusted (app release)";
+function renderTrust(trust: BundleTrustState): string {
+  switch (trust.state) {
+    case "not-yet-trusted":
+      return "not yet trusted";
+    case "app-release":
+      return "trusted (app release)";
+    case "trusted":
+      return `trusted (granted ${trust.grantedAt})`;
+  }
 }

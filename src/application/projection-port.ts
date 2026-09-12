@@ -68,7 +68,10 @@ export type WorkspaceApprovalState =
   | { readonly state: "approved"; readonly approvedAt: string } // ISO 8601
   | { readonly state: "unapproved" };
 
-/** The receipt of one submitted intent: pending, then a typed outcome. */
+/** The receipt of one submitted intent: `pending` until it settles, then a
+ *  typed outcome. Opening the Projection on an operation id Secant never saw is
+ *  not an error: it settles `not-applied` with an `operation-not-found` Problem
+ *  rather than throwing. */
 export interface OperationSnapshot {
   readonly family: "operation";
   readonly operationId: string;

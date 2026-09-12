@@ -284,9 +284,16 @@ function openCoordination(
 ): { database: Database; rebuilt: boolean } {
   try {
     const database = new Database(coordinationPath);
-    prepareCoordination(database);
-    database.query("SELECT COUNT(*) AS n FROM runs").get();
-    database.query("SELECT COUNT(*) AS n FROM operations").get();
+    try {
+      prepareCoordination(database);
+      database.query("SELECT COUNT(*) AS n FROM runs").get();
+      database.query("SELECT COUNT(*) AS n FROM operations").get();
+    } catch (error) {
+      // Close the handle before the file is deleted below: on Windows an open
+      // handle to the corrupt file locks it, so `rmSync` would fail with EBUSY.
+      database.close();
+      throw error;
+    }
     return { database, rebuilt: false };
   } catch {
     rmSync(coordinationPath, { force: true });

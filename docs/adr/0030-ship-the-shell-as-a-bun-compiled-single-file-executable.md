@@ -56,9 +56,12 @@ in 12 of 833 source files and cut from 321 call sites to 48 by replacing Bun cal
 
 ## Legacy conhost
 
-Legacy conhost is dropped as a support-matrix row. At startup, when the console window is conhost-owned (`bun:ffi` `GetConsoleWindow` +
-`IsWindowVisible`; ConPTY's headless conhost has an invisible window), Secant prints a one-line notice pointing at Windows Terminal; the TUI still
-runs and headless is unaffected. The wedge is exit-only — a dead console window, no Secant data lost — and OpenCode ships no handling for it with
+Legacy conhost is dropped as a support-matrix row. At startup, Secant first suppresses the notice when Windows Terminal's inherited `WT_SESSION`
+marker is present, then falls back to `bun:ffi` `GetConsoleWindow` + `IsWindowVisible` to identify a visible, conhost-owned console window. The
+marker is supplemental rather than the only discriminator because Windows Terminal documents that it can be absent when configured as the default
+terminal host ([microsoft/terminal#13006](https://github.com/microsoft/terminal/issues/13006)). The recorded #66 real-terminal check found that an
+ordinary Windows Terminal tab can still expose a visible console window, disproving the original assumption that ConPTY visibility alone was
+sufficient. In legacy conhost Secant prints a one-line notice pointing at Windows Terminal; the TUI still runs and headless is unaffected. The wedge is exit-only — a dead console window, no Secant data lost — and OpenCode ships no handling for it with
 eight stale-closed bug reports, so the notice is what prevents that noise. The human release check retargets from conhost to **Windows Terminal**,
 run when the Bun pin, the OpenTUI pin, or `src/tui/renderer/` changed. The notice can be removed once Bun merges the stdin-release fix
 ([bun#35621](https://github.com/oven-sh/bun/pull/35621)).

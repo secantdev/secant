@@ -33,15 +33,20 @@ export const CONHOST_NOTICE =
 export function printConhostNotice(
   probe: ConsoleProbe,
   out: (text: string) => void,
+  isWindowsTerminalSession: boolean,
 ): void {
+  if (isWindowsTerminalSession) return;
   if (probe()) out(CONHOST_NOTICE);
 }
 
 /**
- * The production probe: `GetConsoleWindow` + `IsWindowVisible` over `bun:ffi`.
- * A legacy conhost window is visible; ConPTY's headless conhost (used by Windows
- * Terminal and every pseudo-console) has an invisible window, so it reports
- * false. Non-Windows and any failure report false — no notice.
+ * The production FFI probe, reached after the composition root has passed
+ * Windows Terminal's inherited `WT_SESSION` marker to `printConhostNotice`. A
+ * real-terminal check found a visible console window in an ordinary Windows
+ * Terminal tab, invalidating visibility as a sufficient discriminator. This
+ * remains the fallback because microsoft/terminal#13006 says the marker can be
+ * absent for default-host launches. Non-Windows and any FFI failure report
+ * false — no notice.
  */
 export const conhostConsoleProbe: ConsoleProbe = () => {
   if (process.platform !== "win32") return false;

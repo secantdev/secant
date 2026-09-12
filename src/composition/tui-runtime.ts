@@ -58,7 +58,11 @@ export async function runTuiApp(): Promise<number> {
   // visible conhost window (see conhost-notice.ts). To stdout, not stderr: the
   // gate above guarantees stdout is the (visible) console TTY, whereas stderr
   // may be redirected — so this is where the warning is certain to be seen.
-  printConhostNotice(conhostConsoleProbe, (text) => process.stdout.write(text));
+  printConhostNotice(
+    conhostConsoleProbe,
+    (text) => process.stdout.write(text),
+    process.env.WT_SESSION !== undefined,
+  );
 
   const secantHome =
     process.env.SECANT_HOME?.trim() || join(homedir(), ".secant");

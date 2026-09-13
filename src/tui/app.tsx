@@ -16,6 +16,11 @@ import {
 } from "./bundle-view.js";
 import { Home } from "./home.js";
 import { createTuiKeymap, KeymapProvider } from "./keymap.js";
+import { StartRun } from "./start-run.js";
+import {
+  RunLaunchViewProvider,
+  type RunLaunchView,
+} from "./run-launch-view.js";
 import { DialogProvider, useDialog } from "./vendor/dialog.js";
 import { useExit, type Exit, ExitProvider } from "./vendor/exit.js";
 import { ThemeProvider, useTheme } from "./vendor/theme-context.js";
@@ -35,6 +40,7 @@ import {
 
 type Screen =
   | { readonly name: "home" }
+  | { readonly name: "start-run" }
   | { readonly name: "bundle-list" }
   | { readonly name: "bundle-inspect"; readonly selector: BundleFocusSelector };
 
@@ -74,9 +80,15 @@ function Route() {
   return (
     <Switch
       fallback={
-        <Home onOpenBundles={() => setScreen({ name: "bundle-list" })} />
+        <Home
+          onStartRun={() => setScreen({ name: "start-run" })}
+          onOpenBundles={() => setScreen({ name: "bundle-list" })}
+        />
       }
     >
+      <Match when={screen().name === "start-run"}>
+        <StartRun onLeave={() => setScreen({ name: "home" })} />
+      </Match>
       <Match when={screen().name === "bundle-list"}>
         <BundleList
           selected={selected}
@@ -112,6 +124,7 @@ function Fallback(props: { error: unknown; exit: Exit }) {
 export function App(props: {
   view: WorkspaceView;
   bundles: BundleCatalogView;
+  launch: RunLaunchView;
   exit: Exit;
 }) {
   const keymap = createTuiKeymap();
@@ -121,15 +134,17 @@ export function App(props: {
         <KeymapProvider keymap={keymap}>
           <WorkspaceViewProvider view={props.view}>
             <BundleCatalogViewProvider view={props.bundles}>
-              <DialogProvider>
-                <ErrorBoundary
-                  fallback={(error) => (
-                    <Fallback error={error} exit={props.exit} />
-                  )}
-                >
-                  <Route />
-                </ErrorBoundary>
-              </DialogProvider>
+              <RunLaunchViewProvider view={props.launch}>
+                <DialogProvider>
+                  <ErrorBoundary
+                    fallback={(error) => (
+                      <Fallback error={error} exit={props.exit} />
+                    )}
+                  >
+                    <Route />
+                  </ErrorBoundary>
+                </DialogProvider>
+              </RunLaunchViewProvider>
             </BundleCatalogViewProvider>
           </WorkspaceViewProvider>
         </KeymapProvider>

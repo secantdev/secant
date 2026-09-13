@@ -3,6 +3,7 @@ import { render } from "@opentui/solid";
 import type { ProjectionPort } from "../application/projection-port.js";
 import { App } from "./app.js";
 import { createLiveBundleCatalogView } from "./bundle-view.js";
+import { createLiveRunLaunchView } from "./run-launch-view.js";
 import type { Exit } from "./vendor/exit.js";
 import { createLiveWorkspaceView } from "./workspace-view.js";
 
@@ -25,6 +26,7 @@ export function mountTui(
       <App
         view={createLiveWorkspaceView(options.projectionPort)}
         bundles={createLiveBundleCatalogView(options.projectionPort)}
+        launch={createLiveRunLaunchView(options.projectionPort)}
         exit={options.exit}
       />
     ),

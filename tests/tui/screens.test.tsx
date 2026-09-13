@@ -3,7 +3,11 @@ import { test } from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
-import type { BundleCatalogView, WorkspaceView } from "../../src/tui/tui.js";
+import type {
+  BundleCatalogView,
+  RunLaunchView,
+  WorkspaceView,
+} from "../../src/tui/tui.js";
 import type {
   BundleCatalogSnapshot,
   WorkspaceSnapshot,
@@ -73,6 +77,10 @@ async function until(
   throw new Error("Condition not met within the time budget.");
 }
 
+function noLaunch(): RunLaunchView {
+  return { launch: () => () => ({ kind: "pending" }) };
+}
+
 async function mount(width = 60, height = 16) {
   const view = fakeView();
   const exits: unknown[] = [];
@@ -81,6 +89,7 @@ async function mount(width = 60, height = 16) {
       <App
         view={view}
         bundles={emptyBundles()}
+        launch={noLaunch()}
         exit={(reason) => exits.push(reason)}
       />
     ),

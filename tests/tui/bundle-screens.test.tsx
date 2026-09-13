@@ -3,7 +3,11 @@ import { test } from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
-import type { BundleCatalogView, WorkspaceView } from "../../src/tui/tui.js";
+import type {
+  BundleCatalogView,
+  RunLaunchView,
+  WorkspaceView,
+} from "../../src/tui/tui.js";
 import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
@@ -152,6 +156,11 @@ function bundles(rows: InstalledBundleSummary[]): BundleCatalogView {
   };
 }
 
+/** The Bundle screens never launch; a stub launch seam satisfies the App prop. */
+function noLaunch(): RunLaunchView {
+  return { launch: () => () => ({ kind: "pending" }) };
+}
+
 async function mount(rows = ROWS, width = 80, height = 40) {
   const exits: unknown[] = [];
   const t = await testRender(
@@ -159,6 +168,7 @@ async function mount(rows = ROWS, width = 80, height = 40) {
       <App
         view={approvedWorkspace()}
         bundles={bundles(rows)}
+        launch={noLaunch()}
         exit={(reason) => exits.push(reason)}
       />
     ),
@@ -246,7 +256,14 @@ test("a trusted Bundle reads as trusted in the list and inspection", async () =>
     },
   };
   const t = await testRender(
-    () => <App view={approvedWorkspace()} bundles={view} exit={() => {}} />,
+    () => (
+      <App
+        view={approvedWorkspace()}
+        bundles={view}
+        launch={noLaunch()}
+        exit={() => {}}
+      />
+    ),
     { width: 80, height: 40 },
   );
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
@@ -290,7 +307,14 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
     },
   };
   const t = await testRender(
-    () => <App view={approvedWorkspace()} bundles={view} exit={() => {}} />,
+    () => (
+      <App
+        view={approvedWorkspace()}
+        bundles={view}
+        launch={noLaunch()}
+        exit={() => {}}
+      />
+    ),
     { width: 80, height: 40 },
   );
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));

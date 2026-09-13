@@ -18,14 +18,19 @@ import { makeTempDir } from "../helpers/tempDir.js";
 
 ensureRuntimeOnPath();
 
-const runExecution: RunExecution = ({ routing, owner }) =>
-  executeRouting(routing, {
-    owner,
-    platform: hostPlatform(),
-    resolveAsset: () => undefined,
-  });
-
-async function harness(t: TestContext) {
+async function harness(
+  t: TestContext,
+  opts: { commandTimeoutMs?: number } = {},
+) {
+  const runExecution: RunExecution = ({ routing, owner }) =>
+    executeRouting(routing, {
+      owner,
+      platform: hostPlatform(),
+      resolveAsset: () => undefined,
+      ...(opts.commandTimeoutMs !== undefined
+        ? { commandTimeoutMs: opts.commandTimeoutMs }
+        : {}),
+    });
   const catalog = openCatalog(makeTempDir("secant-runcli-home-"));
   t.after(() => catalog.close());
   const workspace = realpathSync.native(makeTempDir("secant-runcli-ws-"));
@@ -153,14 +158,15 @@ test("run show prints identity, state, progress, position, and timeline; --json 
 });
 
 test("run launch of a Run that rests failed exits non-zero and shows the failed Step", async (t) => {
-  const h = await harness(t);
-  // A resolvable executable whose Attempt fails at runtime: the command dies by
-  // signal, so spawnSync reports no exit status and the Attempt is failed (a clean
-  // non-zero exit would instead be a `fail` verdict on a succeeded Attempt). An
-  // off-PATH executable is now refused by Preflight before a Run exists (see
-  // tests/application/preflight.test.ts).
+  // A resolvable executable whose Attempt fails at runtime: the command runs past
+  // a short command timeout, so spawnSync kills it and reports no exit status —
+  // a failed Attempt on every platform (a clean non-zero exit would instead be a
+  // `fail` verdict on a *succeeded* Attempt, and Windows has no real signals to
+  // force one). An off-PATH executable is now refused by Preflight before a Run
+  // exists (see tests/application/preflight.test.ts).
+  const h = await harness(t, { commandTimeoutMs: 200 });
   const { id, digest } = h.install({
-    script: "process.kill(process.pid, 'SIGKILL')",
+    script: "setTimeout(() => {}, 60000)",
     retry: 0,
   });
   h.approve();

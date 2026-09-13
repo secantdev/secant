@@ -5,6 +5,8 @@ import type {
   InstalledBundleFocus,
   InstalledBundleSummary,
   RoutingNodeView,
+  RunListGroup,
+  RunListSnapshot,
   RunView,
 } from "../application/projection-port.js";
 
@@ -141,6 +143,24 @@ export function renderRun(run: RunView): string {
     );
   }
 
+  // The cancel/delete offers appear only when legal (#87): cancel while live,
+  // delete while at rest. Print the command and what it does.
+  for (const offer of run.actionOffers) {
+    if (offer.action === "cancel-run") {
+      lines.push(
+        "",
+        "Actions:",
+        `  secant run cancel ${run.runId}  # ${offer.consequence}`,
+      );
+    } else if (offer.action === "delete-run") {
+      lines.push(
+        "",
+        "Actions:",
+        `  secant run delete ${run.runId}  # ${offer.consequence}`,
+      );
+    }
+  }
+
   lines.push("", "Progress:");
   if (run.progress.length === 0) lines.push("  (no steps)");
   for (const step of run.progress) {
@@ -171,6 +191,45 @@ export function renderRun(run: RunView): string {
     );
   }
 
+  return `${lines.join("\n")}\n`;
+}
+
+const GROUP_HEADINGS: Record<RunListGroup, string> = {
+  today: "Today",
+  yesterday: "Yesterday",
+  older: "Older",
+};
+
+export function renderRunList(snapshot: RunListSnapshot): string {
+  const scope =
+    snapshot.filter === "resumable" ? "Resumable Runs" : "Previous Runs";
+  if (snapshot.empty) {
+    return `${scope}: none yet.\n`;
+  }
+  // A page past the end of history (only reachable from a stale/hand-made cursor)
+  // has no rows though the list is not empty; say so rather than a bare heading.
+  if (snapshot.rows.length === 0) {
+    return `${scope}: no more runs (beginning of history).\n`;
+  }
+  const lines: string[] = [`${scope}:`];
+  // Rows are already newest-first and grouped; print each group heading once as it
+  // first appears, so the order stays Today, then Yesterday, then Older.
+  let current: RunListGroup | undefined;
+  for (const row of snapshot.rows) {
+    if (row.group !== current) {
+      current = row.group;
+      lines.push("", `${GROUP_HEADINGS[current]}:`);
+    }
+    lines.push(`  ${row.runId}  ${row.bundleName}  (${row.activityAt})`);
+  }
+  if (snapshot.nextCursor !== undefined) {
+    lines.push(
+      "",
+      `More runs: secant run list --before ${snapshot.nextCursor}`,
+    );
+  } else if (snapshot.beginningOfHistory) {
+    lines.push("", "(beginning of history)");
+  }
   return `${lines.join("\n")}\n`;
 }
 

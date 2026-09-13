@@ -31,6 +31,7 @@ import {
   selectRunEntry,
   type RunProjectionDependencies,
 } from "./run-projection.js";
+import { listRunsSnapshot } from "./run-list.js";
 import { preflight } from "./preflight.js";
 import type {
   AnswerHumanGateInput,
@@ -50,6 +51,7 @@ import type {
   ResourceRead,
   ResourceReference,
   RunGateReference,
+  RunListSnapshot,
   RunSnapshot,
   Submission,
   SubmissionAdmission,
@@ -103,6 +105,9 @@ export interface ApplicationDependencies {
   readonly runGroup?: RunGroup;
   /** The Run execution composition constructs and hands in (see RunExecution). */
   readonly runExecution?: RunExecution;
+  /** The clock the `run-list` Projection groups rows by (Today / Yesterday /
+   *  Older). Defaults to the wall clock; a test injects a fixed instant (#87). */
+  readonly now?: () => Date;
 }
 
 export interface Application {
@@ -117,6 +122,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
   );
   const scheduleSettlement =
     deps.scheduleSettlement ?? ((settle: () => void) => settle());
+  const now = deps.now ?? (() => new Date());
   const budgets = deps.bundleBudgets ?? DEFAULT_BUDGETS;
   // Each Operation carries a settler (run inline by default, deferred under a
   // test), its outcome, and the streams watching it. Observers are added only
@@ -362,10 +368,45 @@ export function createApplication(deps: ApplicationDependencies): Application {
     readonly family: "run";
     readonly runId: string;
   }): OpenedProjection<RunSnapshot>;
+  function openProjection(selector: {
+    readonly family: "run-list";
+    readonly resumable?: boolean;
+    readonly before?: string;
+  }): OpenedProjection<RunListSnapshot>;
   function openProjection(selector: ProjectionSelector): OpenedProjection;
   function openProjection(selector: ProjectionSelector): OpenedProjection {
     if (selector.family === "run") {
       return openRunProjection(selector.runId);
+    }
+    if (selector.family === "run-list") {
+      // A point-in-time page, like a bundle-catalog focus: no live updates in M2
+      // (the TUI adds observers in #93). An unwired Run Store yields an empty,
+      // informational snapshot rather than a throw.
+      const updates = new UpdateStream();
+      const snapshot: RunListSnapshot =
+        runProjection === undefined
+          ? {
+              family: "run-list",
+              filter: selector.resumable ? "resumable" : "all",
+              rows: [],
+              beginningOfHistory: true,
+              empty: true,
+            }
+          : listRunsSnapshot(runProjection, {
+              resumable: selector.resumable ?? false,
+              now: now(),
+              ...(selector.before !== undefined
+                ? { before: selector.before }
+                : {}),
+            });
+      return {
+        snapshot,
+        catchUp: "fresh",
+        updates,
+        close() {
+          updates.close();
+        },
+      };
     }
     if (selector.family === "bundle-catalog") {
       if (selector.focus !== undefined) {
@@ -955,6 +996,123 @@ export function createApplication(deps: ApplicationDependencies): Application {
     }
   }
 
+  // Cancel a live Run (#87). Admitted at once; the cancel is decided and applied
+  // at settle time (inline by default). Idempotent per operation id via the
+  // operations map.
+  function submitCancel(
+    operationId: string,
+    runId: string,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === cancelReplayKey(runId)) {
+        return { admitted: true, operationId, runId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (runGroup === undefined) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    operations.set(operationId, {
+      replayKey: cancelReplayKey(runId),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId,
+      settle: () => cancelAndSettle(runId),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId };
+  }
+
+  // Rest a live Run `cancelled` — the only route to that terminal state. Acquiring
+  // the owner bumps the fencing epoch, so a stale owner executing the Run in
+  // another process is fenced and its next canonical write is refused (execution
+  // stops); then we record `cancelled` and release the claim, every Artifact
+  // intact. A Run that is not live has no cancel to make.
+  function cancelAndSettle(runId: string): OperationOutcome {
+    if (runGroup === undefined) {
+      return { status: "not-applied", problem: runSupportUnavailable() };
+    }
+    const listing = runGroup.listRuns().find((run) => run.runId === runId);
+    if (listing === undefined) {
+      return { status: "not-applied", problem: runNotFound(runId) };
+    }
+    if (!listing.live) {
+      return { status: "not-applied", problem: runNotLive(runId) };
+    }
+    const owner = runGroup.acquireRun(runId);
+    if (owner === undefined) {
+      return { status: "not-applied", problem: runStoreUnreadable(runId) };
+    }
+    try {
+      // Our epoch is the freshest, so this write is not fenced. A concurrent second
+      // cancel is the only actor that could fence it, and it is resting the same
+      // Run cancelled too, so the outcome is unchanged either way.
+      owner.writeState("cancelled");
+    } finally {
+      owner.close();
+    }
+    runGroup.endRun(runId);
+    runs.delete(runId);
+    return { status: "applied" };
+  }
+
+  // Delete a resting or terminal Run (#87). Admitted at once; applied at settle
+  // time through the Run Store's admitted delete, which is idempotent per
+  // operation id and a no-op on an absent Run.
+  function submitDelete(
+    operationId: string,
+    runId: string,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === deleteReplayKey(runId)) {
+        return { admitted: true, operationId, runId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (runGroup === undefined) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    operations.set(operationId, {
+      replayKey: deleteReplayKey(runId),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId,
+      settle: () => deleteAndSettle(operationId, runId),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId };
+  }
+
+  function deleteAndSettle(
+    operationId: string,
+    runId: string,
+  ): OperationOutcome {
+    if (runGroup === undefined) {
+      return { status: "not-applied", problem: runSupportUnavailable() };
+    }
+    // A live Run cannot be deleted (its store is in use); cancel it first.
+    // ponytail: this liveness check is not transactional with the store delete,
+    // and the Run Store's admitted delete deliberately does not re-check the claim
+    // (it deletes any Run, live or not). So a Run that a *different process* resumes
+    // in the window between this check and the delete could have its store removed
+    // out from under it — a cross-process race that M2's one-command-per-process
+    // usage does not hit. Close it by deciding liveness inside `admitDelete` under
+    // its BEGIN IMMEDIATE lock (as create/resume do) if concurrent delete/resume
+    // ever races.
+    const listing = runGroup.listRuns().find((run) => run.runId === runId);
+    if (listing?.live === true) {
+      return { status: "not-applied", problem: runIsLive(runId) };
+    }
+    // The admitted delete drops the registration then reclaims the store under a
+    // `.deleting` quarantine; idempotent per operation id, and re-deleting a Run
+    // already gone still settles applied.
+    runGroup.deleteRun({ operationId, runId });
+    runs.delete(runId);
+    return { status: "applied" };
+  }
+
   const projectionPort: ProjectionPort = {
     openProjection,
     submit(submission: Submission): SubmissionAdmission {
@@ -969,6 +1127,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
           return submitResume(submission.operationId, submission.input);
         case "answer-human-gate":
           return submitAnswer(submission.operationId, submission.input);
+        case "cancel-run":
+          return submitCancel(submission.operationId, submission.input.runId);
+        case "delete-run":
+          return submitDelete(submission.operationId, submission.input.runId);
       }
     },
 
@@ -1224,6 +1386,30 @@ function runNotHalted(runId: string, state: string): Problem {
   };
 }
 
+/** A Run that is not live cannot be cancelled: there is no execution to stop (#87). */
+function runNotLive(runId: string): Problem {
+  return {
+    code: "run-not-live",
+    explanation: `Run ${runId} is not live; only a live Run can be cancelled.`,
+    remediation:
+      "A resting or terminal Run has nothing to cancel; delete it instead to remove it.",
+    possibleEffects: "none",
+    details: { runId },
+  };
+}
+
+/** A live Run cannot be deleted: its store is in use (#87). */
+function runIsLive(runId: string): Problem {
+  return {
+    code: "run-is-live",
+    explanation: `Run ${runId} is live; a live Run cannot be deleted.`,
+    remediation:
+      "Cancel the Run first (or wait for it to reach rest), then delete it.",
+    possibleEffects: "none",
+    details: { runId },
+  };
+}
+
 /** A Run that is not blocked cannot be answered: the Gate does not exist (#85). */
 function runNotBlocked(runId: string, state: string): Problem {
   return {
@@ -1282,6 +1468,17 @@ function answerReplayKey(input: AnswerHumanGateInput): string {
     input.gate.attemptId,
     input.answer,
   ]);
+}
+
+/** A stable replay key for a cancel: the Run id. A re-submitted operation id with
+ *  an equal key replays; a different key is a conflict (#87). */
+function cancelReplayKey(runId: string): string {
+  return JSON.stringify(["cancel", runId]);
+}
+
+/** A stable replay key for a delete: the Run id (#87). */
+function deleteReplayKey(runId: string): string {
+  return JSON.stringify(["delete", runId]);
 }
 
 function operationNotFound(operationId: string): Problem {

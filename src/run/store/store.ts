@@ -471,6 +471,10 @@ function readRunStore(dir: string): RunRecord | typeof DAMAGED | undefined {
   let database: Database | undefined;
   try {
     database = new Database(path);
+    // Wait briefly for a concurrent writer rather than misreading a live Run's
+    // write lock as a damaged store (which would drop it from `run list`), like
+    // every other open in this Module.
+    database.exec("PRAGMA busy_timeout = 5000");
     const row = database
       .query(
         "SELECT run_id, workspace_path, bundle_snapshot_digest, launch, state, " +

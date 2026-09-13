@@ -16,7 +16,17 @@ export type ProjectionSelector =
   | { readonly family: "bundle-catalog"; readonly focus?: BundleFocusSelector }
   // One launched Run by its id. Read-only: launching is an Operation, not a Run
   // Action; durable updates land as each publication commits.
-  | { readonly family: "run"; readonly runId: string };
+  | { readonly family: "run"; readonly runId: string }
+  // The Workspace's Previous Runs (#87): a bounded, newest-first page whose rows
+  // carry only the Bundle name, Run id, and latest durable-activity time, each
+  // grouped Today / Yesterday / Older. `resumable` narrows to halted+failed;
+  // `before` is a stable cursor requesting the next older page. Read-only: Run
+  // state and actions live only on the exact `run` Projection.
+  | {
+      readonly family: "run-list";
+      readonly resumable?: boolean;
+      readonly before?: string;
+    };
 
 /** Selects one Installed Bundle to inspect. An omitted version selects the
  *  highest stable installed version; a prerelease must be named (#9, #49). */
@@ -31,7 +41,9 @@ export type Submission =
   | ApproveWorkspaceSubmission
   | LaunchRunSubmission
   | ResumeRunSubmission
-  | AnswerHumanGateSubmission;
+  | AnswerHumanGateSubmission
+  | CancelRunSubmission
+  | DeleteRunSubmission;
 
 export interface ApproveWorkspaceSubmission {
   readonly operationId: string;
@@ -91,6 +103,26 @@ export interface AnswerHumanGateInput {
   readonly answer: "continue" | "stop";
 }
 
+/** Cancel a live Run (#87): end it `cancelled` — the only route to that terminal
+ *  state — stopping execution and keeping its history and Artifacts. Offered on
+ *  the `run` Projection only while the Run is live; on a resting or terminal Run
+ *  it yields a Problem. Idempotent per operation id. */
+export interface CancelRunSubmission {
+  readonly operationId: string;
+  readonly operation: "cancel-run";
+  readonly input: { readonly runId: string };
+}
+
+/** Delete a resting or terminal Run (#87): remove its store from disk through the
+ *  admitted delete with quarantine (idempotent per operation id). Offered on the
+ *  `run` Projection only while the Run is not live; on a live Run it yields a
+ *  Problem. */
+export interface DeleteRunSubmission {
+  readonly operationId: string;
+  readonly operation: "delete-run";
+  readonly input: { readonly runId: string };
+}
+
 /** `submit` settles only as admitted (with the operation id, and the created Run
  *  id for a launch) or not-admitted. */
 export type SubmissionAdmission =
@@ -123,7 +155,8 @@ export type ProjectionSnapshot =
   | OperationSnapshot
   | BundleCatalogSnapshot
   | BundleFocusSnapshot
-  | RunSnapshot;
+  | RunSnapshot
+  | RunListSnapshot;
 
 /** The one launch Workspace: its canonical path and approval state. */
 export interface WorkspaceSnapshot {
@@ -453,9 +486,56 @@ export type RunResult =
   | { readonly found: true; readonly run: RunView }
   | { readonly found: false; readonly problem: Problem };
 
+// --- run-list family -------------------------------------------------------
+//
+// The Workspace's Previous Runs (#87): a bounded, newest-first page of the Runs
+// launched against this Workspace, joined from the Run Store's registrations and
+// each Run's canonical record. Rows carry only the Bundle human name, Run id, and
+// latest durable-activity time — Run state and actions live only on the exact
+// `run` Projection. Runs from another Workspace never appear (each Workspace has
+// its own Run group).
+
+/** Which day bucket a row falls in, relative to the snapshot's `now`. */
+export type RunListGroup = "today" | "yesterday" | "older";
+
+/** The filter the list was read under: every Run, or only the resumable
+ *  (`halted` and `failed`) ones. */
+export type RunListFilter = "all" | "resumable";
+
+/** One Previous-Runs row. Carries only identity, the Bundle's human name, the
+ *  latest durable-activity time, and its day group — no Run state (#87). */
+export interface RunListRow {
+  readonly runId: string;
+  readonly bundleName: string;
+  /** ISO 8601 durable-activity time the list orders and groups by. M2 populates
+   *  it with the Run's launch time; a per-Attempt "last touched" needs a Store
+   *  timestamp the record does not yet carry (see run-list.ts). */
+  readonly activityAt: string;
+  readonly group: RunListGroup;
+}
+
+/** A bounded page of Previous Runs, newest first. `nextCursor` requests the next
+ *  older page (absent on the final page); `beginningOfHistory` marks that final
+ *  page; `empty` marks an informational empty snapshot (no Runs match). */
+export interface RunListSnapshot {
+  readonly family: "run-list";
+  readonly filter: RunListFilter;
+  readonly rows: readonly RunListRow[];
+  /** A stable cursor for the next older page; absent when this is the final page. */
+  readonly nextCursor?: string;
+  /** True on the final page: there is no older history beyond these rows. */
+  readonly beginningOfHistory: boolean;
+  /** True when no Run matches the filter: an informational empty snapshot. */
+  readonly empty: boolean;
+}
+
 /** A typed opportunity bound to an exact target. The closed set grows one
  *  variant per slice; each offer names the consequence of taking it. */
-export type ActionOffer = ApproveWorkspaceOffer | AnswerHumanGateOffer;
+export type ActionOffer =
+  | ApproveWorkspaceOffer
+  | AnswerHumanGateOffer
+  | CancelRunOffer
+  | DeleteRunOffer;
 
 /** Approve the launch Workspace (M1). Offered while it is unapproved. */
 export interface ApproveWorkspaceOffer {
@@ -473,6 +553,22 @@ export interface AnswerHumanGateOffer {
   readonly continueConsequence: string;
   /** What `stop` does: ends the Run `failed`, keeping history and Artifacts. */
   readonly stopConsequence: string;
+}
+
+/** Cancel a live Run (#87). Offered on the `run` Projection only while the Run is
+ *  live; it names the consequence so a client presents it without re-deriving. */
+export interface CancelRunOffer {
+  readonly action: "cancel-run";
+  readonly runId: string;
+  readonly consequence: string;
+}
+
+/** Delete a resting or terminal Run (#87). Offered on the `run` Projection only
+ *  while the Run is not live; it names the consequence of taking it. */
+export interface DeleteRunOffer {
+  readonly action: "delete-run";
+  readonly runId: string;
+  readonly consequence: string;
 }
 
 export type ProjectionUpdate<
@@ -558,6 +654,11 @@ export interface ProjectionPort {
     readonly family: "run";
     readonly runId: string;
   }): OpenedProjection<RunSnapshot>;
+  openProjection(selector: {
+    readonly family: "run-list";
+    readonly resumable?: boolean;
+    readonly before?: string;
+  }): OpenedProjection<RunListSnapshot>;
   openProjection(selector: ProjectionSelector): OpenedProjection;
   submit(submission: Submission): SubmissionAdmission;
   readResource(

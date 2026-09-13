@@ -615,6 +615,71 @@ try {
     }
   }
 
+  // List, delete, and refuse-cancel Previous Runs from the compiled binary on each
+  // gated OS (issue #87, AC6). The materialize and answer scenarios above left two
+  // resting Runs in this Workspace's group; list them, delete one, and confirm a
+  // resting Run cannot be cancelled.
+  {
+    const listed = JSON.parse(
+      run(binary, ["run", "list", "--json"], {
+        cwd: workspaceDirectory,
+        env: workspaceEnv,
+      }),
+    );
+    if (!Array.isArray(listed.rows) || listed.rows.length < 2) {
+      throw new Error(
+        `run list --json did not carry the earlier Runs: ${JSON.stringify(listed)}`,
+      );
+    }
+    // Each row is grouped into a valid day bucket (not asserting "today", which is
+    // local-midnight sensitive between the Runs' creation and this list).
+    if (
+      listed.rows.some(
+        (row) => !["today", "yesterday", "older"].includes(row.group),
+      )
+    ) {
+      throw new Error(
+        `run list --json produced an invalid day group: ${JSON.stringify(listed)}`,
+      );
+    }
+    const [victim, survivor] = listed.rows;
+
+    const deleted = run(binary, ["run", "delete", victim.runId], {
+      cwd: workspaceDirectory,
+      env: workspaceEnv,
+    });
+    if (!deleted.includes(`Deleted run ${victim.runId}`)) {
+      throw new Error(`run delete did not confirm the removal: ${deleted}`);
+    }
+    const afterDelete = JSON.parse(
+      run(binary, ["run", "list", "--json"], {
+        cwd: workspaceDirectory,
+        env: workspaceEnv,
+      }),
+    );
+    if (afterDelete.rows.some((row) => row.runId === victim.runId)) {
+      throw new Error(
+        `The deleted Run still appears in run list: ${JSON.stringify(afterDelete)}`,
+      );
+    }
+
+    // A resting Run cannot be cancelled: exits non-zero with the precise Problem.
+    const cancel = spawnSync(binary, ["run", "cancel", survivor.runId], {
+      cwd: workspaceDirectory,
+      encoding: "utf8",
+      env: workspaceEnv,
+    });
+    if (cancel.error) throw cancel.error;
+    if (
+      cancel.status === 0 ||
+      !`${cancel.stdout}${cancel.stderr}`.includes("run-not-live")
+    ) {
+      throw new Error(
+        `Cancelling a resting Run was not refused: ${cancel.stdout}${cancel.stderr}`,
+      );
+    }
+  }
+
   // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
   // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
   // startup Problem and a non-zero exit before the renderer is created.

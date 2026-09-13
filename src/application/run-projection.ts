@@ -103,6 +103,11 @@ function runResult(
   if ("problem" in derived) return { found: false, problem: derived.problem };
   const facts = derived.facts;
   const trackedState = context.state ?? record.state;
+  // Legality of cancel/delete is decided here, inside Secant (#87): a Run that
+  // holds the live Workspace claim can be cancelled; one that does not (resting,
+  // blocked, or terminal) can be deleted. Read from the coordination record, which
+  // is the same whether the Run is live in this process or another.
+  const isLive = isLiveElsewhere(deps.runGroup, runId);
   const view = (
     owner: RunOwner | undefined,
     log: readonly AttemptLogEntry[],
@@ -159,12 +164,15 @@ function runResult(
         ...(derivedRun.checkpoint !== undefined
           ? { checkpoint: derivedRun.checkpoint }
           : {}),
-        // The answer-human-gate offer appears only while blocked (#85); it names
-        // the consequence of each answer so a client presents them directly.
-        actionOffers:
-          derivedRun.checkpoint !== undefined
+        // Typed Action Offers, legality decided inside Secant (#85, #87): the
+        // answer-human-gate offer appears only while blocked; cancel is offered
+        // only while live, delete only while not live — mutually exclusive.
+        actionOffers: [
+          ...(derivedRun.checkpoint !== undefined
             ? [answerHumanGateOffer(derivedRun.checkpoint.gate)]
-            : [],
+            : []),
+          isLive ? cancelRunOffer(runId) : deleteRunOffer(runId),
+        ],
         ...(active !== undefined
           ? { conflict: conflictView(runId, active) }
           : {}),
@@ -215,8 +223,9 @@ function conflictView(
   };
 }
 
-/** Whether the coordination record still holds this Run's live Workspace claim —
- *  i.e. some process is executing it — so a reader must not acquire (and fence). */
+/** Whether the coordination record holds this Run's live Workspace claim — some
+ *  process is executing it. A reader must not acquire (and fence) such a Run; it
+ *  is also the legality test for cancel (live) vs delete (not live) (#87). */
 export function isLiveElsewhere(runGroup: RunGroup, runId: string): boolean {
   return runGroup.listRuns().some((run) => run.runId === runId && run.live);
 }
@@ -288,6 +297,26 @@ function answerHumanGateOffer(gate: RunGateReference): ActionOffer {
       "continue: grant one more review interval and resume the Run.",
     stopConsequence:
       "stop: end the Run failed, keeping its history and Artifacts.",
+  };
+}
+
+/** The `cancel-run` offer for a live Run (#87). */
+function cancelRunOffer(runId: string): ActionOffer {
+  return {
+    action: "cancel-run",
+    runId,
+    consequence:
+      "end the live Run cancelled, stopping execution and keeping its history and Artifacts.",
+  };
+}
+
+/** The `delete-run` offer for a resting or terminal Run (#87). */
+function deleteRunOffer(runId: string): ActionOffer {
+  return {
+    action: "delete-run",
+    runId,
+    consequence:
+      "remove the Run and its stored history and Artifacts from disk.",
   };
 }
 

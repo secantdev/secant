@@ -9,7 +9,7 @@ import type {
   Problem,
   ProjectionPort,
 } from "../application/projection-port.js";
-import { renderFocus, renderRow, renderRun } from "./render.js";
+import { renderFocus, renderRow, renderRun, renderRunList } from "./render.js";
 
 // The headless client speaks the Application Interfaces and nothing else: the
 // Projection Port for the Workspace and Bundle-management for `bundle build`.
@@ -286,7 +286,9 @@ function buildProgram(
   // error exiting non-zero. `run launch` executes; `run show`/`run read` observe.
   const run = program
     .command("run")
-    .description("launch, show, read, answer, and resume Runs");
+    .description(
+      "launch, list, show, read, answer, resume, cancel, and delete Runs",
+    );
   run
     .command("launch")
     .description("launch an installed Command-only Bundle")
@@ -443,6 +445,84 @@ function buildProgram(
       return settle(
         execute((clients) =>
           readRun(clients.projectionPort, io, json, reference),
+        ),
+      );
+    });
+  run
+    .command("list")
+    .description("list this Workspace's Previous Runs, newest first")
+    .option("--resumable", "show only resumable (halted or failed) Runs")
+    .option("--before <cursor>", "page to the next older Runs from this cursor")
+    .option("--json", "print the Projection snapshot as JSON")
+    .action(
+      (options: { resumable?: boolean; before?: string; json?: boolean }) =>
+        settle(
+          execute((clients) =>
+            listRuns(
+              clients.projectionPort,
+              io,
+              options.json ?? false,
+              options.resumable ?? false,
+              options.before,
+            ),
+          ),
+        ),
+    );
+  run
+    .command("cancel")
+    .description("cancel a live Run, ending it cancelled")
+    .argument("[run-id]", "the Run id printed at launch")
+    .option("--json", "print the Operation result as JSON")
+    .action((runId: string | undefined, options: { json?: boolean }) => {
+      const json = options.json ?? false;
+      if (runId === undefined) {
+        return settle(
+          fail(io, json, {
+            code: "missing-run-id",
+            explanation: "run cancel needs a Run id.",
+            remediation: "Run `secant run cancel <run-id>`.",
+            possibleEffects: "none",
+          }),
+        );
+      }
+      return settle(
+        execute((clients) =>
+          endRunOperation(
+            clients.projectionPort,
+            io,
+            json,
+            "cancel-run",
+            runId,
+          ),
+        ),
+      );
+    });
+  run
+    .command("delete")
+    .description("delete a resting or terminal Run's store from disk")
+    .argument("[run-id]", "the Run id printed at launch")
+    .option("--json", "print the Operation result as JSON")
+    .action((runId: string | undefined, options: { json?: boolean }) => {
+      const json = options.json ?? false;
+      if (runId === undefined) {
+        return settle(
+          fail(io, json, {
+            code: "missing-run-id",
+            explanation: "run delete needs a Run id.",
+            remediation: "Run `secant run delete <run-id>`.",
+            possibleEffects: "none",
+          }),
+        );
+      }
+      return settle(
+        execute((clients) =>
+          endRunOperation(
+            clients.projectionPort,
+            io,
+            json,
+            "delete-run",
+            runId,
+          ),
         ),
       );
     });
@@ -899,6 +979,71 @@ function readRun(
   }
   io.out(read.content.endsWith("\n") ? read.content : `${read.content}\n`);
   return 0;
+}
+
+function listRuns(
+  port: ProjectionPort,
+  io: HeadlessIO,
+  json: boolean,
+  resumable: boolean,
+  before: string | undefined,
+): number {
+  const opened = port.openProjection({
+    family: "run-list",
+    ...(resumable ? { resumable: true } : {}),
+    ...(before !== undefined ? { before } : {}),
+  });
+  try {
+    const snapshot = opened.snapshot;
+    if (json) {
+      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return 0;
+    }
+    io.out(renderRunList(snapshot));
+    return 0;
+  } finally {
+    opened.close();
+  }
+}
+
+/** Submit a cancel-run/delete-run Operation and report its settled outcome. Both
+ *  settle inline (headless default), so the Operation is already applied here. */
+function endRunOperation(
+  port: ProjectionPort,
+  io: HeadlessIO,
+  json: boolean,
+  operation: "cancel-run" | "delete-run",
+  runId: string,
+): number {
+  const admission = port.submit({
+    operationId: randomUUID(),
+    operation,
+    input: { runId },
+  });
+  if (!admission.admitted) return fail(io, json, admission.problem);
+
+  const opened = port.openProjection({
+    family: "operation",
+    operationId: admission.operationId,
+  });
+  try {
+    const outcome = opened.snapshot.outcome;
+    if (json) {
+      io.out(`${JSON.stringify(opened.snapshot, null, 2)}\n`);
+      return outcome.status === "applied" ? 0 : 1;
+    }
+    if (outcome.status === "not-applied") {
+      return fail(io, false, outcome.problem);
+    }
+    io.out(
+      operation === "cancel-run"
+        ? `Cancelled run ${runId}\n`
+        : `Deleted run ${runId}\n`,
+    );
+    return 0;
+  } finally {
+    opened.close();
+  }
 }
 
 function report(io: HeadlessIO, json: boolean, result: BundleResult): number {

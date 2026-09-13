@@ -359,7 +359,9 @@ function buildProgram(
     });
   run
     .command("resume")
-    .description("resume a halted Run after restoring its Workspace file")
+    .description(
+      "resume a halted or failed Run, running it until it rests again",
+    )
     .argument("[run-id]", "the Run id printed at launch")
     .option("--json", "print the Run snapshot as JSON")
     .action((runId: string | undefined, options: { json?: boolean }) => {

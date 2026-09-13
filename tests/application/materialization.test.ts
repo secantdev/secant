@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
@@ -34,12 +34,14 @@ const runExecution: RunExecution = ({ routing, owner }) =>
 interface Fixture {
   readonly app: Application;
   readonly catalog: Catalog;
+  readonly catalogHome: string;
   readonly runGroup: RunGroup;
   readonly workspace: string;
 }
 
 function fixture(t: TestContext): Fixture {
-  const catalog = openCatalog(makeTempDir("secant-mat-home-"));
+  const catalogHome = makeTempDir("secant-mat-home-");
+  const catalog = openCatalog(catalogHome);
   t.after(() => catalog.close());
   const workspace = realpathSync.native(makeTempDir("secant-mat-ws-"));
   const runGroup = openRunGroup(makeTempDir("secant-mat-store-"), workspace);
@@ -51,7 +53,7 @@ function fixture(t: TestContext): Fixture {
     runGroup,
     runExecution,
   });
-  return { app, catalog, runGroup, workspace };
+  return { app, catalog, catalogHome, runGroup, workspace };
 }
 
 function installMaterializationBundle(
@@ -180,5 +182,79 @@ test("resume of a Run that is not halted is refused", (t) => {
     input: { runId },
   });
   assert.ok(!admission.admitted);
-  assert.equal(admission.problem.code, "run-not-halted");
+  assert.equal(admission.problem.code, "run-not-resumable");
+});
+
+test("resume of a live (running) Run is refused, not thrown (#86)", (t) => {
+  const f = fixture(t);
+  // A record left `running` (a live Run, here or elsewhere) is not resumable:
+  // resuming would fence the process driving it.
+  const created = f.runGroup.createRun({
+    operationId: "live-1",
+    bundleSnapshotDigest: "sha256:deadbeef",
+    launch: {},
+    at: new Date(),
+  });
+  assert.ok(created.outcome === "created");
+  const owner = f.runGroup.acquireRun(created.runId);
+  assert.ok(owner);
+  assert.deepEqual(owner.writeState("running"), { ok: true });
+  owner.close();
+
+  const admission = f.app.projectionPort.submit({
+    operationId: "resume-live",
+    operation: "resume-run",
+    input: { runId: created.runId },
+  });
+  assert.ok(!admission.admitted);
+  assert.equal(admission.problem.code, "run-not-resumable");
+});
+
+test("resume is idempotent per operation id (#86, AC3)", (t) => {
+  const f = fixture(t);
+  const { id, digest } = installMaterializationBundle(f, "modify");
+  const runId = launch(f, id, digest);
+  assert.equal(runView(f, runId).state, "halted");
+  // Restore the tampered Workspace copy so the resume can complete.
+  writeFileSync(join(f.workspace, "out", "x.txt"), "materialized-content");
+
+  const first = f.app.projectionPort.submit({
+    operationId: "resume-idem",
+    operation: "resume-run",
+    input: { runId },
+  });
+  assert.ok(first.admitted);
+  assert.equal(runView(f, runId).state, "succeeded");
+
+  // A second submit with the same operation id replays: same Run, no re-execution.
+  const second = f.app.projectionPort.submit({
+    operationId: "resume-idem",
+    operation: "resume-run",
+    input: { runId },
+  });
+  assert.ok(second.admitted);
+  assert.equal(second.runId, first.runId);
+  assert.equal(runView(f, runId).state, "succeeded");
+});
+
+test("resume after the pinned digest is no longer installed names the reinstall (#86, AC3)", (t) => {
+  const f = fixture(t);
+  const { id, digest } = installMaterializationBundle(f, "modify");
+  const runId = launch(f, id, digest);
+  assert.equal(runView(f, runId).state, "halted");
+  writeFileSync(join(f.workspace, "out", "x.txt"), "materialized-content");
+
+  // Replace the pinned install: remove the exact managed bytes the Run pinned.
+  rmSync(join(f.catalogHome, "bundles", `${digest}.wfb`));
+
+  const admission = f.app.projectionPort.submit({
+    operationId: "resume-replaced",
+    operation: "resume-run",
+    input: { runId },
+  });
+  assert.ok(!admission.admitted);
+  assert.equal(admission.problem.code, "bundle-bytes-missing");
+  assert.match(admission.problem.remediation, /[Rr]einstall/);
+  // Refused before authorizing work: the Run stays halted.
+  assert.equal(runView(f, runId).state, "halted");
 });

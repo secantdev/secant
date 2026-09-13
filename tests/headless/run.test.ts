@@ -521,6 +521,55 @@ test("two invocations: block under one instance, continue under a fresh instance
   assert.match(b.text(), /^State: succeeded$/m);
 });
 
+test("run resume of a Run rested failed by a checkpoint stop resets bounds and blocks after another full interval (#86, AC2)", async (t) => {
+  const h = await harness(t);
+  const runId = launchBlocked(h, { interval: 2 }); // always fails
+
+  // Stop at the checkpoint: the Run rests failed.
+  assert.equal(
+    runHeadless(h.clients, ["run", "answer", runId, "--stop"], h.io),
+    1,
+  );
+  assert.match(h.stdout(), /^State: failed$/m);
+  h.reset();
+
+  // Resume the failed Run: its Iteration bounds reset, so it runs another full
+  // interval and blocks again (non-zero exit), rather than staying failed.
+  assert.equal(runHeadless(h.clients, ["run", "resume", runId], h.io), 1);
+  assert.match(h.stdout(), /^State: blocked$/m);
+  h.reset();
+
+  runHeadless(h.clients, ["run", "show", runId, "--json"], h.io);
+  const after = parseRun(h.stdout());
+  assert.equal(after.state, "blocked");
+  // A full fresh interval ran since the grant, not zero and not a partial count.
+  assert.equal(after.checkpoint?.completedIterations, 2);
+});
+
+test("run show offers the resume action only while resting failed or halted (#86)", async (t) => {
+  const h = await harness(t);
+  const runId = launchBlocked(h, { interval: 2 });
+  runHeadless(h.clients, ["run", "answer", runId, "--stop"], h.io); // rest failed
+  h.reset();
+
+  runHeadless(h.clients, ["run", "show", runId], h.io);
+  const failed = h.stdout();
+  assert.match(failed, /^State: failed$/m);
+  assert.match(failed, /Resume:/);
+  assert.match(failed, /secant run resume .*grant another try/);
+  h.reset();
+
+  // A succeeded Run offers no resume.
+  const { id, digest } = h.install();
+  h.approve();
+  runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io);
+  const doneId = /^Run (\S+)$/m.exec(h.stdout())![1]!;
+  h.reset();
+  runHeadless(h.clients, ["run", "show", doneId], h.io);
+  assert.match(h.stdout(), /^State: succeeded$/m);
+  assert.doesNotMatch(h.stdout(), /Resume:/);
+});
+
 /** Parse a `run show --json` snapshot's run view (blocked-run shape). */
 function parseRun(json: string): {
   state: string;

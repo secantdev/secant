@@ -20,6 +20,13 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   that transaction publishes — so a fault between the commit and the transaction leaves no binding moved, and republishing the same attempt id is a no-op.
 - Git mechanics shell out to the `git` executable (no library); `artifacts.git` is created lazily on first publication, and an absent `git` is a precise
   `git-unavailable` Problem, not a throw. Bindings/attempt reads validate their row at the read ingress like the coordination reads (D7).
+- Startup reconciliation (#86): a live Workspace claim found at open is stale (a clean exit releases it via `endRun`), so its Run is rested `halted` with one
+  appended `indeterminate` attempt-log marker and the claim released — running no Step work. The claim, not the stored state, distinguishes a killed Run from a
+  derived-`blocked` Run (also stored `running` but with its claim released). The marker is log-only (not an `attempt` row), so the resume skip cursor (succeeded
+  attempts) is unchanged and the interrupted Step re-runs. Assumes one process per home; a PID/lock probe on the claim would be needed for concurrent processes.
+- Reconciliation's one accepted micro-window: reaching a derived-`blocked` rest and releasing the claim is not atomic (execution returns `blocked`, then the
+  caller's `finally` runs `endRun`), so a kill in that synchronous gap leaves the Run `running` with a live claim and reconciliation mislabels it `halted` — a
+  resume then runs a fresh interval instead of an answer. Narrow, no data loss, same class as the create rename/commit window; persist a rested marker if it bites.
 - A Human Gate answer (#85) is a bound Artifact recorded through `recordGateAnswer` — a publication-shaped write (stage a commit, then one transaction moves the
   binding and appends the `gate_answer` row) that deliberately skips `attempt_log`, so `blocked` stays derived and iterations still count off the log. Idempotent
   per `operation_id` (a UNIQUE column); its `iterations_at_grant` is the offset the derived "iterations since the last grant" count resets from.

@@ -164,12 +164,16 @@ function runResult(
         ...(derivedRun.checkpoint !== undefined
           ? { checkpoint: derivedRun.checkpoint }
           : {}),
-        // Typed Action Offers, legality decided inside Secant (#85, #87): the
-        // answer-human-gate offer appears only while blocked; cancel is offered
-        // only while live, delete only while not live — mutually exclusive.
+        // Typed Action Offers, legality decided inside Secant (#85, #86, #87): the
+        // answer-human-gate offer appears only while blocked; resume-run only while
+        // resting halted or failed; cancel is offered only while live, delete only
+        // while not live (mutually exclusive).
         actionOffers: [
           ...(derivedRun.checkpoint !== undefined
             ? [answerHumanGateOffer(derivedRun.checkpoint.gate)]
+            : []),
+          ...(derivedRun.state === "halted" || derivedRun.state === "failed"
+            ? [resumeRunOffer(runId, derivedRun.state)]
             : []),
           isLive ? cancelRunOffer(runId) : deleteRunOffer(runId),
         ],
@@ -285,6 +289,19 @@ function collectOutputs(
     });
   }
   return outputs;
+}
+
+/** The `resume-run` offer for a resting Run: names what resume does from the
+ *  current state so a client presents it without re-deriving the model (#86). */
+function resumeRunOffer(runId: string, state: string): ActionOffer {
+  return {
+    action: "resume-run",
+    runId,
+    consequence:
+      state === "failed"
+        ? "resume: reset this Step's attempt and iteration bounds and grant another try."
+        : "resume: continue from the Step the Run stopped at.",
+  };
 }
 
 /** The `answer-human-gate` offer for a blocked Run: names the consequence of each

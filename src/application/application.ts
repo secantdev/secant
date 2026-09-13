@@ -719,10 +719,58 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { admitted: true, operationId, runId };
   }
 
-  // Resume a Run resting `halted`: re-derive its facts from the pinned bytes (a
-  // fresh `run resume` process holds no in-memory tracking), re-claim the
-  // Workspace (ADR 0023), then drive it further through the same execution — which
-  // skips the completed Steps and re-verifies the one that halted.
+  // The Run-precondition re-check a resume runs before authorizing more work: the
+  // exact pinned digest must still be installed, its bytes must still validate and
+  // compose, the Bundle must still Preflight for this Workspace, and Trust must
+  // still hold (ADR 0021, #86). A removed or replaced install surfaces as a
+  // reinstall Problem, so a resume never runs a Bundle that could not be launched
+  // fresh. Returns the manifest (its facts drive the resumed Run) or a Problem.
+  function resumePreconditions(
+    digest: string,
+    launchInputs: Readonly<Record<string, string>>,
+  ): { manifest: AuthoredManifest } | { problem: Problem } {
+    const entry = catalog.listEntries().find((e) => e.digest === digest);
+    if (entry === undefined) {
+      // The exact digest is no longer installed (uninstalled, or replaced by a
+      // different install): its bytes cannot be trusted to be the pinned Snapshot.
+      return { problem: bundleBytesMissingForRun(digest) };
+    }
+    const bytes = catalog.readManagedBytes(digest);
+    if (bytes === undefined) {
+      return { problem: bundleBytesMissingForRun(digest) };
+    }
+    const inspected = inspectBundle(bytes, budgets, true);
+    if (!inspected.ok) {
+      return {
+        problem: bundleBytesCorruptForRun(digest, inspected.finding.code),
+      };
+    }
+    const manifest = inspected.inspection.manifest;
+    const pre = preflight({
+      manifest,
+      composition: inspected.inspection.composition,
+      workspacePath: launchWorkspacePath,
+      launchInputs,
+      hostPlatform: deps.hostPlatform,
+      digest,
+    });
+    if ("problem" in pre) return { problem: pre.problem };
+    const grant = catalog.getTrustGrant(digest, entry.installationGeneration);
+    if (grant === undefined) {
+      return {
+        problem: bundleTrustRequired(manifest, digest, deps.hostPlatform),
+      };
+    }
+    return { manifest };
+  }
+
+  // Resume a Run resting `halted` or `failed` (ADR 0019): re-verify the pinned
+  // Snapshot is still installed and runnable, re-claim the Workspace (ADR 0023),
+  // then drive it further through the same execution — which skips the completed
+  // Steps and re-runs from where it rested. A `failed` Run's declared attempt and
+  // Iteration bounds reset naturally: the failed Step's Attempts never settled
+  // `succeeded` (so it re-runs with a fresh retry budget), and a checkpoint stop
+  // recorded the grant offset the Repeat loop restarts its interval from (#85).
   function submitResume(
     operationId: string,
     input: ResumeRunInput,
@@ -756,20 +804,26 @@ export function createApplication(deps: ApplicationDependencies): Application {
       };
     }
     const record = read.run;
-    // Resume applies only to a Run resting `halted` on a conflict. A `running`
-    // record means the Run is live (here or elsewhere); resuming it would fence
-    // the process driving it. A `succeeded`/`failed` Run is already at rest.
-    if (record.state !== "halted") {
+    // Resume applies only to a Run resting `halted` or `failed` (ADR 0019). A
+    // `running` record means the Run is live (here or elsewhere); resuming it would
+    // fence the process driving it. A `succeeded`/`cancelled` Run is terminal.
+    if (record.state !== "halted" && record.state !== "failed") {
       return {
         admitted: false,
-        problem: runNotHalted(input.runId, record.state),
+        problem: runNotResumable(input.runId, record.state),
       };
     }
-    const derived = deriveRunFacts(runProjection, record.bundleSnapshotDigest);
-    if ("problem" in derived) {
-      return { admitted: false, problem: derived.problem };
+    // Re-check Trust, Preflight, and that the exact pinned digest is still
+    // installed before authorizing more work (#86); a removed or replaced install
+    // is refused with a reinstall Problem, not resumed.
+    const runnable = resumePreconditions(
+      record.bundleSnapshotDigest,
+      (record.launch ?? {}) as Readonly<Record<string, string>>,
+    );
+    if ("problem" in runnable) {
+      return { admitted: false, problem: runnable.problem };
     }
-    const facts = derived.facts;
+    const manifest = runnable.manifest;
     // Re-claim the Workspace before authorizing more work; a different live Run
     // refuses, leaving this Run untouched.
     const claim = runGroup.resumeRun(input.runId);
@@ -781,10 +835,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
     }
     runs.set(input.runId, {
       digest: record.bundleSnapshotDigest,
-      routing: facts.routing,
-      name: facts.name,
-      id: facts.id,
-      version: facts.version,
+      routing: manifest.routing,
+      name: manifest.bundle.name,
+      id: manifest.bundle.id,
+      version: manifest.bundle.version,
       state: record.state,
       done: false,
       observers: new Set<UpdateStream>(),
@@ -912,14 +966,14 @@ export function createApplication(deps: ApplicationDependencies): Application {
       // Idempotent across process death: an answer already recorded for this
       // operation id settles `applied` without re-validating the (now-moved) Gate
       // or re-driving execution.
-      // ponytail: process death after recording a `continue` but before the
-      // granted interval reaches its next rest leaves the Run stored `running`
-      // with the grant recorded — so it derives neither `blocked` (the grant
-      // resets the count below the interval) nor `halted`, and no CLI path
-      // re-drives it. This is the same class as a crash mid-launch-execution
-      // (which also leaves a Run `running` with no re-drive) and is out of M2
-      // scope; the fix is a persisted grant-pending marker that `run resume`
-      // (or a re-answer) honors — add it with crash-recovery for `running` Runs.
+      // Process death after recording a `continue` but before the granted interval
+      // reaches its next rest leaves the Run stored `running` with a live claim, so
+      // startup reconciliation (#86) rests it `halted` on the next open and
+      // `run resume` re-drives it — one interval of already-run iterations is
+      // dropped whole-span, so the grant is honored, not double-counted.
+      // ponytail: that recovers the interrupted grant but reports it as a `halted`
+      // resume rather than a `blocked` re-answer; a persisted grant-pending marker
+      // would let it re-derive `blocked` instead — add it if the distinction matters.
       const already = owner
         .gateAnswers()
         .some((answer) => answer.operationId === operationId);
@@ -1375,12 +1429,12 @@ function runNotFound(runId: string): Problem {
   };
 }
 
-function runNotHalted(runId: string, state: string): Problem {
+function runNotResumable(runId: string, state: string): Problem {
   return {
-    code: "run-not-halted",
-    explanation: `Run ${runId} is ${state}, not halted; only a halted Run can be resumed.`,
+    code: "run-not-resumable",
+    explanation: `Run ${runId} is ${state}; only a halted or failed Run can be resumed.`,
     remediation:
-      "Resume applies to a Run halted on a Materialization conflict; open the Run to see its state.",
+      "Resume applies to a Run resting halted or failed; open the Run to see its state.",
     possibleEffects: "none",
     details: { runId, state },
   };

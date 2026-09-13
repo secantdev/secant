@@ -357,6 +357,63 @@ test("a corrupt run.db reports a Problem for that Run while siblings stay readab
   assert.equal(sibling.run.runId, a.runId);
 });
 
+test("startup reconciles a stale-claimed running Run to halted with an indeterminate Attempt (#86)", (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  assert.deepEqual(owner.writeState("running"), { ok: true }); // a live Run mid-flight
+  owner.close();
+  // The launch process dies without ending the Run: the claim stays live and the
+  // record stays `running`, exactly as a killed process leaves them.
+  group.close();
+
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  const read = reopened.readRun(created.runId);
+  assert.ok(read.ok);
+  assert.equal(read.run.state, "halted");
+  // The interrupted Attempt is recorded indeterminate — nothing succeeded was
+  // fabricated, so a resume re-runs from the interrupted Step.
+  const owner2 = reopened.acquireRun(created.runId);
+  assert.ok(owner2);
+  t.after(() => owner2.close());
+  const log = owner2.attemptLog();
+  assert.equal(log.at(-1)?.outcome, "indeterminate");
+  // The stale claim was released: the Workspace is free again.
+  assert.equal(
+    reopened.listRuns().find((run) => run.runId === created.runId)?.live,
+    false,
+  );
+});
+
+test("startup leaves a Run whose claim was cleanly released untouched (#86)", (t) => {
+  // A derived-`blocked` Run is stored `running` but has released its claim, so it
+  // must not be reconciled: the claim, not the stored state, marks a killed Run.
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  assert.deepEqual(owner.writeState("running"), { ok: true });
+  owner.close();
+  group.endRun(created.runId); // a clean rest releases the claim
+  group.close();
+
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  const read = reopened.readRun(created.runId);
+  assert.ok(read.ok);
+  assert.equal(read.run.state, "running"); // untouched: no indeterminate, no halt
+  const owner2 = reopened.acquireRun(created.runId);
+  assert.ok(owner2);
+  t.after(() => owner2.close());
+  assert.equal(owner2.attemptLog().length, 0);
+});
+
 test("canonical truth survives reopening the same home", async (t) => {
   const home = makeTempDir("secant-store-");
   const first = openRunGroup(home, WORKSPACE);

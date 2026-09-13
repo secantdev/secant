@@ -492,6 +492,53 @@ function readRunStore(dir: string): RunRecord | typeof DAMAGED | undefined {
   }
 }
 
+/**
+ * Reconcile a Run whose canonical record is still `running`/`created` — a state
+ * only a process actively driving the Run leaves behind — by resting it `halted`
+ * with the interrupted Attempt marked `indeterminate` (ADR 0019, ADR 0023, #86).
+ * Returns true when it reconciled, so the caller releases the now-stale claim;
+ * false when the Run was already at rest or its store is unreadable. Runs no Step
+ * work and holds no handle on return.
+ */
+function reconcileRunStore(dir: string, at: Date): boolean {
+  const path = join(dir, "run.db");
+  if (!existsSync(path)) return false;
+  let database: Database | undefined;
+  try {
+    database = new Database(path);
+    database.exec("PRAGMA busy_timeout = 5000");
+    const row = database
+      .query("SELECT run_id, state FROM run_record LIMIT 1")
+      .get() as { run_id: string; state: string } | null;
+    if (row == null || (row.state !== "running" && row.state !== "created")) {
+      return false;
+    }
+    const isoAt = at.toISOString();
+    // Append the indeterminate marker and rest `halted` together, so recovery is
+    // atomic: a crash mid-reconcile leaves the Run still `running` to reconcile
+    // again, never half-reconciled. The marker is recovery evidence appended to
+    // the log (ADR 0023), not a settled `attempt` row — so the resume skip cursor
+    // (succeeded Attempts) is unchanged and the interrupted Step re-runs.
+    const reconcile = database.transaction(() => {
+      database!
+        .query(
+          "INSERT INTO attempt_log (attempt_id, outcome, at) VALUES (?, ?, ?)",
+        )
+        .run(randomUUID(), "indeterminate", isoAt);
+      database!
+        .query("UPDATE run_record SET state = 'halted' WHERE run_id = ?")
+        .run(row.run_id);
+    });
+    reconcile();
+    return true;
+  } catch {
+    // A damaged run.db is left untouched; readRun surfaces it as a Problem later.
+    return false;
+  } finally {
+    database?.close();
+  }
+}
+
 /** The Run directories in a group, excluding the coordination DB and quarantines. */
 function runDirNames(groupDir: string): string[] {
   return readdirSync(groupDir, { withFileTypes: true })
@@ -749,6 +796,27 @@ export function openRunGroup(
     const deletingDir = join(groupDir, `${runId}.deleting`);
     renameSync(finalDir, deletingDir);
     rmSync(deletingDir, { recursive: true, force: true });
+  }
+
+  // Startup reconciliation (ADR 0023, #86): a live Workspace claim found at open
+  // is stale — a clean exit releases it via endRun, so its owner died mid-Run
+  // (Ctrl+C, a termination signal, a crash). A rested Run (succeeded, failed,
+  // halted, or a derived-`blocked` Run stored `running`) has already released its
+  // claim, so the claim — not the stored state — is what distinguishes a killed
+  // Run from a resting one. Rest each stale-claimed Run `halted` with the
+  // interrupted Attempt `indeterminate` and release the claim, running no Step
+  // work, so a reopened home never silently resumes execution (ADR 0019).
+  // ponytail: a live claim on open is taken to mean a dead owner — M2 runs one
+  // Secant process per home per invocation (execution is synchronous; a clean exit
+  // releases the claim). A reader opening a fresh group while another process
+  // legitimately drives a Run would wrongly reconcile it; record the owner PID on
+  // the claim and probe it here before reconciling if concurrent processes on one
+  // home ever matter.
+  for (const row of listRegistrations.all() as Record<string, unknown>[]) {
+    const parsed = registrationRow.safeParse(row);
+    if (!parsed.success || parsed.data.state !== "live") continue;
+    reconcileRunStore(join(groupDir, parsed.data.run_id), new Date());
+    endRun.run(parsed.data.run_id);
   }
 
   return {

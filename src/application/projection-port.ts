@@ -69,9 +69,13 @@ export interface LaunchRunInput {
   readonly trustDigest?: string;
 }
 
-/** Resume a Run resting `halted` on a Materialization conflict, after the user
- *  has restored the Workspace file. Resume acquires fresh ownership and the
- *  Workspace claim (ADR 0023), re-verifies the copy, and continues (#88). */
+/** Resume a Run resting `halted` or `failed` (ADR 0019, #86). Idempotent per
+ *  operation id, offered only on a resting Run. Resume acquires fresh ownership
+ *  and the Workspace claim (ADR 0023), re-checks Trust and Preflight against the
+ *  still-installed pinned digest, and drives the Run to its next rest: a `halted`
+ *  Run continues from the Step it stopped at (e.g. after a Materialization
+ *  conflict is fixed, #88); a `failed` Run resets that Step's attempt and
+ *  Iteration bounds, so the resume is itself the grant of another try. */
 export interface ResumeRunSubmission {
   readonly operationId: string;
   readonly operation: "resume-run";
@@ -534,6 +538,7 @@ export interface RunListSnapshot {
 export type ActionOffer =
   | ApproveWorkspaceOffer
   | AnswerHumanGateOffer
+  | ResumeRunOffer
   | CancelRunOffer
   | DeleteRunOffer;
 
@@ -553,6 +558,15 @@ export interface AnswerHumanGateOffer {
   readonly continueConsequence: string;
   /** What `stop` does: ends the Run `failed`, keeping history and Artifacts. */
   readonly stopConsequence: string;
+}
+
+/** Resume a resting Run (#86). Offered on the `run` Projection only while the Run
+ *  rests `halted` or `failed`; absent while it is live or terminal. */
+export interface ResumeRunOffer {
+  readonly action: "resume-run";
+  readonly runId: string;
+  /** What resume does from the Run's current resting state. */
+  readonly consequence: string;
 }
 
 /** Cancel a live Run (#87). Offered on the `run` Projection only while the Run is

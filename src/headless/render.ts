@@ -143,6 +143,17 @@ export function renderRun(run: RunView): string {
     );
   }
 
+  // The resume-run offer appears only while resting halted or failed (#86); print
+  // the command and what resume does from the Run's current state.
+  for (const offer of run.actionOffers) {
+    if (offer.action !== "resume-run") continue;
+    lines.push(
+      "",
+      "Resume:",
+      `  secant run resume ${run.runId}  # ${offer.consequence}`,
+    );
+  }
+
   // The cancel/delete offers appear only when legal (#87): cancel while live,
   // delete while at rest. Print the command and what it does.
   for (const offer of run.actionOffers) {

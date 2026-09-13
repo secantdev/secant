@@ -1,13 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  flattenSteps,
+  MAX_REVIEW_CHECKPOINT_INTERVAL,
   type AttemptOutcome,
   type CommandInvocation,
   type CommandParams,
   type CommandStep,
   type Platform,
   type Reference,
+  type RepeatGroup,
   type RoutingNode,
   type Step,
   type StepKindName,
@@ -15,11 +16,12 @@ import {
 import type { CandidateOutput, RunOwner } from "../store/store.js";
 
 // The Run execution Module owns the Run lifecycle policy: it walks a Routing
-// step by step, dispatches each Step through a closed executable Step-kind table,
-// retries an Attempt that could not execute within its bound, and rests the Run
-// `succeeded` or `failed`. It imports Workflow (the authored vocabulary and the
-// Routing walk order) and the Run Store (the canonical record every Attempt lands
-// through); the Harness edge stays empty until an agent Step kind lands.
+// node by node, dispatches each Step through a closed executable Step-kind table,
+// retries an Attempt that could not execute within its bound, loops a Repeat
+// group on its Verdict, and rests the Run `succeeded`, `failed`, or `blocked`. It
+// imports Workflow (the authored vocabulary and the Routing walk order) and the
+// Run Store (the canonical record every Attempt lands through); the Harness edge
+// stays empty until an agent Step kind lands.
 //
 // The scheduler learns nothing per Step kind — it looks a kind up in the closed
 // table (#13) and never branches on Bundle identity (id, name, asset path). M2
@@ -30,8 +32,16 @@ import type { CandidateOutput, RunOwner } from "../store/store.js";
 // Command step's exit status is a *value* (exit 0 -> `pass`, non-zero -> `fail`),
 // not the Attempt outcome. The Attempt `succeeded` because the command ran to an
 // exit; it `failed` only when the command could not execute — a missing binary, a
-// spawn error, a timeout. So a `fail` Verdict advances a straight-line Routing,
-// and only a `failed` Attempt consumes the retry budget.
+// spawn error, a timeout. So a `fail` Verdict advances a Routing (and drives a
+// Repeat group to loop), and only a `failed` Attempt consumes the retry budget.
+//
+// A Repeat group (ADR 0020) loops its span of Steps until its named `until`
+// Verdict reads `pass`. The condition is evaluated before every iteration, so an
+// already-`pass` Verdict runs zero iterations. Iterations are bounded separately
+// from retries: on completing the review cadence (the authored interval, clamped
+// to the engine ceiling) without a pass, the Run rests `blocked` at a Review
+// checkpoint. `blocked` is never written — it is derived from the current Step
+// Attempt (the Application re-derives it), so the loop simply stops and returns.
 
 /**
  * How a `{asset}` reference reaches execution without importing Bundle or
@@ -57,12 +67,20 @@ export interface ExecutionDeps {
   readonly now?: () => Date;
 }
 
-/** How a Run came to rest. */
-export type RunOutcome = "succeeded" | "failed";
+/** How a Run came to rest. `blocked` is a durable pause at a Review checkpoint,
+ *  derived (never written) from the current Step Attempt; #85 answers it. */
+export type RunOutcome = "succeeded" | "failed" | "blocked";
 
 export interface RunReport {
   readonly outcome: RunOutcome;
 }
+
+// The outcome of executing one Routing node. `succeeded-rested` means the node's
+// deciding Attempt already advanced the Run to `succeeded` in its own
+// transaction; `succeeded-open` means the node completed but did not rest the Run
+// (it was not the last node, or a group passed with zero iterations); `failed`
+// and `blocked` end the walk.
+type NodeOutcome = "succeeded-rested" | "succeeded-open" | "failed" | "blocked";
 
 // Crucible-owned defaults (ADR 0020: the engine sets the retry budget, a Bundle
 // may override per Step). Retries measure transient flakiness, not problem size.
@@ -112,85 +130,228 @@ export const EXECUTABLE_STEP_KINDS: readonly StepKindName[] = Object.keys(
   STEP_EXECUTORS,
 ) as StepKindName[];
 
+interface WalkContext {
+  readonly step: StepContext;
+  readonly budget: number;
+  readonly now: () => Date;
+}
+
 /**
- * Drive one acquired Run's Routing to rest. Walks the Steps in Routing order,
- * dispatches each through the closed table, retries a `failed` Attempt within its
- * bound, and rests the Run `succeeded` (every Step ran to an exit) or `failed` (a
- * Step's retry budget was exhausted). A fenced owner or a publication Problem is a
- * coordination/environment fault and throws — the caller (composition) owns it.
+ * Drive one acquired Run's Routing to rest. Walks the nodes in Routing order,
+ * dispatching each Step through the closed table, retrying a `failed` Attempt
+ * within its bound, and looping a Repeat group on its `until` Verdict. Rests the
+ * Run `succeeded` (every node ran to completion), `failed` (a Step's retry budget
+ * was exhausted), or `blocked` (a Repeat group reached its review cadence without
+ * a pass). A fenced owner or a publication Problem is a coordination/environment
+ * fault and throws — the caller (composition) owns it.
  */
 export function executeRouting(
   routing: readonly RoutingNode[],
   deps: ExecutionDeps,
 ): RunReport {
-  const now = deps.now ?? (() => new Date());
-  const budget = deps.defaultRetryBudget ?? DEFAULT_RETRY_BUDGET;
-  const context: StepContext = {
-    owner: deps.owner,
-    platform: deps.platform,
-    resolveAsset: deps.resolveAsset,
-    commandTimeoutMs: deps.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+  const context: WalkContext = {
+    step: {
+      owner: deps.owner,
+      platform: deps.platform,
+      resolveAsset: deps.resolveAsset,
+      commandTimeoutMs: deps.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+    },
+    budget: deps.defaultRetryBudget ?? DEFAULT_RETRY_BUDGET,
+    now: deps.now ?? (() => new Date()),
   };
 
   writeStateOrThrow(deps.owner, "running");
 
-  // ponytail: flattenSteps runs a Repeat group's Steps straight-line once — the
-  // loop condition is #84. M2 Routings are command-only and straight-line, so
-  // this is the correct walk order (the same one the Composition check uses).
-  const steps = flattenSteps(routing);
-  // With no Steps the deciding-Attempt path never runs, so rest the Run here.
-  if (steps.length === 0) {
-    writeStateOrThrow(deps.owner, "succeeded");
-    return { outcome: "succeeded" };
-  }
-  for (let index = 0; index < steps.length; index++) {
-    const step = steps[index]!;
-    const executor = STEP_EXECUTORS[step.kind];
-    if (executor === undefined) {
-      throw new Error(
-        `execution: Step kind "${step.kind}" is not dispatchable in M2 ` +
-          "(command-only; Human Gates pause and Repeat groups land later).",
-      );
-    }
-    const isLastStep = index === steps.length - 1;
-    // Clamp a bad budget to zero so a typo (e.g. -1) still runs the Step once
-    // rather than silently skipping it and resting the Run failed with no Attempt.
-    const retries = Math.max(0, step.retry ?? budget);
-    let outcome: AttemptOutcome = "failed";
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      const result = executor(step, context);
-      outcome = result.outcome;
-      // Rest the Run in the same transaction as its deciding Attempt: a success
-      // on the last Step rests `succeeded`; a `failed` Attempt that exhausts the
-      // budget rests `failed`. Advancing separately would leave a crash between
-      // the Attempt commit and the state write stuck at `running`.
-      const rested =
-        result.outcome === "failed" ? attempt === retries : isLastStep;
-      const advanceState = rested
-        ? result.outcome === "failed"
-          ? "failed"
-          : "succeeded"
-        : undefined;
-      publishOrThrow(
-        deps.owner.publishAttempt({
-          attemptId: randomUUID(),
-          outcome: result.outcome,
-          // A failed Attempt moves no binding; a succeeded one publishes exactly
-          // the Step's declared outputs.
-          required: result.outcome === "succeeded" ? (step.produces ?? []) : [],
-          outputs: result.outputs,
-          at: now(),
-          advanceState,
-        }),
-      );
-      // A Verdict (pass or fail) still ran to an exit, so it advances the Run;
-      // only a `failed` Attempt is retried.
-      if (result.outcome !== "failed") break;
-    }
+  const lastIndex = routing.length - 1;
+  let restedSucceeded = false;
+  for (let index = 0; index < routing.length; index++) {
+    const node = routing[index]!;
+    const isLastNode = index === lastIndex;
+    const outcome =
+      "repeat" in node
+        ? runRepeatGroup(node.repeat, context, isLastNode)
+        : runStep(node, context, isLastNode);
     if (outcome === "failed") return { outcome: "failed" };
+    if (outcome === "blocked") return { outcome: "blocked" };
+    restedSucceeded = outcome === "succeeded-rested";
   }
 
+  // A node's deciding Attempt already rests the Run `succeeded` in its own
+  // transaction (the last plain Step, or the last iteration of a trailing Repeat
+  // group). The remaining cases — an empty Routing, or a trailing group that
+  // passed with zero iterations — leave no deciding Attempt, so rest here.
+  if (!restedSucceeded) writeStateOrThrow(deps.owner, "succeeded");
   return { outcome: "succeeded" };
+}
+
+/** Run one plain Step through its retry loop, resting the Run in the deciding
+ *  Attempt's transaction: a `failed` Attempt that exhausts the budget rests
+ *  `failed`; a success on the last node rests `succeeded`. Advancing separately
+ *  would leave a crash between the Attempt commit and the state write stuck at
+ *  `running`. */
+function runStep(
+  step: Step,
+  context: WalkContext,
+  isLastNode: boolean,
+): NodeOutcome {
+  const outcome = runStepAttempts(
+    step,
+    context,
+    isLastNode ? "succeeded" : undefined,
+  );
+  if (outcome === "failed") return "failed";
+  return isLastNode ? "succeeded-rested" : "succeeded-open";
+}
+
+/**
+ * Loop a Repeat group until its `until` Verdict reads `pass` (ADR 0020). The
+ * condition is evaluated before every iteration, so an already-`pass` Verdict
+ * runs zero iterations. On completing the review cadence — the authored interval,
+ * clamped to the engine ceiling so a Bundle cannot disable review — without a
+ * pass, the Run rests `blocked`: nothing is written, so the block is derived from
+ * the current Step Attempt (a reopened home re-derives it with no new Attempt).
+ */
+function runRepeatGroup(
+  repeat: RepeatGroup["repeat"],
+  context: WalkContext,
+  isLastNode: boolean,
+): NodeOutcome {
+  const interval = Math.min(
+    repeat.reviewCheckpoint.interval,
+    MAX_REVIEW_CHECKPOINT_INTERVAL,
+  );
+  const owner = context.step.owner;
+  // Zero-iteration case: the Verdict is already bound `pass` before entry.
+  if (verdictPasses(owner, repeat.until)) return "succeeded-open";
+
+  // Iterations are bounded independently of the per-Step retry budget.
+  let iterations = 0;
+  for (;;) {
+    const outcome = runIteration(repeat, context, isLastNode);
+    if (outcome === "failed") return "failed";
+    iterations++;
+    // Re-evaluate the condition after the iteration (equivalently, before the
+    // next). A pass ends the group; `succeeded-rested` means the iteration's
+    // deciding Attempt already rested the Run when this is the last node.
+    if (outcome === "succeeded-rested" || verdictPasses(owner, repeat.until)) {
+      return outcome;
+    }
+    // Still not passing: block once the cadence is reached without a pass.
+    if (iterations >= interval) return "blocked";
+  }
+}
+
+/** Run one iteration of a Repeat group's span. A span Step whose Attempt exhausts
+ *  its budget rests the Run `failed`. When this is the last Routing node and the
+ *  iteration makes the `until` Verdict pass, the last span Step's Attempt rests
+ *  the Run `succeeded` — the deciding Attempt — so no separate state write is
+ *  needed. */
+function runIteration(
+  repeat: RepeatGroup["repeat"],
+  context: WalkContext,
+  isLastNode: boolean,
+): NodeOutcome {
+  const { steps, until } = repeat;
+  for (let s = 0; s < steps.length; s++) {
+    const step = steps[s]!;
+    const isLastSpanStep = s === steps.length - 1;
+    // The deciding-`succeeded` Attempt is the last span Step of the last node when
+    // it leaves the `until` Verdict reading `pass`. Compute that intent from the
+    // Attempt's own outputs (a Step producing the Verdict) or the current binding.
+    const decideOnPass = isLastNode && isLastSpanStep;
+    const outcome = runStepAttempts(
+      step,
+      context,
+      undefined,
+      decideOnPass
+        ? (result) =>
+            iterationPasses(result, until, context.step.owner)
+              ? "succeeded"
+              : undefined
+        : undefined,
+    );
+    if (outcome === "failed") return "failed";
+  }
+  return isLastNode && verdictPasses(context.step.owner, until)
+    ? "succeeded-rested"
+    : "succeeded-open";
+}
+
+/**
+ * Run one Step's retry loop, publishing each Attempt. A `failed` Attempt that
+ * exhausts the budget carries `advanceState: "failed"`. A succeeded Attempt
+ * carries `successAdvance` (the caller's fixed `"succeeded"` for a last plain
+ * Step) unless `decideSuccessAdvance` is given, which chooses the advance from the
+ * Attempt result (the Repeat-group deciding Attempt). Returns the final outcome.
+ */
+function runStepAttempts(
+  step: Step,
+  context: WalkContext,
+  successAdvance: string | undefined,
+  decideSuccessAdvance?: (result: StepAttempt) => string | undefined,
+): AttemptOutcome {
+  const executor = STEP_EXECUTORS[step.kind];
+  if (executor === undefined) {
+    throw new Error(
+      `execution: Step kind "${step.kind}" is not dispatchable in M2 ` +
+        "(command-only; Human Gates pause and agent kinds land later).",
+    );
+  }
+  // Clamp a bad budget to zero so a typo (e.g. -1) still runs the Step once
+  // rather than silently skipping it and resting the Run failed with no Attempt.
+  const retries = Math.max(0, step.retry ?? context.budget);
+  let outcome: AttemptOutcome = "failed";
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const result = executor(step, context.step);
+    outcome = result.outcome;
+    const advanceState =
+      result.outcome === "failed"
+        ? attempt === retries
+          ? "failed"
+          : undefined
+        : (decideSuccessAdvance?.(result) ?? successAdvance);
+    publishOrThrow(
+      context.step.owner.publishAttempt({
+        attemptId: randomUUID(),
+        outcome: result.outcome,
+        // A failed Attempt moves no binding; a succeeded one publishes exactly
+        // the Step's declared outputs.
+        required: result.outcome === "succeeded" ? (step.produces ?? []) : [],
+        outputs: result.outputs,
+        at: context.now(),
+        advanceState,
+      }),
+    );
+    // A Verdict (pass or fail) still ran to an exit, so it advances the Run;
+    // only a `failed` Attempt is retried.
+    if (result.outcome !== "failed") break;
+  }
+  return outcome;
+}
+
+/** Whether the named Verdict is currently bound to `pass`. */
+function verdictPasses(owner: RunOwner, name: string): boolean {
+  const versionId = owner.currentVersion(name);
+  if (versionId === undefined) return false;
+  const bytes = owner.readArtifact(versionId, name);
+  return bytes !== undefined && new TextDecoder().decode(bytes) === "pass";
+}
+
+/** Whether an iteration's last span Step leaves `until` reading `pass`: prefer
+ *  the Verdict this very Attempt is about to publish, else the current binding an
+ *  earlier span Step left. */
+function iterationPasses(
+  result: StepAttempt,
+  until: string,
+  owner: RunOwner,
+): boolean {
+  const produced = result.outputs.find(
+    (output) => output.name === until && output.type === "verdict",
+  );
+  if (produced !== undefined) {
+    return new TextDecoder().decode(produced.content) === "pass";
+  }
+  return verdictPasses(owner, until);
 }
 
 // --- Command step (the one executable dispatch entry) ----------------------

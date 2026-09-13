@@ -292,25 +292,38 @@ export type BundleFocusResult =
 // events. Run outputs are reached by reference (ResourceReference), never inlined
 // here, so the snapshot stays bounded however large an output grows.
 
-/** A Run's canonical lifecycle state, in words. `blocked` is never persisted. */
-export type RunStateName = "created" | "running" | "succeeded" | "failed";
+/** A Run's canonical lifecycle state, in words. `blocked` — a durable pause at a
+ *  Repeat group's Review checkpoint (ADR 0020, #84) — is never persisted: the
+ *  Application derives it from the current Step Attempt, so a reopened home
+ *  re-derives it with no new Attempt. */
+export type RunStateName =
+  "created" | "running" | "succeeded" | "failed" | "blocked";
 
-/** One Step's status within a Run's ordered progress. */
-export type RunStepStatus = "pending" | "running" | "succeeded" | "failed";
+/** One Step's status within a Run's ordered progress. `blocked` is the Step a
+ *  Repeat group is paused at when its Review checkpoint is reached. */
+export type RunStepStatus =
+  "pending" | "running" | "succeeded" | "failed" | "blocked";
 export interface RunStepProgress {
   readonly id: string;
   readonly kind: StepKindName;
   readonly status: RunStepStatus;
 }
 
-/** One durable Run event: when it happened and, where it helps, a detail. */
+/** One durable Run event: when it happened and, where it helps, a detail.
+ *  `iteration` marks one completed Repeat-group iteration; `checkpoint-blocked`
+ *  marks the Run resting at a Review checkpoint (#84). */
 export type RunTimelineKind =
-  "run-created" | "trust-granted" | "attempt-settled";
+  | "run-created"
+  | "trust-granted"
+  | "attempt-settled"
+  | "iteration"
+  | "checkpoint-blocked";
 export interface RunTimelineEvent {
   readonly at: string; // ISO 8601
   readonly event: RunTimelineKind;
   /** The Attempt outcome for `attempt-settled`; the granting operation id for
-   *  `trust-granted`; absent for `run-created`. */
+   *  `trust-granted`; the iteration ordinal for `iteration`; the completed
+   *  iteration count for `checkpoint-blocked`; absent for `run-created`. */
   readonly detail?: string;
 }
 
@@ -320,6 +333,32 @@ export interface RunOutputView {
   readonly name: string;
   readonly type: "text" | "verdict";
   readonly reference: ResourceReference;
+}
+
+/** The exact durable reference of the approve/reject Human Gate a blocked Run
+ *  rests at, derived from the current Step Attempt (never stored). Distinct from
+ *  a `ResourceReference`: it names the Attempt the Gate pauses, so #85 can answer
+ *  it. */
+export interface RunGateReference {
+  readonly runId: string;
+  readonly stepId: string; // the Step whose current Attempt the Gate derives from
+  readonly attemptId: string; // that current Step Attempt
+  readonly shape: "approve-reject";
+}
+
+/** The Review checkpoint a `blocked` Run is paused at (ADR 0020, #84). Present
+ *  only when `state` is `blocked`. */
+export interface RunCheckpointView {
+  readonly message: string; // the authored reviewCheckpoint message
+  readonly interval: number; // the effective cadence, clamped to the engine ceiling
+  readonly completedIterations: number; // iterations completed since the last grant
+  /** The `until` Verdict's latest value (`fail` when blocked) and its reference. */
+  readonly latestVerdict: {
+    readonly name: string;
+    readonly value: "pass" | "fail";
+    readonly reference: ResourceReference;
+  };
+  readonly gate: RunGateReference; // the Gate's exact durable reference
 }
 
 /** A Run's bounded snapshot. Outputs carry references, not bytes. */
@@ -339,6 +378,8 @@ export interface RunView {
   readonly position: number;
   readonly timeline: readonly RunTimelineEvent[];
   readonly outputs: readonly RunOutputView[];
+  /** The Review checkpoint facts, present only when `state` is `blocked` (#84). */
+  readonly checkpoint?: RunCheckpointView;
 }
 
 export interface RunSnapshot {

@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import type {
-  CommandParams,
-  CommandStep,
-  Platform,
-  ProducedArtifact,
-  RoutingNode,
+import {
+  MAX_REVIEW_CHECKPOINT_INTERVAL,
+  type CommandParams,
+  type CommandStep,
+  type Platform,
+  type ProducedArtifact,
+  type RoutingNode,
 } from "../../../src/workflow/workflow.js";
 import {
   executeRouting,
@@ -290,6 +291,152 @@ test("an unknown Step kind is refused (M2 is command-only)", async (t) => {
   } as unknown as RoutingNode;
   assert.throws(() => run([gate], owner), /not dispatchable/);
 });
+
+// --- Repeat groups (#84, ADR 0020) -----------------------------------------
+
+/** A Command that exits non-zero until its `passAt`th run: it increments a
+ *  counter file each run and exits 0 once the count reaches `passAt`. This makes
+ *  a Repeat group's Verdict flip from `fail` to `pass` across iterations, without
+ *  a platform-specific script (the runtime binary runs the `-e` JS on every OS). */
+function counterScript(counterPath: string, passAt: number): CommandParams {
+  const code =
+    `const fs=require('node:fs');const p=${JSON.stringify(counterPath)};` +
+    `let n=0;try{n=Number(fs.readFileSync(p,'utf8'))||0;}catch{}` +
+    `n++;fs.writeFileSync(p,String(n));` +
+    `console.log('iteration '+n);process.exit(n>=${passAt}?0:1);`;
+  return { executable: NODE, arguments: ["-e", code] };
+}
+
+/** A single-step Repeat group over a counter Command producing the `until`
+ *  Verdict `passing` and a `log` text. */
+function repeatOver(
+  counterPath: string,
+  passAt: number,
+  interval: number,
+): RoutingNode {
+  return {
+    repeat: {
+      until: "passing",
+      reviewCheckpoint: { interval, message: "please review the loop" },
+      steps: [
+        commandStep("check", counterScript(counterPath, passAt), {
+          produces: produces(
+            { name: "passing", type: "verdict" },
+            { name: "log", type: "text" },
+          ),
+        }),
+      ],
+    },
+  };
+}
+
+/** A fresh counter file path under a temp dir (the file is created on first run). */
+function freshCounter(): string {
+  return join(makeTempDir("secant-counter-"), "count");
+}
+
+test("a Repeat group that fails twice then passes runs three iterations and rests succeeded", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const routing = [repeatOver(freshCounter(), 3, 5)];
+
+  const report = run(routing, owner);
+  assert.deepEqual(report, { outcome: "succeeded" });
+  // The last iteration's deciding Attempt rested the Run in one transaction.
+  assert.equal(state(), "succeeded");
+  // Three iterations, each a `succeeded` Attempt (a fail Verdict is a value).
+  assert.deepEqual(
+    owner.attemptLog().map((entry) => entry.outcome),
+    ["succeeded", "succeeded", "succeeded"],
+  );
+  assert.equal(dec(readBound(owner, "passing")), "pass");
+  assert.equal(dec(readBound(owner, "log")), "iteration 3\n");
+});
+
+test("a Repeat group whose Verdict is already pass before entry runs zero iterations and the Run continues", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const counter = freshCounter();
+  const routing: RoutingNode[] = [
+    // Baseline binds `passing` = pass before the group is entered (exit 0).
+    commandStep(
+      "baseline",
+      { executable: NODE, arguments: ["-e", "process.exit(0)"] },
+      { produces: produces({ name: "passing", type: "verdict" }) },
+    ),
+    // The group's counter Command would fail, but it must never run.
+    repeatOver(counter, 999, 5),
+    // A node after the group proves the Run continues past a zero-iteration group.
+    commandStep(
+      "after",
+      { executable: NODE, arguments: ["-e", "console.log('after ran')"] },
+      { produces: produces({ name: "done", type: "text" }) },
+    ),
+  ];
+
+  const report = run(routing, owner);
+  assert.deepEqual(report, { outcome: "succeeded" });
+  assert.equal(state(), "succeeded");
+  // Only the baseline and the trailing step ran — the group ran zero iterations.
+  assert.deepEqual(
+    owner.attemptLog().map((entry) => entry.outcome),
+    ["succeeded", "succeeded"],
+  );
+  assert.equal(dec(readBound(owner, "done")), "after ran\n");
+  // The counter file was never written, so the group's Command never ran.
+  assert.equal(existsSync(counter), false);
+});
+
+/** An always-failing single-step Repeat group (exit 1 each iteration), cheaper
+ *  than the counter for tests that only need the loop to keep failing. */
+function alwaysFailRepeat(interval: number): RoutingNode {
+  return {
+    repeat: {
+      until: "passing",
+      reviewCheckpoint: { interval, message: "please review the loop" },
+      steps: [
+        commandStep(
+          "check",
+          { executable: NODE, arguments: ["-e", "process.exit(1)"] },
+          { produces: produces({ name: "passing", type: "verdict" }) },
+        ),
+      ],
+    },
+  };
+}
+
+test("a Repeat group that always fails blocks after `interval` iterations", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const report = run([alwaysFailRepeat(3)], owner);
+  assert.deepEqual(report, { outcome: "blocked" });
+  // `blocked` is never written: the stored state stays `running`, and the block
+  // is derived from the current Step Attempt (a reopened home re-derives it).
+  assert.equal(state(), "running");
+  // Exactly three iterations ran before the checkpoint; every one a fail Verdict.
+  assert.deepEqual(
+    owner.attemptLog().map((entry) => entry.outcome),
+    ["succeeded", "succeeded", "succeeded"],
+  );
+  assert.equal(dec(readBound(owner, "passing")), "fail");
+});
+
+test(
+  "an authored interval above the engine ceiling never delays the checkpoint beyond the ceiling",
+  { timeout: 60_000 },
+  async (t) => {
+    const { owner } = ownerForFreshRun(t);
+    const report = run(
+      [alwaysFailRepeat(MAX_REVIEW_CHECKPOINT_INTERVAL + 150)],
+      owner,
+    );
+    assert.deepEqual(report, { outcome: "blocked" });
+    // The clamp caps iterations-between-reviews at the ceiling, not the authored
+    // 250. Count only ran iterations (a rare transient spawn retry adds `failed`
+    // entries that do not count as an iteration).
+    const iterations = owner
+      .attemptLog()
+      .filter((entry) => entry.outcome === "succeeded").length;
+    assert.equal(iterations, MAX_REVIEW_CHECKPOINT_INTERVAL);
+  },
+);
 
 /** Read the bytes currently bound to an artifact name through the owner. */
 function readBound(owner: RunOwner, name: string): Uint8Array | undefined {

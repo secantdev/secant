@@ -109,9 +109,27 @@ export function renderRun(run: RunView): string {
         ? "at rest"
         : `step ${run.position + 1} of ${run.progress.length}`
     }`,
-    "",
-    "Progress:",
   ];
+
+  // A blocked Run rests at a Review checkpoint (#84): print the authored message,
+  // the cadence, the completed-iteration count, the latest fail Verdict, and the
+  // Gate's exact durable reference. Output references print under "Outputs:".
+  const checkpoint = run.checkpoint;
+  if (checkpoint !== undefined) {
+    lines.push(
+      "",
+      "Review checkpoint:",
+      `  message: ${checkpoint.message}`,
+      `  cadence: every ${checkpoint.interval} iteration(s)`,
+      `  completed iterations: ${checkpoint.completedIterations}`,
+      `  latest verdict: ${checkpoint.latestVerdict.name} = ${checkpoint.latestVerdict.value}` +
+        ` (ref ${checkpoint.latestVerdict.reference.runId}/${checkpoint.latestVerdict.reference.artifactName})`,
+      `  gate: ${checkpoint.gate.shape} at step ${checkpoint.gate.stepId}` +
+        ` (attempt ${checkpoint.gate.attemptId})`,
+    );
+  }
+
+  lines.push("", "Progress:");
   if (run.progress.length === 0) lines.push("  (no steps)");
   for (const step of run.progress) {
     lines.push(`  ${step.id} (${step.kind}): ${step.status}`);

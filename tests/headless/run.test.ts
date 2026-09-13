@@ -13,6 +13,8 @@ import {
   ensureRuntimeOnPath,
   hostPlatform,
   writeCommandBundle,
+  writeRepeatBundle,
+  type RepeatBundleOptions,
 } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
@@ -70,6 +72,17 @@ async function harness(
       const entry = catalog.listEntries().find((e) => e.id === cmd.id);
       assert.ok(entry);
       return { id: cmd.id, digest: entry.digest };
+    },
+    installRepeat: (opts: RepeatBundleOptions) => {
+      const bundle = writeRepeatBundle(opts);
+      assert.equal(
+        runHeadless(clients, ["bundle", "build", bundle.folder], io),
+        0,
+      );
+      out.length = 0;
+      const entry = catalog.listEntries().find((e) => e.id === bundle.id);
+      assert.ok(entry);
+      return { id: bundle.id, digest: entry.digest };
     },
     approve: () => catalog.approveWorkspace(workspace, new Date()),
   };
@@ -233,4 +246,74 @@ test("run read of an unknown output exits non-zero", async (t) => {
     1,
   );
   assert.match(h.stderr(), /run-output-not-found/);
+});
+
+// --- Repeat groups (#84, ADR 0020) -----------------------------------------
+
+test("run launch on a blocking Repeat group names the Run and blocked, and exits non-zero", async (t) => {
+  const h = await harness(t);
+  const { id, digest } = h.installRepeat({ interval: 3 });
+  h.approve();
+
+  assert.equal(
+    runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io),
+    1,
+  );
+  assert.match(h.stdout(), /^Run /m);
+  assert.match(h.stdout(), /^State: blocked$/m);
+});
+
+test("run show prints the Review checkpoint facts for a blocked Run", async (t) => {
+  const h = await harness(t);
+  const { id, digest } = h.installRepeat({
+    interval: 3,
+    message: "human, please look",
+  });
+  h.approve();
+
+  runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io);
+  const runId = /^Run (\S+)$/m.exec(h.stdout())![1]!;
+  h.reset();
+
+  assert.equal(runHeadless(h.clients, ["run", "show", runId], h.io), 0);
+  const out = h.stdout();
+  assert.match(out, /^State: blocked$/m);
+  assert.match(out, /Review checkpoint:/);
+  assert.match(out, /message: human, please look/);
+  assert.match(out, /cadence: every 3 iteration/);
+  assert.match(out, /completed iterations: 3/);
+  assert.match(out, /latest verdict: passing = fail/);
+  assert.match(out, /gate: approve-reject at step check/);
+});
+
+test("run show --json carries the checkpoint for a blocked Run", async (t) => {
+  const h = await harness(t);
+  const { id, digest } = h.installRepeat({ interval: 2 });
+  h.approve();
+
+  runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io);
+  const runId = /^Run (\S+)$/m.exec(h.stdout())![1]!;
+  h.reset();
+
+  assert.equal(
+    runHeadless(h.clients, ["run", "show", runId, "--json"], h.io),
+    0,
+  );
+  const snapshot = JSON.parse(h.stdout()) as {
+    result: {
+      found: boolean;
+      run: {
+        state: string;
+        checkpoint?: {
+          completedIterations: number;
+          gate: { attemptId: string; stepId: string };
+        };
+      };
+    };
+  };
+  assert.ok(snapshot.result.found);
+  assert.equal(snapshot.result.run.state, "blocked");
+  assert.equal(snapshot.result.run.checkpoint?.completedIterations, 2);
+  assert.equal(snapshot.result.run.checkpoint?.gate.stepId, "check");
+  assert.match(snapshot.result.run.checkpoint?.gate.attemptId ?? "", /\S/);
 });

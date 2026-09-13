@@ -3,8 +3,11 @@ import type { Catalog, CatalogEntry } from "../catalog/catalog.js";
 import { inspectBundle, type Budgets } from "../bundle/bundle.js";
 import {
   flattenSteps,
+  MAX_REVIEW_CHECKPOINT_INTERVAL,
   type Platform,
+  type RepeatGroup,
   type RoutingNode,
+  type Step,
 } from "../workflow/workflow.js";
 import type {
   AttemptLogEntry,
@@ -13,10 +16,12 @@ import type {
 } from "../run/store/store.js";
 import type {
   Problem,
+  RunCheckpointView,
   RunOutputView,
   RunResult,
   RunSnapshot,
   RunStepProgress,
+  RunStepStatus,
   RunTimelineEvent,
 } from "./projection-port.js";
 
@@ -87,12 +92,24 @@ function runResult(
     : deriveRunFacts(deps, record.bundleSnapshotDigest);
   if ("problem" in derived) return { found: false, problem: derived.problem };
   const facts = derived.facts;
-  const state = context.state ?? record.state;
+  const trackedState = context.state ?? record.state;
   const view = (
+    owner: RunOwner | undefined,
     log: readonly AttemptLogEntry[],
     outputs: readonly RunOutputView[],
   ): RunResult => {
-    const progress = reconstructProgress(facts.routing, log, state);
+    // Derive progress and the `blocked` state from the Routing and the ordered
+    // attempt log (ADR 0020, #84): a Repeat group loops, so a flat succeeded-
+    // advances-one-Step mapping no longer identifies the current Step. `blocked`
+    // is never stored, so it is re-derived here from the current Step Attempt —
+    // needing the Verdict bindings, which only the owner can read.
+    const derivedRun = deriveRun(
+      facts.routing,
+      log,
+      trackedState,
+      runId,
+      owner,
+    );
     return {
       found: true,
       run: {
@@ -105,11 +122,21 @@ function runResult(
         },
         workspacePath: record.workspacePath,
         launchedAt: record.createdAt,
-        state,
-        progress: progress.statuses,
-        position: progress.position,
-        timeline: buildTimeline(deps, record.createdAt, log, facts.digest),
+        state: derivedRun.state,
+        progress: derivedRun.statuses,
+        position: derivedRun.position,
+        timeline: buildTimeline(
+          deps,
+          record.createdAt,
+          log,
+          facts.digest,
+          derivedRun.iterationEvents,
+          derivedRun.checkpoint,
+        ),
         outputs,
+        ...(derivedRun.checkpoint !== undefined
+          ? { checkpoint: derivedRun.checkpoint }
+          : {}),
       },
     };
   };
@@ -120,7 +147,7 @@ function runResult(
   // process actually executing the Run. A read must never break a running Run, so
   // show the record-level snapshot instead (no attempt log or outputs from here).
   if (live === undefined && isLiveElsewhere(deps.runGroup, runId)) {
-    return view([], []);
+    return view(undefined, [], []);
   }
   const owner = live ?? deps.runGroup.acquireRun(runId);
   if (owner === undefined) {
@@ -128,6 +155,7 @@ function runResult(
   }
   try {
     return view(
+      owner,
       owner.attemptLog(),
       collectOutputs(owner, facts.routing, runId),
     );
@@ -195,46 +223,321 @@ function collectOutputs(
   return outputs;
 }
 
-// Reconstruct per-Step progress from the ordered attempt log and the Run state.
-// ponytail: M2 Routings are straight-line command-only, so a `succeeded` Attempt
-// completes the current Step and advances, and `failed` Attempts before it are
-// that Step's retries; the deciding failure is read from the rested Run state.
-// This walk gains a Step→Attempt link when Repeat groups (#84) make it ambiguous.
-function reconstructProgress(
+interface DerivedRun {
+  /** The effective state, which may be the derived `blocked` (never stored). */
+  readonly state: string;
+  readonly statuses: RunStepProgress[];
+  readonly position: number;
+  /** One event per completed Repeat-group iteration, for the timeline. */
+  readonly iterationEvents: readonly RunTimelineEvent[];
+  /** The Review checkpoint facts, present only when the state derives to `blocked`. */
+  readonly checkpoint?: RunCheckpointView;
+}
+
+/**
+ * Derive per-Step progress, the effective Run state, the per-iteration timeline,
+ * and the Review checkpoint from the Routing and the ordered attempt log (ADR
+ * 0020, #84). A Repeat group loops, so a flat succeeded-advances-one-Step mapping
+ * no longer identifies the current Step; and `blocked` is never stored, so it is
+ * re-derived here from the current Step Attempt — which needs the `until` Verdict
+ * binding, readable only through the owner.
+ *
+ * The attempt log carries no Step link, so iterations are reconstructed by
+ * consuming attempts node by node: a Step consumes its `failed` retries then its
+ * one terminal Attempt; a Repeat group consumes complete span-iterations. This is
+ * exact when the Repeat group is the terminal reached node — every trailing
+ * Attempt is one of its iterations — which a `blocked` Run always is, since the
+ * block stops the walk. (ponytail: a group the walk has already passed with ≥1
+ * iteration contributes no iteration events, because a precise mid-Routing count
+ * needs the attempt→Step link the Store does not yet surface; a `succeeded` Run's
+ * progress is taken from the terminal state, so this is only a timeline nicety.)
+ */
+function deriveRun(
   routing: readonly RoutingNode[],
   log: readonly AttemptLogEntry[],
   state: string,
-): { statuses: RunStepProgress[]; position: number } {
+  runId: string,
+  owner: RunOwner | undefined,
+): DerivedRun {
   const steps = flattenSteps(routing);
   const statuses: RunStepProgress[] = steps.map((step) => ({
     id: step.id,
     kind: step.kind,
     status: "pending",
   }));
-  let index = 0;
-  for (const entry of log) {
-    if (index >= steps.length) break;
-    if (entry.outcome === "succeeded") {
-      statuses[index] = { ...statuses[index]!, status: "succeeded" };
-      index++;
-    }
-  }
+  const flatIndex = new Map<Step, number>();
+  steps.forEach((step, index) => flatIndex.set(step, index));
+  const mark = (step: Step, status: RunStepStatus): void => {
+    const index = flatIndex.get(step)!;
+    statuses[index] = { ...statuses[index]!, status };
+  };
+
+  // A rested `succeeded` Run: every Step ran to completion. Progress is taken from
+  // the terminal state; iteration events are counted only for a trailing group.
   if (state === "succeeded") {
-    for (let i = index; i < steps.length; i++) {
-      statuses[i] = { ...statuses[i]!, status: "succeeded" };
+    for (const step of steps) mark(step, "succeeded");
+    return {
+      state,
+      statuses,
+      position: steps.length,
+      iterationEvents: trailingGroupIterations(routing, log),
+    };
+  }
+
+  const iterationEvents: RunTimelineEvent[] = [];
+  // The status of the Step the walk is currently paused at (log exhausted): a
+  // failed Run's current Step failed; a running Run's is running; a `created` Run
+  // has not started, so its Steps stay pending.
+  const stalledStatus: RunStepStatus =
+    state === "failed" ? "failed" : state === "running" ? "running" : "pending";
+  let cursor = 0;
+  for (const node of routing) {
+    if (!("repeat" in node)) {
+      const result = consumeStep(log, cursor);
+      cursor = result.next;
+      if (!result.complete) {
+        mark(node, stalledStatus);
+        return {
+          state,
+          statuses,
+          position: flatIndex.get(node)!,
+          iterationEvents,
+        };
+      }
+      mark(node, "succeeded");
+      continue;
     }
-    return { statuses, position: steps.length };
-  }
-  if (state === "failed") {
-    if (index < steps.length) {
-      statuses[index] = { ...statuses[index]!, status: "failed" };
+    // A Repeat group: consume complete span-iterations until the log runs out.
+    const span = node.repeat.steps;
+    let iterations = 0;
+    for (;;) {
+      const iteration = consumeSpan(log, cursor, span);
+      if (!iteration.complete) {
+        // The log ran out mid-iteration: the group is the current node, paused at
+        // `iteration.stalled`. Earlier span Steps of this iteration already ran.
+        markSpanBefore(span, iteration.stalled, mark);
+        mark(iteration.stalled, stalledStatus);
+        return {
+          state,
+          statuses,
+          position: flatIndex.get(iteration.stalled)!,
+          iterationEvents,
+        };
+      }
+      // A span that consumed no Attempts (a degenerate empty group Composition
+      // rejects) would loop forever; stop rather than spin or mis-mark.
+      if (iteration.next === cursor) break;
+      cursor = iteration.next;
+      iterations++;
+      iterationEvents.push({
+        at: iteration.at,
+        event: "iteration",
+        detail: String(iterations),
+      });
+      for (const spanStep of span) mark(spanStep, "succeeded");
+      if (cursor >= log.length) {
+        // No more Attempts: the group is the terminal reached node — derive the
+        // block from its current (last) Step Attempt.
+        return finishTerminalGroup(
+          node.repeat,
+          span,
+          iterations,
+          state,
+          statuses,
+          flatIndex,
+          mark,
+          iterationEvents,
+          runId,
+          owner,
+          log,
+        );
+      }
+      // More Attempts remain: the group passed and the walk moves on (greedy — see
+      // the ponytail above; exact when the group is the terminal node).
     }
-    return { statuses, position: index };
   }
-  if (state === "running" && index < steps.length) {
-    statuses[index] = { ...statuses[index]!, status: "running" };
+  // Every node consumed cleanly with the log exhausted at a boundary: the Run is
+  // between Steps (a transient running/created snapshot).
+  return { state, statuses, position: steps.length, iterationEvents };
+}
+
+/** Consume one Step's Attempts from `cursor`: skip its `failed` retries, then its
+ *  terminal `succeeded`. `complete` is false when the log runs out first (the Step
+ *  is the current one). */
+function consumeStep(
+  log: readonly AttemptLogEntry[],
+  cursor: number,
+): { next: number; complete: boolean; at?: string } {
+  let i = cursor;
+  while (i < log.length) {
+    const entry = log[i]!;
+    i++;
+    if (entry.outcome === "succeeded")
+      return { next: i, complete: true, at: entry.at };
   }
-  return { statuses, position: index };
+  return { next: i, complete: false };
+}
+
+/** Consume one full span iteration (every span Step completing). `complete` is
+ *  false, with the `stalled` Step, when the log runs out partway through. */
+function consumeSpan(
+  log: readonly AttemptLogEntry[],
+  cursor: number,
+  span: readonly Step[],
+):
+  | { complete: true; next: number; at: string }
+  | { complete: false; stalled: Step; next: number } {
+  let probe = cursor;
+  let at = "";
+  for (const spanStep of span) {
+    const result = consumeStep(log, probe);
+    if (!result.complete) {
+      return { complete: false, stalled: spanStep, next: result.next };
+    }
+    probe = result.next;
+    at = result.at ?? at;
+  }
+  // A non-empty span consumed every Step; an empty span (Composition rejects one)
+  // consumes nothing, which `next === cursor` lets the caller detect and stop on.
+  return { complete: true, next: probe, at };
+}
+
+/** Mark every span Step before `stalled` as succeeded (they ran this iteration). */
+function markSpanBefore(
+  span: readonly Step[],
+  stalled: Step,
+  mark: (step: Step, status: RunStepStatus) => void,
+): void {
+  for (const spanStep of span) {
+    if (spanStep === stalled) return;
+    mark(spanStep, "succeeded");
+  }
+}
+
+/** Finish a Repeat group that is the terminal reached node: derive `blocked` when
+ *  the review cadence is reached without a pass, else leave it running. */
+function finishTerminalGroup(
+  repeat: RepeatGroup["repeat"],
+  span: readonly Step[],
+  iterations: number,
+  state: string,
+  statuses: RunStepProgress[],
+  flatIndex: Map<Step, number>,
+  mark: (step: Step, status: RunStepStatus) => void,
+  iterationEvents: readonly RunTimelineEvent[],
+  runId: string,
+  owner: RunOwner | undefined,
+  log: readonly AttemptLogEntry[],
+): DerivedRun {
+  const current = span[span.length - 1]!;
+  const position = flatIndex.get(current)!;
+  const interval = Math.min(
+    repeat.reviewCheckpoint.interval,
+    MAX_REVIEW_CHECKPOINT_INTERVAL,
+  );
+  const versionId = owner?.currentVersion(repeat.until);
+  const verdict =
+    owner !== undefined && versionId !== undefined
+      ? readVerdict(owner, versionId, repeat.until)
+      : undefined;
+  const passes = verdict === "pass";
+
+  // Blocked: the cadence is reached, the Verdict still does not pass, and the Run
+  // has not failed. The block is derived from the current Step Attempt.
+  if (
+    state !== "failed" &&
+    !passes &&
+    versionId !== undefined &&
+    iterations >= interval
+  ) {
+    mark(current, "blocked");
+    const lastAttempt = log[log.length - 1]!;
+    const checkpoint: RunCheckpointView = {
+      message: repeat.reviewCheckpoint.message,
+      interval,
+      completedIterations: iterations,
+      latestVerdict: {
+        name: repeat.until,
+        // Normalize the value actually read (M2 Verdicts are pass/fail); this
+        // branch already established it is not `pass`.
+        value: verdict === "pass" ? "pass" : "fail",
+        reference: {
+          runId,
+          artifactName: repeat.until,
+          versionId,
+          type: "verdict",
+        },
+      },
+      gate: {
+        runId,
+        stepId: current.id,
+        attemptId: lastAttempt.attemptId,
+        shape: "approve-reject",
+      },
+    };
+    return {
+      state: "blocked",
+      statuses,
+      position,
+      iterationEvents,
+      checkpoint,
+    };
+  }
+
+  // Not blocked: the loop is still short of its cadence (a live mid-loop snapshot),
+  // or the Run failed on the last span Step.
+  mark(current, state === "failed" ? "failed" : "running");
+  return { state, statuses, position, iterationEvents };
+}
+
+/** Iteration events for a trailing Repeat group in a rested `succeeded` Run: every
+ *  Attempt after the preceding nodes is one of the group's iterations. */
+function trailingGroupIterations(
+  routing: readonly RoutingNode[],
+  log: readonly AttemptLogEntry[],
+): RunTimelineEvent[] {
+  const last = routing[routing.length - 1];
+  if (last === undefined || !("repeat" in last)) return [];
+  // Consume the preceding nodes to find where the group's Attempts begin.
+  let cursor = 0;
+  for (const node of routing.slice(0, -1)) {
+    if ("repeat" in node) {
+      for (;;) {
+        const iteration = consumeSpan(log, cursor, node.repeat.steps);
+        // Stop on a partial iteration or one that consumed nothing (an empty span).
+        if (!iteration.complete || iteration.next === cursor) break;
+        cursor = iteration.next;
+        if (cursor >= log.length) break;
+      }
+    } else {
+      cursor = consumeStep(log, cursor).next;
+    }
+  }
+  const span = last.repeat.steps;
+  const events: RunTimelineEvent[] = [];
+  let iterations = 0;
+  while (cursor < log.length) {
+    const iteration = consumeSpan(log, cursor, span);
+    if (!iteration.complete) break;
+    cursor = iteration.next;
+    iterations++;
+    events.push({
+      at: iteration.at,
+      event: "iteration",
+      detail: String(iterations),
+    });
+  }
+  return events;
+}
+
+/** The `pass`/`fail` value of a Verdict at a version, or undefined if unreadable. */
+function readVerdict(
+  owner: RunOwner,
+  versionId: string,
+  name: string,
+): string | undefined {
+  const bytes = owner.readArtifact(versionId, name);
+  return bytes === undefined ? undefined : new TextDecoder().decode(bytes);
 }
 
 function buildTimeline(
@@ -242,6 +545,8 @@ function buildTimeline(
   createdAt: string,
   log: readonly AttemptLogEntry[],
   digest: string,
+  iterationEvents: readonly RunTimelineEvent[],
+  checkpoint: RunCheckpointView | undefined,
 ): RunTimelineEvent[] {
   const events: RunTimelineEvent[] = [{ at: createdAt, event: "run-created" }];
   const entry = deps.catalog.listEntries().find((e) => e.digest === digest);
@@ -265,10 +570,18 @@ function buildTimeline(
       detail: attempt.outcome,
     });
   }
-  // ponytail: per-Attempt Verdict events are not tied to their Attempt through
-  // the Run Store Interface (the attempt log carries no artifact link), so
-  // Verdicts are reached as outputs instead. Add Verdict timeline events when the
-  // Store surfaces the attempt→version link.
+  // Each completed Repeat-group iteration, then the block when the Run rests at a
+  // Review checkpoint (#84). ponytail: per-Attempt Verdict *values* still are not
+  // tied to their Attempt through the Store Interface (no attempt→version link),
+  // so the Verdict is reached as an output; add Verdict values here when it lands.
+  for (const iteration of iterationEvents) events.push(iteration);
+  if (checkpoint !== undefined) {
+    events.push({
+      at: log[log.length - 1]?.at ?? createdAt,
+      event: "checkpoint-blocked",
+      detail: String(checkpoint.completedIterations),
+    });
+  }
   return events;
 }
 

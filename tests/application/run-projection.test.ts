@@ -17,6 +17,8 @@ import {
   ensureRuntimeOnPath,
   hostPlatform,
   writeCommandBundle,
+  writeRepeatBundle,
+  type RepeatBundleOptions,
 } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
@@ -442,4 +444,198 @@ test("a fresh Application (no in-process tracking) reads a Run back from its sto
   const read = fresh.projectionPort.readResource(output.reference);
   assert.ok(read.found);
   if (read.found) assert.match(read.content, /persisted-output/);
+});
+
+// --- Repeat groups (#84, ADR 0020) -----------------------------------------
+
+/** Build+install a Repeat-group Bundle and return its installed digest. */
+function installRepeatBundle(
+  f: Fixture,
+  options: RepeatBundleOptions,
+): { id: string; digest: string } {
+  const bundle = writeRepeatBundle(options);
+  const built = f.app.bundleManagement.build(bundle.folder, {
+    noInstall: false,
+  });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = f.catalog.listEntries().find((e) => e.id === bundle.id);
+  assert.ok(entry);
+  return { id: bundle.id, digest: entry.digest };
+}
+
+/** Launch an installed Bundle in an approved Workspace, returning the Run id. */
+function launch(f: Fixture, id: string, digest: string): string {
+  f.catalog.approveWorkspace(f.workspace, new Date());
+  const admission = f.app.projectionPort.submit({
+    operationId: `op-${id}`,
+    operation: "launch-run",
+    input: { bundle: { id }, launchInputs: {}, trustDigest: digest },
+  });
+  assert.ok(admission.admitted);
+  return admission.runId!;
+}
+
+test("a Repeat group that always fails rests blocked and surfaces the checkpoint facts", async (t) => {
+  const f = fixture(t);
+  const { id, digest } = installRepeatBundle(f, {
+    interval: 3,
+    message: "human, please look",
+  });
+  const runId = launch(f, id, digest);
+
+  const result = runResult(f.app, runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  const run = result.run;
+  assert.equal(run.state, "blocked");
+
+  const checkpoint = run.checkpoint;
+  assert.ok(checkpoint);
+  if (checkpoint === undefined) throw new Error("unreachable");
+  assert.equal(checkpoint.message, "human, please look");
+  assert.equal(checkpoint.interval, 3);
+  assert.equal(checkpoint.completedIterations, 3);
+  assert.equal(checkpoint.latestVerdict.name, "passing");
+  assert.equal(checkpoint.latestVerdict.value, "fail");
+
+  // The Gate is derived from the current Step Attempt: the last iteration's
+  // `check` Attempt.
+  assert.equal(checkpoint.gate.shape, "approve-reject");
+  assert.equal(checkpoint.gate.stepId, "check");
+  const log = f.runGroup.acquireRun(runId)!;
+  t.after(() => log.close());
+  const lastAttempt = log.attemptLog().at(-1)!;
+  assert.equal(checkpoint.gate.attemptId, lastAttempt.attemptId);
+
+  // Progress marks the loop Step blocked; the timeline records each iteration and
+  // the block.
+  assert.equal(run.progress.find((s) => s.id === "check")!.status, "blocked");
+  assert.equal(run.timeline.filter((e) => e.event === "iteration").length, 3);
+  assert.ok(run.timeline.some((e) => e.event === "checkpoint-blocked"));
+
+  // The latest fail Verdict is reachable by reference (references to the latest
+  // output), and reads `fail`.
+  const verdictRead = f.app.projectionPort.readResource(
+    checkpoint.latestVerdict.reference,
+  );
+  assert.ok(verdictRead.found);
+  if (verdictRead.found) assert.equal(verdictRead.content, "fail");
+});
+
+test("a Repeat group that fails twice then passes rests succeeded with three iterations", async (t) => {
+  const f = fixture(t);
+  const { id, digest } = installRepeatBundle(f, { interval: 5, passAt: 3 });
+  const runId = launch(f, id, digest);
+
+  const result = runResult(f.app, runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  const run = result.run;
+  assert.equal(run.state, "succeeded");
+  assert.equal(run.checkpoint, undefined);
+  // The timeline shows the three iterations (one per Verdict).
+  assert.equal(run.timeline.filter((e) => e.event === "iteration").length, 3);
+  const passing = run.outputs.find((o) => o.name === "passing");
+  assert.ok(passing);
+  const read = f.app.projectionPort.readResource(passing.reference);
+  assert.ok(read.found);
+  if (read.found) assert.equal(read.content, "pass");
+});
+
+test("a Repeat group already passing before entry runs zero iterations and the Run continues", async (t) => {
+  const f = fixture(t);
+  // baselinePass binds `passing` = pass before the group; the group's check would
+  // fail, but it must never run.
+  const { id, digest } = installRepeatBundle(f, {
+    interval: 3,
+    baselinePass: true,
+  });
+  const runId = launch(f, id, digest);
+
+  const result = runResult(f.app, runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  assert.equal(result.run.state, "succeeded");
+  assert.equal(result.run.checkpoint, undefined);
+  // Only the baseline ran: no iteration of the group, so no iteration events.
+  assert.equal(
+    result.run.timeline.filter((e) => e.event === "iteration").length,
+    0,
+  );
+});
+
+test("reopening the Run Store shows a blocked Run still blocked with the same Gate reference and no new Attempt", async (t) => {
+  // Self-contained so a second Run Store can reopen the same on-disk store — the
+  // separate-process `run show` path.
+  const home = makeTempDir("secant-reopen-home-");
+  const storeDir = makeTempDir("secant-reopen-store-");
+  const workspace = realpathSync.native(makeTempDir("secant-reopen-ws-"));
+
+  const catalog = openCatalog(home);
+  t.after(() => catalog.close());
+  const runGroup = openRunGroup(storeDir, workspace);
+  const app = createApplication({
+    catalog,
+    launchWorkspacePath: workspace,
+    hostPlatform: hostPlatform(),
+    runGroup,
+    runExecution,
+  });
+  const f: Fixture = { app, catalog, runGroup, workspace };
+  const { id, digest } = installRepeatBundle(f, { interval: 2 });
+  const runId = launch(f, id, digest);
+
+  const before = runResult(app, runId);
+  assert.ok(before.found);
+  if (!before.found) throw new Error("unreachable");
+  assert.equal(before.run.state, "blocked");
+  const gateBefore = before.run.checkpoint!.gate;
+  const attemptsBefore = runGroup.acquireRun(runId)!;
+  const countBefore = attemptsBefore.attemptLog().length;
+  attemptsBefore.close();
+  runGroup.close();
+
+  // Reopen the same store in a fresh Run Group + Application, as a new process
+  // would. The block is re-derived from the current Step Attempt, adding none.
+  const reopened = openRunGroup(storeDir, workspace);
+  t.after(() => reopened.close());
+  const freshApp = createApplication({
+    catalog,
+    launchWorkspacePath: workspace,
+    hostPlatform: hostPlatform(),
+    runGroup: reopened,
+    runExecution,
+  });
+  const after = runResult(freshApp, runId);
+  assert.ok(after.found);
+  if (!after.found) throw new Error("unreachable");
+  assert.equal(after.run.state, "blocked");
+  assert.equal(after.run.checkpoint!.gate.attemptId, gateBefore.attemptId);
+  assert.equal(after.run.checkpoint!.gate.stepId, gateBefore.stepId);
+
+  const attemptsAfter = reopened.acquireRun(runId)!;
+  assert.equal(attemptsAfter.attemptLog().length, countBefore);
+  attemptsAfter.close();
+});
+
+test("a created Run (execution not started) shows every Step pending", async (t) => {
+  // Hold settlement so the Run is created but never executed: its state is
+  // `created` and no Attempt has settled.
+  const held: (() => void)[] = [];
+  const f = fixture(t, { scheduleSettlement: (settle) => held.push(settle) });
+  const { id, digest } = installCommandBundle(f);
+  f.catalog.approveWorkspace(f.workspace, new Date());
+  const admission = f.app.projectionPort.submit({
+    operationId: "op-created",
+    operation: "launch-run",
+    input: { bundle: { id }, launchInputs: {}, trustDigest: digest },
+  });
+  assert.ok(admission.admitted);
+
+  const result = runResult(f.app, admission.runId!);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  assert.equal(result.run.state, "created");
+  // A Step that has not started is pending, not running.
+  assert.ok(result.run.progress.every((s) => s.status === "pending"));
 });

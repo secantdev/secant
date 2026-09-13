@@ -105,6 +105,98 @@ export function writeCommandBundle(
   return { folder, id, version };
 }
 
+export interface RepeatBundleOptions {
+  readonly id?: string;
+  readonly version?: string;
+  /** The Review checkpoint cadence. */
+  readonly interval: number;
+  readonly message?: string;
+  /** The `check` Command exits 0 (a `pass` Verdict) on its `passAt`th iteration.
+   *  Omit to make it always fail (exit 1), so the group blocks at the checkpoint. */
+  readonly passAt?: number;
+  /** The `check` Step's retry budget. */
+  readonly retry?: number;
+  /** Make the baseline bind `passing` = pass, so the group runs zero iterations. */
+  readonly baselinePass?: boolean;
+}
+
+// A Repeat-group Bundle authoring folder (#84): a baseline Command binds the
+// `until` Verdict `passing` before the group is entered (Composition requires it),
+// then a group loops a `check` Command until `passing` reads `pass`. Command-only
+// and cross-OS like `writeCommandBundle`. When `passAt` is set, `check` counts its
+// iterations through a per-Bundle counter file so its Verdict flips to `pass` on
+// the `passAt`th run.
+export function writeRepeatBundle(options: RepeatBundleOptions): CommandBundle {
+  const id = options.id ?? "dev.secant.repeat-loop";
+  const version = options.version ?? "1.0.0";
+  const folder = makeTempDir("secant-repeat-bundle-");
+  const counter = join(makeTempDir("secant-repeat-counter-"), "counter");
+
+  const baselineScript = options.baselinePass
+    ? "process.exit(0)"
+    : "process.exit(1)";
+  const checkScript =
+    options.passAt === undefined
+      ? "process.exit(1)"
+      : `const fs=require('node:fs');const p=${JSON.stringify(counter)};` +
+        `let n=0;try{n=Number(fs.readFileSync(p,'utf8'))||0;}catch{}` +
+        `n++;fs.writeFileSync(p,String(n));` +
+        `console.log('iteration '+n);process.exit(n>=${options.passAt}?0:1);`;
+
+  const manifest = {
+    formatVersion: 1,
+    bundle: {
+      id,
+      version,
+      name: "Repeat Loop",
+      description: "A repeat-group test Bundle.",
+    },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [],
+    routing: [
+      {
+        id: "baseline",
+        kind: "command",
+        produces: [{ name: "passing", type: "verdict" }],
+        command: {
+          executable: RUNTIME_NAME,
+          arguments: ["-e", baselineScript],
+        },
+      },
+      {
+        repeat: {
+          until: "passing",
+          reviewCheckpoint: {
+            interval: options.interval,
+            message: options.message ?? "please review the loop",
+          },
+          steps: [
+            {
+              id: "check",
+              kind: "command",
+              ...(options.retry !== undefined ? { retry: options.retry } : {}),
+              produces: [
+                { name: "passing", type: "verdict" },
+                { name: "log", type: "text" },
+              ],
+              command: {
+                executable: RUNTIME_NAME,
+                arguments: ["-e", checkScript],
+              },
+            },
+          ],
+        },
+      },
+    ],
+  };
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  return { folder, id, version };
+}
+
 /** The host platform, so a Run execution resolves the command deterministically. */
 export function hostPlatform(): Platform {
   switch (process.platform) {

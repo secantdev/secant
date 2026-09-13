@@ -272,9 +272,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
 
   // Acquire the Run, drive it to rest through the injected execution, then close
   // the owner and release the Workspace claim. The launch Operation is `applied`
-  // once the Run reaches rest (whatever its own succeeded/failed outcome); a
-  // fenced owner or publication fault is a coordination/environment fault that
-  // execution throws, carried here as a `not-applied` Problem.
+  // once the Run reaches rest (succeeded, failed, or a `blocked` pause at a Review
+  // checkpoint — nothing executes while blocked, and the claim is released on the
+  // `finally`, so a reopened home re-derives the block from the current Step
+  // Attempt); a fenced owner or publication fault is a coordination/environment
+  // fault that execution throws, carried here as a `not-applied` Problem.
   function runAndSettle(runId: string): OperationOutcome {
     const tracking = runs.get(runId);
     if (

@@ -23,9 +23,11 @@ import { readZip, writeZip, type Budgets, type ZipEntry } from "./zip.js";
 // returns the identical findings).
 export {
   DEFAULT_BUDGETS,
+  readZip,
   writeZip,
   type Budgets,
   type ZipEntry,
+  type ZipReadResult,
 } from "./zip.js";
 
 // The finding shape Application translates into a Problem; re-exported so callers

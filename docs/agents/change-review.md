@@ -6,7 +6,8 @@ Record a concise, relevance-driven summary on the implementing GitHub issue. Ide
 
 - Owning Module and affected Interface.
 - External or persisted ingress Seams.
-- Behavioral test evidence.
+- Behavioral test evidence meeting the completeness bar in [testing](./testing.md): the behaviors, branches, and failure paths under test, and the
+  behaviors deliberately left untested and why. A reasoned gap is acceptable; a silent one is not.
 - Replaced legacy behavior and deletions.
 - Purpose of each new dependency.
 - Guidance or ADR changes required by the work.

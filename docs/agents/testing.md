@@ -16,6 +16,15 @@ replaced by a deeper Module, replace their implementation-coupled tests rather t
 Use real deterministic local resources, such as temporary directories and Git repositories. Use an injected Adapter for remote or truly external
 dependencies, and keep internal test Seams private to the Module's Implementation.
 
+## Behavioral Completeness
+
+Tests are the Module's executable specification. Cover every promised behavior, branch, and failure path — not every input permutation — and each
+boundary where bugs cluster (empty, zero, maximum, first and last, absent). The bar: a plausible wrong edit to the logic must turn some test red, so
+assert the consequence (the value, state, or output), never that code merely ran. Depth scales with blast radius — money, security, data-loss, and
+validation paths carry the most, trivial glue a line; never test the framework or the compiler. Completeness is defensible, not total: name the
+behaviors you deliberately leave untested and why. A silent gap is the failure; a reasoned one is not. A flaky test is not a net — if a behavior
+cannot be asserted deterministically, that is a named gap, not a sleep or a retry.
+
 ## Fixture Ladder
 
 - Test in-process behavior with ordinary real values.

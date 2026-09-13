@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
+import {
+  ensureRuntimeOnPath,
+  writeCommandBundle,
+} from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // The composition wiring suite (#74 A18): it constructs the Application through
@@ -35,7 +39,10 @@ function seeded(
     launchCwd: makeTempDir("secant-wire-ws-"),
     ...overrides,
   });
-  t.after(() => wired.catalog.close());
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
   assert.ok(wired.bundleManagement.build(proofBundle, { noInstall: false }).ok);
   return wired;
 }
@@ -79,6 +86,112 @@ test("the wiring hands the Application the engine version, host platform, and la
   // hostPlatform linux reached the Application: the Execution summary resolves
   // commands for linux, not platforms[0].
   assert.equal(bundle.executionSummary.platform, "linux");
+});
+
+test("the wiring constructs the Run Store and Run execution through the single root, so a launch runs to succeeded", (t) => {
+  ensureRuntimeOnPath();
+  const workspace = makeTempDir("secant-wire-run-ws-");
+  const wired = wireApplication({
+    secantHome: makeTempDir("secant-wire-run-home-"),
+    launchCwd: workspace,
+  });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+
+  const cmd = writeCommandBundle();
+  assert.ok(wired.bundleManagement.build(cmd.folder, { noInstall: false }).ok);
+  // Approve the launch Workspace through the Port (the raw cwd; the Application
+  // canonicalises it), so the launch passes the approval gate.
+  const approve = wired.projectionPort.submit({
+    operationId: "op-approve",
+    operation: "approve-workspace",
+    input: { path: workspace },
+  });
+  assert.ok(approve.admitted);
+
+  const entry = wired.catalog.listEntries()[0];
+  assert.ok(entry);
+  const admission = wired.projectionPort.submit({
+    operationId: "op-launch",
+    operation: "launch-run",
+    input: {
+      bundle: { id: cmd.id },
+      launchInputs: {},
+      trustDigest: entry.digest,
+    },
+  });
+  assert.ok(admission.admitted, JSON.stringify(admission));
+  const runId = admission.runId;
+  assert.ok(runId);
+
+  const opened = wired.projectionPort.openProjection({ family: "run", runId });
+  try {
+    assert.ok(opened.snapshot.result.found, JSON.stringify(opened.snapshot));
+    if (opened.snapshot.result.found) {
+      assert.equal(opened.snapshot.result.run.state, "succeeded");
+    }
+  } finally {
+    opened.close();
+  }
+});
+
+test("the wiring's AssetResolver extracts a Bundle's script asset to disk so a Command can run it", (t) => {
+  ensureRuntimeOnPath();
+  const workspace = makeTempDir("secant-wire-asset-ws-");
+  const wired = wireApplication({
+    secantHome: makeTempDir("secant-wire-asset-home-"),
+    launchCwd: workspace,
+  });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+
+  // The Command runs `<runtime> {asset:check.js}`; only the composition-built
+  // AssetResolver (extracting the pinned Snapshot's bytes to disk) makes that
+  // `{asset}` reference resolve to an on-disk path — the seam #81 left open.
+  const cmd = writeCommandBundle({
+    asset: { path: "check.js", content: "console.log('ran-from-asset')" },
+  });
+  assert.ok(wired.bundleManagement.build(cmd.folder, { noInstall: false }).ok);
+  assert.ok(
+    wired.projectionPort.submit({
+      operationId: "op-approve",
+      operation: "approve-workspace",
+      input: { path: workspace },
+    }).admitted,
+  );
+  const entry = wired.catalog.listEntries()[0];
+  assert.ok(entry);
+  const admission = wired.projectionPort.submit({
+    operationId: "op-launch",
+    operation: "launch-run",
+    input: {
+      bundle: { id: cmd.id },
+      launchInputs: {},
+      trustDigest: entry.digest,
+    },
+  });
+  assert.ok(admission.admitted, JSON.stringify(admission));
+  const runId = admission.runId!;
+
+  const opened = wired.projectionPort.openProjection({ family: "run", runId });
+  try {
+    assert.ok(opened.snapshot.result.found, JSON.stringify(opened.snapshot));
+    if (!opened.snapshot.result.found) throw new Error("unreachable");
+    assert.equal(opened.snapshot.result.run.state, "succeeded");
+    const output = opened.snapshot.result.run.outputs.find(
+      (o) => o.name === "output",
+    );
+    assert.ok(output);
+    const read = wired.projectionPort.readResource(output.reference);
+    assert.ok(read.found);
+    if (read.found) assert.match(read.content, /ran-from-asset/);
+  } finally {
+    opened.close();
+  }
 });
 
 test("the headless client and the TUI client render the same Port snapshot", (t) => {

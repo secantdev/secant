@@ -1,7 +1,18 @@
 import { realpathSync } from "node:fs";
-import { DEFAULT_BUDGETS, type Budgets } from "../bundle/bundle.js";
+import {
+  DEFAULT_BUDGETS,
+  generateExecutionSummary,
+  inspectBundle,
+  type Budgets,
+} from "../bundle/bundle.js";
 import type { Catalog } from "../catalog/catalog.js";
-import type { Platform } from "../workflow/workflow.js";
+import type {
+  AuthoredManifest,
+  Platform,
+  RoutingNode,
+} from "../workflow/workflow.js";
+import type { RunReport } from "../run/execution/execution.js";
+import type { RunGroup, RunOwner } from "../run/store/store.js";
 import {
   focusSnapshot,
   listSnapshot,
@@ -9,10 +20,19 @@ import {
 } from "./bundle-catalog.js";
 import type { BundleManagement } from "./bundle-management.js";
 import { createBundleManagement } from "./build-bundle.js";
+import {
+  bundleBytesCorruptForRun,
+  bundleBytesMissingForRun,
+  isLiveElsewhere,
+  runSnapshot,
+  selectRunEntry,
+  type RunProjectionDependencies,
+} from "./run-projection.js";
 import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
   BundleFocusSnapshot,
+  LaunchRunInput,
   OpenedProjection,
   OperationOutcome,
   OperationSnapshot,
@@ -20,11 +40,24 @@ import type {
   ProjectionSelector,
   ProjectionUpdate,
   Problem,
+  ResourceRead,
   ResourceReference,
+  RunSnapshot,
   Submission,
   SubmissionAdmission,
   WorkspaceSnapshot,
 } from "./projection-port.js";
+
+/** How composition drives one acquired Run to rest. It constructs the Run
+ *  execution (the `{asset}` resolver, host platform, and bounds) and calls the
+ *  execution Interface; a fenced owner or publication fault throws (composition
+ *  owns it). The Application wraps the owner it is handed to observe each
+ *  publication, so this signature stays execution-agnostic. */
+export type RunExecution = (context: {
+  readonly routing: readonly RoutingNode[];
+  readonly digest: string;
+  readonly owner: RunOwner;
+}) => RunReport;
 
 // Application owns the Workspace-approval use case behind the Projection Port.
 // The Port is in-memory: it resolves paths, records approvals through the
@@ -56,6 +89,12 @@ export interface ApplicationDependencies {
    *  A test supplies a controllable settler to exercise the `pending` → settled
    *  path without a real long-lived Run. */
   readonly scheduleSettlement?: (settle: () => void) => void;
+  /** The Run Store for the launch Workspace, opened by composition (which owns
+   *  its lifetime). Absent when a caller wires no Run support; `launch-run` and
+   *  the `run` Projection then report a Problem rather than executing. */
+  readonly runGroup?: RunGroup;
+  /** The Run execution composition constructs and hands in (see RunExecution). */
+  readonly runExecution?: RunExecution;
 }
 
 export interface Application {
@@ -64,20 +103,42 @@ export interface Application {
 }
 
 export function createApplication(deps: ApplicationDependencies): Application {
-  const { catalog } = deps;
+  const { catalog, runGroup, runExecution } = deps;
   const launchWorkspacePath = canonicalizeWorkspacePath(
     deps.launchWorkspacePath,
   );
   const scheduleSettlement =
     deps.scheduleSettlement ?? ((settle: () => void) => settle());
-  // Each Operation carries its outcome and the streams watching it. Observers are
-  // added only while `pending` and delivered to exactly once on settlement, so a
-  // settled Operation holds no live observer to leak.
+  const budgets = deps.bundleBudgets ?? DEFAULT_BUDGETS;
+  // Each Operation carries a settler (run inline by default, deferred under a
+  // test), its outcome, and the streams watching it. Observers are added only
+  // while `pending` and delivered to exactly once on settlement, so a settled
+  // Operation holds no live observer to leak. `replayKey` decides whether a
+  // re-submitted operation id is a replay (equal) or a conflict (different).
   const operations = new Map<
     string,
     {
-      readonly path: string;
-      readonly outcome: OperationOutcome;
+      readonly replayKey: string;
+      outcome: OperationOutcome;
+      readonly observers: Set<UpdateStream>;
+      readonly runId?: string;
+      readonly settle: () => OperationOutcome;
+    }
+  >();
+  // A launched Run tracked in this process: its routing and Bundle facts, the
+  // owner while it is live (so a snapshot read never fences the executing owner),
+  // the in-memory latest state, and the streams watching it.
+  const runs = new Map<
+    string,
+    {
+      readonly digest: string;
+      readonly routing: readonly RoutingNode[];
+      readonly name: string;
+      readonly id: string;
+      readonly version: string;
+      state: string;
+      owner?: RunOwner;
+      done: boolean;
       readonly observers: Set<UpdateStream>;
     }
   >();
@@ -85,12 +146,23 @@ export function createApplication(deps: ApplicationDependencies): Application {
   const bundleCatalogObservers = new Set<UpdateStream>();
   const bundleCatalog: BundleCatalogDependencies = {
     catalog,
-    budgets: deps.bundleBudgets ?? DEFAULT_BUDGETS,
+    budgets,
     engineVersion: deps.engineVersion ?? "0.0.0-dev",
     ...(deps.hostPlatform !== undefined
       ? { hostPlatform: deps.hostPlatform }
       : {}),
   };
+  const runProjection: RunProjectionDependencies | undefined =
+    runGroup === undefined
+      ? undefined
+      : {
+          runGroup,
+          catalog,
+          budgets,
+          ...(deps.hostPlatform !== undefined
+            ? { hostPlatform: deps.hostPlatform }
+            : {}),
+        };
 
   function workspaceSnapshot(): WorkspaceSnapshot {
     const approval = catalog.getWorkspaceApproval(launchWorkspacePath);
@@ -129,22 +201,111 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { status: "applied" };
   }
 
-  // Settles a `pending` Operation: applies it, records the durable outcome, and
-  // delivers it to any Projection opened on this id while it was pending. Runs
-  // via `scheduleSettlement`, so inline by default and deferred under a test. The
-  // observer Set is carried forward so streams opened while pending stay live.
-  function settleOperation(operationId: string, path: string): void {
-    const observers =
-      operations.get(operationId)?.observers ?? new Set<UpdateStream>();
-    const outcome = applyApproval(path);
-    operations.set(operationId, { path, outcome, observers });
+  // Settles a `pending` Operation: runs its settler, records the durable outcome
+  // in place (the observer Set and settler stay stable), and delivers it to any
+  // Projection opened on this id while it was pending. Runs via
+  // `scheduleSettlement`, so inline by default and deferred under a test.
+  function settleOperation(operationId: string): void {
+    const entry = operations.get(operationId);
+    if (entry === undefined) return;
+    entry.outcome = entry.settle();
     const snapshot: OperationSnapshot = {
       family: "operation",
       operationId,
-      outcome,
+      outcome: entry.outcome,
     };
-    for (const observer of observers) {
+    for (const observer of entry.observers) {
       observer.push({ kind: "durable", snapshot });
+    }
+  }
+
+  // Push the current Run snapshot to every observer watching this Run. Called
+  // after each publication (via the wrapped owner) while the Run is live.
+  function pushRunUpdate(runId: string): void {
+    if (runProjection === undefined) return;
+    const tracking = runs.get(runId);
+    if (tracking === undefined || tracking.observers.size === 0) return;
+    const snapshot = runSnapshot(runProjection, runId, {
+      facts: {
+        routing: tracking.routing,
+        name: tracking.name,
+        id: tracking.id,
+        version: tracking.version,
+        digest: tracking.digest,
+      },
+      ...(tracking.owner !== undefined ? { liveOwner: tracking.owner } : {}),
+      state: tracking.state,
+    });
+    for (const observer of tracking.observers) {
+      observer.push({ kind: "durable", snapshot });
+    }
+  }
+
+  // Wrap the acquired owner so each canonical write pushes a fresh Run snapshot
+  // to observers. Reads delegate to the raw owner unchanged; only the two
+  // canonical writes are intercepted, after they commit.
+  function observedOwner(owner: RunOwner, runId: string): RunOwner {
+    const tracking = runs.get(runId);
+    return {
+      ...owner,
+      writeState(state) {
+        const result = owner.writeState(state);
+        if (result.ok && tracking !== undefined) {
+          tracking.state = state;
+          pushRunUpdate(runId);
+        }
+        return result;
+      },
+      publishAttempt(request) {
+        const result = owner.publishAttempt(request);
+        if (result.ok) {
+          if (request.advanceState !== undefined && tracking !== undefined) {
+            tracking.state = request.advanceState;
+          }
+          pushRunUpdate(runId);
+        }
+        return result;
+      },
+    };
+  }
+
+  // Acquire the Run, drive it to rest through the injected execution, then close
+  // the owner and release the Workspace claim. The launch Operation is `applied`
+  // once the Run reaches rest (whatever its own succeeded/failed outcome); a
+  // fenced owner or publication fault is a coordination/environment fault that
+  // execution throws, carried here as a `not-applied` Problem.
+  function runAndSettle(runId: string): OperationOutcome {
+    const tracking = runs.get(runId);
+    if (
+      tracking === undefined ||
+      runGroup === undefined ||
+      runExecution === undefined
+    ) {
+      return { status: "not-applied", problem: runSupportUnavailable() };
+    }
+    const owner = runGroup.acquireRun(runId);
+    if (owner === undefined) {
+      tracking.done = true;
+      return { status: "not-applied", problem: runStoreUnreadable(runId) };
+    }
+    tracking.owner = owner;
+    try {
+      runExecution({
+        routing: tracking.routing,
+        digest: tracking.digest,
+        owner: observedOwner(owner, runId),
+      });
+      return { status: "applied" };
+    } catch (error) {
+      return {
+        status: "not-applied",
+        problem: runExecutionFault(runId, error),
+      };
+    } finally {
+      tracking.owner = undefined;
+      tracking.done = true;
+      owner.close();
+      runGroup.endRun(runId);
     }
   }
 
@@ -167,8 +328,15 @@ export function createApplication(deps: ApplicationDependencies): Application {
     readonly family: "bundle-catalog";
     readonly focus?: undefined;
   }): OpenedProjection<BundleCatalogSnapshot>;
+  function openProjection(selector: {
+    readonly family: "run";
+    readonly runId: string;
+  }): OpenedProjection<RunSnapshot>;
   function openProjection(selector: ProjectionSelector): OpenedProjection;
   function openProjection(selector: ProjectionSelector): OpenedProjection {
+    if (selector.family === "run") {
+      return openRunProjection(selector.runId);
+    }
     if (selector.family === "bundle-catalog") {
       if (selector.focus !== undefined) {
         // A focus is a settled point-in-time inspection; no updates arrive.
@@ -259,37 +427,252 @@ export function createApplication(deps: ApplicationDependencies): Application {
     };
   }
 
+  function openRunProjection(runId: string): OpenedProjection {
+    const updates = new UpdateStream();
+    if (runProjection === undefined) {
+      // No Run support wired: a Problem snapshot, not a throw, like an unknown id.
+      return {
+        snapshot: {
+          family: "run",
+          runId,
+          result: { found: false, problem: runSupportUnavailable() },
+        },
+        catchUp: "fresh",
+        updates,
+        close() {
+          updates.close();
+        },
+      };
+    }
+    const tracking = runs.get(runId);
+    const snapshot = runSnapshot(
+      runProjection,
+      runId,
+      tracking === undefined
+        ? {}
+        : {
+            facts: {
+              routing: tracking.routing,
+              name: tracking.name,
+              id: tracking.id,
+              version: tracking.version,
+              digest: tracking.digest,
+            },
+            ...(tracking.owner !== undefined
+              ? { liveOwner: tracking.owner }
+              : {}),
+            state: tracking.state,
+          },
+    );
+    // Register for durable updates only while the Run is still live in this
+    // process; a settled or foreign Run receives no further publication.
+    if (tracking !== undefined && !tracking.done) {
+      tracking.observers.add(updates);
+      return {
+        snapshot,
+        catchUp: "fresh",
+        updates,
+        close() {
+          tracking.observers.delete(updates);
+          updates.close();
+        },
+      };
+    }
+    return {
+      snapshot,
+      catchUp: "fresh",
+      updates,
+      close() {
+        updates.close();
+      },
+    };
+  }
+
+  function submitApprove(
+    operationId: string,
+    input: { readonly path: string },
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === input.path) {
+        return { admitted: true, operationId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    operations.set(operationId, {
+      replayKey: input.path,
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      settle: () => applyApproval(input.path),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId };
+  }
+
+  function submitLaunch(
+    operationId: string,
+    input: LaunchRunInput,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === launchReplayKey(input)) {
+        return {
+          admitted: true,
+          operationId,
+          ...(existing.runId !== undefined ? { runId: existing.runId } : {}),
+        };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (runGroup === undefined || runExecution === undefined) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    // Resolve the installed Entry, prove the Workspace is approved, and read the
+    // pinned bytes — all before anything is written, so a Problem here leaves no
+    // Trust grant and no Run (AC1, AC4).
+    const selected = selectRunEntry(
+      catalog,
+      input.bundle.id,
+      input.bundle.version,
+    );
+    if ("problem" in selected) {
+      return { admitted: false, problem: selected.problem };
+    }
+    const entry = selected.entry;
+    if (catalog.getWorkspaceApproval(launchWorkspacePath) === undefined) {
+      return {
+        admitted: false,
+        problem: workspaceNotApproved(launchWorkspacePath),
+      };
+    }
+    const bytes = catalog.readManagedBytes(entry.digest);
+    if (bytes === undefined) {
+      return {
+        admitted: false,
+        problem: bundleBytesMissingForRun(entry.digest),
+      };
+    }
+    const inspected = inspectBundle(bytes, budgets, false);
+    if (!inspected.ok) {
+      return {
+        admitted: false,
+        problem: bundleBytesCorruptForRun(entry.digest, inspected.finding.code),
+      };
+    }
+    const manifest = inspected.inspection.manifest;
+
+    // Trust: an untrusted digest needs a matching acknowledgement. A missing one
+    // is `bundle-trust-required` (carrying the Execution summary, the fixed
+    // warning, and the exact digest); a mismatching one grants nothing. The
+    // acknowledgement is validated here but the grant is only recorded *after* the
+    // Run is created, so a `workspace-busy` refusal leaves no dangling grant.
+    const grant = catalog.getTrustGrant(
+      entry.digest,
+      entry.installationGeneration,
+    );
+    const needsGrant = grant === undefined;
+    if (needsGrant) {
+      if (input.trustDigest === undefined) {
+        return {
+          admitted: false,
+          problem: bundleTrustRequired(
+            manifest,
+            entry.digest,
+            deps.hostPlatform,
+          ),
+        };
+      }
+      if (input.trustDigest !== entry.digest) {
+        return {
+          admitted: false,
+          problem: trustDigestMismatch(entry.digest, input.trustDigest),
+        };
+      }
+    }
+
+    const created = runGroup.createRun({
+      operationId,
+      bundleSnapshotDigest: entry.digest,
+      launch: input.launchInputs,
+      at: new Date(),
+    });
+    if (created.outcome === "workspace-busy") {
+      // Refused before any grant is written: nothing to undo.
+      return { admitted: false, problem: workspaceBusy(created.liveRunId) };
+    }
+    if (needsGrant) {
+      catalog.grantTrust({
+        operationId,
+        digest: entry.digest,
+        installationGeneration: entry.installationGeneration,
+        grantedAt: new Date(),
+      });
+    }
+    const runId = created.runId;
+    runs.set(runId, {
+      digest: entry.digest,
+      routing: manifest.routing,
+      name: manifest.bundle.name,
+      id: manifest.bundle.id,
+      version: manifest.bundle.version,
+      state: created.record.state,
+      done: false,
+      observers: new Set<UpdateStream>(),
+    });
+    operations.set(operationId, {
+      replayKey: launchReplayKey(input),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId,
+      settle: () => runAndSettle(runId),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId };
+  }
+
   const projectionPort: ProjectionPort = {
     openProjection,
     submit(submission: Submission): SubmissionAdmission {
-      const existing = operations.get(submission.operationId);
-      if (existing !== undefined) {
-        // Same id, equal input replays the original result without re-dispatch;
-        // same id, different input is rejected.
-        if (existing.path === submission.input.path) {
-          return { admitted: true, operationId: submission.operationId };
-        }
-        return {
-          admitted: false,
-          problem: operationIdReused(submission.operationId),
-        };
-      }
       // Admit at once and record `pending`; settlement is scheduled (inline by
       // default, deferred under a test) and publishes the outcome then.
-      operations.set(submission.operationId, {
-        path: submission.input.path,
-        outcome: { status: "pending" },
-        observers: new Set<UpdateStream>(),
-      });
-      scheduleSettlement(() =>
-        settleOperation(submission.operationId, submission.input.path),
-      );
-      return { admitted: true, operationId: submission.operationId };
+      return submission.operation === "approve-workspace"
+        ? submitApprove(submission.operationId, submission.input)
+        : submitLaunch(submission.operationId, submission.input);
     },
 
-    readResource(_reference: ResourceReference): never {
-      // Unreachable: no resource references exist in M1 (the type is uninhabited).
-      throw new Error("The Projection Port has no M1 resource vocabulary.");
+    readResource(reference: ResourceReference): ResourceRead {
+      if (runGroup === undefined) {
+        return { found: false, problem: runSupportUnavailable() };
+      }
+      // Read through the live owner when the Run is still executing in this
+      // process (so the read never fences it); otherwise acquire a short-lived
+      // owner and close it. Never acquire for a Run live in another process:
+      // acquiring bumps the fencing epoch and would abort the process running it,
+      // so refuse the read until the Run rests instead.
+      const live = runs.get(reference.runId)?.owner;
+      if (live === undefined && isLiveElsewhere(runGroup, reference.runId)) {
+        return { found: false, problem: runLiveElsewhere(reference.runId) };
+      }
+      const owner = live ?? runGroup.acquireRun(reference.runId);
+      if (owner === undefined) {
+        return { found: false, problem: runStoreUnreadable(reference.runId) };
+      }
+      try {
+        const bytes = owner.readArtifact(
+          reference.versionId,
+          reference.artifactName,
+        );
+        if (bytes === undefined) {
+          return { found: false, problem: runOutputMissing(reference) };
+        }
+        return {
+          found: true,
+          type: reference.type,
+          content: new TextDecoder().decode(bytes),
+        };
+      } finally {
+        if (live === undefined) owner.close();
+      }
     },
   };
 
@@ -329,6 +712,142 @@ function pathNotFound(rawPath: string, error: unknown): Problem {
       "Pass a path that exists, or create the directory first, then run the command again.",
     possibleEffects: "none",
     details: code ? { path: rawPath, errno: code } : { path: rawPath },
+  };
+}
+
+/** A stable replay key for a launch: the identity, the sorted inputs, and any
+ *  acknowledged digest. A re-submitted operation id with an equal key replays. */
+function launchReplayKey(input: LaunchRunInput): string {
+  const inputs = Object.entries(input.launchInputs).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  return JSON.stringify([
+    input.bundle.id,
+    input.bundle.version ?? null,
+    inputs,
+    input.trustDigest ?? null,
+  ]);
+}
+
+function workspaceNotApproved(path: string): Problem {
+  return {
+    code: "workspace-not-approved",
+    explanation: `The launch Workspace ${path} is not approved.`,
+    remediation:
+      "Run `secant workspace approve` to approve this Workspace, then launch again.",
+    possibleEffects: "none",
+    details: { path },
+  };
+}
+
+// The `bundle-trust-required` Problem carries the Execution summary for the host
+// platform and the fixed authority warning in its explanation, and names the
+// exact digest to acknowledge in its remediation (ADR 0021, #82 AC1). The summary
+// resolves commands for the host platform when the Bundle supports it — the same
+// rule `bundle-catalog`'s focus uses — so the user sees what will actually run,
+// not the first declared platform.
+function bundleTrustRequired(
+  manifest: AuthoredManifest,
+  digest: string,
+  host: Platform | undefined,
+): Problem {
+  const platforms = manifest.platforms ?? [];
+  const platform: Platform =
+    host !== undefined && platforms.includes(host)
+      ? host
+      : (platforms[0] ?? "linux");
+  const summary = generateExecutionSummary(manifest, digest, platform);
+  const kinds = Object.entries(summary.stepKindCounts)
+    .map(([kind, count]) => `${kind}=${count}`)
+    .join(", ");
+  const commands = summary.commands
+    .map((command) => `${command.stepId}: ${command.executable}`)
+    .join("; ");
+  const explanation =
+    `Launching ${summary.identity.id}@${summary.identity.version} needs your trust for the exact installed bytes. ` +
+    `Execution summary (platform ${summary.platform}): step kinds ${kinds || "(none)"}; ` +
+    `commands ${commands || "(none)"}. ${summary.warning}`;
+  return {
+    code: "bundle-trust-required",
+    explanation,
+    remediation: `Re-run with --trust ${digest} to acknowledge and trust this exact Bundle, then launch.`,
+    possibleEffects: "none",
+    details: { digest, platform: summary.platform },
+  };
+}
+
+function trustDigestMismatch(installed: string, acknowledged: string): Problem {
+  return {
+    code: "trust-digest-mismatch",
+    explanation: `The acknowledged digest ${acknowledged} does not match the installed digest ${installed}; nothing was trusted.`,
+    remediation: `Re-run with --trust ${installed} to acknowledge the exact installed Bundle.`,
+    possibleEffects: "none",
+    details: { installed, acknowledged },
+  };
+}
+
+function workspaceBusy(liveRunId: string): Problem {
+  return {
+    code: "workspace-busy",
+    explanation: `Another Run (${liveRunId}) is live in this Workspace; only one Run runs at a time.`,
+    remediation: "Wait for the live Run to reach rest, then launch again.",
+    possibleEffects: "none",
+    details: { liveRunId },
+  };
+}
+
+function runSupportUnavailable(): Problem {
+  return {
+    code: "run-support-unavailable",
+    explanation: "This client was wired without Run support.",
+    remediation:
+      "Launch Runs through the headless CLI or the shell, which wire the Run Store and execution.",
+    possibleEffects: "none",
+  };
+}
+
+function runStoreUnreadable(runId: string): Problem {
+  return {
+    code: "run-store-damaged",
+    explanation: `Run ${runId} could not be acquired; its canonical store is unreadable.`,
+    remediation:
+      "The Run's store is damaged; delete the Run and launch a fresh one.",
+    possibleEffects: "unknown",
+    details: { runId },
+  };
+}
+
+function runExecutionFault(runId: string, error: unknown): Problem {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    code: "run-execution-fault",
+    explanation: `Run ${runId} could not be driven to rest: ${message}`,
+    remediation:
+      "This is a coordination or environment fault; check the Run store and retry the launch.",
+    possibleEffects: "unknown",
+    details: { runId },
+  };
+}
+
+function runLiveElsewhere(runId: string): Problem {
+  return {
+    code: "run-live-elsewhere",
+    explanation: `Run ${runId} is live in another process; its outputs cannot be read until it reaches rest.`,
+    remediation:
+      "Wait for the Run to reach rest (its launch process prints the final state), then read the output.",
+    possibleEffects: "none",
+    details: { runId },
+  };
+}
+
+function runOutputMissing(reference: ResourceReference): Problem {
+  return {
+    code: "run-output-not-found",
+    explanation: `Output ${reference.artifactName} has no bytes at the referenced version.`,
+    remediation:
+      "Open the Run to see its current outputs, then read one that is bound.",
+    possibleEffects: "none",
+    details: { runId: reference.runId, artifactName: reference.artifactName },
   };
 }
 

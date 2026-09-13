@@ -284,6 +284,30 @@ try {
     );
   }
 
+  // Run error paths from the compiled binary (issue #82, AC7): `run show` on an
+  // unknown Run id and `run launch` on an uninstalled Bundle each exit non-zero
+  // with the precise Problem, before any Run directory exists.
+  for (const [args, code] of [
+    [["run", "show", "no-such-run"], "run-not-found"],
+    [["run", "launch", "io.example.absent"], "bundle-not-installed"],
+  ]) {
+    const result = spawnSync(binary, args, {
+      cwd: workspaceDirectory,
+      encoding: "utf8",
+      env: workspaceEnv,
+    });
+    if (result.error) throw result.error;
+    if (result.status === 0) {
+      throw new Error(`\`secant ${args.join(" ")}\` should exit non-zero.`);
+    }
+    const output = `${result.stdout}${result.stderr}`;
+    if (!output.includes(code)) {
+      throw new Error(
+        `\`secant ${args.join(" ")}\` did not print ${code}: ${output}`,
+      );
+    }
+  }
+
   // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
   // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
   // startup Problem and a non-zero exit before the renderer is created.

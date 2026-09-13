@@ -13,7 +13,10 @@ export type ProjectionSelector =
   | { readonly family: "operation"; readonly operationId: string }
   // `bundle-catalog` with no `focus` is the list; with a `focus` it is the exact
   // inspection of one Installed Bundle. Read-only: this family offers no Actions.
-  | { readonly family: "bundle-catalog"; readonly focus?: BundleFocusSelector };
+  | { readonly family: "bundle-catalog"; readonly focus?: BundleFocusSelector }
+  // One launched Run by its id. Read-only: launching is an Operation, not a Run
+  // Action; durable updates land as each publication commits.
+  | { readonly family: "run"; readonly runId: string };
 
 /** Selects one Installed Bundle to inspect. An omitted version selects the
  *  highest stable installed version; a prerelease must be named (#9, #49). */
@@ -22,16 +25,43 @@ export interface BundleFocusSelector {
   readonly version?: string;
 }
 
-/** A durable user intent, correlated by a caller-generated operation id. */
-export interface Submission {
+/** A durable user intent, correlated by a caller-generated operation id. The
+ *  closed set of Operations grows one variant per slice. */
+export type Submission = ApproveWorkspaceSubmission | LaunchRunSubmission;
+
+export interface ApproveWorkspaceSubmission {
   readonly operationId: string;
   readonly operation: "approve-workspace";
   readonly input: { readonly path: string };
 }
 
-/** `submit` settles only as admitted (with the operation id) or not-admitted. */
+/** Launch an installed Command-only Bundle against the approved launch
+ *  Workspace, optionally acknowledging trust for the exact installed digest. */
+export interface LaunchRunSubmission {
+  readonly operationId: string;
+  readonly operation: "launch-run";
+  readonly input: LaunchRunInput;
+}
+export interface LaunchRunInput {
+  /** The installed Bundle to launch. An omitted version selects the highest
+   *  stable installed version; a prerelease must be named (#9, #49). */
+  readonly bundle: { readonly id: string; readonly version?: string };
+  /** Launch inputs by name, as plain strings; stored opaque on the Run. */
+  readonly launchInputs: Readonly<Record<string, string>>;
+  /** The exact installed digest the caller acknowledges trusting. Required only
+   *  when the installed digest is not yet trusted (ADR 0021). */
+  readonly trustDigest?: string;
+}
+
+/** `submit` settles only as admitted (with the operation id, and the created Run
+ *  id for a launch) or not-admitted. */
 export type SubmissionAdmission =
-  | { readonly admitted: true; readonly operationId: string }
+  | {
+      readonly admitted: true;
+      readonly operationId: string;
+      /** The Run a launch created, so the caller can open its Projection at once. */
+      readonly runId?: string;
+    }
   | { readonly admitted: false; readonly problem: Problem };
 
 /** An opened Projection joins its snapshot, catch-up barrier, and updates. The
@@ -54,7 +84,8 @@ export type ProjectionSnapshot =
   | WorkspaceSnapshot
   | OperationSnapshot
   | BundleCatalogSnapshot
-  | BundleFocusSnapshot;
+  | BundleFocusSnapshot
+  | RunSnapshot;
 
 /** The one launch Workspace: its canonical path and approval state. */
 export interface WorkspaceSnapshot {
@@ -254,6 +285,73 @@ export type BundleFocusResult =
   | { readonly found: true; readonly bundle: InstalledBundleFocus }
   | { readonly found: false; readonly problem: Problem };
 
+// --- run family ------------------------------------------------------------
+//
+// One launched Run as a bounded snapshot: identity, state, ordered Workflow
+// progress with per-step status, current position, and a timeline of durable
+// events. Run outputs are reached by reference (ResourceReference), never inlined
+// here, so the snapshot stays bounded however large an output grows.
+
+/** A Run's canonical lifecycle state, in words. `blocked` is never persisted. */
+export type RunStateName = "created" | "running" | "succeeded" | "failed";
+
+/** One Step's status within a Run's ordered progress. */
+export type RunStepStatus = "pending" | "running" | "succeeded" | "failed";
+export interface RunStepProgress {
+  readonly id: string;
+  readonly kind: StepKindName;
+  readonly status: RunStepStatus;
+}
+
+/** One durable Run event: when it happened and, where it helps, a detail. */
+export type RunTimelineKind =
+  "run-created" | "trust-granted" | "attempt-settled";
+export interface RunTimelineEvent {
+  readonly at: string; // ISO 8601
+  readonly event: RunTimelineKind;
+  /** The Attempt outcome for `attempt-settled`; the granting operation id for
+   *  `trust-granted`; absent for `run-created`. */
+  readonly detail?: string;
+}
+
+/** One Run output, reachable through `readResource`. Only `text` and `verdict`
+ *  are reachable in M2; file/file-set materialization is a later slice. */
+export interface RunOutputView {
+  readonly name: string;
+  readonly type: "text" | "verdict";
+  readonly reference: ResourceReference;
+}
+
+/** A Run's bounded snapshot. Outputs carry references, not bytes. */
+export interface RunView {
+  readonly runId: string;
+  readonly bundle: {
+    readonly id: string;
+    readonly version: string;
+    readonly name: string;
+    readonly digest: string; // SHA-256 hex over the installed bytes
+  };
+  readonly workspacePath: string;
+  readonly launchedAt: string; // ISO 8601
+  readonly state: string;
+  readonly progress: readonly RunStepProgress[];
+  /** Index of the current Step; `progress.length` once the Run is at rest. */
+  readonly position: number;
+  readonly timeline: readonly RunTimelineEvent[];
+  readonly outputs: readonly RunOutputView[];
+}
+
+export interface RunSnapshot {
+  readonly family: "run";
+  readonly runId: string;
+  readonly result: RunResult;
+}
+/** The Run, or a Problem when no such Run exists or its store is damaged —
+ *  carried the way an operation carries `operation-not-found`, not thrown. */
+export type RunResult =
+  | { readonly found: true; readonly run: RunView }
+  | { readonly found: false; readonly problem: Problem };
+
 /** A typed opportunity bound to an exact target. M1 offers exactly one. */
 export interface ActionOffer {
   readonly action: "approve-workspace";
@@ -288,10 +386,26 @@ export interface FieldViolation {
   readonly explanation: string;
 }
 
-// No M1 resource vocabulary: `readResource` exists in the contract with nothing
-// to reference yet, so its reference and result types are uninhabited.
-export type ResourceReference = never;
-export type ResourceRead = never;
+/** A reference to one Run output, resolved through `readResource`. It names the
+ *  Run, the artifact, and the exact bound version, so a later publication of the
+ *  same name does not change what a held reference reads. M2 references `text`
+ *  Artifacts and Verdicts only. */
+export interface ResourceReference {
+  readonly runId: string;
+  readonly artifactName: string;
+  readonly versionId: string;
+  readonly type: "text" | "verdict";
+}
+/** The content of a resolved reference, or a Problem when the run or the bytes
+ *  are gone. `text` is the captured output; `verdict` is `pass`/`fail`. M2
+ *  outputs are textual, so bytes decode as UTF-8 (ADR 0020, #81 ponytail gap). */
+export type ResourceRead =
+  | {
+      readonly found: true;
+      readonly type: "text" | "verdict";
+      readonly content: string;
+    }
+  | { readonly found: false; readonly problem: Problem };
 
 export interface ProjectionPort {
   // Selector-typed overloads (#74 A8): each concrete selector resolves to the
@@ -313,6 +427,10 @@ export interface ProjectionPort {
     readonly family: "bundle-catalog";
     readonly focus?: undefined;
   }): OpenedProjection<BundleCatalogSnapshot>;
+  openProjection(selector: {
+    readonly family: "run";
+    readonly runId: string;
+  }): OpenedProjection<RunSnapshot>;
   openProjection(selector: ProjectionSelector): OpenedProjection;
   submit(submission: Submission): SubmissionAdmission;
   readResource(reference: ResourceReference): ResourceRead;

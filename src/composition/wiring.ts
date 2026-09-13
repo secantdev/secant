@@ -1,10 +1,18 @@
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   createApplication,
   type Application,
+  type RunExecution,
 } from "../application/application.js";
 import { openCatalog, type Catalog } from "../catalog/catalog.js";
+import { DEFAULT_BUDGETS, readZip } from "../bundle/bundle.js";
+import {
+  executeRouting,
+  type AssetResolver,
+} from "../run/execution/execution.js";
+import { openRunGroup, type RunGroup } from "../run/store/store.js";
 import type { Platform } from "../workflow/workflow.js";
 
 // The one wiring path both composition roots take (#74 A1, A2, A6). Before this,
@@ -48,11 +56,13 @@ export interface WiringOverrides {
 
 export interface Wiring extends Application {
   readonly catalog: Catalog;
+  readonly runGroup: RunGroup;
 }
 
-/** Resolves the Secant home, opens the Catalog, and constructs the Application
- *  with the running engine version and host platform, handing it the raw launch
- *  cwd. The caller owns `catalog` and must close it. */
+/** Resolves the Secant home, opens the Catalog and the launch Workspace's Run
+ *  Store, constructs the Run execution, and builds the Application with the
+ *  running engine version and host platform, handing it the raw launch cwd. The
+ *  caller owns `catalog` and `runGroup` and must close both. */
 export function wireApplication(overrides: WiringOverrides = {}): Wiring {
   const secantHome =
     overrides.secantHome ??
@@ -62,17 +72,84 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
 
   const catalog = openCatalog(secantHome);
   try {
-    const application = createApplication({
-      catalog,
-      launchWorkspacePath,
-      engineVersion: overrides.engineVersion ?? engineVersion,
-      ...(host !== undefined ? { hostPlatform: host } : {}),
-    });
-    return { catalog, ...application };
+    // The Run Store groups Runs by the resolved absolute Workspace path; open it
+    // against the same canonicalisation the Application applies (A6), so a fresh
+    // `run show` process reaches the same group directory as the launch.
+    const runGroup = openRunGroup(
+      secantHome,
+      realpathSync.native(launchWorkspacePath),
+    );
+    try {
+      const application = createApplication({
+        catalog,
+        launchWorkspacePath,
+        engineVersion: overrides.engineVersion ?? engineVersion,
+        ...(host !== undefined ? { hostPlatform: host } : {}),
+        runGroup,
+        runExecution: makeRunExecution(catalog, secantHome, host ?? "linux"),
+      });
+      return { catalog, runGroup, ...application };
+    } catch (error) {
+      runGroup.close();
+      throw error;
+    }
   } catch (error) {
     // Construction can throw (e.g. the launch path no longer resolves); close
     // the Catalog we opened before rethrowing, so no caller leaks it.
     catalog.close();
     throw error;
   }
+}
+
+// The Run execution seam #81 left open: an installed Bundle's `{asset}` paths
+// become on-disk paths by extracting the pinned Snapshot's bytes
+// (`catalog.readManagedBytes(digest)`) under the Secant home, once per Run, then
+// mapping each declared asset path to the extracted file. No pinned-Snapshot
+// extraction mechanism existed before this slice, so this is the genuinely new
+// wiring. `run read` returns only `text`/`verdict` in M2 (execution's
+// file-materialization gap is a documented `ponytail:`).
+function makeRunExecution(
+  catalog: Catalog,
+  secantHome: string,
+  platform: Platform,
+): RunExecution {
+  return ({ routing, digest, owner }) => {
+    const assetDir = join(secantHome, "run-assets", owner.runId);
+    return executeRouting(routing, {
+      owner,
+      platform,
+      resolveAsset: extractAssets(catalog, digest, assetDir),
+    });
+  };
+}
+
+/** Extract the pinned Bundle Snapshot's entries to `assetDir` and return a
+ *  resolver mapping a declared asset path to its extracted on-disk path. A digest
+ *  whose managed bytes are missing or do not read resolves nothing; execution
+ *  then throws on the first unresolved `{asset}`, which composition owns. */
+// ponytail: extracts every archive entry to a fresh per-Run directory on each
+// launch — no cache by digest, no filtering to only the assets a Routing
+// references. Fine at M2 Bundle sizes (a Command-only Bundle is a manifest and a
+// script or two). If large payloads or many launches make this bite, extract once
+// per digest into a shared `run-assets/<digest>` and resolve only declared assets.
+function extractAssets(
+  catalog: Catalog,
+  digest: string,
+  assetDir: string,
+): AssetResolver {
+  const bytes = catalog.readManagedBytes(digest);
+  if (bytes === undefined) return () => undefined;
+  const archive = readZip(bytes, DEFAULT_BUDGETS);
+  if (!archive.ok) return () => undefined;
+  const extracted = new Map<string, string>();
+  for (const entry of archive.entries) {
+    const target = join(assetDir, entry.path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, entry.data);
+    extracted.set(entry.path, target);
+  }
+  return (assetPath) => {
+    const path = extracted.get(assetPath);
+    return path !== undefined && existsSync(path) ? path : undefined;
+  };
 }

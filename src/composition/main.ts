@@ -18,10 +18,12 @@ export {
 /** Wires the composition root for one headless command, runs `fn` with the
  *  Application Interfaces, and closes the Catalog on every exit path. */
 export function withClients<T>(fn: (clients: HeadlessClients) => T): T {
-  const { catalog, projectionPort, bundleManagement } = wireApplication();
+  const { catalog, runGroup, projectionPort, bundleManagement } =
+    wireApplication();
   try {
     return fn({ projectionPort, bundleManagement });
   } finally {
+    runGroup.close();
     catalog.close();
   }
 }

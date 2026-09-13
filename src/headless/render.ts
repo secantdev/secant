@@ -5,6 +5,7 @@ import type {
   InstalledBundleFocus,
   InstalledBundleSummary,
   RoutingNodeView,
+  RunView,
 } from "../application/projection-port.js";
 
 // The headless client's plain-text renderers: pure snapshot → string functions
@@ -90,6 +91,45 @@ export function renderFocus(bundle: InstalledBundleFocus): string {
         `  [${finding.severity}] ${finding.code} @ ${finding.target}: ${finding.explanation}`,
       );
     }
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+export function renderRun(run: RunView): string {
+  const lines: string[] = [
+    `Run ${run.runId}`,
+    `Bundle: ${run.bundle.id}@${run.bundle.version} (${run.bundle.name})`,
+    `Digest: sha256:${run.bundle.digest}`,
+    `Workspace: ${run.workspacePath}`,
+    `Launched: ${run.launchedAt}`,
+    `State: ${run.state}`,
+    `Position: ${
+      run.position >= run.progress.length
+        ? "at rest"
+        : `step ${run.position + 1} of ${run.progress.length}`
+    }`,
+    "",
+    "Progress:",
+  ];
+  if (run.progress.length === 0) lines.push("  (no steps)");
+  for (const step of run.progress) {
+    lines.push(`  ${step.id} (${step.kind}): ${step.status}`);
+  }
+
+  lines.push("", "Timeline:");
+  if (run.timeline.length === 0) lines.push("  (none)");
+  for (const event of run.timeline) {
+    const detail = event.detail !== undefined ? ` ${event.detail}` : "";
+    lines.push(`  ${event.at} ${event.event}${detail}`);
+  }
+
+  lines.push("", "Outputs:");
+  if (run.outputs.length === 0) lines.push("  (none)");
+  for (const output of run.outputs) {
+    lines.push(
+      `  ${output.name} (${output.type}) ref=${output.reference.runId}/${output.name}`,
+    );
   }
 
   return `${lines.join("\n")}\n`;

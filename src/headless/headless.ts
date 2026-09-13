@@ -9,7 +9,7 @@ import type {
   Problem,
   ProjectionPort,
 } from "../application/projection-port.js";
-import { renderFocus, renderRow } from "./render.js";
+import { renderFocus, renderRow, renderRun } from "./render.js";
 
 // The headless client speaks the Application Interfaces and nothing else: the
 // Projection Port for the Workspace and Bundle-management for `bundle build`.
@@ -282,6 +282,101 @@ function buildProgram(
       );
     });
 
+  // No `run` action: like `bundle`, a bare `run` or an unknown token is a usage
+  // error exiting non-zero. `run launch` executes; `run show`/`run read` observe.
+  const run = program.command("run").description("launch, show, and read Runs");
+  run
+    .command("launch")
+    .description("launch an installed Command-only Bundle")
+    .argument("[id@version]", "Bundle id, optionally with @version")
+    .option(
+      "--trust <digest>",
+      "acknowledge and trust this exact installed digest",
+    )
+    .option(
+      "--input <name=value>",
+      "a Launch input (repeatable)",
+      (pair: string, prev: string[]) => [...prev, pair],
+      [],
+    )
+    .option("--json", "print the Run snapshot as JSON")
+    .action(
+      (
+        selector: string | undefined,
+        options: { trust?: string; input: string[]; json?: boolean },
+      ) => {
+        const json = options.json ?? false;
+        if (selector === undefined) {
+          return settle(
+            fail(io, json, {
+              code: "missing-bundle-id",
+              explanation: "run launch needs a Bundle id.",
+              remediation: "Run `secant run launch <id>[@<version>]`.",
+              possibleEffects: "none",
+            }),
+          );
+        }
+        const inputs = parseInputs(options.input);
+        if ("problem" in inputs) return settle(fail(io, json, inputs.problem));
+        return settle(
+          execute((clients) =>
+            launchRun(
+              clients.projectionPort,
+              io,
+              json,
+              selector,
+              options.trust,
+              inputs.values,
+            ),
+          ),
+        );
+      },
+    );
+  run
+    .command("show")
+    .description("show a Run's snapshot")
+    .argument("[run-id]", "the Run id printed at launch")
+    .option("--json", "print the Run snapshot as JSON")
+    .action((runId: string | undefined, options: { json?: boolean }) => {
+      const json = options.json ?? false;
+      if (runId === undefined) {
+        return settle(
+          fail(io, json, {
+            code: "missing-run-id",
+            explanation: "run show needs a Run id.",
+            remediation: "Run `secant run show <run-id>`.",
+            possibleEffects: "none",
+          }),
+        );
+      }
+      return settle(
+        execute((clients) => showRun(clients.projectionPort, io, json, runId)),
+      );
+    });
+  run
+    .command("read")
+    .description("read one Run output by reference (<run-id>/<name>)")
+    .argument("[reference]", "a Run output reference, <run-id>/<name>")
+    .option("--json", "print the resolved output as JSON")
+    .action((reference: string | undefined, options: { json?: boolean }) => {
+      const json = options.json ?? false;
+      if (reference === undefined) {
+        return settle(
+          fail(io, json, {
+            code: "missing-reference",
+            explanation: "run read needs an output reference.",
+            remediation: "Run `secant run read <run-id>/<name>`.",
+            possibleEffects: "none",
+          }),
+        );
+      }
+      return settle(
+        execute((clients) =>
+          readRun(clients.projectionPort, io, json, reference),
+        ),
+      );
+    });
+
   return { program, state };
 }
 
@@ -451,6 +546,169 @@ function inspectBundle(
   } finally {
     opened.close();
   }
+}
+
+/** Parse repeated `--input name=value` pairs into a record, or a Problem when a
+ *  pair has no `=`. A later pair for the same name wins. */
+function parseInputs(
+  pairs: readonly string[],
+): { values: Record<string, string> } | { problem: Problem } {
+  const values: Record<string, string> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0) {
+      return {
+        problem: {
+          code: "invalid-input",
+          explanation: `Launch input "${pair}" is not in name=value form.`,
+          remediation: "Pass each input as `--input <name>=<value>`.",
+          possibleEffects: "none",
+        },
+      };
+    }
+    values[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return { values };
+}
+
+/** Split `<id>[@<version>]`; the first `@` divides them. */
+function splitSelector(selector: string): {
+  id: string;
+  version?: string;
+} {
+  const at = selector.indexOf("@");
+  return at === -1
+    ? { id: selector }
+    : { id: selector.slice(0, at), version: selector.slice(at + 1) };
+}
+
+function launchRun(
+  port: ProjectionPort,
+  io: HeadlessIO,
+  json: boolean,
+  selector: string,
+  trust: string | undefined,
+  inputs: Record<string, string>,
+): number {
+  const { id, version } = splitSelector(selector);
+  const admission = port.submit({
+    operationId: randomUUID(),
+    operation: "launch-run",
+    input: {
+      bundle: { id, ...(version !== undefined ? { version } : {}) },
+      launchInputs: inputs,
+      ...(trust !== undefined ? { trustDigest: trust } : {}),
+    },
+  });
+  if (!admission.admitted) return fail(io, json, admission.problem);
+  const runId = admission.runId;
+  if (runId === undefined) {
+    // A launch always identifies its Run; a missing id is a contract violation.
+    return fail(io, json, {
+      code: "run-not-identified",
+      explanation: "The launch was admitted without identifying a Run.",
+      remediation: "Retry the launch; if it persists, report it.",
+      possibleEffects: "unknown",
+    });
+  }
+
+  // The launch settles inline (headless default), so the Operation is already
+  // applied here; surface a settlement Problem before reading the Run.
+  const operationView = port.openProjection({
+    family: "operation",
+    operationId: admission.operationId,
+  });
+  const outcome = operationView.snapshot.outcome;
+  operationView.close();
+  if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
+
+  const opened = port.openProjection({ family: "run", runId });
+  try {
+    const snapshot = opened.snapshot;
+    if (json) {
+      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return snapshot.result.found && snapshot.result.run.state === "succeeded"
+        ? 0
+        : 1;
+    }
+    if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
+    const run = snapshot.result.run;
+    io.out(`Run ${run.runId}\n`);
+    io.out(`State: ${run.state}\n`);
+    return run.state === "succeeded" ? 0 : 1;
+  } finally {
+    opened.close();
+  }
+}
+
+function showRun(
+  port: ProjectionPort,
+  io: HeadlessIO,
+  json: boolean,
+  runId: string,
+): number {
+  const opened = port.openProjection({ family: "run", runId });
+  try {
+    const snapshot = opened.snapshot;
+    if (json) {
+      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return snapshot.result.found ? 0 : 1;
+    }
+    if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
+    io.out(renderRun(snapshot.result.run));
+    return 0;
+  } finally {
+    opened.close();
+  }
+}
+
+function readRun(
+  port: ProjectionPort,
+  io: HeadlessIO,
+  json: boolean,
+  reference: string,
+): number {
+  const slash = reference.indexOf("/");
+  if (slash <= 0 || slash === reference.length - 1) {
+    return fail(io, json, {
+      code: "invalid-reference",
+      explanation: `Reference "${reference}" is not in <run-id>/<name> form.`,
+      remediation: "Run `secant run read <run-id>/<name>`.",
+      possibleEffects: "none",
+    });
+  }
+  const runId = reference.slice(0, slash);
+  const name = reference.slice(slash + 1);
+
+  const opened = port.openProjection({ family: "run", runId });
+  let outputRef;
+  try {
+    const snapshot = opened.snapshot;
+    if (!snapshot.result.found) return fail(io, json, snapshot.result.problem);
+    const output = snapshot.result.run.outputs.find((o) => o.name === name);
+    if (output === undefined) {
+      return fail(io, json, {
+        code: "run-output-not-found",
+        explanation: `Run ${runId} has no bound output named ${name}.`,
+        remediation:
+          "Run `secant run show <run-id>` to see the Run's current outputs.",
+        possibleEffects: "none",
+        details: { runId, name },
+      });
+    }
+    outputRef = output.reference;
+  } finally {
+    opened.close();
+  }
+
+  const read = port.readResource(outputRef);
+  if (!read.found) return fail(io, json, read.problem);
+  if (json) {
+    io.out(`${JSON.stringify(read, null, 2)}\n`);
+    return 0;
+  }
+  io.out(read.content.endsWith("\n") ? read.content : `${read.content}\n`);
+  return 0;
 }
 
 function report(io: HeadlessIO, json: boolean, result: BundleResult): number {

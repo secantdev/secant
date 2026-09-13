@@ -63,7 +63,7 @@ export async function runTuiApp(): Promise<number> {
     process.env.WT_SESSION !== undefined,
   );
 
-  const { catalog, projectionPort } = wireApplication();
+  const { catalog, runGroup, projectionPort } = wireApplication();
   try {
     const { port, renderer } = await createProductionRenderer();
     // The diagnostic records the single teardown from createTeardown's own
@@ -118,6 +118,7 @@ export async function runTuiApp(): Promise<number> {
     }
     return 0;
   } finally {
+    runGroup.close();
     catalog.close();
   }
 }

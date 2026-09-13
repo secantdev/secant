@@ -28,7 +28,10 @@ export interface BundleFocusSelector {
 /** A durable user intent, correlated by a caller-generated operation id. The
  *  closed set of Operations grows one variant per slice. */
 export type Submission =
-  ApproveWorkspaceSubmission | LaunchRunSubmission | ResumeRunSubmission;
+  | ApproveWorkspaceSubmission
+  | LaunchRunSubmission
+  | ResumeRunSubmission
+  | AnswerHumanGateSubmission;
 
 export interface ApproveWorkspaceSubmission {
   readonly operationId: string;
@@ -64,6 +67,28 @@ export interface ResumeRunSubmission {
 }
 export interface ResumeRunInput {
   readonly runId: string;
+}
+
+/** Answer the durable Human Gate a `blocked` Run rests at (ADR 0020, #85). The
+ *  answer targets the Gate's exact durable reference — a stale or mismatched
+ *  reference, or a Run that is not blocked, is not applied and changes nothing —
+ *  and settles across process death: `continue` grants exactly one more interval
+ *  and execution resumes in the answering process, `stop` (a rejecting
+ *  approve/reject) ends the Run `failed` without discarding history or Artifacts.
+ *  The answer is stored as a durable Run Artifact, so the Run can wait
+ *  indefinitely and the answer survives closing Secant. */
+export interface AnswerHumanGateSubmission {
+  readonly operationId: string;
+  readonly operation: "answer-human-gate";
+  readonly input: AnswerHumanGateInput;
+}
+export interface AnswerHumanGateInput {
+  readonly runId: string;
+  /** The Gate reference the answer resolves — `RunCheckpointView.gate`, read from
+   *  the current blocked snapshot. Staleness is decided against the live gate. */
+  readonly gate: RunGateReference;
+  /** `continue` grants another interval; `stop` ends the Run `failed`. */
+  readonly answer: "continue" | "stop";
 }
 
 /** `submit` settles only as admitted (with the operation id, and the created Run
@@ -334,14 +359,16 @@ export type RunTimelineKind =
   | "attempt-settled"
   | "iteration"
   | "checkpoint-blocked"
+  | "gate-answered"
   | "materialization-conflict";
 export interface RunTimelineEvent {
   readonly at: string; // ISO 8601
   readonly event: RunTimelineKind;
   /** The Attempt outcome for `attempt-settled`; the granting operation id for
    *  `trust-granted`; the iteration ordinal for `iteration`; the completed
-   *  iteration count for `checkpoint-blocked`; the declared Workspace path for
-   *  `materialization-conflict`; absent for `run-created`. */
+   *  iteration count for `checkpoint-blocked`; the answer (`continue`/`stop`) for
+   *  `gate-answered`; the declared Workspace path for `materialization-conflict`;
+   *  absent for `run-created`. */
   readonly detail?: string;
 }
 
@@ -408,6 +435,9 @@ export interface RunView {
   readonly outputs: readonly RunOutputView[];
   /** The Review checkpoint facts, present only when `state` is `blocked` (#84). */
   readonly checkpoint?: RunCheckpointView;
+  /** Typed opportunities on this Run. The `answer-human-gate` offer appears only
+   *  while `state` is `blocked` (#85); absent otherwise. */
+  readonly actionOffers: readonly ActionOffer[];
   /** Present only while the Run rests `halted` on a Materialization conflict. */
   readonly conflict?: RunConflictView;
 }
@@ -423,10 +453,26 @@ export type RunResult =
   | { readonly found: true; readonly run: RunView }
   | { readonly found: false; readonly problem: Problem };
 
-/** A typed opportunity bound to an exact target. M1 offers exactly one. */
-export interface ActionOffer {
+/** A typed opportunity bound to an exact target. The closed set grows one
+ *  variant per slice; each offer names the consequence of taking it. */
+export type ActionOffer = ApproveWorkspaceOffer | AnswerHumanGateOffer;
+
+/** Approve the launch Workspace (M1). Offered while it is unapproved. */
+export interface ApproveWorkspaceOffer {
   readonly action: "approve-workspace";
   readonly input: { readonly path: string };
+}
+
+/** Answer the Human Gate a `blocked` Run rests at (#85). Offered on the `run`
+ *  Projection only while the Run is blocked; it names the consequence of each
+ *  answer so a client can present them without re-deriving the model. */
+export interface AnswerHumanGateOffer {
+  readonly action: "answer-human-gate";
+  readonly gate: RunGateReference;
+  /** What `continue` does: grants exactly one more review interval. */
+  readonly continueConsequence: string;
+  /** What `stop` does: ends the Run `failed`, keeping history and Artifacts. */
+  readonly stopConsequence: string;
 }
 
 export type ProjectionUpdate<

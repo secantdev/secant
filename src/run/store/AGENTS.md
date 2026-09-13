@@ -20,3 +20,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   that transaction publishes — so a fault between the commit and the transaction leaves no binding moved, and republishing the same attempt id is a no-op.
 - Git mechanics shell out to the `git` executable (no library); `artifacts.git` is created lazily on first publication, and an absent `git` is a precise
   `git-unavailable` Problem, not a throw. Bindings/attempt reads validate their row at the read ingress like the coordination reads (D7).
+- A Human Gate answer (#85) is a bound Artifact recorded through `recordGateAnswer` — a publication-shaped write (stage a commit, then one transaction moves the
+  binding and appends the `gate_answer` row) that deliberately skips `attempt_log`, so `blocked` stays derived and iterations still count off the log. Idempotent
+  per `operation_id` (a UNIQUE column); its `iterations_at_grant` is the offset the derived "iterations since the last grant" count resets from.

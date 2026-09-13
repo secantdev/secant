@@ -317,3 +317,221 @@ test("run show --json carries the checkpoint for a blocked Run", async (t) => {
   assert.equal(snapshot.result.run.checkpoint?.gate.stepId, "check");
   assert.match(snapshot.result.run.checkpoint?.gate.attemptId ?? "", /\S/);
 });
+
+// --- Answering the Human Gate (#85, ADR 0020) ------------------------------
+
+/** Launch a blocking Repeat Bundle and return its blocked Run id. */
+function launchBlocked(
+  h: Awaited<ReturnType<typeof harness>>,
+  opts: RepeatBundleOptions,
+): string {
+  const { id, digest } = h.installRepeat(opts);
+  h.approve();
+  runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io);
+  const runId = /^Run (\S+)$/m.exec(h.stdout())![1]!;
+  h.reset();
+  return runId;
+}
+
+test("run answer --continue grants an interval that passes and rests the Run succeeded", async (t) => {
+  const h = await harness(t);
+  // interval 2, passes on the 3rd iteration: the first interval blocks, the
+  // granted interval reaches the pass.
+  const runId = launchBlocked(h, { interval: 2, passAt: 3 });
+
+  assert.equal(
+    runHeadless(h.clients, ["run", "answer", runId, "--continue"], h.io),
+    0,
+  );
+  const out = h.stdout();
+  assert.match(out, /Answered: continue/);
+  assert.match(out, /^State: succeeded$/m);
+});
+
+test("run answer --continue that keeps failing blocks again with a fresh interval", async (t) => {
+  const h = await harness(t);
+  const runId = launchBlocked(h, { interval: 2 }); // always fails
+
+  // The first gate.
+  runHeadless(h.clients, ["run", "show", runId, "--json"], h.io);
+  const before = parseRun(h.stdout());
+  h.reset();
+  assert.equal(before.checkpoint?.completedIterations, 2);
+  const firstGate = before.checkpoint?.gate.attemptId;
+
+  assert.equal(
+    runHeadless(h.clients, ["run", "answer", runId, "--continue"], h.io),
+    1, // blocked again, so non-zero
+  );
+  assert.match(h.stdout(), /^State: blocked$/m);
+  h.reset();
+
+  runHeadless(h.clients, ["run", "show", runId, "--json"], h.io);
+  const after = parseRun(h.stdout());
+  assert.equal(after.state, "blocked");
+  // The count reset to the interval since the grant, and the block moved to a
+  // fresh Attempt — a new interval actually ran.
+  assert.equal(after.checkpoint?.completedIterations, 2);
+  assert.notEqual(after.checkpoint?.gate.attemptId, firstGate);
+});
+
+test("run answer --stop rests the Run failed with its history and Artifacts intact", async (t) => {
+  const h = await harness(t);
+  const runId = launchBlocked(h, { interval: 2 });
+
+  assert.equal(
+    runHeadless(h.clients, ["run", "answer", runId, "--stop"], h.io),
+    1,
+  );
+  assert.match(h.stdout(), /Answered: stop/);
+  assert.match(h.stdout(), /^State: failed$/m);
+  h.reset();
+
+  // The answer is a durable, readable Artifact; the loop's Verdict is still
+  // readable; the timeline records the answer.
+  assert.equal(
+    runHeadless(h.clients, ["run", "read", `${runId}/human-gate-answer`], h.io),
+    0,
+  );
+  assert.match(h.stdout(), /^stop$/m);
+  h.reset();
+  assert.equal(
+    runHeadless(h.clients, ["run", "read", `${runId}/passing`], h.io),
+    0,
+  );
+  assert.match(h.stdout(), /^fail$/m);
+  h.reset();
+  runHeadless(h.clients, ["run", "show", runId], h.io);
+  assert.match(h.stdout(), /gate-answered stop/);
+});
+
+test("run show offers the answer action only while blocked, naming each consequence", async (t) => {
+  const h = await harness(t);
+  const runId = launchBlocked(h, { interval: 2, passAt: 3 });
+
+  // While blocked, the offer appears and states the consequence of each answer.
+  runHeadless(h.clients, ["run", "show", runId], h.io);
+  const blocked = h.stdout();
+  assert.match(blocked, /Answer the checkpoint:/);
+  assert.match(
+    blocked,
+    /run answer .* --continue .*grant one more review interval/,
+  );
+  assert.match(blocked, /run answer .* --stop .*end the Run failed/);
+  h.reset();
+
+  // Once answered (and succeeded), the offer is gone.
+  runHeadless(h.clients, ["run", "answer", runId, "--continue"], h.io);
+  h.reset();
+  runHeadless(h.clients, ["run", "show", runId], h.io);
+  assert.doesNotMatch(h.stdout(), /Answer the checkpoint:/);
+});
+
+test("run answer on a Run that is not blocked is refused, changing nothing", async (t) => {
+  const h = await harness(t);
+  const { id, digest } = h.install(); // a straight-line Bundle that succeeds
+  h.approve();
+  runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io);
+  const runId = /^Run (\S+)$/m.exec(h.stdout())![1]!;
+  h.reset();
+
+  assert.equal(
+    runHeadless(h.clients, ["run", "answer", runId, "--continue"], h.io),
+    1,
+  );
+  assert.match(h.stderr(), /run-not-blocked/);
+});
+
+test("run answer needs exactly one of --continue or --stop", async (t) => {
+  const h = await harness(t);
+  assert.equal(runHeadless(h.clients, ["run", "answer", "some-run"], h.io), 1);
+  assert.match(h.stderr(), /invalid-answer/);
+});
+
+test("two invocations: block under one instance, continue under a fresh instance over the same home (#85, AC6)", async (t) => {
+  ensureRuntimeOnPath();
+  const catalogHome = makeTempDir("secant-2inv-cat-");
+  const storeHome = makeTempDir("secant-2inv-store-");
+  const workspace = realpathSync.native(makeTempDir("secant-2inv-ws-"));
+  const mkExecution: RunExecution = ({ routing, owner }) =>
+    executeRouting(routing, {
+      owner,
+      platform: hostPlatform(),
+      resolveAsset: () => undefined,
+    });
+  const sink = () => {
+    const lines: string[] = [];
+    const io: HeadlessIO = {
+      out: (t) => lines.push(t),
+      err: (t) => lines.push(t),
+      cwd: () => workspace,
+    };
+    return { io, text: () => lines.join("") };
+  };
+
+  // A Repeat Bundle that passes on its 3rd iteration, interval 2: the first
+  // instance blocks after two iterations, the second instance's granted interval
+  // reaches the pass.
+  const bundle = writeRepeatBundle({ interval: 2, passAt: 3 });
+
+  // Instance A: build, approve, launch → blocked.
+  const catA = openCatalog(catalogHome);
+  const groupA = openRunGroup(storeHome, workspace);
+  const appA = createApplication({
+    catalog: catA,
+    launchWorkspacePath: workspace,
+    runGroup: groupA,
+    runExecution: mkExecution,
+  });
+  const a = sink();
+  assert.equal(runHeadless(appA, ["bundle", "build", bundle.folder], a.io), 0);
+  const entry = catA.listEntries().find((e) => e.id === bundle.id)!;
+  catA.approveWorkspace(workspace, new Date());
+  const launch = sink();
+  assert.equal(
+    runHeadless(
+      appA,
+      ["run", "launch", bundle.id, "--trust", entry.digest],
+      launch.io,
+    ),
+    1,
+  );
+  const runId = /^Run (\S+)$/m.exec(launch.text())![1]!;
+  assert.match(launch.text(), /^State: blocked$/m);
+  groupA.close();
+  catA.close();
+
+  // Instance B: a fresh Application over the same Secant home answers the durable
+  // Gate and drives the Run to completion.
+  const catB = openCatalog(catalogHome);
+  const groupB = openRunGroup(storeHome, workspace);
+  t.after(() => groupB.close());
+  const appB = createApplication({
+    catalog: catB,
+    launchWorkspacePath: workspace,
+    runGroup: groupB,
+    runExecution: mkExecution,
+  });
+  t.after(() => catB.close());
+  const b = sink();
+  assert.equal(
+    runHeadless(appB, ["run", "answer", runId, "--continue"], b.io),
+    0,
+  );
+  assert.match(b.text(), /^State: succeeded$/m);
+});
+
+/** Parse a `run show --json` snapshot's run view (blocked-run shape). */
+function parseRun(json: string): {
+  state: string;
+  checkpoint?: {
+    completedIterations: number;
+    gate: { attemptId: string };
+  };
+} {
+  const snapshot = JSON.parse(json) as {
+    result: { found: boolean; run: ReturnType<typeof parseRun> };
+  };
+  assert.ok(snapshot.result.found);
+  return snapshot.result.run;
+}

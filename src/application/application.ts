@@ -23,7 +23,9 @@ import { createBundleManagement } from "./build-bundle.js";
 import {
   bundleBytesCorruptForRun,
   bundleBytesMissingForRun,
+  deriveRun,
   deriveRunFacts,
+  GATE_ANSWER_ARTIFACT,
   isLiveElsewhere,
   runSnapshot,
   selectRunEntry,
@@ -31,6 +33,7 @@ import {
 } from "./run-projection.js";
 import { preflight } from "./preflight.js";
 import type {
+  AnswerHumanGateInput,
   BundleCatalogSnapshot,
   BundleFocusSelector,
   BundleFocusSnapshot,
@@ -46,6 +49,7 @@ import type {
   DiagnosticReference,
   ResourceRead,
   ResourceReference,
+  RunGateReference,
   RunSnapshot,
   Submission,
   SubmissionAdmission,
@@ -276,6 +280,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
         // the in-memory state and push the halted snapshot to observers.
         if (result.ok && tracking !== undefined) {
           tracking.state = "halted";
+          pushRunUpdate(runId);
+        }
+        return result;
+      },
+      recordGateAnswer(request) {
+        const result = owner.recordGateAnswer(request);
+        // A `stop` advances the Run to `failed` inside this transaction; mirror
+        // that advance into the in-memory state and push it to observers (#85).
+        if (result.ok && request.advanceState !== undefined && tracking) {
+          tracking.state = request.advanceState;
           pushRunUpdate(runId);
         }
         return result;
@@ -745,6 +759,202 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { admitted: true, operationId, runId: input.runId };
   }
 
+  // Answer the durable Human Gate a `blocked` Run rests at (#85). Admitted at
+  // once; the answer is validated, recorded, and driven to the next rest at
+  // settle time (deferred under a test), since deriving the current gate needs
+  // the acquired owner.
+  function submitAnswer(
+    operationId: string,
+    input: AnswerHumanGateInput,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === answerReplayKey(input)) {
+        return { admitted: true, operationId, runId: input.runId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (
+      runGroup === undefined ||
+      runExecution === undefined ||
+      runProjection === undefined
+    ) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    operations.set(operationId, {
+      replayKey: answerReplayKey(input),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId: input.runId,
+      settle: () => answerAndSettle(operationId, input),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId: input.runId };
+  }
+
+  // Validate the answer against the live Gate, record it durably, then either end
+  // the Run `failed` (`stop`) or drive the granted interval to its next rest
+  // (`continue`) — in this process. A stale/mismatched Gate or a Run that is not
+  // blocked settles `not-applied` and changes nothing.
+  function answerAndSettle(
+    operationId: string,
+    input: AnswerHumanGateInput,
+  ): OperationOutcome {
+    if (
+      runGroup === undefined ||
+      runExecution === undefined ||
+      runProjection === undefined
+    ) {
+      return { status: "not-applied", problem: runSupportUnavailable() };
+    }
+    const read = runGroup.readRun(input.runId);
+    if (!read.ok) {
+      return {
+        status: "not-applied",
+        problem:
+          read.problem.kind === "unknown-run"
+            ? runNotFound(input.runId)
+            : runStoreUnreadable(input.runId),
+      };
+    }
+    const record = read.run;
+    const derivedFacts = deriveRunFacts(
+      runProjection,
+      record.bundleSnapshotDigest,
+    );
+    if ("problem" in derivedFacts) {
+      return { status: "not-applied", problem: derivedFacts.problem };
+    }
+    const facts = derivedFacts.facts;
+    // A `blocked` Run is stored `running` (the block is derived), so only a
+    // `running`/`created` record can be blocked. Reject a clearly-terminal record
+    // (`succeeded`/`failed`/`halted`) before touching coordination, so answering a
+    // Run that is not blocked changes nothing at all — no claim toggle, no epoch
+    // bump. (A `running` record still needs the owner to tell blocked from a live
+    // mid-execution Run; that is checked once acquired.)
+    if (record.state !== "running" && record.state !== "created") {
+      return {
+        status: "not-applied",
+        problem: runNotBlocked(input.runId, record.state),
+      };
+    }
+    // Re-claim the Workspace — the block released it — before acquiring ownership;
+    // a different live Run refuses, leaving this Run untouched.
+    const claim = runGroup.resumeRun(input.runId);
+    if (claim.outcome === "workspace-busy") {
+      return { status: "not-applied", problem: workspaceBusy(claim.liveRunId) };
+    }
+    if (claim.outcome === "unknown-run") {
+      return { status: "not-applied", problem: runNotFound(input.runId) };
+    }
+    const owner = runGroup.acquireRun(input.runId);
+    if (owner === undefined) {
+      return {
+        status: "not-applied",
+        problem: runStoreUnreadable(input.runId),
+      };
+    }
+    runs.set(input.runId, {
+      digest: record.bundleSnapshotDigest,
+      routing: facts.routing,
+      name: facts.name,
+      id: facts.id,
+      version: facts.version,
+      state: record.state,
+      owner,
+      done: false,
+      observers: new Set<UpdateStream>(),
+    });
+    const tracking = runs.get(input.runId)!;
+    try {
+      const observed = observedOwner(owner, input.runId);
+      // Idempotent across process death: an answer already recorded for this
+      // operation id settles `applied` without re-validating the (now-moved) Gate
+      // or re-driving execution.
+      // ponytail: process death after recording a `continue` but before the
+      // granted interval reaches its next rest leaves the Run stored `running`
+      // with the grant recorded — so it derives neither `blocked` (the grant
+      // resets the count below the interval) nor `halted`, and no CLI path
+      // re-drives it. This is the same class as a crash mid-launch-execution
+      // (which also leaves a Run `running` with no re-drive) and is out of M2
+      // scope; the fix is a persisted grant-pending marker that `run resume`
+      // (or a re-answer) honors — add it with crash-recovery for `running` Runs.
+      const already = owner
+        .gateAnswers()
+        .some((answer) => answer.operationId === operationId);
+      const priorAnswers = owner.gateAnswers();
+      const derived = deriveRun(
+        facts.routing,
+        owner.attemptLog(),
+        record.state,
+        input.runId,
+        owner,
+        priorAnswers,
+      );
+      if (!already) {
+        if (derived.state !== "blocked" || derived.checkpoint === undefined) {
+          return {
+            status: "not-applied",
+            problem: runNotBlocked(input.runId, derived.state),
+          };
+        }
+        if (!gateEquals(derived.checkpoint.gate, input.gate)) {
+          return {
+            status: "not-applied",
+            problem: gateStale(
+              input.runId,
+              input.gate,
+              derived.checkpoint.gate,
+            ),
+          };
+        }
+      }
+      if (already) return { status: "applied" };
+      // The cumulative iteration count this grant/stop resets from: the prior
+      // grant offset plus the iterations completed since it (#85).
+      const priorOffset =
+        priorAnswers.length === 0
+          ? 0
+          : priorAnswers[priorAnswers.length - 1]!.iterationsAtGrant;
+      const iterationsAtGrant =
+        priorOffset + (derived.checkpoint?.completedIterations ?? 0);
+      const recorded = observed.recordGateAnswer({
+        operationId,
+        gateAttemptId: input.gate.attemptId,
+        answer: input.answer,
+        iterationsAtGrant,
+        artifactName: GATE_ANSWER_ARTIFACT,
+        at: new Date(),
+        ...(input.answer === "stop" ? { advanceState: "failed" } : {}),
+      });
+      if (!recorded.ok) {
+        throw new Error(
+          "reason" in recorded
+            ? `cannot record the gate answer: ${recorded.reason}`
+            : `cannot record the gate answer: ${recorded.problem.kind}`,
+        );
+      }
+      if (input.answer === "stop") return { status: "applied" };
+      // `continue`: the answering process drives the granted interval to rest.
+      runExecution({
+        routing: facts.routing,
+        digest: record.bundleSnapshotDigest,
+        owner: observed,
+      });
+      return { status: "applied" };
+    } catch (error) {
+      return {
+        status: "not-applied",
+        problem: runExecutionFault(input.runId, error),
+      };
+    } finally {
+      tracking.owner = undefined;
+      tracking.done = true;
+      owner.close();
+      runGroup.endRun(input.runId);
+    }
+  }
+
   const projectionPort: ProjectionPort = {
     openProjection,
     submit(submission: Submission): SubmissionAdmission {
@@ -757,6 +967,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
           return submitLaunch(submission.operationId, submission.input);
         case "resume-run":
           return submitResume(submission.operationId, submission.input);
+        case "answer-human-gate":
+          return submitAnswer(submission.operationId, submission.input);
       }
     },
 
@@ -1012,10 +1224,64 @@ function runNotHalted(runId: string, state: string): Problem {
   };
 }
 
+/** A Run that is not blocked cannot be answered: the Gate does not exist (#85). */
+function runNotBlocked(runId: string, state: string): Problem {
+  return {
+    code: "run-not-blocked",
+    explanation: `Run ${runId} is ${state}, not blocked; there is no Human Gate to answer.`,
+    remediation:
+      "Open the Run to see its state; only a blocked Run rests at an answerable Gate.",
+    possibleEffects: "none",
+    details: { runId, state },
+  };
+}
+
+/** The submitted Gate reference no longer matches the Run's live Gate (#85): the
+ *  block moved on, so the answer targets a stale Attempt and is not applied. */
+function gateStale(
+  runId: string,
+  submitted: RunGateReference,
+  current: RunGateReference,
+): Problem {
+  return {
+    code: "gate-reference-stale",
+    explanation: `The answered Gate (attempt ${submitted.attemptId}) is not the Run's current Gate (attempt ${current.attemptId}); nothing was applied.`,
+    remediation:
+      "Open the Run to read its current Gate reference, then answer that one.",
+    possibleEffects: "none",
+    details: {
+      runId,
+      submittedAttemptId: submitted.attemptId,
+      currentAttemptId: current.attemptId,
+    },
+  };
+}
+
+/** Whether two Gate references name the same Attempt of the same Run (#85). */
+function gateEquals(a: RunGateReference, b: RunGateReference): boolean {
+  return (
+    a.runId === b.runId &&
+    a.stepId === b.stepId &&
+    a.attemptId === b.attemptId &&
+    a.shape === b.shape
+  );
+}
+
 /** A stable replay key for a resume: the Run id. A re-submitted operation id
  *  with an equal key replays; a different key is a conflict. */
 function resumeReplayKey(input: ResumeRunInput): string {
   return JSON.stringify(["resume", input.runId]);
+}
+
+/** A stable replay key for a gate answer: the Run, the answered Attempt, and the
+ *  answer. A re-submitted operation id with an equal key replays. */
+function answerReplayKey(input: AnswerHumanGateInput): string {
+  return JSON.stringify([
+    "answer",
+    input.runId,
+    input.gate.attemptId,
+    input.answer,
+  ]);
 }
 
 function operationNotFound(operationId: string): Problem {

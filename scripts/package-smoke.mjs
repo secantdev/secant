@@ -506,6 +506,115 @@ try {
     }
   }
 
+  // Answer a durable Human Gate across process invocations from the compiled
+  // binary on each gated OS (issue #85, AC6). A Repeat group blocks at its Review
+  // checkpoint under one invocation; a second, separate invocation answers the
+  // Gate `--continue`, granting one more interval that reaches the pass and rests
+  // the Run `succeeded` — the answer survived process death as a durable Artifact.
+  {
+    const runtime = basename(process.execPath);
+    const id = "dev.secant.answer-smoke";
+    const counterPath = join(smokeRoot, "answer-counter");
+    // The `check` Command counts iterations through a shared file and passes on
+    // its 3rd run, so the granted interval (iterations 3+) reaches the pass.
+    const checkScript =
+      `const fs=require('node:fs');const p=${JSON.stringify(counterPath)};` +
+      `let n=0;try{n=Number(fs.readFileSync(p,'utf8'))||0;}catch{}` +
+      `n++;fs.writeFileSync(p,String(n));process.exit(n>=3?0:1);`;
+    const manifest = {
+      formatVersion: 1,
+      bundle: {
+        id,
+        version: "1.0.0",
+        name: "Answer Smoke",
+        description: "Human Gate answer smoke Bundle.",
+      },
+      platforms: ["windows", "macos", "linux"],
+      inputs: {},
+      assets: [],
+      routing: [
+        {
+          id: "baseline",
+          kind: "command",
+          produces: [{ name: "passing", type: "verdict" }],
+          command: {
+            executable: runtime,
+            arguments: ["-e", "process.exit(1)"],
+          },
+        },
+        {
+          repeat: {
+            until: "passing",
+            reviewCheckpoint: { interval: 2, message: "please review" },
+            steps: [
+              {
+                id: "check",
+                kind: "command",
+                produces: [{ name: "passing", type: "verdict" }],
+                command: {
+                  executable: runtime,
+                  arguments: ["-e", checkScript],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const folder = join(smokeRoot, "answer-bundle");
+    await mkdir(folder, { recursive: true });
+    await writeFile(
+      join(folder, "manifest.json"),
+      JSON.stringify(manifest, null, 2),
+    );
+    run(binary, ["bundle", "build", folder], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    });
+
+    const listJson = run(binary, ["bundle", "list", "--json"], {
+      cwd: workspaceDirectory,
+      env: workspaceEnv,
+    });
+    const installed = JSON.parse(listJson).result.bundles.find(
+      (bundle) => bundle.id === id,
+    );
+    if (installed === undefined) {
+      throw new Error(`Answer Bundle was not installed: ${listJson}`);
+    }
+
+    // First invocation: launch, which blocks at the checkpoint.
+    const launched = spawnSync(
+      binary,
+      ["run", "launch", id, "--trust", installed.digest, "--json"],
+      { cwd: workspaceDirectory, encoding: "utf8", env: workspaceEnv },
+    );
+    if (launched.error) throw launched.error;
+    const launchSnapshot = JSON.parse(launched.stdout);
+    const runId = launchSnapshot.runId;
+    if (launchSnapshot.result.run.state !== "blocked") {
+      throw new Error(
+        `Expected the Run to rest blocked at the checkpoint: ${launched.stdout}`,
+      );
+    }
+
+    // Second, separate invocation: answer the durable Gate `--continue`.
+    const answered = spawnSync(binary, ["run", "answer", runId, "--continue"], {
+      cwd: workspaceDirectory,
+      encoding: "utf8",
+      env: workspaceEnv,
+    });
+    if (answered.error) throw answered.error;
+    if (
+      answered.status !== 0 ||
+      !`${answered.stdout}`.includes("State: succeeded")
+    ) {
+      throw new Error(
+        `Answering --continue in a fresh invocation did not resolve the Run: ${answered.stdout}${answered.stderr}`,
+      );
+    }
+  }
+
   // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
   // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
   // startup Problem and a non-zero exit before the renderer is created.

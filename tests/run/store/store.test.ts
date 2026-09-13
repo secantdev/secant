@@ -607,6 +607,123 @@ test("a fenced owner cannot publish", async (t) => {
   assert.ok(ok.ok && ok.versionId);
 });
 
+test("a gate answer binds a durable, readable Artifact without logging an Attempt (#85)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId)!;
+  t.after(() => owner.close());
+
+  const result = owner.recordGateAnswer({
+    operationId: "answer-1",
+    gateAttemptId: "attempt-xyz",
+    answer: "continue",
+    iterationsAtGrant: 3,
+    artifactName: "human-gate-answer",
+    at: AT,
+  });
+  assert.ok(result.ok && !result.replayed);
+
+  // Bound and readable like any output, but the attempt log is untouched.
+  const version = owner.currentVersion("human-gate-answer");
+  assert.ok(version);
+  assert.equal(
+    dec(owner.readArtifact(version!, "human-gate-answer")),
+    "continue",
+  );
+  assert.equal(owner.attemptLog().length, 0);
+  const answers = owner.gateAnswers();
+  assert.equal(answers.length, 1);
+  assert.deepEqual(
+    {
+      operationId: answers[0]!.operationId,
+      gateAttemptId: answers[0]!.gateAttemptId,
+      answer: answers[0]!.answer,
+      iterationsAtGrant: answers[0]!.iterationsAtGrant,
+    },
+    {
+      operationId: "answer-1",
+      gateAttemptId: "attempt-xyz",
+      answer: "continue",
+      iterationsAtGrant: 3,
+    },
+  );
+});
+
+test("recording a gate answer is idempotent per operation id (#85)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId)!;
+  t.after(() => owner.close());
+
+  const request = {
+    operationId: "answer-1",
+    gateAttemptId: "attempt-xyz",
+    answer: "continue" as const,
+    iterationsAtGrant: 3,
+    artifactName: "human-gate-answer",
+    at: AT,
+  };
+  const first = owner.recordGateAnswer(request);
+  const replay = owner.recordGateAnswer(request);
+  assert.ok(first.ok && replay.ok);
+  assert.equal(replay.replayed, true);
+  assert.equal(first.versionId, replay.versionId);
+  assert.equal(owner.gateAnswers().length, 1);
+});
+
+test("a stop answer rests the Run failed in the same transaction (#85)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId)!;
+  t.after(() => owner.close());
+
+  const result = owner.recordGateAnswer({
+    operationId: "answer-1",
+    gateAttemptId: "attempt-xyz",
+    answer: "stop",
+    iterationsAtGrant: 3,
+    artifactName: "human-gate-answer",
+    at: AT,
+    advanceState: "failed",
+  });
+  assert.ok(result.ok);
+  const read = group.readRun(created.runId);
+  assert.ok(read.ok && read.run.state === "failed");
+});
+
+test("a fenced owner cannot record a gate answer (#85)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const stale = group.acquireRun(created.runId)!;
+  const fresh = group.acquireRun(created.runId)!; // bumps the epoch, fencing `stale`
+  t.after(() => fresh.close());
+
+  assert.deepEqual(
+    stale.recordGateAnswer({
+      operationId: "answer-1",
+      gateAttemptId: "attempt-xyz",
+      answer: "continue",
+      iterationsAtGrant: 0,
+      artifactName: "human-gate-answer",
+      at: AT,
+    }),
+    { ok: false, reason: "fenced" },
+  );
+  assert.equal(fresh.gateAnswers().length, 0);
+});
+
 /** The `<slug>--<digest>` directory openRunGroup derives for WORKSPACE, recomputed
  *  here so the poisoned-coordination test can pre-seed it. */
 function exampleGroupName(): string {

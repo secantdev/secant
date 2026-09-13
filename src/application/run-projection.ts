@@ -11,14 +11,17 @@ import {
 } from "../workflow/workflow.js";
 import type {
   AttemptLogEntry,
+  GateAnswerRecord,
   MaterializationConflict,
   RunGroup,
   RunOwner,
 } from "../run/store/store.js";
 import type {
+  ActionOffer,
   Problem,
   RunCheckpointView,
   RunConflictView,
+  RunGateReference,
   RunOutputView,
   RunResult,
   RunSnapshot,
@@ -26,6 +29,11 @@ import type {
   RunStepStatus,
   RunTimelineEvent,
 } from "./projection-port.js";
+
+/** The bound Artifact name a Human Gate answer publishes to (#85), so the answer
+ *  reads back through `run show`/`run read` like any output. The latest answer
+ *  wins the binding; every version stays retained in the Artifact store. */
+export const GATE_ANSWER_ARTIFACT = "human-gate-answer";
 
 // The `run` Projection join (#82), beside `bundle-catalog.ts`. It reads a Run's
 // canonical record and outputs through the Run Store, re-derives the ordered
@@ -100,6 +108,7 @@ function runResult(
     log: readonly AttemptLogEntry[],
     outputs: readonly RunOutputView[],
     conflicts: readonly MaterializationConflict[],
+    gateAnswers: readonly GateAnswerRecord[],
   ): RunResult => {
     // Derive progress and the `blocked` state from the Routing and the ordered
     // attempt log (ADR 0020, #84): a Repeat group loops, so a flat succeeded-
@@ -113,6 +122,7 @@ function runResult(
       trackedState,
       runId,
       owner,
+      gateAnswers,
     );
     // The conflict resting the Run is the latest recorded one; earlier conflicts
     // stay on the timeline as history. It is surfaced only while `halted`.
@@ -143,11 +153,18 @@ function runResult(
           derivedRun.iterationEvents,
           derivedRun.checkpoint,
           conflicts,
+          gateAnswers,
         ),
         outputs,
         ...(derivedRun.checkpoint !== undefined
           ? { checkpoint: derivedRun.checkpoint }
           : {}),
+        // The answer-human-gate offer appears only while blocked (#85); it names
+        // the consequence of each answer so a client presents them directly.
+        actionOffers:
+          derivedRun.checkpoint !== undefined
+            ? [answerHumanGateOffer(derivedRun.checkpoint.gate)]
+            : [],
         ...(active !== undefined
           ? { conflict: conflictView(runId, active) }
           : {}),
@@ -161,7 +178,7 @@ function runResult(
   // process actually executing the Run. A read must never break a running Run, so
   // show the record-level snapshot instead (no attempt log or outputs from here).
   if (live === undefined && isLiveElsewhere(deps.runGroup, runId)) {
-    return view(undefined, [], [], []);
+    return view(undefined, [], [], [], []);
   }
   const owner = live ?? deps.runGroup.acquireRun(runId);
   if (owner === undefined) {
@@ -173,6 +190,7 @@ function runResult(
       owner.attemptLog(),
       collectOutputs(owner, facts.routing, runId),
       owner.materializationConflicts(),
+      owner.gateAnswers(),
     );
   } finally {
     if (live === undefined) owner.close();
@@ -243,6 +261,10 @@ function collectOutputs(
       }
     }
   }
+  // A durable Human Gate answer (#85) is a bound `text` Artifact not declared in
+  // the Routing; surface it as an output so it reads back through run show/read.
+  const answerVersion = owner.currentVersion(GATE_ANSWER_ARTIFACT);
+  if (answerVersion !== undefined) declared.set(GATE_ANSWER_ARTIFACT, "text");
   const outputs: RunOutputView[] = [];
   for (const [name, type] of declared) {
     const versionId = owner.currentVersion(name);
@@ -256,7 +278,20 @@ function collectOutputs(
   return outputs;
 }
 
-interface DerivedRun {
+/** The `answer-human-gate` offer for a blocked Run: names the consequence of each
+ *  answer so a client presents them without re-deriving the model (#85). */
+function answerHumanGateOffer(gate: RunGateReference): ActionOffer {
+  return {
+    action: "answer-human-gate",
+    gate,
+    continueConsequence:
+      "continue: grant one more review interval and resume the Run.",
+    stopConsequence:
+      "stop: end the Run failed, keeping its history and Artifacts.",
+  };
+}
+
+export interface DerivedRun {
   /** The effective state, which may be the derived `blocked` (never stored). */
   readonly state: string;
   readonly statuses: RunStepProgress[];
@@ -285,13 +320,21 @@ interface DerivedRun {
  * needs the attempt→Step link the Store does not yet surface; a `succeeded` Run's
  * progress is taken from the terminal state, so this is only a timeline nicety.)
  */
-function deriveRun(
+export function deriveRun(
   routing: readonly RoutingNode[],
   log: readonly AttemptLogEntry[],
   state: string,
   runId: string,
   owner: RunOwner | undefined,
+  gateAnswers: readonly GateAnswerRecord[],
 ): DerivedRun {
+  // The offset the derived checkpoint count and the block decision reset from:
+  // the latest grant's cumulative iteration count (#85). Zero before any grant,
+  // so the first block still reports the full interval.
+  const grantOffset =
+    gateAnswers.length === 0
+      ? 0
+      : gateAnswers[gateAnswers.length - 1]!.iterationsAtGrant;
   const steps = flattenSteps(routing);
   const statuses: RunStepProgress[] = steps.map((step) => ({
     id: step.id,
@@ -382,6 +425,7 @@ function deriveRun(
           node.repeat,
           span,
           iterations,
+          grantOffset,
           state,
           statuses,
           flatIndex,
@@ -460,6 +504,7 @@ function finishTerminalGroup(
   repeat: RepeatGroup["repeat"],
   span: readonly Step[],
   iterations: number,
+  grantOffset: number,
   state: string,
   statuses: RunStepProgress[],
   flatIndex: Map<Step, number>,
@@ -475,6 +520,10 @@ function finishTerminalGroup(
     repeat.reviewCheckpoint.interval,
     MAX_REVIEW_CHECKPOINT_INTERVAL,
   );
+  // Iterations since the last grant: a `continue` grant resets the count, so one
+  // grant buys exactly one more interval (ADR 0020, #85). Before any grant the
+  // offset is zero, so this is the full iteration count.
+  const sinceGrant = iterations - grantOffset;
   const versionId = owner?.currentVersion(repeat.until);
   const verdict =
     owner !== undefined && versionId !== undefined
@@ -482,20 +531,21 @@ function finishTerminalGroup(
       : undefined;
   const passes = verdict === "pass";
 
-  // Blocked: the cadence is reached, the Verdict still does not pass, and the Run
-  // has not failed. The block is derived from the current Step Attempt.
+  // Blocked: the cadence is reached *since the last grant*, the Verdict still does
+  // not pass, and the Run has not failed. The block is derived from the current
+  // Step Attempt.
   if (
     state !== "failed" &&
     !passes &&
     versionId !== undefined &&
-    iterations >= interval
+    sinceGrant >= interval
   ) {
     mark(current, "blocked");
     const lastAttempt = log[log.length - 1]!;
     const checkpoint: RunCheckpointView = {
       message: repeat.reviewCheckpoint.message,
       interval,
-      completedIterations: iterations,
+      completedIterations: sinceGrant,
       latestVerdict: {
         name: repeat.until,
         // Normalize the value actually read (M2 Verdicts are pass/fail); this
@@ -588,6 +638,7 @@ function buildTimeline(
   iterationEvents: readonly RunTimelineEvent[],
   checkpoint: RunCheckpointView | undefined,
   conflicts: readonly MaterializationConflict[],
+  gateAnswers: readonly GateAnswerRecord[],
 ): RunTimelineEvent[] {
   const events: RunTimelineEvent[] = [{ at: createdAt, event: "run-created" }];
   const entry = deps.catalog.listEntries().find((e) => e.digest === digest);
@@ -621,6 +672,15 @@ function buildTimeline(
       at: log[log.length - 1]?.at ?? createdAt,
       event: "checkpoint-blocked",
       detail: String(checkpoint.completedIterations),
+    });
+  }
+  // Each durable Human Gate answer, in the order it was recorded (#85), so the
+  // grant/stop history stays readable after the Run resumes or ends.
+  for (const answer of gateAnswers) {
+    events.push({
+      at: answer.at,
+      event: "gate-answered",
+      detail: answer.answer,
     });
   }
   // Each conflict names its declared Workspace path (AC5). Appended after the

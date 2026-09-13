@@ -284,7 +284,9 @@ function buildProgram(
 
   // No `run` action: like `bundle`, a bare `run` or an unknown token is a usage
   // error exiting non-zero. `run launch` executes; `run show`/`run read` observe.
-  const run = program.command("run").description("launch, show, and read Runs");
+  const run = program
+    .command("run")
+    .description("launch, show, read, answer, and resume Runs");
   run
     .command("launch")
     .description("launch an installed Command-only Bundle")
@@ -376,6 +378,51 @@ function buildProgram(
         ),
       );
     });
+  run
+    .command("answer")
+    .description("answer the Human Gate a blocked Run rests at")
+    .argument("[run-id]", "the Run id printed at launch")
+    .option("--continue", "grant one more review interval and resume the Run")
+    .option("--stop", "end the Run failed, keeping history and Artifacts")
+    .option("--json", "print the Run snapshot as JSON")
+    .action(
+      (
+        runId: string | undefined,
+        options: { continue?: boolean; stop?: boolean; json?: boolean },
+      ) => {
+        const json = options.json ?? false;
+        if (runId === undefined) {
+          return settle(
+            fail(io, json, {
+              code: "missing-run-id",
+              explanation: "run answer needs a Run id.",
+              remediation:
+                "Run `secant run answer <run-id> --continue` or `--stop`.",
+              possibleEffects: "none",
+            }),
+          );
+        }
+        const chosen = [options.continue, options.stop].filter(Boolean).length;
+        if (chosen !== 1) {
+          return settle(
+            fail(io, json, {
+              code: "invalid-answer",
+              explanation:
+                "run answer needs exactly one of --continue or --stop.",
+              remediation:
+                "Run `secant run answer <run-id> --continue` to grant another interval, or `--stop` to end the Run.",
+              possibleEffects: "none",
+            }),
+          );
+        }
+        const answer = options.continue ? "continue" : "stop";
+        return settle(
+          execute((clients) =>
+            answerRun(clients.projectionPort, io, json, runId, answer),
+          ),
+        );
+      },
+    );
   run
     .command("read")
     .description("read one Run output by reference (<run-id>/<name>)")
@@ -731,6 +778,77 @@ function resumeRun(
     return run.state === "succeeded" ? 0 : 1;
   } finally {
     opened.close();
+  }
+}
+
+function answerRun(
+  port: ProjectionPort,
+  io: HeadlessIO,
+  json: boolean,
+  runId: string,
+  answer: "continue" | "stop",
+): number {
+  // Read the Run's current Gate reference and submit against it, so a Gate that
+  // moved between the read and the submit is caught as stale by the Application.
+  const opened = port.openProjection({ family: "run", runId });
+  let gate;
+  try {
+    const snapshot = opened.snapshot;
+    if (!snapshot.result.found) return fail(io, json, snapshot.result.problem);
+    const run = snapshot.result.run;
+    if (run.checkpoint === undefined) {
+      return fail(io, json, {
+        code: "run-not-blocked",
+        explanation: `Run ${runId} is ${run.state}, not blocked; there is no Human Gate to answer.`,
+        remediation:
+          "Run `secant run show <run-id>` to see the Run's state; only a blocked Run can be answered.",
+        possibleEffects: "none",
+        details: { runId, state: run.state },
+      });
+    }
+    gate = run.checkpoint.gate;
+  } finally {
+    opened.close();
+  }
+
+  const admission = port.submit({
+    operationId: randomUUID(),
+    operation: "answer-human-gate",
+    input: { runId, gate, answer },
+  });
+  if (!admission.admitted) return fail(io, json, admission.problem);
+
+  // The answer settles inline (headless default); surface a settlement Problem
+  // before reading the Run, like `run launch`/`run resume`.
+  const operationView = port.openProjection({
+    family: "operation",
+    operationId: admission.operationId,
+  });
+  const outcome = operationView.snapshot.outcome;
+  operationView.close();
+  if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
+
+  const after = port.openProjection({ family: "run", runId });
+  try {
+    const snapshot = after.snapshot;
+    if (json) {
+      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return snapshot.result.found && snapshot.result.run.state === "succeeded"
+        ? 0
+        : 1;
+    }
+    if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
+    const run = snapshot.result.run;
+    io.out(`Run ${run.runId}\n`);
+    io.out(
+      answer === "continue"
+        ? "Answered: continue (granted one more review interval)\n"
+        : "Answered: stop (ended the Run failed, history and Artifacts kept)\n",
+    );
+    io.out(`State: ${run.state}\n`);
+    return run.state === "succeeded" ? 0 : 1;
+  } finally {
+    after.close();
   }
 }
 

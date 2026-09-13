@@ -158,6 +158,45 @@ export type RecordConflictResult =
   | { readonly ok: true; readonly diagnosticId: string }
   | { readonly ok: false; readonly reason: "fenced" };
 
+/** A durable Human Gate answer recorded against a blocked Run (#85). It is a
+ *  bound Run Artifact (readable like any output) and survives process death; the
+ *  attempt log is deliberately untouched, so `blocked` derivation and the
+ *  iteration count are unaffected. */
+export interface GateAnswerRecord {
+  readonly answerId: string;
+  readonly operationId: string; // caller-generated; makes recording idempotent
+  readonly gateAttemptId: string; // the Gate reference's Attempt this answers
+  readonly answer: "continue" | "stop";
+  /** Cumulative Repeat-group iterations completed when this answer was recorded,
+   *  so the derived "iterations since the last grant" count resets here. */
+  readonly iterationsAtGrant: number;
+  readonly versionId: string; // the bound answer Artifact's version
+  readonly at: string; // ISO 8601
+}
+
+/** The request to record one Human Gate answer as a durable, bound Artifact. */
+export interface RecordGateAnswerRequest {
+  readonly operationId: string;
+  readonly gateAttemptId: string;
+  readonly answer: "continue" | "stop";
+  readonly iterationsAtGrant: number;
+  /** The Artifact name the answer binds, so it reads back like any output. */
+  readonly artifactName: string;
+  readonly at: Date;
+  /** Optional canonical state to advance to in the same transaction (`failed`
+   *  for a `stop`, so the answer and the rest commit together). */
+  readonly advanceState?: string;
+}
+export type RecordGateAnswerResult =
+  | {
+      readonly ok: true;
+      readonly versionId: string;
+      /** True when this operation id was already recorded (idempotent replay). */
+      readonly replayed: boolean;
+    }
+  | { readonly ok: false; readonly reason: "fenced" }
+  | { readonly ok: false; readonly problem: StageProblem };
+
 /**
  * Ownership of one Run's canonical store. Acquiring bumps a fencing epoch, so a
  * stale owner (a crashed process that comes back) is fenced: its canonical
@@ -197,6 +236,16 @@ export interface RunOwner {
   materializationConflicts(): readonly MaterializationConflict[];
   /** The bytes of a recorded diagnostic by id, or undefined if it is absent. */
   readDiagnostic(diagnosticId: string): Uint8Array | undefined;
+  /**
+   * Record a durable Human Gate answer as a bound Artifact (#85): stage its bytes
+   * as one commit, then a single `run.db` transaction records the version, moves
+   * the binding, appends the answer, and optionally advances the Run — all or
+   * nothing. The attempt log is untouched, so `blocked` stays derived. Idempotent
+   * per operation id; refused if this owner is fenced.
+   */
+  recordGateAnswer(request: RecordGateAnswerRequest): RecordGateAnswerResult;
+  /** Every recorded Human Gate answer, in append order. */
+  gateAnswers(): readonly GateAnswerRecord[];
   close(): void;
 }
 
@@ -272,6 +321,15 @@ const conflictRow = z.object({
   diagnostic_id: z.string(),
   artifact_name: z.string(),
   artifact_path: z.string(),
+  version_id: z.string(),
+  at: z.string(),
+});
+const gateAnswerRow = z.object({
+  answer_id: z.string(),
+  operation_id: z.string(),
+  gate_attempt_id: z.string(),
+  answer: z.string(),
+  iterations_at_grant: z.number(),
   version_id: z.string(),
   at: z.string(),
 });
@@ -374,6 +432,17 @@ function stageRunStore(dir: string, record: RunRecord): void {
       "CREATE TABLE IF NOT EXISTS materialization_conflict (" +
         "seq INTEGER PRIMARY KEY, diagnostic_id TEXT NOT NULL, " +
         "artifact_name TEXT NOT NULL, artifact_path TEXT NOT NULL, " +
+        "version_id TEXT NOT NULL, at TEXT NOT NULL) STRICT",
+    );
+    // A durable Human Gate answer (#85): each row is one grant/stop against a
+    // blocked Run's Gate. `operation_id` is UNIQUE so a replayed answer records
+    // once. Append-only and separate from `attempt_log`, so `blocked` stays
+    // derived and iterations are counted since the latest row's grant point.
+    database.exec(
+      "CREATE TABLE IF NOT EXISTS gate_answer (" +
+        "seq INTEGER PRIMARY KEY, answer_id TEXT NOT NULL, " +
+        "operation_id TEXT NOT NULL UNIQUE, gate_attempt_id TEXT NOT NULL, " +
+        "answer TEXT NOT NULL, iterations_at_grant INTEGER NOT NULL, " +
         "version_id TEXT NOT NULL, at TEXT NOT NULL) STRICT",
     );
     database
@@ -750,6 +819,17 @@ export function openRunGroup(
         "SELECT diagnostic_id, artifact_name, artifact_path, version_id, at " +
           "FROM materialization_conflict ORDER BY seq",
       );
+      const findGateAnswer = runDatabase.query(
+        "SELECT answer_id, version_id FROM gate_answer WHERE operation_id = ?",
+      );
+      const insertGateAnswer = runDatabase.query(
+        "INSERT INTO gate_answer (answer_id, operation_id, gate_attempt_id, " +
+          "answer, iterations_at_grant, version_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      );
+      const listGateAnswers = runDatabase.query(
+        "SELECT answer_id, operation_id, gate_attempt_id, answer, " +
+          "iterations_at_grant, version_id, at FROM gate_answer ORDER BY seq",
+      );
 
       // The single publication transaction: record every version, move every
       // binding, settle the Attempt, and advance the Run — all or nothing. A
@@ -795,6 +875,40 @@ export function openRunGroup(
             request.at.toISOString(),
           );
           updateState.run("halted", runId);
+        },
+      );
+
+      // Record the gate answer and (for a `stop`) rest the Run together: the
+      // version and binding move, the answer is appended, and the optional state
+      // advance commits atomically — the same all-or-nothing ordering as a
+      // publication, but without touching the attempt log.
+      const gateAnswerTransaction = runDatabase.transaction(
+        (
+          request: RecordGateAnswerRequest,
+          answerId: string,
+          versionId: string,
+        ) => {
+          const at = request.at.toISOString();
+          insertVersion.run(
+            versionId,
+            request.artifactName,
+            "text",
+            answerId,
+            at,
+          );
+          upsertBinding.run(request.artifactName, versionId, at);
+          insertGateAnswer.run(
+            answerId,
+            request.operationId,
+            request.gateAttemptId,
+            request.answer,
+            request.iterationsAtGrant,
+            versionId,
+            at,
+          );
+          if (request.advanceState !== undefined) {
+            updateState.run(request.advanceState, runId);
+          }
         },
       );
 
@@ -901,6 +1015,55 @@ export function openRunGroup(
           } catch {
             return undefined;
           }
+        },
+        recordGateAnswer(request) {
+          if (fenced()) return { ok: false, reason: "fenced" };
+          // Idempotent per operation id: a replayed answer returns its recorded
+          // version without staging a second commit or a second row.
+          const existing = findGateAnswer.get(request.operationId) as {
+            answer_id: string;
+            version_id: string;
+          } | null;
+          if (existing != null) {
+            return { ok: true, versionId: existing.version_id, replayed: true };
+          }
+          const answerId = randomUUID();
+          // Stage the answer bytes (invisible candidate storage) before the
+          // transaction; an absent `git` is a Problem here, with no `run.db` change.
+          const staged = repo.stageCommit(
+            answerId,
+            [],
+            [
+              {
+                name: request.artifactName,
+                type: "text",
+                content: new TextEncoder().encode(request.answer),
+              },
+            ],
+            request.at,
+          );
+          if (!staged.ok) return { ok: false, problem: staged.problem };
+          // Re-check the epoch after the (subprocess-slow) staging: recording is a
+          // canonical write, so a stale owner must be refused.
+          if (fenced()) return { ok: false, reason: "fenced" };
+          gateAnswerTransaction(request, answerId, staged.versionId);
+          return { ok: true, versionId: staged.versionId, replayed: false };
+        },
+        gateAnswers() {
+          return (listGateAnswers.all() as Record<string, unknown>[]).map(
+            (row) => {
+              const parsed = gateAnswerRow.parse(row);
+              return {
+                answerId: parsed.answer_id,
+                operationId: parsed.operation_id,
+                gateAttemptId: parsed.gate_attempt_id,
+                answer: parsed.answer as "continue" | "stop",
+                iterationsAtGrant: parsed.iterations_at_grant,
+                versionId: parsed.version_id,
+                at: parsed.at,
+              };
+            },
+          );
         },
         close() {
           if (handles.delete(runDatabase)) runDatabase.close();

@@ -438,6 +438,72 @@ test(
   },
 );
 
+test("resuming a blocked Repeat group runs exactly one more interval and blocks again (#85)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  // First interval: three iterations, then blocked (nothing written).
+  assert.deepEqual(run([alwaysFailRepeat(3)], owner), { outcome: "blocked" });
+  assert.equal(owner.attemptLog().length, 3);
+  assert.equal(state(), "running");
+
+  // Resume in the same owner (a `continue` grant re-walks the Routing): the three
+  // prior iterations are dropped, and a fresh interval of three runs before the
+  // Run blocks again — the count advanced from 3 to 6.
+  assert.deepEqual(run([alwaysFailRepeat(3)], owner), { outcome: "blocked" });
+  assert.equal(
+    owner.attemptLog().filter((e) => e.outcome === "succeeded").length,
+    6,
+  );
+  assert.equal(state(), "running");
+});
+
+test("a granted interval that makes the Verdict pass rests the Run succeeded (#85)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const counter = freshCounter();
+  // passAt 5, interval 3: the first interval (iterations 1-3) fails and blocks.
+  assert.deepEqual(run([repeatOver(counter, 5, 3)], owner), {
+    outcome: "blocked",
+  });
+  assert.equal(owner.attemptLog().length, 3);
+
+  // The granted interval continues the shared counter (4, then 5 = pass) and the
+  // deciding Attempt rests the Run succeeded within the interval.
+  assert.deepEqual(run([repeatOver(counter, 5, 3)], owner), {
+    outcome: "succeeded",
+  });
+  assert.equal(state(), "succeeded");
+  assert.equal(dec(readBound(owner, "passing")), "pass");
+  assert.equal(owner.attemptLog().length, 5);
+});
+
+test("resuming past a group that already passed consumes no skip and does not re-run a later Step (#85)", async (t) => {
+  const { owner } = ownerForFreshRun(t);
+  const counter = freshCounter();
+  const routing: RoutingNode[] = [
+    // Baseline binds `passing` = pass, so the group runs zero iterations.
+    commandStep(
+      "baseline",
+      { executable: NODE, arguments: ["-e", "process.exit(0)"] },
+      { produces: produces({ name: "passing", type: "verdict" }) },
+    ),
+    // Would fail every iteration, but `passing` is already pass, so it never runs.
+    repeatOver(counter, 999, 5),
+    commandStep(
+      "after",
+      { executable: NODE, arguments: ["-e", "console.log('after')"] },
+      { produces: produces({ name: "done", type: "text" }) },
+    ),
+  ];
+  assert.deepEqual(run(routing, owner), { outcome: "succeeded" });
+  assert.equal(owner.attemptLog().length, 2); // baseline + after
+
+  // Resume: the already-passed group must consume none of the skip budget (it is
+  // not the terminal node), so `after` stays skipped rather than re-running, and
+  // the group's Command never runs.
+  assert.deepEqual(run(routing, owner), { outcome: "succeeded" });
+  assert.equal(owner.attemptLog().length, 2);
+  assert.equal(existsSync(counter), false);
+});
+
 /** Read the bytes currently bound to an artifact name through the owner. */
 function readBound(owner: RunOwner, name: string): Uint8Array | undefined {
   const versionId = owner.currentVersion(name);

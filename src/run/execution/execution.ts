@@ -177,12 +177,12 @@ export function executeRouting(
     // `home: workspace` outputs and where they materialize (#88). Keyed on the
     // authored declaration (#13 rule 6: never on Bundle identity).
     materializations: collectMaterializations(flattenSteps(routing)),
-    // Resume (#88): skip the Steps whose Attempts already settled on a prior run,
-    // so a resumed Run re-verifies the Step that halted rather than re-running the
-    // completed ones. Zero on a fresh launch.
-    // ponytail: the settled-success count is exact for straight-line M2 Routings.
-    // Resuming partway through a Repeat group (#84) would need iteration-aware
-    // bookkeeping; no M2 conflict scenario reaches one, so add it with #85.
+    // Resume (#88, #85): skip the Steps whose Attempts already settled on a prior
+    // run, so a resumed Run re-verifies the Step that halted (#88) or continues a
+    // granted Repeat interval (#85) rather than re-running completed work. Zero on
+    // a fresh launch. A Repeat group's already-run iterations are part of this
+    // count; `runRepeatGroup` drops its share (whole spans) so the granted
+    // interval starts fresh from the block — see there.
     skip: { remaining: countSucceeded(deps.owner.attemptLog()) },
   };
 
@@ -241,6 +241,13 @@ function runStep(
  * clamped to the engine ceiling so a Bundle cannot disable review — without a
  * pass, the Run rests `blocked`: nothing is written, so the block is derived from
  * the current Step Attempt (a reopened home re-derives it with no new Attempt).
+ *
+ * A `continue`-answered Run resumes here in the answering process (#85): the block
+ * released its Workspace claim, so a fresh process re-walks the Routing. The skip
+ * cursor entering the group is its already-completed iterations; those are dropped
+ * whole-span (never re-run), and the local `iterations` counter restarts at zero —
+ * so the block decision counts iterations *since the last grant* (ADR 0020), and
+ * one grant buys exactly one more interval.
  */
 function runRepeatGroup(
   repeat: RepeatGroup["repeat"],
@@ -252,10 +259,25 @@ function runRepeatGroup(
     MAX_REVIEW_CHECKPOINT_INTERVAL,
   );
   const owner = context.step.owner;
-  // Zero-iteration case: the Verdict is already bound `pass` before entry.
+  // Zero-iteration case: the Verdict is already bound `pass` before entry. On a
+  // resume this also covers a group a prior granted interval already passed —
+  // return before touching the skip budget, so the remaining budget stays with
+  // the later nodes it belongs to (a passed group is never the terminal node).
   if (verdictPasses(owner, repeat.until)) return "succeeded-open";
+  // Resume (#85): reaching here, the group is still failing — which means it is
+  // the terminal reached node (the walk cannot pass a failing `until` group), so
+  // all remaining skip budget is this group's own prior granted iterations. Drop
+  // them a whole span at a time (the block only ever leaves complete iterations,
+  // so the budget is a whole multiple of the span) and the granted interval
+  // restarts fresh from the block.
+  const spanLength = repeat.steps.length;
+  if (spanLength > 0) {
+    const priorIterations = Math.floor(context.skip.remaining / spanLength);
+    context.skip.remaining -= priorIterations * spanLength;
+  }
 
-  // Iterations are bounded independently of the per-Step retry budget.
+  // Iterations are bounded independently of the per-Step retry budget, and count
+  // from zero each granted interval (see the resume note above).
   let iterations = 0;
   for (;;) {
     const outcome = runIteration(repeat, context, isLastNode);

@@ -129,6 +129,18 @@ export function renderRun(run: RunView): string {
     );
   }
 
+  // The answer-human-gate offer appears only while blocked (#85); print each
+  // answer's consequence so `run show` states what continuing or stopping does.
+  for (const offer of run.actionOffers) {
+    if (offer.action !== "answer-human-gate") continue;
+    lines.push(
+      "",
+      "Answer the checkpoint:",
+      `  secant run answer ${run.runId} --continue  # ${offer.continueConsequence}`,
+      `  secant run answer ${run.runId} --stop      # ${offer.stopConsequence}`,
+    );
+  }
+
   lines.push("", "Progress:");
   if (run.progress.length === 0) lines.push("  (no steps)");
   for (const step of run.progress) {

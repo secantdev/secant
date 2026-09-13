@@ -23,6 +23,7 @@ import { createBundleManagement } from "./build-bundle.js";
 import {
   bundleBytesCorruptForRun,
   bundleBytesMissingForRun,
+  deriveRunFacts,
   isLiveElsewhere,
   runSnapshot,
   selectRunEntry,
@@ -34,6 +35,7 @@ import type {
   BundleFocusSelector,
   BundleFocusSnapshot,
   LaunchRunInput,
+  ResumeRunInput,
   OpenedProjection,
   OperationOutcome,
   OperationSnapshot,
@@ -41,6 +43,7 @@ import type {
   ProjectionSelector,
   ProjectionUpdate,
   Problem,
+  DiagnosticReference,
   ResourceRead,
   ResourceReference,
   RunSnapshot,
@@ -263,6 +266,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
           if (request.advanceState !== undefined && tracking !== undefined) {
             tracking.state = request.advanceState;
           }
+          pushRunUpdate(runId);
+        }
+        return result;
+      },
+      recordMaterializationConflict(request) {
+        const result = owner.recordMaterializationConflict(request);
+        // The store rests the Run `halted` inside this call, so mirror that into
+        // the in-memory state and push the halted snapshot to observers.
+        if (result.ok && tracking !== undefined) {
+          tracking.state = "halted";
           pushRunUpdate(runId);
         }
         return result;
@@ -651,17 +664,105 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { admitted: true, operationId, runId };
   }
 
+  // Resume a Run resting `halted`: re-derive its facts from the pinned bytes (a
+  // fresh `run resume` process holds no in-memory tracking), re-claim the
+  // Workspace (ADR 0023), then drive it further through the same execution — which
+  // skips the completed Steps and re-verifies the one that halted.
+  function submitResume(
+    operationId: string,
+    input: ResumeRunInput,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === resumeReplayKey(input)) {
+        return {
+          admitted: true,
+          operationId,
+          ...(existing.runId !== undefined ? { runId: existing.runId } : {}),
+        };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (
+      runGroup === undefined ||
+      runExecution === undefined ||
+      runProjection === undefined
+    ) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    const read = runGroup.readRun(input.runId);
+    if (!read.ok) {
+      return {
+        admitted: false,
+        problem:
+          read.problem.kind === "unknown-run"
+            ? runNotFound(input.runId)
+            : runStoreUnreadable(input.runId),
+      };
+    }
+    const record = read.run;
+    // Resume applies only to a Run resting `halted` on a conflict. A `running`
+    // record means the Run is live (here or elsewhere); resuming it would fence
+    // the process driving it. A `succeeded`/`failed` Run is already at rest.
+    if (record.state !== "halted") {
+      return {
+        admitted: false,
+        problem: runNotHalted(input.runId, record.state),
+      };
+    }
+    const derived = deriveRunFacts(runProjection, record.bundleSnapshotDigest);
+    if ("problem" in derived) {
+      return { admitted: false, problem: derived.problem };
+    }
+    const facts = derived.facts;
+    // Re-claim the Workspace before authorizing more work; a different live Run
+    // refuses, leaving this Run untouched.
+    const claim = runGroup.resumeRun(input.runId);
+    if (claim.outcome === "workspace-busy") {
+      return { admitted: false, problem: workspaceBusy(claim.liveRunId) };
+    }
+    if (claim.outcome === "unknown-run") {
+      return { admitted: false, problem: runNotFound(input.runId) };
+    }
+    runs.set(input.runId, {
+      digest: record.bundleSnapshotDigest,
+      routing: facts.routing,
+      name: facts.name,
+      id: facts.id,
+      version: facts.version,
+      state: record.state,
+      done: false,
+      observers: new Set<UpdateStream>(),
+    });
+    operations.set(operationId, {
+      replayKey: resumeReplayKey(input),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId: input.runId,
+      settle: () => runAndSettle(input.runId),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId: input.runId };
+  }
+
   const projectionPort: ProjectionPort = {
     openProjection,
     submit(submission: Submission): SubmissionAdmission {
       // Admit at once and record `pending`; settlement is scheduled (inline by
       // default, deferred under a test) and publishes the outcome then.
-      return submission.operation === "approve-workspace"
-        ? submitApprove(submission.operationId, submission.input)
-        : submitLaunch(submission.operationId, submission.input);
+      switch (submission.operation) {
+        case "approve-workspace":
+          return submitApprove(submission.operationId, submission.input);
+        case "launch-run":
+          return submitLaunch(submission.operationId, submission.input);
+        case "resume-run":
+          return submitResume(submission.operationId, submission.input);
+      }
     },
 
-    readResource(reference: ResourceReference): ResourceRead {
+    readResource(
+      reference: ResourceReference | DiagnosticReference,
+    ): ResourceRead {
       if (runGroup === undefined) {
         return { found: false, problem: runSupportUnavailable() };
       }
@@ -679,12 +780,18 @@ export function createApplication(deps: ApplicationDependencies): Application {
         return { found: false, problem: runStoreUnreadable(reference.runId) };
       }
       try {
-        const bytes = owner.readArtifact(
-          reference.versionId,
-          reference.artifactName,
-        );
+        const bytes =
+          reference.type === "diagnostic"
+            ? owner.readDiagnostic(reference.diagnosticId)
+            : owner.readArtifact(reference.versionId, reference.artifactName);
         if (bytes === undefined) {
-          return { found: false, problem: runOutputMissing(reference) };
+          return {
+            found: false,
+            problem:
+              reference.type === "diagnostic"
+                ? runDiagnosticMissing(reference)
+                : runOutputMissing(reference),
+          };
         }
         return {
           found: true,
@@ -870,6 +977,45 @@ function runOutputMissing(reference: ResourceReference): Problem {
     possibleEffects: "none",
     details: { runId: reference.runId, artifactName: reference.artifactName },
   };
+}
+
+function runDiagnosticMissing(reference: DiagnosticReference): Problem {
+  return {
+    code: "run-diagnostic-not-found",
+    explanation: `Diagnostic ${reference.diagnosticId} is not recorded for this Run.`,
+    remediation:
+      "Open the Run to see its current conflict, then read the diagnostic it references.",
+    possibleEffects: "none",
+    details: { runId: reference.runId, diagnosticId: reference.diagnosticId },
+  };
+}
+
+function runNotFound(runId: string): Problem {
+  return {
+    code: "run-not-found",
+    explanation: `No Run ${runId} exists in this Workspace.`,
+    remediation:
+      "Check the Run id (it is printed when a Run is launched), or launch a Run first.",
+    possibleEffects: "none",
+    details: { runId },
+  };
+}
+
+function runNotHalted(runId: string, state: string): Problem {
+  return {
+    code: "run-not-halted",
+    explanation: `Run ${runId} is ${state}, not halted; only a halted Run can be resumed.`,
+    remediation:
+      "Resume applies to a Run halted on a Materialization conflict; open the Run to see its state.",
+    possibleEffects: "none",
+    details: { runId, state },
+  };
+}
+
+/** A stable replay key for a resume: the Run id. A re-submitted operation id
+ *  with an equal key replays; a different key is a conflict. */
+function resumeReplayKey(input: ResumeRunInput): string {
+  return JSON.stringify(["resume", input.runId]);
 }
 
 function operationNotFound(operationId: string): Problem {

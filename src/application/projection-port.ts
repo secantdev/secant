@@ -27,7 +27,8 @@ export interface BundleFocusSelector {
 
 /** A durable user intent, correlated by a caller-generated operation id. The
  *  closed set of Operations grows one variant per slice. */
-export type Submission = ApproveWorkspaceSubmission | LaunchRunSubmission;
+export type Submission =
+  ApproveWorkspaceSubmission | LaunchRunSubmission | ResumeRunSubmission;
 
 export interface ApproveWorkspaceSubmission {
   readonly operationId: string;
@@ -51,6 +52,18 @@ export interface LaunchRunInput {
   /** The exact installed digest the caller acknowledges trusting. Required only
    *  when the installed digest is not yet trusted (ADR 0021). */
   readonly trustDigest?: string;
+}
+
+/** Resume a Run resting `halted` on a Materialization conflict, after the user
+ *  has restored the Workspace file. Resume acquires fresh ownership and the
+ *  Workspace claim (ADR 0023), re-verifies the copy, and continues (#88). */
+export interface ResumeRunSubmission {
+  readonly operationId: string;
+  readonly operation: "resume-run";
+  readonly input: ResumeRunInput;
+}
+export interface ResumeRunInput {
+  readonly runId: string;
 }
 
 /** `submit` settles only as admitted (with the operation id, and the created Run
@@ -295,12 +308,15 @@ export type BundleFocusResult =
 /** A Run's canonical lifecycle state, in words. `blocked` — a durable pause at a
  *  Repeat group's Review checkpoint (ADR 0020, #84) — is never persisted: the
  *  Application derives it from the current Step Attempt, so a reopened home
- *  re-derives it with no new Attempt. */
+ *  re-derives it with no new Attempt. `halted` is a persisted rest state a
+ *  Materialization conflict leaves the Run in until the user restores the file
+ *  and resumes (#88, ADR 0023). */
 export type RunStateName =
-  "created" | "running" | "succeeded" | "failed" | "blocked";
+  "created" | "running" | "succeeded" | "failed" | "blocked" | "halted";
 
 /** One Step's status within a Run's ordered progress. `blocked` is the Step a
- *  Repeat group is paused at when its Review checkpoint is reached. */
+ *  Repeat group is paused at (its Review checkpoint), or the Step a Materialization
+ *  conflict stopped before it could run. */
 export type RunStepStatus =
   "pending" | "running" | "succeeded" | "failed" | "blocked";
 export interface RunStepProgress {
@@ -317,14 +333,26 @@ export type RunTimelineKind =
   | "trust-granted"
   | "attempt-settled"
   | "iteration"
-  | "checkpoint-blocked";
+  | "checkpoint-blocked"
+  | "materialization-conflict";
 export interface RunTimelineEvent {
   readonly at: string; // ISO 8601
   readonly event: RunTimelineKind;
   /** The Attempt outcome for `attempt-settled`; the granting operation id for
    *  `trust-granted`; the iteration ordinal for `iteration`; the completed
-   *  iteration count for `checkpoint-blocked`; absent for `run-created`. */
+   *  iteration count for `checkpoint-blocked`; the declared Workspace path for
+   *  `materialization-conflict`; absent for `run-created`. */
   readonly detail?: string;
+}
+
+/** A Materialization conflict currently resting a Run `halted`: a `home: workspace`
+ *  Artifact whose Workspace copy went missing or changed before a Step could use
+ *  it (#88, ADR 0023). The detailed diagnostic is reached by reference, never
+ *  inlined, so the snapshot stays bounded (AC5). */
+export interface RunConflictView {
+  readonly artifactName: string;
+  readonly path: string; // the declared relative Workspace path
+  readonly reference: DiagnosticReference;
 }
 
 /** One Run output, reachable through `readResource`. Only `text` and `verdict`
@@ -380,6 +408,8 @@ export interface RunView {
   readonly outputs: readonly RunOutputView[];
   /** The Review checkpoint facts, present only when `state` is `blocked` (#84). */
   readonly checkpoint?: RunCheckpointView;
+  /** Present only while the Run rests `halted` on a Materialization conflict. */
+  readonly conflict?: RunConflictView;
 }
 
 export interface RunSnapshot {
@@ -437,13 +467,23 @@ export interface ResourceReference {
   readonly versionId: string;
   readonly type: "text" | "verdict";
 }
+/** A reference to a Run's recorded diagnostic, resolved through `readResource`.
+ *  It names the Run and the exact diagnostic; unlike an output reference it binds
+ *  no artifact version. The Materialization-conflict diagnostic is reached this
+ *  way so `run show` can name the conflict without inlining its detail (#88). */
+export interface DiagnosticReference {
+  readonly runId: string;
+  readonly diagnosticId: string;
+  readonly type: "diagnostic";
+}
 /** The content of a resolved reference, or a Problem when the run or the bytes
- *  are gone. `text` is the captured output; `verdict` is `pass`/`fail`. M2
- *  outputs are textual, so bytes decode as UTF-8 (ADR 0020, #81 ponytail gap). */
+ *  are gone. `text` is the captured output; `verdict` is `pass`/`fail`;
+ *  `diagnostic` is a recorded diagnostic's text. M2 outputs are textual, so bytes
+ *  decode as UTF-8 (ADR 0020, #81 ponytail gap). */
 export type ResourceRead =
   | {
       readonly found: true;
-      readonly type: "text" | "verdict";
+      readonly type: "text" | "verdict" | "diagnostic";
       readonly content: string;
     }
   | { readonly found: false; readonly problem: Problem };
@@ -474,5 +514,7 @@ export interface ProjectionPort {
   }): OpenedProjection<RunSnapshot>;
   openProjection(selector: ProjectionSelector): OpenedProjection;
   submit(submission: Submission): SubmissionAdmission;
-  readResource(reference: ResourceReference): ResourceRead;
+  readResource(
+    reference: ResourceReference | DiagnosticReference,
+  ): ResourceRead;
 }

@@ -1,6 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
+  flattenSteps,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
   type AttemptOutcome,
   type CommandInvocation,
@@ -13,7 +16,11 @@ import {
   type Step,
   type StepKindName,
 } from "../../workflow/workflow.js";
-import type { CandidateOutput, RunOwner } from "../store/store.js";
+import type {
+  AttemptLogEntry,
+  CandidateOutput,
+  RunOwner,
+} from "../store/store.js";
 
 // The Run execution Module owns the Run lifecycle policy: it walks a Routing
 // node by node, dispatches each Step through a closed executable Step-kind table,
@@ -68,8 +75,9 @@ export interface ExecutionDeps {
 }
 
 /** How a Run came to rest. `blocked` is a durable pause at a Review checkpoint,
- *  derived (never written) from the current Step Attempt; #85 answers it. */
-export type RunOutcome = "succeeded" | "failed" | "blocked";
+ *  derived (never written) from the current Step Attempt (#84, #85). `halted` is
+ *  a resumable rest a Materialization conflict leaves the Run in (#88, ADR 0023). */
+export type RunOutcome = "succeeded" | "failed" | "blocked" | "halted";
 
 export interface RunReport {
   readonly outcome: RunOutcome;
@@ -78,9 +86,10 @@ export interface RunReport {
 // The outcome of executing one Routing node. `succeeded-rested` means the node's
 // deciding Attempt already advanced the Run to `succeeded` in its own
 // transaction; `succeeded-open` means the node completed but did not rest the Run
-// (it was not the last node, or a group passed with zero iterations); `failed`
-// and `blocked` end the walk.
-type NodeOutcome = "succeeded-rested" | "succeeded-open" | "failed" | "blocked";
+// (it was not the last node, or a group passed with zero iterations); `failed`,
+// `blocked`, and `halted` (a Materialization conflict) end the walk.
+type NodeOutcome =
+  "succeeded-rested" | "succeeded-open" | "failed" | "blocked" | "halted";
 
 // Crucible-owned defaults (ADR 0020: the engine sets the retry budget, a Bundle
 // may override per Step). Retries measure transient flakiness, not problem size.
@@ -134,6 +143,13 @@ interface WalkContext {
   readonly step: StepContext;
   readonly budget: number;
   readonly now: () => Date;
+  /** Artifact name → declared relative Workspace path for `home: workspace`
+   *  outputs, so a Step verifies the copies it uses before running (#88). */
+  readonly materializations: ReadonlyMap<string, string>;
+  /** Resume cursor: the count of Steps whose Attempts already settled on a prior
+   *  run, skipped so a resumed Run does not re-run completed work (#88). Mutable;
+   *  each executed Step decrements it. */
+  readonly skip: { remaining: number };
 }
 
 /**
@@ -158,6 +174,16 @@ export function executeRouting(
     },
     budget: deps.defaultRetryBudget ?? DEFAULT_RETRY_BUDGET,
     now: deps.now ?? (() => new Date()),
+    // `home: workspace` outputs and where they materialize (#88). Keyed on the
+    // authored declaration (#13 rule 6: never on Bundle identity).
+    materializations: collectMaterializations(flattenSteps(routing)),
+    // Resume (#88): skip the Steps whose Attempts already settled on a prior run,
+    // so a resumed Run re-verifies the Step that halted rather than re-running the
+    // completed ones. Zero on a fresh launch.
+    // ponytail: the settled-success count is exact for straight-line M2 Routings.
+    // Resuming partway through a Repeat group (#84) would need iteration-aware
+    // bookkeeping; no M2 conflict scenario reaches one, so add it with #85.
+    skip: { remaining: countSucceeded(deps.owner.attemptLog()) },
   };
 
   writeStateOrThrow(deps.owner, "running");
@@ -173,6 +199,7 @@ export function executeRouting(
         : runStep(node, context, isLastNode);
     if (outcome === "failed") return { outcome: "failed" };
     if (outcome === "blocked") return { outcome: "blocked" };
+    if (outcome === "halted") return { outcome: "halted" };
     restedSucceeded = outcome === "succeeded-rested";
   }
 
@@ -199,7 +226,11 @@ function runStep(
     context,
     isLastNode ? "succeeded" : undefined,
   );
+  if (outcome === "halted") return "halted";
   if (outcome === "failed") return "failed";
+  // A skipped Step (already settled on a prior run) rested nothing this run, so it
+  // is `succeeded-open`; executeRouting's final rest covers an all-skipped Run.
+  if (outcome === "skipped") return "succeeded-open";
   return isLastNode ? "succeeded-rested" : "succeeded-open";
 }
 
@@ -229,6 +260,7 @@ function runRepeatGroup(
   for (;;) {
     const outcome = runIteration(repeat, context, isLastNode);
     if (outcome === "failed") return "failed";
+    if (outcome === "halted") return "halted";
     iterations++;
     // Re-evaluate the condition after the iteration (equivalently, before the
     // next). A pass ends the group; `succeeded-rested` means the iteration's
@@ -270,6 +302,7 @@ function runIteration(
               : undefined
         : undefined,
     );
+    if (outcome === "halted") return "halted";
     if (outcome === "failed") return "failed";
   }
   return isLastNode && verdictPasses(context.step.owner, until)
@@ -282,14 +315,39 @@ function runIteration(
  * exhausts the budget carries `advanceState: "failed"`. A succeeded Attempt
  * carries `successAdvance` (the caller's fixed `"succeeded"` for a last plain
  * Step) unless `decideSuccessAdvance` is given, which chooses the advance from the
- * Attempt result (the Repeat-group deciding Attempt). Returns the final outcome.
+ * Attempt result (the Repeat-group deciding Attempt).
+ *
+ * Two #88 concerns fold in at this single Step choke point: a Step already settled
+ * on a prior run is `"skipped"` (resume), and before any Step runs its
+ * `home: workspace` Artifacts are verified — a conflict rests the Run `halted` and
+ * returns `"halted"`. Returns the final outcome.
  */
 function runStepAttempts(
   step: Step,
   context: WalkContext,
   successAdvance: string | undefined,
   decideSuccessAdvance?: (result: StepAttempt) => string | undefined,
-): AttemptOutcome {
+): AttemptOutcome | "halted" | "skipped" {
+  // Resume (#88): a Step whose Attempt already settled on a prior run is skipped —
+  // its outputs stay bound and materialized, so re-running it would duplicate work
+  // and (for a Step that changed the copy) undo the user's fix. Consume one skip.
+  if (context.skip.remaining > 0) {
+    context.skip.remaining--;
+    return "skipped";
+  }
+  // Before the Step runs, verify every `home: workspace` Artifact it uses against
+  // its bound version (ADR 0023). A missing or changed copy records a conflict and
+  // rests the Run `halted`; the Workspace is never overwritten nor its bytes adopted.
+  const conflict = verifyMaterializations(
+    step,
+    context.step,
+    context.materializations,
+    context.now(),
+  );
+  if (conflict !== undefined) {
+    recordConflictOrThrow(context.step.owner, conflict);
+    return "halted";
+  }
   const executor = STEP_EXECUTORS[step.kind];
   if (executor === undefined) {
     throw new Error(
@@ -322,6 +380,13 @@ function runStepAttempts(
         advanceState,
       }),
     );
+    // A succeeded Attempt's `home: workspace` outputs are now canonical in the
+    // store; materialize each into the Workspace at its declared path (#88). Written
+    // after publication so a Workspace copy that outlives a failed publication is
+    // only external state, never a moved binding (ADR 0023).
+    if (result.outcome === "succeeded") {
+      materializeOutputs(step, result.outputs, context.step);
+    }
     // A Verdict (pass or fail) still ran to an exit, so it advances the Run;
     // only a `failed` Attempt is retried.
     if (result.outcome !== "failed") break;
@@ -352,6 +417,196 @@ function iterationPasses(
     return new TextDecoder().decode(produced.content) === "pass";
   }
   return verdictPasses(owner, until);
+}
+
+// --- Workspace materialization and verification (#88, ADR 0023) -------------
+
+/** A detected Materialization conflict, ready to record. */
+interface DetectedConflict {
+  readonly artifactName: string;
+  readonly path: string;
+  readonly versionId: string;
+  readonly diagnostic: Uint8Array;
+  readonly at: Date;
+}
+
+/** Artifact name → declared relative Workspace path for every `home: workspace`
+ *  output any Step produces. An output with no `path` cannot be placed, so it is
+ *  skipped (the Composition check is the authority that a workspace home has one). */
+function collectMaterializations(steps: readonly Step[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const step of steps) {
+    for (const produced of step.produces ?? []) {
+      if (produced.home === "workspace" && produced.path !== undefined) {
+        map.set(produced.name, produced.path);
+      }
+    }
+  }
+  return map;
+}
+
+/** How many Attempts settled `succeeded` — the count of completed Steps in a
+ *  straight-line M2 Routing, so the next Step to run on resume. */
+function countSucceeded(log: readonly AttemptLogEntry[]): number {
+  let count = 0;
+  for (const entry of log) if (entry.outcome === "succeeded") count++;
+  return count;
+}
+
+/** Verify every `home: workspace` Artifact this Step is about to use. Returns the
+ *  first conflict, or undefined when every copy matches its bound version. */
+function verifyMaterializations(
+  step: Step,
+  context: StepContext,
+  materializations: ReadonlyMap<string, string>,
+  at: Date,
+): DetectedConflict | undefined {
+  const workspacePath = context.owner.record.workspacePath;
+  for (const name of stepReferences(step)) {
+    const relPath = materializations.get(name);
+    if (relPath === undefined) continue; // not Workspace-materialized
+    const versionId = context.owner.currentVersion(name);
+    if (versionId === undefined) continue; // not bound yet — nothing to verify
+    const bound = context.owner.readArtifact(versionId, name);
+    if (bound === undefined) continue; // no bytes at the bound version
+    const copy = readWorkspaceCopy(workspacePath, relPath);
+    if (copy !== undefined && bytesEqual(copy, bound)) continue; // matches
+    return {
+      artifactName: name,
+      path: relPath,
+      versionId,
+      diagnostic: encode(
+        conflictDiagnostic(name, relPath, versionId, bound, copy),
+      ),
+      at,
+    };
+  }
+  return undefined;
+}
+
+/** Write each `home: workspace` output this Step produced into the Workspace at
+ *  its declared path, byte-for-byte (AC1/AC4). */
+function materializeOutputs(
+  step: Step,
+  outputs: readonly CandidateOutput[],
+  context: StepContext,
+): void {
+  const wanted = new Map<string, string>();
+  for (const produced of step.produces ?? []) {
+    if (produced.home === "workspace" && produced.path !== undefined) {
+      wanted.set(produced.name, produced.path);
+    }
+  }
+  if (wanted.size === 0) return;
+  const workspacePath = context.owner.record.workspacePath;
+  for (const output of outputs) {
+    const relPath = wanted.get(output.name);
+    if (relPath === undefined) continue;
+    const target = resolveWorkspacePath(workspacePath, relPath);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, output.content);
+  }
+}
+
+/** The artifact names a Step uses: everything it `requires`, plus every
+ *  `{artifact}` a Command resolves in its arguments or env (base and any platform
+ *  override). Verification runs over these before the Step executes. */
+function stepReferences(step: Step): Set<string> {
+  const names = new Set<string>(step.requires ?? []);
+  if (step.kind === "command") {
+    collectArtifactTokens(step.command, names);
+    for (const override of Object.values(step.command.platforms ?? {})) {
+      if (override !== undefined) collectArtifactTokens(override, names);
+    }
+  }
+  return names;
+}
+
+function collectArtifactTokens(
+  invocation: {
+    readonly arguments?: readonly (string | Reference)[];
+    readonly env?: Readonly<Record<string, string | Reference>>;
+  },
+  into: Set<string>,
+): void {
+  for (const token of invocation.arguments ?? []) {
+    if (typeof token !== "string" && "artifact" in token)
+      into.add(token.artifact);
+  }
+  for (const value of Object.values(invocation.env ?? {})) {
+    if (typeof value !== "string" && "artifact" in value)
+      into.add(value.artifact);
+  }
+}
+
+/** Resolve a declared relative Workspace path identically on Windows and POSIX
+ *  (AC4): split on either separator and re-join under the Workspace root. */
+function resolveWorkspacePath(workspacePath: string, relPath: string): string {
+  return join(
+    workspacePath,
+    ...relPath.split(/[\\/]+/).filter((segment) => segment.length > 0),
+  );
+}
+
+/** The current Workspace bytes at a declared path, or undefined if it is absent. */
+function readWorkspaceCopy(
+  workspacePath: string,
+  relPath: string,
+): Uint8Array | undefined {
+  const target = resolveWorkspacePath(workspacePath, relPath);
+  try {
+    return existsSync(target) ? readFileSync(target) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Exact byte comparison — no line-ending or encoding normalization (AC4). */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  return Buffer.compare(a, b) === 0;
+}
+
+/** The human-readable diagnostic for a conflict: names the artifact, the path,
+ *  the bound version, and whether the copy is missing or changed. */
+function conflictDiagnostic(
+  name: string,
+  relPath: string,
+  versionId: string,
+  bound: Uint8Array,
+  copy: Uint8Array | undefined,
+): string {
+  const state =
+    copy === undefined
+      ? "the Workspace copy is missing"
+      : `the Workspace copy changed (expected ${bound.length} bytes, found ${copy.length})`;
+  return (
+    [
+      `Materialization conflict for artifact "${name}" at Workspace path "${relPath}".`,
+      `Before a Step could use it, ${state}; it no longer matches the bound version ${versionId}.`,
+      "Secant halted the Run without overwriting the Workspace or adopting its bytes (ADR 0023).",
+      `Restore "${relPath}" to its bound content and resume the Run.`,
+    ].join("\n") + "\n"
+  );
+}
+
+function recordConflictOrThrow(
+  owner: RunOwner,
+  conflict: DetectedConflict,
+): void {
+  const result = owner.recordMaterializationConflict({
+    artifactName: conflict.artifactName,
+    path: conflict.path,
+    versionId: conflict.versionId,
+    diagnostic: conflict.diagnostic,
+    at: conflict.at,
+  });
+  // A fenced owner mid-Run means another process took over; stopping is correct
+  // and throwing hands that to composition, like writeStateOrThrow.
+  if (!result.ok) {
+    throw new Error(
+      `execution: cannot record a Materialization conflict: ${result.reason}.`,
+    );
+  }
 }
 
 // --- Command step (the one executable dispatch entry) ----------------------

@@ -11,12 +11,14 @@ import {
 } from "../workflow/workflow.js";
 import type {
   AttemptLogEntry,
+  MaterializationConflict,
   RunGroup,
   RunOwner,
 } from "../run/store/store.js";
 import type {
   Problem,
   RunCheckpointView,
+  RunConflictView,
   RunOutputView,
   RunResult,
   RunSnapshot,
@@ -97,12 +99,14 @@ function runResult(
     owner: RunOwner | undefined,
     log: readonly AttemptLogEntry[],
     outputs: readonly RunOutputView[],
+    conflicts: readonly MaterializationConflict[],
   ): RunResult => {
     // Derive progress and the `blocked` state from the Routing and the ordered
     // attempt log (ADR 0020, #84): a Repeat group loops, so a flat succeeded-
     // advances-one-Step mapping no longer identifies the current Step. `blocked`
     // is never stored, so it is re-derived here from the current Step Attempt —
-    // needing the Verdict bindings, which only the owner can read.
+    // needing the Verdict bindings, which only the owner can read. A persisted
+    // `halted` (#88) passes through and marks its current Step `blocked`.
     const derivedRun = deriveRun(
       facts.routing,
       log,
@@ -110,6 +114,12 @@ function runResult(
       runId,
       owner,
     );
+    // The conflict resting the Run is the latest recorded one; earlier conflicts
+    // stay on the timeline as history. It is surfaced only while `halted`.
+    const active =
+      derivedRun.state === "halted"
+        ? conflicts[conflicts.length - 1]
+        : undefined;
     return {
       found: true,
       run: {
@@ -132,10 +142,14 @@ function runResult(
           facts.digest,
           derivedRun.iterationEvents,
           derivedRun.checkpoint,
+          conflicts,
         ),
         outputs,
         ...(derivedRun.checkpoint !== undefined
           ? { checkpoint: derivedRun.checkpoint }
+          : {}),
+        ...(active !== undefined
+          ? { conflict: conflictView(runId, active) }
           : {}),
       },
     };
@@ -147,7 +161,7 @@ function runResult(
   // process actually executing the Run. A read must never break a running Run, so
   // show the record-level snapshot instead (no attempt log or outputs from here).
   if (live === undefined && isLiveElsewhere(deps.runGroup, runId)) {
-    return view(undefined, [], []);
+    return view(undefined, [], [], []);
   }
   const owner = live ?? deps.runGroup.acquireRun(runId);
   if (owner === undefined) {
@@ -158,10 +172,29 @@ function runResult(
       owner,
       owner.attemptLog(),
       collectOutputs(owner, facts.routing, runId),
+      owner.materializationConflicts(),
     );
   } finally {
     if (live === undefined) owner.close();
   }
+}
+
+/** The client view of the conflict resting a Run `halted`: names the artifact and
+ *  path, and references the diagnostic (read via `readResource`), never inlining
+ *  its detail so the snapshot stays bounded (AC5). */
+function conflictView(
+  runId: string,
+  conflict: MaterializationConflict,
+): RunConflictView {
+  return {
+    artifactName: conflict.artifactName,
+    path: conflict.path,
+    reference: {
+      runId,
+      diagnosticId: conflict.diagnosticId,
+      type: "diagnostic",
+    },
+  };
 }
 
 /** Whether the coordination record still holds this Run's live Workspace claim —
@@ -286,10 +319,17 @@ function deriveRun(
 
   const iterationEvents: RunTimelineEvent[] = [];
   // The status of the Step the walk is currently paused at (log exhausted): a
-  // failed Run's current Step failed; a running Run's is running; a `created` Run
-  // has not started, so its Steps stay pending.
+  // failed Run's current Step failed; a running Run's is running; a `halted` Run's
+  // (a Materialization conflict, #88) is blocked; a `created` Run has not started,
+  // so its Steps stay pending.
   const stalledStatus: RunStepStatus =
-    state === "failed" ? "failed" : state === "running" ? "running" : "pending";
+    state === "failed"
+      ? "failed"
+      : state === "running"
+        ? "running"
+        : state === "halted"
+          ? "blocked"
+          : "pending";
   let cursor = 0;
   for (const node of routing) {
     if (!("repeat" in node)) {
@@ -547,6 +587,7 @@ function buildTimeline(
   digest: string,
   iterationEvents: readonly RunTimelineEvent[],
   checkpoint: RunCheckpointView | undefined,
+  conflicts: readonly MaterializationConflict[],
 ): RunTimelineEvent[] {
   const events: RunTimelineEvent[] = [{ at: createdAt, event: "run-created" }];
   const entry = deps.catalog.listEntries().find((e) => e.digest === digest);
@@ -580,6 +621,15 @@ function buildTimeline(
       at: log[log.length - 1]?.at ?? createdAt,
       event: "checkpoint-blocked",
       detail: String(checkpoint.completedIterations),
+    });
+  }
+  // Each conflict names its declared Workspace path (AC5). Appended after the
+  // Attempt events — a conflict follows the Steps that completed before it.
+  for (const conflict of conflicts) {
+    events.push({
+      at: conflict.at,
+      event: "materialization-conflict",
+      detail: conflict.path,
     });
   }
   return events;

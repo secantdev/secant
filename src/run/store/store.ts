@@ -3,8 +3,10 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -83,6 +85,14 @@ export type DeleteRunResult =
   | { readonly outcome: "deleted"; readonly runId: string }
   | { readonly outcome: "already-deleted"; readonly runId: string };
 
+/** The outcome of a resume claim. `resumed` re-holds the Workspace claim (or the
+ *  Run already held it); `workspace-busy` refuses because a different live Run
+ *  holds it; `unknown-run` names a Run this group never registered. */
+export type ResumeRunResult =
+  | { readonly outcome: "resumed"; readonly runId: string }
+  | { readonly outcome: "workspace-busy"; readonly liveRunId: string }
+  | { readonly outcome: "unknown-run"; readonly runId: string };
+
 /** A write against a fenced owner is refused; nothing is written. */
 export type WriteResult =
   { readonly ok: true } | { readonly ok: false; readonly reason: "fenced" };
@@ -123,6 +133,31 @@ export interface AttemptLogEntry {
   readonly at: string;
 }
 
+/** A recorded Materialization conflict: a `home: workspace` Artifact's Workspace
+ *  copy went missing or changed before a Step could use it (ADR 0023). */
+export interface MaterializationConflict {
+  readonly diagnosticId: string;
+  readonly artifactName: string;
+  readonly path: string; // the declared relative Workspace path
+  readonly versionId: string; // the bound version the copy failed to match
+  readonly at: string; // ISO 8601
+}
+
+/** The request to record one Materialization conflict. The store writes the
+ *  diagnostic to its own `diagnostics/` and rests the Run `halted`; it never
+ *  reads or writes the Workspace and moves no binding. */
+export interface RecordConflictRequest {
+  readonly artifactName: string;
+  readonly path: string;
+  readonly versionId: string;
+  /** The human-readable diagnostic bytes, retained under `diagnostics/`. */
+  readonly diagnostic: Uint8Array;
+  readonly at: Date;
+}
+export type RecordConflictResult =
+  | { readonly ok: true; readonly diagnosticId: string }
+  | { readonly ok: false; readonly reason: "fenced" };
+
 /**
  * Ownership of one Run's canonical store. Acquiring bumps a fencing epoch, so a
  * stale owner (a crashed process that comes back) is fenced: its canonical
@@ -148,6 +183,20 @@ export interface RunOwner {
   readArtifact(versionId: string, name: string): Uint8Array | undefined;
   /** Every Attempt outcome in append order. */
   attemptLog(): readonly AttemptLogEntry[];
+  /**
+   * Record a Materialization conflict and rest the Run `halted` in one
+   * transaction: write the diagnostic under `diagnostics/`, append the conflict
+   * record, and set the canonical state to `halted`. Moves no binding and never
+   * touches the Workspace, so the "never overwrite / never adopt" invariant holds
+   * trivially (the store has no Workspace access). Refused if this owner is fenced.
+   */
+  recordMaterializationConflict(
+    request: RecordConflictRequest,
+  ): RecordConflictResult;
+  /** Every recorded Materialization conflict, in append order. */
+  materializationConflicts(): readonly MaterializationConflict[];
+  /** The bytes of a recorded diagnostic by id, or undefined if it is absent. */
+  readDiagnostic(diagnosticId: string): Uint8Array | undefined;
   close(): void;
 }
 
@@ -174,6 +223,13 @@ export interface RunGroup {
    * or already-ended Run is a no-op.
    */
   endRun(runId: string): void;
+  /**
+   * Re-claim the Workspace for a Run so an explicit human resume can drive it
+   * further (ADR 0023). Refused `workspace-busy` if a different Run holds the
+   * claim; a no-op `resumed` if this Run already holds it. The caller then
+   * `acquireRun`s for fresh ownership.
+   */
+  resumeRun(runId: string): ResumeRunResult;
   /** Take ownership of a Run, fencing any earlier owner; undefined if unreadable. */
   acquireRun(runId: string): RunOwner | undefined;
   /** Every registered Run in this group. Order is unspecified. */
@@ -210,6 +266,13 @@ const attemptRow = z.object({
 const attemptLogRow = z.object({
   attempt_id: z.string(),
   outcome: z.string(),
+  at: z.string(),
+});
+const conflictRow = z.object({
+  diagnostic_id: z.string(),
+  artifact_name: z.string(),
+  artifact_path: z.string(),
+  version_id: z.string(),
   at: z.string(),
 });
 
@@ -303,6 +366,15 @@ function stageRunStore(dir: string, record: RunRecord): void {
       "CREATE TABLE IF NOT EXISTS attempt_log (" +
         "seq INTEGER PRIMARY KEY, attempt_id TEXT NOT NULL, " +
         "outcome TEXT NOT NULL, at TEXT NOT NULL) STRICT",
+    );
+    // A Materialization conflict (#88): each row is one detected mismatch, its
+    // detailed diagnostic retained as a file under `diagnostics/`. Append-only —
+    // recording a conflict rests the Run `halted` in the same transaction.
+    database.exec(
+      "CREATE TABLE IF NOT EXISTS materialization_conflict (" +
+        "seq INTEGER PRIMARY KEY, diagnostic_id TEXT NOT NULL, " +
+        "artifact_name TEXT NOT NULL, artifact_path TEXT NOT NULL, " +
+        "version_id TEXT NOT NULL, at TEXT NOT NULL) STRICT",
     );
     database
       .query(
@@ -475,6 +547,9 @@ export function openRunGroup(
   const endRun = database.query(
     "UPDATE runs SET state = 'ended' WHERE run_id = ?",
   );
+  const claimRun = database.query(
+    "UPDATE runs SET state = 'live' WHERE run_id = ?",
+  );
   const recordOperation = database.query(
     "INSERT INTO operations (operation_id, kind, run_id, recorded_at) VALUES (?, ?, ?, ?)",
   );
@@ -577,6 +652,24 @@ export function openRunGroup(
     },
   );
 
+  // Re-claim the Workspace for an existing Run under BEGIN IMMEDIATE, so the
+  // one-live-Run decision is made under the write lock like a create. Already
+  // live for this Run is an idempotent `resumed`; a different live Run refuses.
+  const admitResume = database.transaction((runId: string): ResumeRunResult => {
+    const registration = findRegistration.get(runId) as {
+      run_id: string;
+      state: string;
+    } | null;
+    if (registration == null) return { outcome: "unknown-run", runId };
+    if (registration.state === "live") return { outcome: "resumed", runId };
+    const live = findLive.get() as { run_id: string } | null;
+    if (live != null && live.run_id !== runId) {
+      return { outcome: "workspace-busy", liveRunId: live.run_id };
+    }
+    claimRun.run(runId);
+    return { outcome: "resumed", runId };
+  });
+
   function reclaimRunDir(runId: string): void {
     const finalDir = join(groupDir, runId);
     if (!existsSync(finalDir)) return;
@@ -604,6 +697,9 @@ export function openRunGroup(
       // ponytail: releasing the claim is not owner-fenced here; no caller needs a
       // stale owner blocked from ending yet. Guard with the epoch if one ever does.
       endRun.run(runId);
+    },
+    resumeRun(runId) {
+      return admitResume.immediate(runId);
     },
     acquireRun(runId) {
       const record = readRunStore(join(groupDir, runId));
@@ -646,6 +742,14 @@ export function openRunGroup(
       const insertLog = runDatabase.query(
         "INSERT INTO attempt_log (attempt_id, outcome, at) VALUES (?, ?, ?)",
       );
+      const insertConflict = runDatabase.query(
+        "INSERT INTO materialization_conflict (diagnostic_id, artifact_name, " +
+          "artifact_path, version_id, at) VALUES (?, ?, ?, ?, ?)",
+      );
+      const listConflicts = runDatabase.query(
+        "SELECT diagnostic_id, artifact_name, artifact_path, version_id, at " +
+          "FROM materialization_conflict ORDER BY seq",
+      );
 
       // The single publication transaction: record every version, move every
       // binding, settle the Attempt, and advance the Run — all or nothing. A
@@ -677,6 +781,24 @@ export function openRunGroup(
           }
         },
       );
+
+      // Record the conflict and rest `halted` together: the conflict is the
+      // immutable transition that rests the Run, so a crash never leaves it
+      // recorded-but-still-running (the same ordering publishAttempt uses).
+      const conflictTransaction = runDatabase.transaction(
+        (request: RecordConflictRequest, diagnosticId: string) => {
+          insertConflict.run(
+            diagnosticId,
+            request.artifactName,
+            request.path,
+            request.versionId,
+            request.at.toISOString(),
+          );
+          updateState.run("halted", runId);
+        },
+      );
+
+      const diagnosticsDir = join(runDir, "diagnostics");
 
       function fenced(): boolean {
         const current = readEpoch.get(runId) as {
@@ -740,6 +862,45 @@ export function openRunGroup(
               at: parsed.at,
             };
           });
+        },
+        recordMaterializationConflict(request) {
+          if (fenced()) return { ok: false, reason: "fenced" };
+          const diagnosticId = randomUUID();
+          // Write the diagnostic file first (invisible candidate storage, like a
+          // staged commit); the transaction that appends the conflict and rests
+          // `halted` is the publication point. A crash between the two leaves an
+          // orphan diagnostic file the Run's deletion sweeps — no binding moves,
+          // and the Workspace is never touched here.
+          mkdirSync(diagnosticsDir, { recursive: true });
+          writeFileSync(join(diagnosticsDir, diagnosticId), request.diagnostic);
+          if (fenced()) return { ok: false, reason: "fenced" };
+          conflictTransaction(request, diagnosticId);
+          return { ok: true, diagnosticId };
+        },
+        materializationConflicts() {
+          return (listConflicts.all() as Record<string, unknown>[]).map(
+            (row) => {
+              const parsed = conflictRow.parse(row);
+              return {
+                diagnosticId: parsed.diagnostic_id,
+                artifactName: parsed.artifact_name,
+                path: parsed.artifact_path,
+                versionId: parsed.version_id,
+                at: parsed.at,
+              };
+            },
+          );
+        },
+        readDiagnostic(diagnosticId) {
+          // A diagnostic id is a UUID this owner generated; guard the join anyway
+          // so a crafted id can never escape the diagnostics directory.
+          if (!/^[A-Za-z0-9-]+$/.test(diagnosticId)) return undefined;
+          const path = join(diagnosticsDir, diagnosticId);
+          try {
+            return existsSync(path) ? readFileSync(path) : undefined;
+          } catch {
+            return undefined;
+          }
         },
         close() {
           if (handles.delete(runDatabase)) runDatabase.close();

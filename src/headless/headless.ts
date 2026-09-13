@@ -354,6 +354,29 @@ function buildProgram(
       );
     });
   run
+    .command("resume")
+    .description("resume a halted Run after restoring its Workspace file")
+    .argument("[run-id]", "the Run id printed at launch")
+    .option("--json", "print the Run snapshot as JSON")
+    .action((runId: string | undefined, options: { json?: boolean }) => {
+      const json = options.json ?? false;
+      if (runId === undefined) {
+        return settle(
+          fail(io, json, {
+            code: "missing-run-id",
+            explanation: "run resume needs a Run id.",
+            remediation: "Run `secant run resume <run-id>`.",
+            possibleEffects: "none",
+          }),
+        );
+      }
+      return settle(
+        execute((clients) =>
+          resumeRun(clients.projectionPort, io, json, runId),
+        ),
+      );
+    });
+  run
     .command("read")
     .description("read one Run output by reference (<run-id>/<name>)")
     .argument("[reference]", "a Run output reference, <run-id>/<name>")
@@ -655,8 +678,57 @@ function showRun(
       return snapshot.result.found ? 0 : 1;
     }
     if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
-    io.out(renderRun(snapshot.result.run));
+    const run = snapshot.result.run;
+    io.out(renderRun(run));
+    // The conflict diagnostic is reached by reference, never inlined in the
+    // snapshot (AC5); resolve and print it so `run show` is self-contained.
+    if (run.conflict !== undefined) {
+      const read = port.readResource(run.conflict.reference);
+      if (read.found) io.out(`\nDiagnostic:\n${read.content}`);
+    }
     return 0;
+  } finally {
+    opened.close();
+  }
+}
+
+function resumeRun(
+  port: ProjectionPort,
+  io: HeadlessIO,
+  json: boolean,
+  runId: string,
+): number {
+  const admission = port.submit({
+    operationId: randomUUID(),
+    operation: "resume-run",
+    input: { runId },
+  });
+  if (!admission.admitted) return fail(io, json, admission.problem);
+
+  // The resume settles inline (headless default); surface a settlement Problem
+  // before reading the Run, like `run launch`.
+  const operationView = port.openProjection({
+    family: "operation",
+    operationId: admission.operationId,
+  });
+  const outcome = operationView.snapshot.outcome;
+  operationView.close();
+  if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
+
+  const opened = port.openProjection({ family: "run", runId });
+  try {
+    const snapshot = opened.snapshot;
+    if (json) {
+      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return snapshot.result.found && snapshot.result.run.state === "succeeded"
+        ? 0
+        : 1;
+    }
+    if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
+    const run = snapshot.result.run;
+    io.out(`Run ${run.runId}\n`);
+    io.out(`State: ${run.state}\n`);
+    return run.state === "succeeded" ? 0 : 1;
   } finally {
     opened.close();
   }

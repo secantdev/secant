@@ -5,9 +5,17 @@ import {
   readFileSync,
   realpathSync,
 } from "node:fs";
-import { chmod, copyFile, cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  cp,
+  mkdir,
+  mkdtemp,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error JS helper, no types
 import { TARGETS, hostTargetKey } from "./targets.mjs";
@@ -114,7 +122,14 @@ try {
   const secantHome = join(smokeRoot, "secant-home");
   const workspaceDirectory = join(smokeRoot, "workspace");
   await mkdir(workspaceDirectory, { recursive: true });
-  const workspaceEnv = { ...process.env, SECANT_HOME: secantHome };
+  // The runtime's directory is on PATH so a launched Command Step can spawn it by
+  // bare name (the #88 materialization scenario below runs `-e` scripts).
+  const runtimeDir = dirname(process.execPath);
+  const workspaceEnv = {
+    ...process.env,
+    SECANT_HOME: secantHome,
+    PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
+  };
 
   run(binary, ["workspace", "approve"], {
     cwd: workspaceDirectory,
@@ -350,6 +365,143 @@ try {
     if (!output.includes(needle)) {
       throw new Error(
         `\`secant ${args.join(" ")}\` did not report a Preflight refusal (${needle}): ${output}`,
+      );
+    }
+  }
+
+  // Workspace materialization, verification, conflict, and resume from the
+  // compiled binary on each gated OS (issue #88, AC6). A `home: workspace` text
+  // Artifact is materialized to its declared path; a middle Step modifies that
+  // copy; the next Step's byte-for-byte verify rests the Run `halted` with a
+  // conflict `run show` names; restoring the file and `run resume` continues it.
+  {
+    const runtime = basename(process.execPath);
+    const relPath = "out/materialized.txt";
+    const absPath = join(canonicalWorkspace, "out", "materialized.txt");
+    const content = "materialized-by-secant";
+    const tamperScript = `require('node:fs').writeFileSync(${JSON.stringify(absPath)}, 'CHANGED')`;
+    const id = "dev.secant.materialize-smoke";
+    const manifest = {
+      formatVersion: 1,
+      bundle: {
+        id,
+        version: "1.0.0",
+        name: "Materialize Smoke",
+        description: "Workspace materialization smoke Bundle.",
+      },
+      platforms: ["windows", "macos", "linux"],
+      inputs: {},
+      assets: [],
+      routing: [
+        {
+          id: "produce",
+          kind: "command",
+          produces: [
+            { name: "x", type: "text", home: "workspace", path: relPath },
+          ],
+          command: {
+            executable: runtime,
+            arguments: [
+              "-e",
+              `process.stdout.write(${JSON.stringify(content)})`,
+            ],
+          },
+        },
+        {
+          id: "tamper",
+          kind: "command",
+          produces: [{ name: "tamperlog", type: "text" }],
+          command: { executable: runtime, arguments: ["-e", tamperScript] },
+        },
+        {
+          id: "consume",
+          kind: "command",
+          requires: ["x"],
+          produces: [{ name: "y", type: "text" }],
+          command: {
+            executable: runtime,
+            arguments: [
+              "-e",
+              "process.stdout.write('done')",
+              { artifact: "x" },
+            ],
+          },
+        },
+      ],
+    };
+    const folder = join(smokeRoot, "materialize-bundle");
+    await mkdir(folder, { recursive: true });
+    await writeFile(
+      join(folder, "manifest.json"),
+      JSON.stringify(manifest, null, 2),
+    );
+    run(binary, ["bundle", "build", folder], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    });
+
+    const listJson = run(binary, ["bundle", "list", "--json"], {
+      cwd: workspaceDirectory,
+      env: workspaceEnv,
+    });
+    const installed = JSON.parse(listJson).result.bundles.find(
+      (bundle) => bundle.id === id,
+    );
+    if (installed === undefined) {
+      throw new Error(`Materialization Bundle was not installed: ${listJson}`);
+    }
+
+    const launched = spawnSync(
+      binary,
+      ["run", "launch", id, "--trust", installed.digest, "--json"],
+      { cwd: workspaceDirectory, encoding: "utf8", env: workspaceEnv },
+    );
+    if (launched.error) throw launched.error;
+    if (launched.status === 0) {
+      throw new Error(
+        "A launch that halts on a conflict should exit non-zero.",
+      );
+    }
+    const launchSnapshot = JSON.parse(launched.stdout);
+    const runId = launchSnapshot.runId;
+    if (launchSnapshot.result.run.state !== "halted") {
+      throw new Error(
+        `Expected the Run to rest halted on the conflict: ${launched.stdout}`,
+      );
+    }
+    // The materialized copy is left exactly as the tamper left it — never
+    // overwritten and never adopted as the new version.
+    if (readFileSync(absPath, "utf8") !== "CHANGED") {
+      throw new Error("The Workspace copy was overwritten on the conflict.");
+    }
+
+    const shown = run(binary, ["run", "show", runId], {
+      cwd: workspaceDirectory,
+      env: workspaceEnv,
+    });
+    if (
+      !shown.includes("Materialization conflict") ||
+      !shown.includes(relPath)
+    ) {
+      throw new Error(
+        `\`run show\` did not name the conflict and its path: ${shown}`,
+      );
+    }
+
+    // Restore the file to its bound content, then resume: the Run continues.
+    await writeFile(absPath, content);
+    const resumed = spawnSync(binary, ["run", "resume", runId], {
+      cwd: workspaceDirectory,
+      encoding: "utf8",
+      env: workspaceEnv,
+    });
+    if (resumed.error) throw resumed.error;
+    if (
+      resumed.status !== 0 ||
+      !`${resumed.stdout}`.includes("State: succeeded")
+    ) {
+      throw new Error(
+        `Resuming after restoring the file did not continue the Run: ${resumed.stdout}${resumed.stderr}`,
       );
     }
   }

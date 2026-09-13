@@ -142,6 +142,15 @@ export function renderRun(run: RunView): string {
     lines.push(`  ${event.at} ${event.event}${detail}`);
   }
 
+  if (run.conflict !== undefined) {
+    lines.push(
+      "",
+      "Materialization conflict:",
+      `  artifact: ${run.conflict.artifactName}`,
+      `  path: ${run.conflict.path}`,
+    );
+  }
+
   lines.push("", "Outputs:");
   if (run.outputs.length === 0) lines.push("  (none)");
   for (const output of run.outputs) {

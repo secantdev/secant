@@ -197,6 +197,88 @@ export function writeRepeatBundle(options: RepeatBundleOptions): CommandBundle {
   return { folder, id, version };
 }
 
+export interface MaterializationBundleOptions {
+  readonly id?: string;
+  readonly version?: string;
+  /** The resolved absolute launch Workspace, so the tamper Step can target the
+   *  materialized file by absolute path (Command Steps do not run in the
+   *  Workspace). */
+  readonly workspaceAbsPath: string;
+  /** How the middle Step disturbs the materialized copy before the last Step uses
+   *  it: `"modify"` rewrites it, `"delete"` removes it, `"none"` leaves it. */
+  readonly tamper: "modify" | "delete" | "none";
+  /** The declared relative Workspace path for the produced Artifact. */
+  readonly path?: string;
+  /** The bytes the producing Step writes (its captured stdout). */
+  readonly content?: string;
+}
+
+/** A three-Step Bundle for #88: `produce` writes a `home: workspace` text
+ *  Artifact `x`; an optional `tamper` disturbs the Workspace copy; `consume`
+ *  references `x` (so it verifies the copy before running). Command-only, so the
+ *  M2 scheduler drives it, and every command names the runtime by bare name. */
+export function writeMaterializationBundle(
+  options: MaterializationBundleOptions,
+): CommandBundle {
+  const id = options.id ?? "dev.secant.materialize";
+  const version = options.version ?? "1.0.0";
+  const relPath = options.path ?? "out/x.txt";
+  const content = options.content ?? "materialized-content";
+  const absX = join(options.workspaceAbsPath, ...relPath.split("/"));
+  const routing: unknown[] = [
+    {
+      id: "produce",
+      kind: "command",
+      produces: [{ name: "x", type: "text", home: "workspace", path: relPath }],
+      command: {
+        executable: RUNTIME_NAME,
+        arguments: ["-e", `process.stdout.write(${JSON.stringify(content)})`],
+      },
+    },
+  ];
+  if (options.tamper !== "none") {
+    const script =
+      options.tamper === "modify"
+        ? `require('node:fs').writeFileSync(${JSON.stringify(absX)}, 'CHANGED')`
+        : `require('node:fs').rmSync(${JSON.stringify(absX)})`;
+    routing.push({
+      id: "tamper",
+      kind: "command",
+      produces: [{ name: "tamperlog", type: "text" }],
+      command: { executable: RUNTIME_NAME, arguments: ["-e", script] },
+    });
+  }
+  routing.push({
+    id: "consume",
+    kind: "command",
+    requires: ["x"],
+    produces: [{ name: "y", type: "text" }],
+    command: {
+      executable: RUNTIME_NAME,
+      arguments: ["-e", "process.stdout.write('done')", { artifact: "x" }],
+    },
+  });
+  const manifest = {
+    formatVersion: 1,
+    bundle: {
+      id,
+      version,
+      name: "Materialize",
+      description: "A workspace-materialization test Bundle.",
+    },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [],
+    routing,
+  };
+  const folder = makeTempDir("secant-mat-bundle-");
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  return { folder, id, version };
+}
+
 /** The host platform, so a Run execution resolves the command deterministically. */
 export function hostPlatform(): Platform {
   switch (process.platform) {

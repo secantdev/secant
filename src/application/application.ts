@@ -28,6 +28,7 @@ import {
   selectRunEntry,
   type RunProjectionDependencies,
 } from "./run-projection.js";
+import { preflight } from "./preflight.js";
 import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
@@ -552,7 +553,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
         problem: bundleBytesMissingForRun(entry.digest),
       };
     }
-    const inspected = inspectBundle(bytes, budgets, false);
+    // Include the Composition re-check: a Run pins this Snapshot, so Preflight
+    // proves it still composes against the archived prompt/schema text (ADR 0021).
+    const inspected = inspectBundle(bytes, budgets, true);
     if (!inspected.ok) {
       return {
         admitted: false,
@@ -560,6 +563,22 @@ export function createApplication(deps: ApplicationDependencies): Application {
       };
     }
     const manifest = inspected.inspection.manifest;
+
+    // Preflight refuses a Run whose prerequisites are not met — before any Trust
+    // grant or Run is created, so a Problem here leaves nothing behind (#14). It
+    // runs ahead of the Trust gate: a Bundle that cannot run in this environment
+    // is refused without asking the user to acknowledge bytes that would not run.
+    const pre = preflight({
+      manifest,
+      composition: inspected.inspection.composition,
+      workspacePath: launchWorkspacePath,
+      launchInputs: input.launchInputs,
+      hostPlatform: deps.hostPlatform,
+      digest: entry.digest,
+    });
+    if ("problem" in pre) {
+      return { admitted: false, problem: pre.problem };
+    }
 
     // Trust: an untrusted digest needs a matching acknowledgement. A missing one
     // is `bundle-trust-required` (carrying the Execution summary, the fixed

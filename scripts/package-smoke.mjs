@@ -308,6 +308,52 @@ try {
     }
   }
 
+  // Preflight refusals from the compiled binary (issue #83, AC7), each before any
+  // Run exists. The Proof Bundle carries an Agent step, so launching it is refused
+  // with the intrinsic Step-kind Problem; a Command-only Bundle that requires a
+  // Git worktree root is refused with the git-worktree-root Problem when launched
+  // from the non-repository workspace. Neither needs a trust acknowledgement:
+  // Preflight runs ahead of the Trust gate.
+  const gitGuardFolder = join(projectRoot, "bundles", "git-guard-command");
+  const gitGuardWfb = join(smokeRoot, "git-guard.wfb");
+  run(
+    binary,
+    [
+      "bundle",
+      "build",
+      gitGuardFolder,
+      "--no-install",
+      "--output",
+      gitGuardWfb,
+    ],
+    { cwd: smokeRoot, env: workspaceEnv },
+  );
+  run(binary, ["bundle", "install", gitGuardWfb], {
+    cwd: smokeRoot,
+    env: workspaceEnv,
+  });
+
+  for (const [args, needle] of [
+    [["run", "launch", "dev.secant.test-repair"], "step-kind-not-executable"],
+    [["run", "launch", "dev.secant.git-guard"], "git-worktree-root"],
+  ]) {
+    const result = spawnSync(binary, args, {
+      cwd: workspaceDirectory,
+      encoding: "utf8",
+      env: workspaceEnv,
+    });
+    if (result.error) throw result.error;
+    if (result.status === 0) {
+      throw new Error(`\`secant ${args.join(" ")}\` should exit non-zero.`);
+    }
+    const output = `${result.stdout}${result.stderr}`;
+    if (!output.includes(needle)) {
+      throw new Error(
+        `\`secant ${args.join(" ")}\` did not report a Preflight refusal (${needle}): ${output}`,
+      );
+    }
+  }
+
   // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
   // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
   // startup Problem and a non-zero exit before the renderer is created.

@@ -1,0 +1,28 @@
+{
+  "formatVersion": 1,
+  "bundle": {
+    "id": "dev.secant.git-guard",
+    "version": "1.0.0",
+    "name": "Git Guard Command",
+    "description": "A Command-only Bundle that requires a Git worktree root, so Preflight refuses it from a non-repository directory."
+  },
+  "platforms": ["windows", "macos", "linux"],
+  "inputs": {},
+  "assets": [],
+  "routing": [
+    {
+      "id": "status",
+      "kind": "command",
+      "prerequisites": ["git-worktree-root"],
+      "produces": [
+        { "name": "status-verdict", "type": "verdict" },
+        { "name": "status-output", "type": "text" }
+      ],
+      "command": {
+        "executable": "git",
+        "arguments": ["status", "--short"],
+        "workingDirectory": "."
+      }
+    }
+  ]
+}

@@ -1,6 +1,10 @@
 import { delimiter, basename, dirname, join } from "node:path";
 import { writeFileSync } from "node:fs";
-import type { Platform } from "../../src/workflow/workflow.js";
+import type {
+  LaunchInput,
+  Platform,
+  WorkspacePrerequisite,
+} from "../../src/workflow/workflow.js";
 import { makeTempDir } from "./tempDir.js";
 
 // A straight-line, single-Command Bundle authoring folder whose command runs the
@@ -35,6 +39,11 @@ export interface CommandBundleOptions {
   /** Run the command as `<runtime> {asset}` against a written script asset,
    *  instead of `-e`. Exercises the `{asset}` → on-disk-path resolver. */
   readonly asset?: { readonly path: string; readonly content: string };
+  /** Workspace prerequisites the command Step requires (e.g. git-worktree-root),
+   *  so Preflight's world probes are exercised. */
+  readonly prerequisites?: readonly WorkspacePrerequisite[];
+  /** Declared Launch inputs, so Preflight's per-input validation is exercised. */
+  readonly inputs?: Readonly<Record<string, LaunchInput>>;
 }
 
 export interface CommandBundle {
@@ -68,13 +77,16 @@ export function writeCommandBundle(
       description: "A command-only test Bundle.",
     },
     platforms: ["windows", "macos", "linux"],
-    inputs: {},
+    inputs: options.inputs ?? {},
     assets,
     routing: [
       {
         id: "run-check",
         kind: "command",
         ...(options.retry !== undefined ? { retry: options.retry } : {}),
+        ...(options.prerequisites !== undefined
+          ? { prerequisites: options.prerequisites }
+          : {}),
         produces: [
           { name: "verdict", type: "verdict" },
           { name: "output", type: "text" },

@@ -154,8 +154,13 @@ test("run show prints identity, state, progress, position, and timeline; --json 
 
 test("run launch of a Run that rests failed exits non-zero and shows the failed Step", async (t) => {
   const h = await harness(t);
+  // A resolvable executable whose Attempt fails at runtime: the command dies by
+  // signal, so spawnSync reports no exit status and the Attempt is failed (a clean
+  // non-zero exit would instead be a `fail` verdict on a succeeded Attempt). An
+  // off-PATH executable is now refused by Preflight before a Run exists (see
+  // tests/application/preflight.test.ts).
   const { id, digest } = h.install({
-    executable: "secant-no-such-binary-xyz",
+    script: "process.kill(process.pid, 'SIGKILL')",
     retry: 0,
   });
   h.approve();

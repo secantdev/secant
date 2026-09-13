@@ -294,31 +294,10 @@ test("opening the run projection on an unknown run id yields a Problem snapshot,
   if (!result.found) assert.equal(result.problem.code, "run-not-found");
 });
 
-test("a Command that cannot execute rests the Run failed, with the failing Step marked failed", async (t) => {
-  const f = fixture(t);
-  const { id, digest } = installCommandBundle(f, {
-    executable: "secant-no-such-binary-xyz",
-    retry: 0,
-  });
-  f.catalog.approveWorkspace(f.workspace, new Date());
-
-  const admission = f.app.projectionPort.submit({
-    operationId: "op-1",
-    operation: "launch-run",
-    input: { bundle: { id }, launchInputs: {}, trustDigest: digest },
-  });
-  assert.ok(admission.admitted);
-  const result = runResult(f.app, admission.runId!);
-  assert.ok(result.found);
-  if (!result.found) throw new Error("unreachable");
-  // The launch itself was applied (the Run reached rest); the Run's own outcome
-  // is failed, and the failing Step is marked failed at the current position.
-  assert.equal(result.run.state, "failed");
-  assert.equal(result.run.progress[0]!.status, "failed");
-  assert.equal(result.run.position, 0);
-  // A failed Attempt binds nothing, so there are no outputs.
-  assert.deepEqual(result.run.outputs, []);
-});
+// A Command whose executable is not on PATH is now refused by Preflight before a
+// Run is created (see tests/application/preflight.test.ts, AC3); execution's own
+// missing-executable-rests-failed behaviour is covered in
+// tests/run/execution/execution.test.ts.
 
 test("a re-submitted launch operation id replays with the same Run; different input is rejected", async (t) => {
   const f = fixture(t);

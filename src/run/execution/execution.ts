@@ -103,6 +103,15 @@ const STEP_EXECUTORS: Readonly<Partial<Record<StepKindName, StepExecutor>>> = {
   },
 };
 
+/** The Step kinds this release can dispatch — the keys of the closed executable
+ *  table. Preflight refuses a Routing that uses any other kind (an intrinsic
+ *  precondition failure) before a Run is created, so the Proof Bundle's Agent
+ *  step is caught at launch rather than at spawn. Single source of truth: adding
+ *  a kind to the table adds it here. */
+export const EXECUTABLE_STEP_KINDS: readonly StepKindName[] = Object.keys(
+  STEP_EXECUTORS,
+) as StepKindName[];
+
 /**
  * Drive one acquired Run's Routing to rest. Walks the Steps in Routing order,
  * dispatches each through the closed table, retries a `failed` Attempt within its

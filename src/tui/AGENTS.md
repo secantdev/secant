@@ -9,6 +9,10 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - A flex column with a fixed `height` shrinks overflowing children to fit, corrupting their content rather than clipping. When a screen's content can
   exceed the terminal height, set `overflow="hidden"` on the container and `flexShrink={0}` on the rows/sections so each keeps its full height. Vertical
   scroll for long content is a later slice, not a reason to drop this guard.
+- A focused OpenTUI `<input>` and the `@opentui/keymap` layer divide keys by binding: any key the keymap binds fires its command even while an input is
+  focused; only unbound printable keys and backspace reach the input. So never bind a bare letter key (e.g. `q` to quit) on a text-entry screen, and gate
+  `left`/`right` with a reactive `enabled` so choice/verdict fields cycle without stealing a text field's cursor. Native `<input>`/`<select>`/`<textarea>`
+  exist — no need to hand-roll a caret.
 
 ## Tests
 

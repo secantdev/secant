@@ -6,6 +6,7 @@ import { App } from "../../src/tui/tui.js";
 import type {
   AnswerOutcome,
   BundleCatalogView,
+  RunActionsView,
   RunLaunchView,
   RunWorkbenchView,
   WorkspaceView,
@@ -288,6 +289,7 @@ async function mountApp(
   launchRunId: string,
   width: number,
   height: number,
+  actions?: RunActionsView,
 ) {
   const exits: unknown[] = [];
   const t = await testRender(
@@ -297,6 +299,7 @@ async function mountApp(
         bundles={oneBundle()}
         launch={launchTo(launchRunId)}
         run={control.view}
+        actions={actions}
         renderer={renderer.port}
         exit={(reason) => exits.push(reason)}
       />
@@ -313,7 +316,12 @@ async function mountApp(
   return { t, exits };
 }
 
-async function mountWorkbench(run: RunView, width = 100, height = 40) {
+async function mountWorkbench(
+  run: RunView,
+  width = 100,
+  height = 40,
+  actions?: RunActionsView,
+) {
   const control = makeRunView(snapshotOf(run));
   const renderer = makeRenderer(width, height);
   const { t, exits } = await mountApp(
@@ -322,6 +330,7 @@ async function mountWorkbench(run: RunView, width = 100, height = 40) {
     run.runId,
     width,
     height,
+    actions,
   );
   await t.waitForFrame((f) => f.includes("Timeline"));
   return { t, control, renderer, exits };
@@ -973,4 +982,170 @@ test("a Run that is not found shows the Problem and Escape leaves", async () => 
   assert.match(t.captureCharFrame(), /No such Run/);
   await press(t, renderer, "escape");
   assert.match(t.captureCharFrame(), /Secant/); // back on Home
+});
+
+// --- Run Actions: resume / cancel / delete (#92 ticket, AC3) ---------------
+
+const RESUME_OFFER = {
+  action: "resume-run" as const,
+  runId: "run-1",
+  consequence: "resume: continue from the Step the Run stopped at.",
+};
+const CANCEL_OFFER = {
+  action: "cancel-run" as const,
+  runId: "run-1",
+  consequence: "end the live Run cancelled, keeping its history and Artifacts.",
+};
+const DELETE_OFFER = {
+  action: "delete-run" as const,
+  runId: "run-1",
+  consequence: "remove the Run and its stored history and Artifacts from disk.",
+};
+
+function okActions(over: Partial<RunActionsView> = {}): RunActionsView {
+  return {
+    resume: () => ({ kind: "ok" }),
+    cancel: () => ({ kind: "ok" }),
+    remove: () => ({ kind: "ok" }),
+    ...over,
+  };
+}
+
+test("Run Actions render only when offered, with the consequence and shortcut", async () => {
+  const { t } = await mountWorkbench(
+    runOf({ state: "halted", actionOffers: [RESUME_OFFER, DELETE_OFFER] }),
+    100,
+    40,
+    okActions(),
+  );
+  const frame = t.captureCharFrame();
+  assert.match(frame, /r resume — resume: continue from the Step/);
+  assert.match(frame, /x delete — remove the Run/);
+  assert.doesNotMatch(frame, /c cancel/); // not offered while resting
+});
+
+test("no Actions section is shown when the Run offers none", async () => {
+  const { t } = await mountWorkbench(runOf({ actionOffers: [] }));
+  assert.doesNotMatch(t.captureCharFrame(), /Actions:/);
+});
+
+test("resume dispatches and the Workbench follows into the running Run", async () => {
+  const control = makeRunView(
+    snapshotOf(runOf({ state: "halted", actionOffers: [RESUME_OFFER] })),
+  );
+  const renderer = makeRenderer(100, 40);
+  const actions = okActions({
+    resume: () => {
+      // Production drives the Run and the read seam observes it; model that here.
+      control.setRun(runOf({ state: "running", actionOffers: [CANCEL_OFFER] }));
+      return { kind: "ok" };
+    },
+  });
+  const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("Timeline"));
+  assert.match(t.captureCharFrame(), /r resume/);
+
+  await press(t, renderer, "r");
+  const frame = t.captureCharFrame();
+  assert.match(frame, /RUNNING/); // transitioned into the running Workbench
+  assert.match(frame, /c cancel/); // now offers cancel (live), not resume
+  assert.doesNotMatch(frame, /r resume/);
+});
+
+test("delete confirms then dispatches and leaves the Workbench", async () => {
+  const control = makeRunView(
+    snapshotOf(runOf({ state: "failed", actionOffers: [DELETE_OFFER] })),
+  );
+  const renderer = makeRenderer(100, 40);
+  let removed = 0;
+  const actions = okActions({
+    remove: () => {
+      removed += 1;
+      return { kind: "ok" };
+    },
+  });
+  const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("x delete"));
+  await press(t, renderer, "x"); // arm the confirmation
+  assert.equal(removed, 0); // not dispatched yet
+  assert.match(t.captureCharFrame(), /Delete is permanent/);
+  await press(t, renderer, "y"); // confirm
+  assert.equal(removed, 1);
+  // Reached from Start a Run, so a delete returns to Home.
+  assert.match(t.captureCharFrame(), /Secant/);
+  assert.doesNotMatch(t.captureCharFrame(), /Timeline/);
+});
+
+test("Escape backs out of an armed delete without dispatching or leaving", async () => {
+  const control = makeRunView(
+    snapshotOf(runOf({ state: "failed", actionOffers: [DELETE_OFFER] })),
+  );
+  const renderer = makeRenderer(100, 40);
+  let removed = 0;
+  const actions = okActions({
+    remove: () => {
+      removed += 1;
+      return { kind: "ok" };
+    },
+  });
+  const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("x delete"));
+  await press(t, renderer, "x"); // arm
+  assert.match(t.captureCharFrame(), /Delete is permanent/);
+  await press(t, renderer, "escape"); // back out
+  assert.equal(removed, 0);
+  assert.doesNotMatch(t.captureCharFrame(), /Delete is permanent/);
+  assert.match(t.captureCharFrame(), /Timeline/); // still on the Workbench
+});
+
+test("cancel arms a confirmation and dispatches on y", async () => {
+  const control = makeRunView(
+    snapshotOf(runOf({ state: "running", actionOffers: [CANCEL_OFFER] })),
+  );
+  const renderer = makeRenderer(100, 40);
+  let cancelled = 0;
+  const actions = okActions({
+    cancel: () => {
+      cancelled += 1;
+      control.setRun(
+        runOf({ state: "cancelled", actionOffers: [DELETE_OFFER] }),
+      );
+      return { kind: "ok" };
+    },
+  });
+  const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("c cancel"));
+  await press(t, renderer, "c"); // arm
+  assert.equal(cancelled, 0);
+  assert.match(t.captureCharFrame(), /Cancel ends the Run/);
+  await press(t, renderer, "y"); // confirm
+  assert.equal(cancelled, 1);
+  const frame = t.captureCharFrame();
+  assert.match(frame, /CANCELLED/); // transitioned to the cancelled state
+  assert.match(frame, /x delete/); // now offers delete, not cancel
+  assert.doesNotMatch(frame, /c cancel/);
+});
+
+test("a refused action surfaces the reason without leaving", async () => {
+  const actions = okActions({
+    resume: () => ({
+      kind: "refused",
+      problem: {
+        code: "run-live-elsewhere",
+        explanation: "The Run is live in another process.",
+        remediation: "Wait for it to rest, then retry.",
+        possibleEffects: "none",
+      },
+    }),
+  });
+  const { t, renderer } = await mountWorkbench(
+    runOf({ state: "halted", actionOffers: [RESUME_OFFER] }),
+    100,
+    40,
+    actions,
+  );
+  await press(t, renderer, "r");
+  const frame = t.captureCharFrame();
+  assert.match(frame, /live in another process/); // the reason is shown
+  assert.match(frame, /Timeline/); // still on the Workbench
 });

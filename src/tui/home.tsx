@@ -16,6 +16,7 @@ import { useWorkspaceView } from "./workspace-view.js";
 export function Home(props: {
   onStartRun: () => void;
   onOpenBundles: () => void;
+  onOpenPreviousRuns: () => void;
 }) {
   const { theme } = useTheme();
   const view = useWorkspaceView();
@@ -28,6 +29,7 @@ export function Home(props: {
   const entries = () => [
     { label: "Workflow Bundles", open: () => props.onOpenBundles() },
     { label: "Start a Run", open: () => props.onStartRun() },
+    { label: "Previous Runs", open: () => props.onOpenPreviousRuns() },
   ];
   const [selected, setSelected] = createSignal(0);
   const move = (delta: number) =>
@@ -60,30 +62,32 @@ export function Home(props: {
       flexDirection="column"
       padding={1}
       gap={1}
+      overflow="hidden"
       backgroundColor={theme.background}
     >
-      <text attributes={TextAttributes.BOLD} fg={theme.text}>
+      <text attributes={TextAttributes.BOLD} fg={theme.text} flexShrink={0}>
         Secant
       </text>
-      <box flexDirection="column">
+      <box flexDirection="column" flexShrink={0}>
         <text fg={theme.textMuted}>Workspace</text>
         <text fg={theme.text}>{view.snapshot().path}</text>
       </box>
       <Show when={approved()}>
-        <box flexDirection="column">
+        <box flexDirection="column" flexShrink={0}>
           <text fg={theme.textMuted}>Menu</text>
           <For each={entries()}>
             {(entry, index) => (
               <text
                 fg={theme.text}
                 attributes={index() === selected() ? TextAttributes.BOLD : 0}
+                flexShrink={0}
               >
                 {`${index() === selected() ? "› " : "  "}${entry.label}`}
               </text>
             )}
           </For>
         </box>
-        <box flexDirection="row" gap={1}>
+        <box flexDirection="row" gap={1} flexShrink={0}>
           <text fg={theme.textMuted}>↑/↓ move · enter open · q quit</text>
         </box>
       </Show>

@@ -19,6 +19,17 @@ export { createLiveRunLaunchView } from "./run-launch-view.js";
 // that Module's own entrypoint, not re-exported here.)
 export type { RunWorkbenchView, AnswerOutcome } from "./run-view.js";
 export { createLiveRunWorkbenchView } from "./run-view.js";
+// The Previous Runs read seam and the Run Actions submit seam (#92 ticket) cross
+// the Module boundary for the list/Workbench renderer tests, the same way — the
+// boundary suite requires cross-Module test imports to go through this entrypoint.
+export type {
+  RunListView,
+  RunListController,
+  RunListState,
+} from "./run-list-view.js";
+export { createLiveRunListView } from "./run-list-view.js";
+export type { RunActionsView, RunActionOutcome } from "./run-actions-view.js";
+export { createLiveRunActionsView } from "./run-actions-view.js";
 // The Workbench's pure timeline model, exposed for #91's unit tests across the
 // boundary, for the same reason.
 export {

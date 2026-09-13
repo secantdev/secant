@@ -4,7 +4,9 @@ import type { ProjectionPort } from "../application/projection-port.js";
 import { App } from "./app.js";
 import { createLiveBundleCatalogView } from "./bundle-view.js";
 import type { RendererPort } from "./renderer/renderer.js";
+import { createLiveRunActionsView } from "./run-actions-view.js";
 import { createLiveRunLaunchView } from "./run-launch-view.js";
+import { createLiveRunListView } from "./run-list-view.js";
 import { createLiveRunWorkbenchView } from "./run-view.js";
 import type { Exit } from "./vendor/exit.js";
 import { createLiveWorkspaceView } from "./workspace-view.js";
@@ -33,6 +35,8 @@ export function mountTui(
         bundles={createLiveBundleCatalogView(options.projectionPort)}
         launch={createLiveRunLaunchView(options.projectionPort)}
         run={createLiveRunWorkbenchView(options.projectionPort)}
+        runList={createLiveRunListView(options.projectionPort)}
+        actions={createLiveRunActionsView(options.projectionPort)}
         renderer={options.rendererPort}
         exit={options.exit}
       />

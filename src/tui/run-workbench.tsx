@@ -12,15 +12,20 @@ import {
 } from "solid-js";
 import type {
   AnswerHumanGateOffer,
+  CancelRunOffer,
+  DeleteRunOffer,
   DiagnosticReference,
   Problem,
   ResourceReference,
+  ResumeRunOffer,
   RunCheckpointView,
   RunStepProgress,
   RunStepStatus,
   RunView,
 } from "../application/projection-port.js";
 import type { RendererPort } from "./renderer/renderer.js";
+import { clip } from "./clip.js";
+import { useRunActionsView } from "./run-actions-view.js";
 import { useRunWorkbenchView, type AnswerOutcome } from "./run-view.js";
 import {
   AT_LIVE,
@@ -38,11 +43,14 @@ import { useTheme } from "./vendor/theme-context.js";
 // of the Renderer Port's `size`/`onKey`/`onResize` (A13): a single raw-key
 // pipeline drives every control and imperatively scrolls the timeline window,
 // while `size`/`onResize` feed the layout breakpoints and the viewport height the
-// pure timeline model (run-timeline.ts) windows over. Its one write is the Review
-// checkpoint interaction (#92): while the `answer-human-gate` offer is live it
-// replaces the bottom footer with two consequence-stating controls that dispatch
-// the answer over run-view's `answer` seam; resume/cancel are later slices. The
-// Renderer Port stays lifecycle-only elsewhere (see tui/AGENTS.md).
+// pure timeline model (run-timeline.ts) windows over. It hosts two write surfaces:
+// the Review checkpoint interaction (#92), which while the `answer-human-gate`
+// offer is live replaces the bottom footer with two consequence-stating controls
+// that dispatch over run-view's `answer` seam; and the Run Actions (#92 ticket,
+// resume/cancel/delete), which render as offer-gated controls dispatching over the
+// separate run-actions submit seam (run-actions-view.ts) — cancel and delete
+// confirm first since they are irreversible. The Renderer Port stays
+// lifecycle-only elsewhere (see tui/AGENTS.md).
 //
 // The scroll/follow/anchor/new-activity mechanics are hand-rolled over the event
 // array rather than OpenTUI's `<scrollbox>` (which OpenCode's session timeline
@@ -97,10 +105,12 @@ export function RunWorkbench(props: {
   runId: string;
   renderer: RendererPort;
   onLeave: () => void;
+  onDeleted: () => void;
 }) {
   const { theme } = useTheme();
   const exit = useExit();
   const view = useRunWorkbenchView();
+  const actions = useRunActionsView();
   const snapshot = view.openRun(props.runId);
 
   const [dims, setDims] = createSignal(props.renderer.size());
@@ -144,6 +154,73 @@ export function RunWorkbench(props: {
     createSignal<Accessor<AnswerOutcome>>();
   const [answerRefusal, setAnswerRefusal] = createSignal<Problem | undefined>();
 
+  // Run Actions (resume/cancel/delete): a control renders — and its key
+  // dispatches — iff its Offer is present, legality decided inside Secant (resume
+  // on halted/failed; cancel while live, delete while not; #86, #87), so the
+  // Workbench never re-derives it. `actionRefusal` shows a refused dispatch;
+  // `pending` arms the confirming keypress cancel/delete require (both are
+  // irreversible), the terminal-native form of the IA prototype's confirm dialog.
+  const offers = createMemo(() => {
+    const list = run()?.actionOffers ?? [];
+    return {
+      resume: list.find(
+        (offer): offer is ResumeRunOffer => offer.action === "resume-run",
+      ),
+      cancel: list.find(
+        (offer): offer is CancelRunOffer => offer.action === "cancel-run",
+      ),
+      remove: list.find(
+        (offer): offer is DeleteRunOffer => offer.action === "delete-run",
+      ),
+    };
+  });
+  const [actionRefusal, setActionRefusal] = createSignal<Problem | undefined>();
+  const [pending, setPending] = createSignal<"cancel" | "delete" | undefined>();
+
+  const dispatchResume = () => {
+    const offer = offers().resume;
+    if (offer === undefined) return;
+    const outcome = actions.resume(offer.runId);
+    setActionRefusal(outcome.kind === "refused" ? outcome.problem : undefined);
+  };
+  // Called on the confirming keypress. Cancel keeps the Run's history; delete
+  // removes it and leaves the Workbench for the list, since the Run is now gone.
+  const confirmCancel = () => {
+    const offer = offers().cancel;
+    if (offer === undefined) return;
+    const outcome = actions.cancel(offer.runId);
+    setActionRefusal(outcome.kind === "refused" ? outcome.problem : undefined);
+  };
+  const confirmDelete = () => {
+    const offer = offers().remove;
+    if (offer === undefined) return;
+    const outcome = actions.remove(offer.runId);
+    if (outcome.kind === "refused") setActionRefusal(outcome.problem);
+    else props.onDeleted();
+  };
+  const anyActionOffer = () => {
+    const current = offers();
+    return (
+      current.resume !== undefined ||
+      current.cancel !== undefined ||
+      current.remove !== undefined
+    );
+  };
+  const actionLines = () => {
+    const current = offers();
+    const count =
+      (current.resume ? 1 : 0) +
+      (current.cancel ? 1 : 0) +
+      (current.remove ? 1 : 0);
+    if (count === 0) return 0;
+    return (
+      1 /*heading*/ +
+      count +
+      (pending() !== undefined ? 1 : 0) +
+      (actionRefusal() !== undefined ? 1 : 0)
+    );
+  };
+
   // The evidence the details panel offers, in a stable order: bound outputs,
   // then a blocked checkpoint's latest Verdict, then a halt diagnostic.
   const openables = createMemo<readonly Openable[]>(() => {
@@ -183,6 +260,7 @@ export function RunWorkbench(props: {
     (compactHeader() ? 1 : 2) +
     (isBlocked() ? 1 : 0) +
     1 /*progress*/ +
+    actionLines() +
     1 /*timeline label*/ +
     (checkpointActive()
       ? CHECKPOINT_HEIGHT
@@ -373,6 +451,36 @@ export function RunWorkbench(props: {
       if (name === "escape") props.onLeave();
       return;
     }
+    // A pending Cancel/Delete waits for its confirming keypress: `y` confirms and
+    // Escape backs out (without dispatching or leaving); any other key is ignored
+    // while the confirmation stays armed, so a stray keystroke never dispatches it.
+    if (pending() !== undefined) {
+      if (name === "y") {
+        const action = pending();
+        setPending(undefined);
+        if (action === "cancel") confirmCancel();
+        else confirmDelete();
+      } else if (name === "escape") {
+        setPending(undefined);
+      }
+      return;
+    }
+    // Run Actions from any focus, gated on the Offer being present. Resume
+    // dispatches at once; Cancel and Delete arm a confirmation first.
+    if (name === "r" && offers().resume !== undefined) {
+      dispatchResume();
+      return;
+    }
+    if (name === "c" && offers().cancel !== undefined) {
+      setActionRefusal(undefined);
+      setPending("cancel");
+      return;
+    }
+    if (name === "x" && offers().remove !== undefined) {
+      setActionRefusal(undefined);
+      setPending("delete");
+      return;
+    }
     // Review checkpoint interaction (#92): the two controls replace the footer
     // while the offer is live. Left/right choose, enter dispatches; both are
     // unavailable while the answer is pending.
@@ -503,6 +611,10 @@ export function RunWorkbench(props: {
               control={control}
               answerPending={answerPending}
               answerRefusal={answerRefusal}
+              actionOffers={offers}
+              anyActionOffer={anyActionOffer}
+              actionRefusal={actionRefusal}
+              actionPending={pending}
               theme={theme}
             />
           )}
@@ -513,11 +625,6 @@ export function RunWorkbench(props: {
 }
 
 type Theme = ReturnType<typeof useTheme>["theme"];
-
-function clip(text: string, width: number): string {
-  if (text.length <= width) return text;
-  return width <= 1 ? text.slice(0, width) : `${text.slice(0, width - 1)}…`;
-}
 
 function stateColor(theme: Theme, state: string) {
   switch (state) {
@@ -559,6 +666,14 @@ function Workbench(props: {
   control: Accessor<"continue" | "stop">;
   answerPending: Accessor<boolean>;
   answerRefusal: Accessor<Problem | undefined>;
+  actionOffers: Accessor<{
+    resume?: ResumeRunOffer;
+    cancel?: CancelRunOffer;
+    remove?: DeleteRunOffer;
+  }>;
+  anyActionOffer: Accessor<boolean>;
+  actionRefusal: Accessor<Problem | undefined>;
+  actionPending: Accessor<"cancel" | "delete" | undefined>;
   theme: Theme;
 }) {
   const { theme } = props;
@@ -616,6 +731,57 @@ function Workbench(props: {
       <text fg={theme.textMuted} flexShrink={0}>
         {clip(progressLine(run().progress), w())}
       </text>
+
+      {/* Run Actions: each control shows only while its Offer is present, with the
+          consequence the Offer names verbatim and its shortcut. Cancel/Delete arm
+          a confirming keypress first; a refused dispatch shows the reason here. */}
+      <Show when={props.anyActionOffer()}>
+        <box flexDirection="column" flexShrink={0}>
+          <text fg={theme.textMuted} flexShrink={0}>
+            {clip("Actions:", w())}
+          </text>
+          <Show when={props.actionOffers().resume}>
+            {(offer) => (
+              <text fg={theme.text} flexShrink={0}>
+                {clip(`  r resume — ${offer().consequence}`, w())}
+              </text>
+            )}
+          </Show>
+          <Show when={props.actionOffers().cancel}>
+            {(offer) => (
+              <text fg={theme.text} flexShrink={0}>
+                {clip(`  c cancel — ${offer().consequence}`, w())}
+              </text>
+            )}
+          </Show>
+          <Show when={props.actionOffers().remove}>
+            {(offer) => (
+              <text fg={theme.text} flexShrink={0}>
+                {clip(`  x delete — ${offer().consequence}`, w())}
+              </text>
+            )}
+          </Show>
+          <Show when={props.actionPending()}>
+            {(action) => (
+              <text fg={theme.warning} flexShrink={0}>
+                {clip(
+                  action() === "delete"
+                    ? "  ⚠ Delete is permanent (Workspace files are kept). Press y to confirm · esc to keep"
+                    : "  ⚠ Cancel ends the Run (history is kept). Press y to confirm · esc to keep",
+                  w(),
+                )}
+              </text>
+            )}
+          </Show>
+          <Show when={props.actionRefusal()}>
+            {(problem) => (
+              <text fg={theme.error} flexShrink={0}>
+                {clip(`  ✗ ${problem().explanation}`, w())}
+              </text>
+            )}
+          </Show>
+        </box>
+      </Show>
 
       <text
         fg={props.focus() === "timeline" ? theme.text : theme.textMuted}

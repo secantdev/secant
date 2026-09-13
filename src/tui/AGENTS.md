@@ -26,7 +26,13 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   dispatch, and small-width/resize relayout without overflow. A lone Escape is held briefly by OpenTUI key disambiguation — poll in real time, not by
   frame count.
 
+- A destructive Run Action (cancel ends a Run for good; delete removes its store from disk) arms a confirming keypress before it dispatches
+  (`run-workbench.tsx` `pending`): `y` confirms, Escape backs out without leaving. Resume is not destructive and dispatches at once. This is the
+  terminal-native form of the IA prototype's confirm dialog; keep it for any later remove/overwrite control.
+
 ## Read next
 
 - Each screen reads the Projection Port through a per-screen view seam (`workspace-view.tsx`, `bundle-view.tsx`, `run-view.tsx` — the reactive `run` read +
-  reference resolution the Workbench uses); the Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`.
+  reference resolution the Workbench uses; `run-list-view.tsx` — the Previous Runs read seam that pages older rows by cursor and appends them, the only
+  seam that re-opens its Projection to grow a page); a write goes through a per-screen submit seam (`run-actions-view.tsx` — resume/cancel/delete, mirroring
+  `run-launch-view.tsx`). The Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`.

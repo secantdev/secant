@@ -254,11 +254,18 @@ function executableOnPath(executable: string): boolean {
   const dirs = (process.env.PATH ?? "")
     .split(delimiter)
     .filter((dir) => dir.length > 0);
+  // On Windows try the bare name first (an executable authored with its own
+  // extension, e.g. `bun.exe`, resolves as-is) and then each PATHEXT extension
+  // (a bare `git` resolves as `git.EXE`); appending only PATHEXT would miss the
+  // former.
   const extensions =
     process.platform === "win32"
-      ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
-          .split(";")
-          .filter(Boolean)
+      ? [
+          "",
+          ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+            .split(";")
+            .filter(Boolean),
+        ]
       : [""];
   for (const dir of dirs) {
     for (const extension of extensions) {

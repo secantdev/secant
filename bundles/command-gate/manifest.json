@@ -1,0 +1,74 @@
+{
+  "formatVersion": 1,
+  "bundle": {
+    "id": "dev.secant.command-gate",
+    "version": "1.0.0",
+    "name": "Command Gate",
+    "description": "The M2 gate: a Command-only Repeat loop whose check fails a fixed number of times then passes, keeping its count in the Workspace and blocking once at its Review checkpoint. Requires a Git worktree root."
+  },
+  "platforms": ["windows", "macos", "linux"],
+  "inputs": {},
+  "assets": [
+    { "path": "scripts/baseline.sh", "kind": "script" },
+    { "path": "scripts/baseline.ps1", "kind": "script" },
+    { "path": "scripts/check.sh", "kind": "script" },
+    { "path": "scripts/check.ps1", "kind": "script" }
+  ],
+  "routing": [
+    {
+      "id": "baseline",
+      "kind": "command",
+      "produces": [{ "name": "passing", "type": "verdict" }],
+      "command": {
+        "executable": "bash",
+        "arguments": [{ "asset": "scripts/baseline.sh" }],
+        "workingDirectory": ".",
+        "platforms": {
+          "windows": {
+            "executable": "pwsh",
+            "arguments": [{ "asset": "scripts/baseline.ps1" }]
+          }
+        }
+      }
+    },
+    {
+      "repeat": {
+        "until": "passing",
+        "reviewCheckpoint": {
+          "interval": 2,
+          "message": "The gate loop has run two iterations without passing. Continue or stop?"
+        },
+        "steps": [
+          {
+            "id": "check",
+            "kind": "command",
+            "prerequisites": ["git-worktree-root"],
+            "produces": [
+              { "name": "passing", "type": "verdict" },
+              { "name": "log", "type": "text" }
+            ],
+            "command": {
+              "executable": "bash",
+              "arguments": [
+                { "asset": "scripts/check.sh" },
+                ".secant-gate-counter",
+                "3"
+              ],
+              "workingDirectory": ".",
+              "platforms": {
+                "windows": {
+                  "executable": "pwsh",
+                  "arguments": [
+                    { "asset": "scripts/check.ps1" },
+                    ".secant-gate-counter",
+                    "3"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

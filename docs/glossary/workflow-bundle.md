@@ -111,6 +111,19 @@ what integrity and trust mean before execution.
   interrupts affected live Runs to `halted` and completes their cleanup; if safe stopping fails, nothing is removed. V1 exposes no removal of
   built-in Bundles; whether a later version permits it remains open.
 
+## Maintained gate Bundle (M2)
+
+- The **Command Gate** Bundle (`bundles/command-gate`, id `dev.secant.command-gate`) is the M2 acceptance gate (ADR 0027): a Command-only Bundle with
+  no Agent step. A baseline binds the `until` Verdict, then a Repeat group loops a `check` Command whose script (`check.sh`/`check.ps1`) fails on
+  iterations 1 and 2 and passes on iteration 3, keeping its iteration count in a Workspace file. The Review checkpoint interval is 2, so the loop
+  blocks once after iteration 2; answering `--continue` grants one more interval, which reaches the pass on iteration 3 — so the Run blocks exactly
+  once. The `check` step declares the `git-worktree-root` prerequisite, so the real Git probe runs on every OS.
+- Its scenario in the package smoke (`scripts/package-smoke.mjs`), built and installed from the compiled binary on Windows, macOS, and Linux with no
+  retry: launch without acknowledgement is refused with the trust Problem and creates no Run; launch with the exact digest rests `blocked` at the
+  expected iteration count; a second invocation answers the durable Gate `--continue` to `succeeded`; `run read` returns the passing output by
+  reference; the Run appears in `run list`; and a launch from a non-repository directory fails Preflight naming `git-worktree-root`. M3's Proof Bundle
+  stands beside it.
+
 ## Related decisions
 
 - [ADR 0021](../adr/0021-use-immutable-self-contained-workflow-bundles-with-digest-scoped-trust.md) records why packaging, identity, execution

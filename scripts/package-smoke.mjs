@@ -680,6 +680,166 @@ try {
     }
   }
 
+  // The maintained Command-only gate Bundle, built, installed, and run to
+  // completion from the compiled binary on each gated OS (issue #89, the M2 gate —
+  // ADR 0027, #26). Its Repeat loop's check fails on iterations 1 and 2 and passes
+  // on iteration 3, keeping its count in the Workspace; the Review checkpoint
+  // interval is 2, so it blocks once after iteration 2 and the granted interval
+  // reaches the pass — the Run blocks exactly once. The git-worktree-root
+  // prerequisite runs the real Git probe from the binary on every OS. Nothing in
+  // target source knows this Bundle exists — it is built, installed, and driven the
+  // way a user's Bundle is.
+  {
+    const gateId = "dev.secant.command-gate";
+    const gateFolder = join(projectRoot, "bundles", "command-gate");
+    const gateWfb = join(smokeRoot, "command-gate.wfb");
+    run(
+      binary,
+      ["bundle", "build", gateFolder, "--no-install", "--output", gateWfb],
+      { cwd: smokeRoot, env: workspaceEnv },
+    );
+    run(binary, ["bundle", "install", gateWfb], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    });
+    const gate = JSON.parse(
+      run(binary, ["bundle", "list", "--json"], {
+        cwd: smokeRoot,
+        env: workspaceEnv,
+      }),
+    ).result.bundles.find((bundle) => bundle.id === gateId);
+    if (gate === undefined) {
+      throw new Error("The gate Bundle was not installed.");
+    }
+
+    // A real Git worktree as the launch Workspace, approved, so the
+    // git-worktree-root prerequisite passes. `git init` alone (an unborn worktree)
+    // qualifies; the probe compares the canonicalized toplevel to the Workspace.
+    const gateWorkspace = join(smokeRoot, "gate-workspace");
+    await mkdir(gateWorkspace, { recursive: true });
+    run("git", ["init"], { cwd: gateWorkspace });
+    run(binary, ["workspace", "approve"], {
+      cwd: gateWorkspace,
+      env: workspaceEnv,
+    });
+
+    // Launch without acknowledgement: Preflight passes in the worktree, so Trust
+    // refuses with the exact Problem — and no Run is created.
+    const untrusted = spawnSync(binary, ["run", "launch", gateId], {
+      cwd: gateWorkspace,
+      encoding: "utf8",
+      env: workspaceEnv,
+    });
+    if (untrusted.error) throw untrusted.error;
+    if (
+      untrusted.status === 0 ||
+      !`${untrusted.stdout}${untrusted.stderr}`.includes(
+        "bundle-trust-required",
+      )
+    ) {
+      throw new Error(
+        `Launching the gate Bundle without --trust was not refused with the trust Problem: ${untrusted.stdout}${untrusted.stderr}`,
+      );
+    }
+    const beforeLaunch = JSON.parse(
+      run(binary, ["run", "list", "--json"], {
+        cwd: gateWorkspace,
+        env: workspaceEnv,
+      }),
+    );
+    if (beforeLaunch.rows.length !== 0) {
+      throw new Error(
+        `The refused launch created a Run: ${JSON.stringify(beforeLaunch)}`,
+      );
+    }
+
+    // Launch with the exact digest acknowledged: the loop runs and rests `blocked`
+    // at the checkpoint with the expected completed-iteration count (the interval).
+    const launched = spawnSync(
+      binary,
+      ["run", "launch", gateId, "--trust", gate.digest, "--json"],
+      { cwd: gateWorkspace, encoding: "utf8", env: workspaceEnv },
+    );
+    if (launched.error) throw launched.error;
+    const gateSnapshot = JSON.parse(launched.stdout);
+    const gateRunId = gateSnapshot.runId;
+    const gateRun = gateSnapshot.result.run;
+    if (gateRun.state !== "blocked") {
+      throw new Error(
+        `Expected the gate Run to rest blocked at the checkpoint: ${launched.stdout}`,
+      );
+    }
+    if (gateRun.checkpoint?.completedIterations !== 2) {
+      throw new Error(
+        `Expected the gate Run to block after 2 completed iterations: ${launched.stdout}`,
+      );
+    }
+
+    // A second, separate invocation answers the durable Gate --continue, granting
+    // one more interval that reaches the pass and rests the Run `succeeded`.
+    const answered = spawnSync(
+      binary,
+      ["run", "answer", gateRunId, "--continue"],
+      { cwd: gateWorkspace, encoding: "utf8", env: workspaceEnv },
+    );
+    if (answered.error) throw answered.error;
+    if (
+      answered.status !== 0 ||
+      !`${answered.stdout}`.includes("State: succeeded")
+    ) {
+      throw new Error(
+        `Answering the gate Run --continue did not resolve it: ${answered.stdout}${answered.stderr}`,
+      );
+    }
+
+    // Read the passing Command output by its reference: the last (passing)
+    // iteration's captured log.
+    const gateOutput = run(binary, ["run", "read", `${gateRunId}/log`], {
+      cwd: gateWorkspace,
+      env: workspaceEnv,
+    });
+    if (!gateOutput.includes("gate iteration 3 of 3")) {
+      throw new Error(
+        `run read did not return the passing gate output: ${gateOutput}`,
+      );
+    }
+
+    // The completed Run appears in this Workspace's Previous Runs.
+    const gateList = JSON.parse(
+      run(binary, ["run", "list", "--json"], {
+        cwd: gateWorkspace,
+        env: workspaceEnv,
+      }),
+    );
+    if (!gateList.rows.some((row) => row.runId === gateRunId)) {
+      throw new Error(
+        `The gate Run does not appear in run list: ${JSON.stringify(gateList)}`,
+      );
+    }
+
+    // Launching from a non-repository directory fails Preflight naming the
+    // unmet git-worktree-root prerequisite, before Trust and before any Run.
+    const nonRepo = join(smokeRoot, "gate-non-repo");
+    await mkdir(nonRepo, { recursive: true });
+    run(binary, ["workspace", "approve"], { cwd: nonRepo, env: workspaceEnv });
+    const outsideRepo = spawnSync(
+      binary,
+      ["run", "launch", gateId, "--trust", gate.digest],
+      { cwd: nonRepo, encoding: "utf8", env: workspaceEnv },
+    );
+    if (outsideRepo.error) throw outsideRepo.error;
+    if (
+      outsideRepo.status === 0 ||
+      !`${outsideRepo.stdout}${outsideRepo.stderr}`.includes(
+        "git-worktree-root",
+      )
+    ) {
+      throw new Error(
+        `Launching the gate Bundle outside a Git worktree was not refused with git-worktree-root: ${outsideRepo.stdout}${outsideRepo.stderr}`,
+      );
+    }
+  }
+
   // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
   // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
   // startup Problem and a non-zero exit before the renderer is created.

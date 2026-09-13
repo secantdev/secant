@@ -100,19 +100,6 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 // that Module is private to the Run Store and this one cannot import it.
 const MAX_CAPTURE_BYTES = 256 * 1024 * 1024;
 
-// Signals a command raises by faulting in its own code (#86). A death by one of
-// these is a `failed` Attempt (retryable, consumes the budget), not the
-// `indeterminate` an external interruption yields — so a deterministically
-// crashing command rests `failed` rather than looping `halted` on manual resume.
-const CRASH_SIGNALS: ReadonlySet<string> = new Set([
-  "SIGSEGV",
-  "SIGABRT",
-  "SIGILL",
-  "SIGFPE",
-  "SIGBUS",
-  "SIGTRAP",
-]);
-
 /** One Step Attempt's outcome and, when it ran, the outputs to publish. */
 interface StepAttempt {
   readonly outcome: AttemptOutcome;
@@ -692,21 +679,19 @@ function runCommand(step: CommandStep, context: StepContext): StepAttempt {
     return { outcome: "failed", outputs: [] };
   }
 
-  // No exit and no error means a signal killed the command. Split the two classes
-  // this Seam must not conflate (ADR 0019, #86): a crash signal — the command's
-  // own code faulting (segfault, abort, illegal instruction) — is a failure to run
-  // to an exit, so it is a retryable `failed` Attempt; a deterministically
-  // crashing command then consumes its retry budget and rests `failed` (a real
-  // answer) instead of resting `halted` and looping forever on manual resume. Any
-  // other signal (Ctrl+C, SIGTERM, SIGHUP, an OOM/`kill` from outside) is an
-  // interruption the command's logic did not cause: the Attempt's result is
-  // genuinely unknown -> `indeterminate`, never retried, and the Run rests
-  // `halted` for human resume. Unknown signals default to the conservative
-  // `indeterminate` (halt, don't lose work) rather than burning the retry budget.
+  // No exit and no error means a signal killed the command — Ctrl+C, SIGTERM, the
+  // terminal closing during a live Run. The Attempt's result is genuinely unknown,
+  // so it is `indeterminate`: never retried, and the Run rests `halted` for human
+  // resume (ADR 0019, #86).
+  // ponytail: every signal death maps to `indeterminate`, including a command that
+  // faults in its own code (segfault, abort). Splitting crash signals to a
+  // retryable `failed` would stop a deterministically crashing command from looping
+  // `halted` on manual resume, but reliably telling crash from interrupt by the
+  // reported signal is not portable across Bun on the three OSes (macOS reports
+  // SIGABRT for abort(); Linux does not, and hangs ~30s first), so the split was
+  // withdrawn. Revisit with a diagnostic channel that records the signal, not a
+  // by-signal-name classifier.
   if (result.status === null) {
-    if (result.signal !== null && CRASH_SIGNALS.has(result.signal)) {
-      return { outcome: "failed", outputs: [] };
-    }
     return { outcome: "indeterminate", outputs: [] };
   }
 

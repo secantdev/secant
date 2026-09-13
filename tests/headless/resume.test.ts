@@ -74,10 +74,13 @@ function writeRecoveryBundle(markers: {
         executable: RUNTIME_NAME,
         arguments: [
           "-e",
+          // Write this process's own pid to the started marker, so the test can
+          // kill this grandchild directly after killing the launch process — no
+          // long-lived orphan lingers stealing a CPU core (the Windows CI slowdown).
           `const fs=require('node:fs');` +
-            `fs.writeFileSync(${q(markers.started)}, 'started');` +
+            `fs.writeFileSync(${q(markers.started)}, String(process.pid));` +
             `if(fs.existsSync(${q(markers.proceed)}))process.exit(0);` +
-            `setTimeout(()=>process.exit(0), 60000);`,
+            `setTimeout(()=>process.exit(0), 30000);`,
         ],
       },
     },
@@ -115,40 +118,104 @@ function writeRecoveryBundle(markers: {
   return folder;
 }
 
-test("a real Secant process killed mid-Attempt reopens halted+indeterminate; resume finishes with no earlier Step re-run (#86, AC1/AC4/AC5/AC6)", async (t: TestContext) => {
-  const home = makeTempDir("secant-recovery-home-");
-  const workspace = realpathSync.native(makeTempDir("secant-recovery-ws-"));
-  const markerDir = makeTempDir("secant-recovery-markers-");
-  const markers = {
-    first: join(markerDir, "first.log"),
-    started: join(markerDir, "started"),
-    proceed: join(markerDir, "proceed"),
-    last: join(markerDir, "last"),
-  };
-  const bundleFolder = writeRecoveryBundle(markers);
-
-  const runExecution: RunExecution = ({ routing, owner }) =>
-    executeRouting(routing, {
-      owner,
-      platform: hostPlatform(),
-      resolveAsset: () => undefined,
-    });
-
-  // In-process setup over the same home the child will use: build, approve, and
-  // read the installed digest, then let the child launch under it.
-  const sink = () => {
-    const lines: string[] = [];
-    const io: HeadlessIO = {
-      out: (s) => lines.push(s),
-      err: (s) => lines.push(s),
-      cwd: () => workspace,
+test(
+  "a real Secant process killed mid-Attempt reopens halted+indeterminate; resume finishes with no earlier Step re-run (#86, AC1/AC4/AC5/AC6)",
+  { timeout: 60000 },
+  async (t: TestContext) => {
+    const home = makeTempDir("secant-recovery-home-");
+    const workspace = realpathSync.native(makeTempDir("secant-recovery-ws-"));
+    const markerDir = makeTempDir("secant-recovery-markers-");
+    const markers = {
+      first: join(markerDir, "first.log"),
+      started: join(markerDir, "started"),
+      proceed: join(markerDir, "proceed"),
+      last: join(markerDir, "last"),
     };
-    return { io, text: () => lines.join("") };
-  };
-  let digest: string;
-  {
+    const bundleFolder = writeRecoveryBundle(markers);
+
+    const runExecution: RunExecution = ({ routing, owner }) =>
+      executeRouting(routing, {
+        owner,
+        platform: hostPlatform(),
+        resolveAsset: () => undefined,
+      });
+
+    // In-process setup over the same home the child will use: build, approve, and
+    // read the installed digest, then let the child launch under it.
+    const sink = () => {
+      const lines: string[] = [];
+      const io: HeadlessIO = {
+        out: (s) => lines.push(s),
+        err: (s) => lines.push(s),
+        cwd: () => workspace,
+      };
+      return { io, text: () => lines.join("") };
+    };
+    let digest: string;
+    {
+      const catalog = openCatalog(home);
+      const group = openRunGroup(home, workspace);
+      const app = createApplication({
+        catalog,
+        launchWorkspacePath: workspace,
+        hostPlatform: hostPlatform(),
+        runGroup: group,
+        runExecution,
+      });
+      const s = sink();
+      assert.equal(
+        runHeadless(app, ["bundle", "build", bundleFolder], s.io),
+        0,
+      );
+      const entry = catalog
+        .listEntries()
+        .find((e) => e.id === "dev.secant.recovery");
+      assert.ok(entry, s.text());
+      catalog.approveWorkspace(workspace, new Date());
+      digest = entry.digest;
+      group.close();
+      catalog.close();
+    }
+
+    // A real child process launches the Run and blocks in the `block` Step's sleep.
+    const child = spawn(
+      process.execPath,
+      [CLI, "run", "launch", "dev.secant.recovery", "--trust", digest],
+      { cwd: workspace, env: { ...process.env, SECANT_HOME: home } },
+    );
+    const childErr: string[] = [];
+    child.stderr.on("data", (d: Buffer) => childErr.push(d.toString()));
+    child.stdout.on("data", () => {});
+    const exited = new Promise<void>((resolve) =>
+      child.on("exit", () => resolve()),
+    );
+
+    const started = await waitForFile(markers.started, 20000);
+    assert.ok(
+      started,
+      `child never reached the block Step: ${childErr.join("")}`,
+    );
+
+    // Kill the process mid-Attempt (never a cancel): SIGKILL is uncatchable, so the
+    // Run is left `running` with a live claim, exactly like a crash.
+    child.kill("SIGKILL");
+    await exited;
+    // Killing the launch process orphans the grandchild command (still sleeping);
+    // kill it directly by the pid it wrote, so it never lingers stealing a CPU core.
+    const blockPid = Number(readFileSync(markers.started, "utf8").trim());
+    if (Number.isInteger(blockPid) && blockPid > 0) {
+      try {
+        process.kill(blockPid, "SIGKILL");
+      } catch {
+        // Already gone — nothing to clean up.
+      }
+    }
+
+    // Reopen the home in-process: startup recovery reconciles the killed Run.
     const catalog = openCatalog(home);
+    t.after(() => catalog.close());
     const group = openRunGroup(home, workspace);
+    t.after(() => group.close());
     const app = createApplication({
       catalog,
       launchWorkspacePath: workspace,
@@ -156,78 +223,31 @@ test("a real Secant process killed mid-Attempt reopens halted+indeterminate; res
       runGroup: group,
       runExecution,
     });
-    const s = sink();
-    assert.equal(runHeadless(app, ["bundle", "build", bundleFolder], s.io), 0);
-    const entry = catalog
-      .listEntries()
-      .find((e) => e.id === "dev.secant.recovery");
-    assert.ok(entry, s.text());
-    catalog.approveWorkspace(workspace, new Date());
-    digest = entry.digest;
-    group.close();
-    catalog.close();
-  }
 
-  // A real child process launches the Run and blocks in the `block` Step's sleep.
-  const child = spawn(
-    process.execPath,
-    [CLI, "run", "launch", "dev.secant.recovery", "--trust", digest],
-    { cwd: workspace, env: { ...process.env, SECANT_HOME: home } },
-  );
-  const childErr: string[] = [];
-  child.stderr.on("data", (d: Buffer) => childErr.push(d.toString()));
-  child.stdout.on("data", () => {});
-  const exited = new Promise<void>((resolve) =>
-    child.on("exit", () => resolve()),
-  );
+    const listed = group.listRuns();
+    assert.equal(listed.length, 1);
+    const runId = listed[0]!.runId;
+    const owner = group.acquireRun(runId);
+    assert.ok(owner);
+    const read = group.readRun(runId);
+    assert.ok(read.ok);
+    assert.equal(read.run.state, "halted");
+    assert.equal(owner.attemptLog().at(-1)?.outcome, "indeterminate");
+    owner.close();
 
-  const started = await waitForFile(markers.started, 20000);
-  assert.ok(
-    started,
-    `child never reached the block Step: ${childErr.join("")}`,
-  );
+    // Recovery ran no Step work: `first` ran exactly once (at launch), `last` never
+    // ran (the side-effect that must not appear — AC4).
+    assert.equal(readFileSync(markers.first, "utf8"), "ran\n");
+    assert.equal(existsSync(markers.last), false);
 
-  // Kill the process mid-Attempt (never a cancel): SIGKILL is uncatchable, so the
-  // Run is left `running` with a live claim, exactly like a crash.
-  child.kill("SIGKILL");
-  await exited;
+    // Let the interrupted Step complete instantly on resume, then resume in-process.
+    writeFileSync(markers.proceed, "go");
+    const r = sink();
+    assert.equal(runHeadless(app, ["run", "resume", runId], r.io), 0);
+    assert.match(r.text(), /^State: succeeded$/m);
 
-  // Reopen the home in-process: startup recovery reconciles the killed Run.
-  const catalog = openCatalog(home);
-  t.after(() => catalog.close());
-  const group = openRunGroup(home, workspace);
-  t.after(() => group.close());
-  const app = createApplication({
-    catalog,
-    launchWorkspacePath: workspace,
-    hostPlatform: hostPlatform(),
-    runGroup: group,
-    runExecution,
-  });
-
-  const listed = group.listRuns();
-  assert.equal(listed.length, 1);
-  const runId = listed[0]!.runId;
-  const owner = group.acquireRun(runId);
-  assert.ok(owner);
-  const read = group.readRun(runId);
-  assert.ok(read.ok);
-  assert.equal(read.run.state, "halted");
-  assert.equal(owner.attemptLog().at(-1)?.outcome, "indeterminate");
-  owner.close();
-
-  // Recovery ran no Step work: `first` ran exactly once (at launch), `last` never
-  // ran (the side-effect that must not appear — AC4).
-  assert.equal(readFileSync(markers.first, "utf8"), "ran\n");
-  assert.equal(existsSync(markers.last), false);
-
-  // Let the interrupted Step complete instantly on resume, then resume in-process.
-  writeFileSync(markers.proceed, "go");
-  const r = sink();
-  assert.equal(runHeadless(app, ["run", "resume", runId], r.io), 0);
-  assert.match(r.text(), /^State: succeeded$/m);
-
-  // The earlier Step was not re-run (still one line); the final Step ran on resume.
-  assert.equal(readFileSync(markers.first, "utf8"), "ran\n");
-  assert.equal(existsSync(markers.last), true);
-});
+    // The earlier Step was not re-run (still one line); the final Step ran on resume.
+    assert.equal(readFileSync(markers.first, "utf8"), "ran\n");
+    assert.equal(existsSync(markers.last), true);
+  },
+);

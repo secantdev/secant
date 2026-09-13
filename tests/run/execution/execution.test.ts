@@ -168,35 +168,6 @@ test(
   },
 );
 
-// A command that faults in its own code (a crash signal) is a retryable failed
-// Attempt, not an interruption — so a deterministically crashing command rests
-// failed rather than looping halted on manual resume (#86). Gated to POSIX, where
-// abort() raises SIGABRT; Windows maps abort() to an exit code, a different path.
-test(
-  "a crashing command (SIGABRT) is a retryable failed Attempt, not indeterminate (#86)",
-  { skip: process.platform === "win32" },
-  async (t) => {
-    const { owner, state } = ownerForFreshRun(t);
-    const routing: RoutingNode[] = [
-      commandStep(
-        "crash",
-        { executable: NODE, arguments: ["-e", "process.abort()"] },
-        { retry: 1, produces: produces({ name: "v", type: "verdict" }) },
-      ),
-    ];
-
-    const report = run(routing, owner);
-    assert.deepEqual(report, { outcome: "failed" });
-    assert.equal(state(), "failed");
-    // The crash consumed the retry budget (two failed Attempts), then rested failed —
-    // no halt, no indeterminate marker.
-    assert.deepEqual(
-      owner.attemptLog().map((entry) => entry.outcome),
-      ["failed", "failed"],
-    );
-  },
-);
-
 test("a script exiting 1 yields a fail Verdict, a succeeded Attempt, and the Run proceeds", async (t) => {
   const { owner } = ownerForFreshRun(t);
   const routing: RoutingNode[] = [

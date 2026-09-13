@@ -6,3 +6,9 @@
 # loader.
 [test]
 preload = ["@opentui/solid/preload"]
+# Each command Step in a Run test spawns a real subprocess; Windows process
+# creation plus Bun cold-start is ~10x POSIX, so a spawn-heavy test can exceed
+# Bun's 5s default per-test timeout on a slow CI Windows runner (a correct test
+# failing as a flake, not a hang). Raise the ceiling to give real subprocess work
+# headroom; a genuine hang still fails, just later (#86).
+timeout = 30000

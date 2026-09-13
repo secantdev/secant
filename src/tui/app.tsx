@@ -16,6 +16,9 @@ import {
 } from "./bundle-view.js";
 import { Home } from "./home.js";
 import { createTuiKeymap, KeymapProvider } from "./keymap.js";
+import type { RendererPort } from "./renderer/renderer.js";
+import { RunWorkbench } from "./run-workbench.js";
+import { RunWorkbenchViewProvider, type RunWorkbenchView } from "./run-view.js";
 import { StartRun } from "./start-run.js";
 import {
   RunLaunchViewProvider,
@@ -42,9 +45,10 @@ type Screen =
   | { readonly name: "home" }
   | { readonly name: "start-run" }
   | { readonly name: "bundle-list" }
-  | { readonly name: "bundle-inspect"; readonly selector: BundleFocusSelector };
+  | { readonly name: "bundle-inspect"; readonly selector: BundleFocusSelector }
+  | { readonly name: "run-workbench"; readonly runId: string };
 
-function Route() {
+function Route(props: { renderer: RendererPort }) {
   const view = useWorkspaceView();
   const dialog = useDialog();
   const exit = useExit();
@@ -57,6 +61,11 @@ function Route() {
   const inspecting = () => {
     const current = screen();
     return current.name === "bundle-inspect" ? current : undefined;
+  };
+  // The same narrowing for the Workbench, so its Run id reaches the child typed.
+  const watching = () => {
+    const current = screen();
+    return current.name === "run-workbench" ? current : undefined;
   };
 
   // Open the approval dialog exactly once, at mount, when the launch Workspace
@@ -87,7 +96,19 @@ function Route() {
       }
     >
       <Match when={screen().name === "start-run"}>
-        <StartRun onLeave={() => setScreen({ name: "home" })} />
+        <StartRun
+          onLeave={() => setScreen({ name: "home" })}
+          onStarted={(runId) => setScreen({ name: "run-workbench", runId })}
+        />
+      </Match>
+      <Match when={watching()}>
+        {(active) => (
+          <RunWorkbench
+            runId={active().runId}
+            renderer={props.renderer}
+            onLeave={() => setScreen({ name: "home" })}
+          />
+        )}
       </Match>
       <Match when={screen().name === "bundle-list"}>
         <BundleList
@@ -125,6 +146,8 @@ export function App(props: {
   view: WorkspaceView;
   bundles: BundleCatalogView;
   launch: RunLaunchView;
+  run: RunWorkbenchView;
+  renderer: RendererPort;
   exit: Exit;
 }) {
   const keymap = createTuiKeymap();
@@ -135,15 +158,17 @@ export function App(props: {
           <WorkspaceViewProvider view={props.view}>
             <BundleCatalogViewProvider view={props.bundles}>
               <RunLaunchViewProvider view={props.launch}>
-                <DialogProvider>
-                  <ErrorBoundary
-                    fallback={(error) => (
-                      <Fallback error={error} exit={props.exit} />
-                    )}
-                  >
-                    <Route />
-                  </ErrorBoundary>
-                </DialogProvider>
+                <RunWorkbenchViewProvider view={props.run}>
+                  <DialogProvider>
+                    <ErrorBoundary
+                      fallback={(error) => (
+                        <Fallback error={error} exit={props.exit} />
+                      )}
+                    >
+                      <Route renderer={props.renderer} />
+                    </ErrorBoundary>
+                  </DialogProvider>
+                </RunWorkbenchViewProvider>
               </RunLaunchViewProvider>
             </BundleCatalogViewProvider>
           </WorkspaceViewProvider>

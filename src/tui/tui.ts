@@ -12,3 +12,19 @@ export type { WorkspaceView } from "./workspace-view.js";
 export type { BundleCatalogView } from "./bundle-view.js";
 export type { RunLaunchView, LaunchOutcome } from "./run-launch-view.js";
 export { createLiveRunLaunchView } from "./run-launch-view.js";
+// The Run Workbench read seam crosses the Module boundary for #91's renderer
+// tests, the way createLiveRunLaunchView does for #90 — the boundary suite
+// requires cross-Module test imports to go through this entrypoint. (The lifecycle
+// Renderer Port belongs to the sibling `renderer` Module; tests take its type from
+// that Module's own entrypoint, not re-exported here.)
+export type { RunWorkbenchView } from "./run-view.js";
+export { createLiveRunWorkbenchView } from "./run-view.js";
+// The Workbench's pure timeline model, exposed for #91's unit tests across the
+// boundary, for the same reason.
+export {
+  AT_LIVE,
+  scrollTimeline,
+  timelineWindow,
+  TIMELINE_PAGE,
+} from "./run-timeline.js";
+export type { TimelineScroll } from "./run-timeline.js";

@@ -13,6 +13,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   focused; only unbound printable keys and backspace reach the input. So never bind a bare letter key (e.g. `q` to quit) on a text-entry screen, and gate
   `left`/`right` with a reactive `enabled` so choice/verdict fields cycle without stealing a text field's cursor. Native `<input>`/`<select>`/`<textarea>`
   exist — no need to hand-roll a caret.
+- The Run Workbench (`run-workbench.tsx`) is the one screen that takes its keys, size, and resize from the injected Renderer Port (`size`/`onKey`/`onResize`,
+  A13) instead of `@opentui/keymap` + `useTerminalDimensions`: a single raw-key pipeline drives every control, so its input and layout are driven by a fake
+  renderer in tests. Every other screen keeps the keymap/`useTerminalDimensions` path. Drawing still goes through OpenTUI elements — the Port never carries it.
+- The timeline's scroll/live-edge/anchor/new-activity is a pure index reducer (`run-timeline.ts`), not OpenTUI's `<scrollbox>` (which OpenCode's session
+  timeline uses): the durable timeline is append-only, so an absolute `top` index keeps naming the same first-visible event as newer events land — that
+  append-stability _is_ the prepend anchor, and the new-activity count is `total − viewportBottom`. Neither exists in the scrollbox.
 
 ## Tests
 
@@ -22,5 +28,5 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Read next
 
-- Each screen reads the Projection Port through a per-screen view seam (`workspace-view.tsx`, `bundle-view.tsx`); the Renderer Port stays
-  lifecycle-only (`renderer/renderer.ts`).
+- Each screen reads the Projection Port through a per-screen view seam (`workspace-view.tsx`, `bundle-view.tsx`, `run-view.tsx` — the reactive `run` read +
+  reference resolution the Workbench uses); the Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`.

@@ -6,8 +6,10 @@ import { App } from "../../src/tui/tui.js";
 import type {
   BundleCatalogView,
   RunLaunchView,
+  RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
+import type { RendererPort } from "../../src/tui/renderer/renderer.js";
 import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
@@ -161,6 +163,28 @@ function noLaunch(): RunLaunchView {
   return { launch: () => () => ({ kind: "pending" }) };
 }
 
+/** The Bundle screens never open the Run Workbench; these stubs satisfy the two
+ *  App props the Workbench needs (#91). */
+function noRunView(): RunWorkbenchView {
+  return {
+    openRun() {
+      throw new Error("run workbench not used in this test");
+    },
+    readResource() {
+      throw new Error("run workbench not used in this test");
+    },
+  };
+}
+function fakeRenderer(): RendererPort {
+  return {
+    size: () => ({ width: 80, height: 24 }),
+    onKey: () => () => {},
+    onResize: () => () => {},
+    destroy() {},
+    destroyed: false,
+  };
+}
+
 async function mount(rows = ROWS, width = 80, height = 40) {
   const exits: unknown[] = [];
   const t = await testRender(
@@ -169,6 +193,8 @@ async function mount(rows = ROWS, width = 80, height = 40) {
         view={approvedWorkspace()}
         bundles={bundles(rows)}
         launch={noLaunch()}
+        run={noRunView()}
+        renderer={fakeRenderer()}
         exit={(reason) => exits.push(reason)}
       />
     ),
@@ -261,6 +287,8 @@ test("a trusted Bundle reads as trusted in the list and inspection", async () =>
         view={approvedWorkspace()}
         bundles={view}
         launch={noLaunch()}
+        run={noRunView()}
+        renderer={fakeRenderer()}
         exit={() => {}}
       />
     ),
@@ -312,6 +340,8 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
         view={approvedWorkspace()}
         bundles={view}
         launch={noLaunch()}
+        run={noRunView()}
+        renderer={fakeRenderer()}
         exit={() => {}}
       />
     ),

@@ -39,11 +39,14 @@ import { useTheme } from "./vendor/theme-context.js";
 // it. Exactly one step renders at a time (a Solid <Switch>), so each step's key
 // bindings exist only while it is active and cannot conflict.
 
-type Step = "choose" | "inputs" | "review" | "pending" | "receipt";
+type Step = "choose" | "inputs" | "review" | "pending";
 
 const NARROW_BREAKPOINT = 60;
 
-export function StartRun(props: { onLeave: () => void }) {
+export function StartRun(props: {
+  onLeave: () => void;
+  onStarted: (runId: string) => void;
+}) {
   const bundles = useBundleCatalogView();
   const launch = useRunLaunchView();
   const list = bundles.openList();
@@ -165,19 +168,19 @@ export function StartRun(props: { onLeave: () => void }) {
     setOutcome(() => launch.launch(input));
   };
 
-  // Follow the launch to its settlement: a receipt advances to the receipt
-  // screen; a refusal returns to the step that owns the correction with the
-  // finding, leaving every other draft choice intact (AC4). Only
-  // `launch-input-invalid` is an inputs-screen fault; every other refusal
-  // (Workspace prerequisite, corrupted Bundle, trust, Workspace state) belongs to
-  // Bundle selection.
+  // Follow the launch to its settlement: a successful launch transitions
+  // straight into that Run's Workbench (#91), replacing #90's receipt; a refusal
+  // returns to the step that owns the correction with the finding, leaving every
+  // other draft choice intact (AC4). Only `launch-input-invalid` is an
+  // inputs-screen fault; every other refusal (Workspace prerequisite, corrupted
+  // Bundle, trust, Workspace state) belongs to Bundle selection.
   createEffect(() => {
     const accessor = outcome();
     if (accessor === undefined) return;
     const settled = accessor();
     if (settled.kind === "pending") return;
     if (settled.kind === "launched") {
-      setStep("receipt");
+      props.onStarted(settled.runId);
       return;
     }
     const problem = settled.problem;
@@ -238,9 +241,6 @@ export function StartRun(props: { onLeave: () => void }) {
       </Match>
       <Match when={step() === "pending"}>
         <PendingStep />
-      </Match>
-      <Match when={step() === "receipt"}>
-        <ReceiptStep outcome={outcome} onLeave={props.onLeave} />
       </Match>
     </Switch>
   );
@@ -771,7 +771,7 @@ function ReviewStep(props: {
   );
 }
 
-// --- pending / receipt -----------------------------------------------------
+// --- pending ---------------------------------------------------------------
 
 function PendingStep() {
   const { theme } = useTheme();
@@ -794,67 +794,6 @@ function PendingStep() {
     >
       <text fg={theme.text} flexShrink={0}>
         Launching… running Preflight.
-      </text>
-    </box>
-  );
-}
-
-function ReceiptStep(props: {
-  outcome: Accessor<Accessor<LaunchOutcome> | undefined>;
-  onLeave: () => void;
-}) {
-  const { theme } = useTheme();
-  const dimensions = useTerminalDimensions();
-  const exit = useExit();
-  const receipt = () => {
-    const settled = props.outcome()?.();
-    return settled !== undefined && settled.kind === "launched"
-      ? settled
-      : undefined;
-  };
-
-  useBindings(() => ({
-    bindings: [
-      {
-        key: "return",
-        desc: "Home",
-        group: "Run started",
-        cmd: () => props.onLeave(),
-      },
-      {
-        key: "escape",
-        desc: "Home",
-        group: "Run started",
-        cmd: () => props.onLeave(),
-      },
-      { key: "q", desc: "Quit", group: "Run started", cmd: () => exit() },
-      { key: "ctrl+c", desc: "Quit", group: "Run started", cmd: () => exit() },
-    ],
-  }));
-
-  return (
-    <box
-      width={dimensions().width}
-      height={dimensions().height}
-      flexDirection="column"
-      padding={1}
-      gap={1}
-      overflow="hidden"
-      backgroundColor={theme.background}
-    >
-      <text attributes={TextAttributes.BOLD} fg={theme.text} flexShrink={0}>
-        Run started
-      </text>
-      <Show when={receipt()}>
-        {(run) => (
-          <box flexDirection="column" flexShrink={0}>
-            <text fg={theme.text}>{`Run ${run().runId}`}</text>
-            <text fg={theme.text}>{`State: ${run().state}`}</text>
-          </box>
-        )}
-      </Show>
-      <text fg={theme.textMuted} flexShrink={0}>
-        enter home · q quit
       </text>
     </box>
   );

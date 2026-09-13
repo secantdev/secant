@@ -94,6 +94,7 @@ export async function runTuiApp(): Promise<number> {
     try {
       await mountTui(renderer, {
         projectionPort,
+        rendererPort: port,
         exit: (reason) => finish(reason),
       });
       // Mounted: the renderer holds the terminal in raw mode and Home's quit

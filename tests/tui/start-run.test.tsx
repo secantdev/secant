@@ -7,8 +7,10 @@ import type {
   BundleCatalogView,
   LaunchOutcome,
   RunLaunchView,
+  RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
+import type { RendererPort } from "../../src/tui/renderer/renderer.js";
 import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
@@ -30,10 +32,11 @@ import type {
 // through a hand-driven `RunLaunchView` over fake `bundle-catalog` snapshots —
 // the chooser + side panel, the trust-acknowledge control, typed inputs with
 // inline per-input findings, review, pending feedback, each refusal routed to its
-// owning step, and the receipt, with small-width/resize relayout and status
-// readable without colour. The last group exercises the real launch seam
-// (`createLiveRunLaunchView`) over fake `operation`/`run` snapshots, both directly
-// and end-to-end through the App into the receipt.
+// owning step, and the transition into the Run Workbench on success (#91 replaced
+// #90's receipt), with small-width/resize relayout and status readable without
+// colour. The last group exercises the real launch seam (`createLiveRunLaunchView`)
+// over fake `operation`/`run` snapshots, both directly and end-to-end through the
+// App into the Workbench.
 
 const WORKSPACE = "/tmp/secant-launch-workspace";
 
@@ -151,11 +154,74 @@ function fakeLaunch() {
   return { view, calls, resolve: (o: LaunchOutcome) => setOutcome(() => o) };
 }
 
+// The Run Workbench opens only after a successful launch; most flow tests never
+// get there. This stub throws if opened, so a stray transition is caught.
+function noRunView(): RunWorkbenchView {
+  return {
+    openRun() {
+      throw new Error("run workbench not opened in this test");
+    },
+    readResource() {
+      throw new Error("run workbench not opened in this test");
+    },
+  };
+}
+
+// A Run Workbench seam that serves any requested Run id as a resting, succeeded
+// Run, so the receipt-replacement tests can assert the transition into it (#91).
+function succeedingRunView(): RunWorkbenchView {
+  return {
+    openRun(runId) {
+      const [snapshot] = createSignal<RunSnapshot>({
+        family: "run",
+        runId,
+        result: {
+          found: true,
+          run: {
+            runId,
+            bundle: {
+              id: "dev.alpha",
+              version: "1.0.0",
+              name: "Alpha",
+              digest: "d",
+            },
+            workspacePath: WORKSPACE,
+            launchedAt: "2026-01-01T00:00:00.000Z",
+            state: "succeeded",
+            progress: [],
+            position: 0,
+            timeline: [],
+            outputs: [],
+            actionOffers: [],
+          },
+        },
+      });
+      return snapshot;
+    },
+    readResource() {
+      throw new Error("no reference read in this test");
+    },
+  };
+}
+
+// The Workbench sizes itself from the Renderer Port; a fixed fake matching the
+// flow's terminal keeps it consistent. No key input is exercised through here.
+function flowRenderer(width: number, height: number): RendererPort {
+  return {
+    size: () => ({ width, height }),
+    onKey: () => () => {},
+    onResize: () => () => {},
+    destroy() {},
+    destroyed: false,
+  };
+}
+
 async function mountFlow(
   bundlesView: BundleCatalogView,
   launchView: RunLaunchView,
   width = 100,
   height = 40,
+  runView: RunWorkbenchView = noRunView(),
 ) {
   const exits: unknown[] = [];
   const t = await testRender(
@@ -164,6 +230,8 @@ async function mountFlow(
         view={approvedWorkspace()}
         bundles={bundlesView}
         launch={launchView}
+        run={runView}
+        renderer={flowRenderer(width, height)}
         exit={(reason) => exits.push(reason)}
       />
     ),
@@ -275,9 +343,15 @@ test("a Bundle with no declared inputs skips the inputs screen and reaches revie
   );
 });
 
-test("pending feedback then a receipt with the Run id and state; a trusted launch carries no trustDigest", async () => {
+test("pending feedback then a transition into the Workbench for the Run id; a trusted launch carries no trustDigest", async () => {
   const launch = fakeLaunch();
-  const { t } = await mountFlow(catalog([ALPHA]), launch.view);
+  const { t } = await mountFlow(
+    catalog([ALPHA]),
+    launch.view,
+    100,
+    40,
+    succeedingRunView(),
+  );
   t.mockInput.pressEnter(); // → review
   await t.waitForFrame((f) => f.includes("Review"));
   t.mockInput.pressEnter(); // Start
@@ -285,11 +359,13 @@ test("pending feedback then a receipt with the Run id and state; a trusted launc
   assert.equal(launch.calls.length, 1);
   assert.equal(launch.calls[0]?.trustDigest, undefined);
 
+  // A successful launch replaces #90's receipt with the Run's Workbench (#91).
   launch.resolve({ kind: "launched", runId: "run-42", state: "succeeded" });
-  await t.waitForFrame((f) => f.includes("Run started"));
+  await t.waitForFrame((f) => f.includes("Run run-42"));
   const frame = t.captureCharFrame();
   assert.match(frame, /Run run-42/);
-  assert.match(frame, /State: succeeded/);
+  assert.match(frame, /SUCCEEDED/); // state in words as well as colour
+  assert.match(frame, /Timeline/); // timeline-first Workbench
 });
 
 // --- typed inputs + inline findings ---------------------------------------
@@ -423,7 +499,7 @@ test("a Workspace prerequisite failure returns to Bundle selection with the reme
   assert.match(frame, /Start a Run/); // back on the chooser
   assert.match(frame, /Launch refused: workspace-prerequisite-failed/);
   assert.match(frame, /choose another Bundle/);
-  assert.doesNotMatch(frame, /Run started/);
+  assert.doesNotMatch(frame, /Timeline/); // never transitioned into the Workbench
 });
 
 test("a corrupted Bundle returns to selection advising reinstalling it", async () => {
@@ -439,7 +515,7 @@ test("a corrupted Bundle returns to selection advising reinstalling it", async (
   const frame = t.captureCharFrame();
   assert.match(frame, /corrupted/);
   assert.match(frame, /Reinstall the Bundle/);
-  assert.doesNotMatch(frame, /Run started/);
+  assert.doesNotMatch(frame, /Timeline/); // never transitioned into the Workbench
 });
 
 test("declining trust launches nothing and cannot continue", async () => {
@@ -663,7 +739,7 @@ test("live seam: an admitted launch with no Run id is a contract-breach refusal"
   );
 });
 
-test("end-to-end over the live seam: the Run snapshot's id and state become the receipt", async () => {
+test("end-to-end over the live seam: a launched Run transitions into its Workbench", async () => {
   const port = fakePort({
     admission: { admitted: true, operationId: "op-1", runId: "run-9" },
     operation: {
@@ -676,12 +752,15 @@ test("end-to-end over the live seam: the Run snapshot's id and state become the 
   const { t } = await mountFlow(
     catalog([ALPHA]),
     createLiveRunLaunchView(port),
+    100,
+    40,
+    succeedingRunView(),
   );
   t.mockInput.pressEnter(); // Alpha is trusted + no inputs → review
   await t.waitForFrame((f) => f.includes("Review"));
   t.mockInput.pressEnter(); // Start
-  await t.waitForFrame((f) => f.includes("Run started"));
+  await t.waitForFrame((f) => f.includes("Run run-9"));
   const frame = t.captureCharFrame();
   assert.match(frame, /Run run-9/);
-  assert.match(frame, /State: succeeded/);
+  assert.match(frame, /SUCCEEDED/);
 });

@@ -164,6 +164,9 @@ function noRunView(): RunWorkbenchView {
     readResource() {
       throw new Error("run workbench not opened in this test");
     },
+    answer() {
+      throw new Error("run workbench not opened in this test");
+    },
   };
 }
 
@@ -200,6 +203,9 @@ function succeedingRunView(): RunWorkbenchView {
     },
     readResource() {
       throw new Error("no reference read in this test");
+    },
+    answer() {
+      throw new Error("no answer dispatched in this test");
     },
   };
 }

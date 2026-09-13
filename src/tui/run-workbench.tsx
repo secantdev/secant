@@ -11,15 +11,17 @@ import {
   type Accessor,
 } from "solid-js";
 import type {
+  AnswerHumanGateOffer,
   DiagnosticReference,
   Problem,
   ResourceReference,
+  RunCheckpointView,
   RunStepProgress,
   RunStepStatus,
   RunView,
 } from "../application/projection-port.js";
 import type { RendererPort } from "./renderer/renderer.js";
-import { useRunWorkbenchView } from "./run-view.js";
+import { useRunWorkbenchView, type AnswerOutcome } from "./run-view.js";
 import {
   AT_LIVE,
   scrollTimeline,
@@ -36,9 +38,11 @@ import { useTheme } from "./vendor/theme-context.js";
 // of the Renderer Port's `size`/`onKey`/`onResize` (A13): a single raw-key
 // pipeline drives every control and imperatively scrolls the timeline window,
 // while `size`/`onResize` feed the layout breakpoints and the viewport height the
-// pure timeline model (run-timeline.ts) windows over. Presentation only — Run
-// Actions (answer/resume/cancel) land in #92; the Renderer Port stays lifecycle-
-// only elsewhere (see tui/AGENTS.md).
+// pure timeline model (run-timeline.ts) windows over. Its one write is the Review
+// checkpoint interaction (#92): while the `answer-human-gate` offer is live it
+// replaces the bottom footer with two consequence-stating controls that dispatch
+// the answer over run-view's `answer` seam; resume/cancel are later slices. The
+// Renderer Port stays lifecycle-only elsewhere (see tui/AGENTS.md).
 //
 // The scroll/follow/anchor/new-activity mechanics are hand-rolled over the event
 // array rather than OpenTUI's `<scrollbox>` (which OpenCode's session timeline
@@ -49,6 +53,11 @@ import { useTheme } from "./vendor/theme-context.js";
 const HEADER_COMPACT_WIDTH = 40;
 const DETAILS_MIN_WIDTH = 60;
 const DETAILS_HEIGHT = 8;
+/** Rows the Review checkpoint interaction occupies when it replaces the footer
+ *  (#92): facts, the latest verdict, the evidence line, two controls each with
+ *  their consequence, and a status/hint line. Fixed so the timeline viewport
+ *  shrinks to fit and nothing overflows. */
+const CHECKPOINT_HEIGHT = 8;
 /** Large content is bounded: at most this many lines are inspected, with an
  *  explicit truncation marker past it (#91 AC4); the bytes are never inlined into
  *  the snapshot, only fetched on open through the reference. */
@@ -62,7 +71,7 @@ const STEP_GLYPH: Record<RunStepStatus, string> = {
   blocked: "⏸",
 };
 
-type Focus = "timeline" | "details";
+type Focus = "timeline" | "details" | "checkpoint";
 
 /** One openable piece of Run evidence, reached through its reference (#91 AC4):
  *  a bound output, the blocked checkpoint's latest Verdict, or the halt
@@ -110,6 +119,17 @@ export function RunWorkbench(props: {
   const events = () => run()?.timeline ?? [];
   const isBlocked = () => run()?.checkpoint !== undefined;
 
+  const answerOffer = createMemo<AnswerHumanGateOffer | undefined>(() =>
+    run()?.actionOffers.find(
+      (offer): offer is AnswerHumanGateOffer =>
+        offer.action === "answer-human-gate",
+    ),
+  );
+  // The interaction is live only while the offer backs it, so no control ever
+  // lacks a current Action Offer behind it (#92 AC6).
+  const checkpointActive = () =>
+    run()?.checkpoint !== undefined && answerOffer() !== undefined;
+
   const [scroll, setScroll] = createSignal<TimelineScroll>(AT_LIVE);
   const [focus, setFocus] = createSignal<Focus>("timeline");
   const [detailsOpen, setDetailsOpen] = createSignal(false);
@@ -119,6 +139,10 @@ export function RunWorkbench(props: {
     mode: "paused",
     top: 0,
   });
+  const [control, setControl] = createSignal<"continue" | "stop">("continue");
+  const [answerOutcome, setAnswerOutcome] =
+    createSignal<Accessor<AnswerOutcome>>();
+  const [answerRefusal, setAnswerRefusal] = createSignal<Problem | undefined>();
 
   // The evidence the details panel offers, in a stable order: bound outputs,
   // then a blocked checkpoint's latest Verdict, then a halt diagnostic.
@@ -145,6 +169,13 @@ export function RunWorkbench(props: {
     return list;
   });
 
+  // The checkpoint interaction's evidence line: the bound outputs (the latest
+  // output and any candidate changes). The latest Verdict has its own line, so it
+  // is not repeated here (the openables list above still offers it in Details).
+  const evidenceLabels = createMemo<readonly string[]>(() =>
+    (run()?.outputs ?? []).map((output) => `${output.name} (${output.type})`),
+  );
+
   const interiorH = () => Math.max(1, dims().height - 2);
   const innerW = () => Math.max(1, dims().width - 2);
   const compactHeader = () => dims().width < HEADER_COMPACT_WIDTH;
@@ -153,7 +184,9 @@ export function RunWorkbench(props: {
     (isBlocked() ? 1 : 0) +
     1 /*progress*/ +
     1 /*timeline label*/ +
-    1; /*footer*/
+    (checkpointActive()
+      ? CHECKPOINT_HEIGHT
+      : 1); /*footer, or the checkpoint interaction that replaces it*/
   // The details panel needs both room across (its width breakpoint) and room
   // down: DETAILS_HEIGHT rows plus at least one timeline row. On a short terminal
   // it stays hidden rather than clipping the panel and footer off the bottom.
@@ -174,6 +207,70 @@ export function RunWorkbench(props: {
   createEffect(() => {
     if (!detailsShown() && focus() === "details") setFocus("timeline");
   });
+
+  const answerPending = () => {
+    const accessor = answerOutcome();
+    return accessor !== undefined && accessor().kind === "pending";
+  };
+
+  const dispatchAnswer = (answer: "continue" | "stop") => {
+    if (answerPending()) return;
+    const checkpoint = run()?.checkpoint;
+    if (checkpoint === undefined) return;
+    setAnswerRefusal(undefined);
+    // Set the accessor before the settlement effect reads it: the live seam
+    // settles inline, so storing it fires the effect at once (mirrors start-run's
+    // pending-first ordering, which keeps a synchronous seam from wedging).
+    setAnswerOutcome(() => view.answer(checkpoint.gate, answer));
+  };
+
+  // Follow the answer to its settlement. A refusal (a stale Gate, or a Run no
+  // longer blocked) surfaces in the interaction and re-enables the controls; an
+  // applied answer just clears local state — the live snapshot drops the
+  // checkpoint and its offer, so the interaction disappears on its own.
+  createEffect(() => {
+    const accessor = answerOutcome();
+    if (accessor === undefined) return;
+    const settled = accessor();
+    if (settled.kind === "pending") return;
+    if (settled.kind === "refused") setAnswerRefusal(settled.problem);
+    setAnswerOutcome(undefined);
+  });
+
+  // Focus lands on the interaction as each new checkpoint appears and returns to
+  // the timeline when it leaves (#92 AC5), without yanking focus back while the
+  // user has tabbed away during a still-blocked Run. Keyed on the Gate's Attempt,
+  // so a re-block at a *fresh* Gate also resets the control to the safer Continue
+  // and clears any refusal left from answering the previous Gate.
+  let lastGateKey = "";
+  createEffect(() => {
+    const gate = run()?.checkpoint?.gate;
+    const active = checkpointActive();
+    const key = gate !== undefined ? `${gate.stepId}:${gate.attemptId}` : "";
+    if (active && key !== lastGateKey) {
+      setFocus("checkpoint");
+      setControl("continue");
+      setAnswerRefusal(undefined);
+    } else if (!active && focus() === "checkpoint") {
+      setFocus("timeline");
+    }
+    lastGateKey = active ? key : "";
+  });
+
+  // Tab cycles the focusable regions in a stable order: the checkpoint (while its
+  // offer is live), the timeline, then the details panel (while shown).
+  const focusOrder = (): Focus[] => {
+    const order: Focus[] = [];
+    if (checkpointActive()) order.push("checkpoint");
+    order.push("timeline");
+    if (detailsShown()) order.push("details");
+    return order;
+  };
+  const cycleFocus = () => {
+    const order = focusOrder();
+    const index = order.indexOf(focus());
+    setFocus(order[(index + 1) % order.length] ?? "timeline");
+  };
 
   const win = () => timelineWindow(scroll(), events().length, viewportH());
   const visibleEvents = () => {
@@ -276,6 +373,37 @@ export function RunWorkbench(props: {
       if (name === "escape") props.onLeave();
       return;
     }
+    // Review checkpoint interaction (#92): the two controls replace the footer
+    // while the offer is live. Left/right choose, enter dispatches; both are
+    // unavailable while the answer is pending.
+    if (focus() === "checkpoint" && checkpointActive()) {
+      switch (name) {
+        case "left":
+          if (!answerPending()) setControl("continue");
+          return;
+        case "right":
+          if (!answerPending()) setControl("stop");
+          return;
+        case "return":
+          dispatchAnswer(control());
+          return;
+        case "tab":
+          cycleFocus();
+          return;
+        case "d":
+          if (detailsAvailable()) {
+            setDetailsOpen(true);
+            setSelected(0);
+            setFocus("details");
+          }
+          return;
+        case "escape":
+          props.onLeave();
+          return;
+        default:
+          return;
+      }
+    }
     if (focus() === "details" && detailsShown()) {
       switch (name) {
         case "up":
@@ -289,7 +417,7 @@ export function RunWorkbench(props: {
           openSelected();
           return;
         case "tab":
-          setFocus("timeline");
+          cycleFocus();
           return;
         case "d":
           setDetailsOpen(false);
@@ -311,7 +439,7 @@ export function RunWorkbench(props: {
         setFocus("details");
         return;
       case "tab":
-        if (detailsShown()) setFocus("details");
+        cycleFocus();
         return;
       case "escape":
         props.onLeave();
@@ -369,6 +497,12 @@ export function RunWorkbench(props: {
               focus={focus}
               openables={openables}
               selected={selectedRef}
+              checkpointActive={checkpointActive}
+              offer={answerOffer}
+              evidence={evidenceLabels}
+              control={control}
+              answerPending={answerPending}
+              answerRefusal={answerRefusal}
               theme={theme}
             />
           )}
@@ -419,6 +553,12 @@ function Workbench(props: {
   focus: Accessor<Focus>;
   openables: Accessor<readonly Openable[]>;
   selected: Accessor<number>;
+  checkpointActive: Accessor<boolean>;
+  offer: Accessor<AnswerHumanGateOffer | undefined>;
+  evidence: Accessor<readonly string[]>;
+  control: Accessor<"continue" | "stop">;
+  answerPending: Accessor<boolean>;
+  answerRefusal: Accessor<Problem | undefined>;
   theme: Theme;
 }) {
   const { theme } = props;
@@ -530,8 +670,121 @@ function Workbench(props: {
         />
       </Show>
 
+      {/* While the answer-human-gate offer is live the interaction replaces the
+          footer input rather than sharing a permanent rail (#92). */}
+      <Show
+        when={props.checkpointActive() ? run().checkpoint : undefined}
+        fallback={
+          <text fg={theme.textMuted} flexShrink={0}>
+            {clip(footer(), w())}
+          </text>
+        }
+      >
+        {(checkpoint) => (
+          <CheckpointInteraction
+            checkpoint={checkpoint}
+            offer={props.offer}
+            evidence={props.evidence}
+            control={props.control}
+            focused={() => props.focus() === "checkpoint"}
+            pending={props.answerPending}
+            refusal={props.answerRefusal}
+            width={props.innerW}
+            theme={theme}
+          />
+        )}
+      </Show>
+    </box>
+  );
+}
+
+/** The Review checkpoint interaction (#92): the authored message and cadence, the
+ *  completed-iteration count, the latest `fail` Verdict, the openable evidence,
+ *  and two consequence-stating controls. It replaces the footer while blocked;
+ *  every line is plain text so both consequences read with colour removed. */
+function CheckpointInteraction(props: {
+  checkpoint: Accessor<RunCheckpointView>;
+  offer: Accessor<AnswerHumanGateOffer | undefined>;
+  evidence: Accessor<readonly string[]>;
+  control: Accessor<"continue" | "stop">;
+  focused: Accessor<boolean>;
+  pending: Accessor<boolean>;
+  refusal: Accessor<Problem | undefined>;
+  width: Accessor<number>;
+  theme: Theme;
+}) {
+  const { theme } = props;
+  const w = () => props.width();
+  const cp = () => props.checkpoint();
+  const continueLabel = () => `Continue ${cp().interval} More Iterations`;
+  const marker = (which: "continue" | "stop") =>
+    props.focused() && props.control() === which ? "› " : "  ";
+  const evidence = () => {
+    const labels = props.evidence();
+    return labels.length > 0 ? labels.join(" · ") : "(none)";
+  };
+  const status = () => {
+    if (props.pending()) return "… submitting your answer";
+    const refusal = props.refusal();
+    if (refusal !== undefined)
+      return `refused: ${refusal.explanation} ${refusal.remediation}`;
+    return "←/→ choose · enter confirm · tab timeline · esc back · q quit";
+  };
+  return (
+    <box
+      flexDirection="column"
+      height={CHECKPOINT_HEIGHT}
+      flexShrink={0}
+      overflow="hidden"
+      backgroundColor={theme.backgroundPanel}
+    >
+      <text
+        fg={props.focused() ? theme.warning : theme.textMuted}
+        attributes={props.focused() ? TextAttributes.BOLD : 0}
+        flexShrink={0}
+      >
+        {clip(
+          `${props.focused() ? "› " : "  "}Review checkpoint · every ${cp().interval} iteration(s) · ${cp().completedIterations} completed`,
+          w(),
+        )}
+      </text>
       <text fg={theme.textMuted} flexShrink={0}>
-        {clip(footer(), w())}
+        {clip(
+          `  latest: ${cp().latestVerdict.name} = ${cp().latestVerdict.value} · evidence: ${evidence()}`,
+          w(),
+        )}
+      </text>
+      <text
+        fg={theme.text}
+        attributes={props.control() === "continue" ? TextAttributes.BOLD : 0}
+        flexShrink={0}
+      >
+        {clip(
+          `${marker("continue")}[ ${continueLabel()} ]${props.pending() ? "  (unavailable)" : ""}`,
+          w(),
+        )}
+      </text>
+      <text fg={theme.textMuted} flexShrink={0}>
+        {clip(`    ${props.offer()?.continueConsequence ?? ""}`, w())}
+      </text>
+      <text
+        fg={theme.text}
+        attributes={props.control() === "stop" ? TextAttributes.BOLD : 0}
+        flexShrink={0}
+      >
+        {clip(
+          `${marker("stop")}[ Stop Run ]${props.pending() ? "  (unavailable)" : ""}`,
+          w(),
+        )}
+      </text>
+      <text fg={theme.textMuted} flexShrink={0}>
+        {clip(`    ${props.offer()?.stopConsequence ?? ""}`, w())}
+      </text>
+      <text
+        fg={props.refusal() !== undefined ? theme.error : theme.textMuted}
+        flexShrink={0}
+      >
+        {clip(status(), w())}
       </text>
     </box>
   );

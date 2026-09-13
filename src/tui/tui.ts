@@ -17,7 +17,7 @@ export { createLiveRunLaunchView } from "./run-launch-view.js";
 // requires cross-Module test imports to go through this entrypoint. (The lifecycle
 // Renderer Port belongs to the sibling `renderer` Module; tests take its type from
 // that Module's own entrypoint, not re-exported here.)
-export type { RunWorkbenchView } from "./run-view.js";
+export type { RunWorkbenchView, AnswerOutcome } from "./run-view.js";
 export { createLiveRunWorkbenchView } from "./run-view.js";
 // The Workbench's pure timeline model, exposed for #91's unit tests across the
 // boundary, for the same reason.

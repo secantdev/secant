@@ -4,6 +4,7 @@ import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
 import type {
+  AnswerOutcome,
   BundleCatalogView,
   RunLaunchView,
   RunWorkbenchView,
@@ -11,12 +12,15 @@ import type {
 } from "../../src/tui/tui.js";
 import type { RendererPort } from "../../src/tui/renderer/renderer.js";
 import type {
+  AnswerHumanGateOffer,
   BundleCatalogSnapshot,
   BundleFocusSnapshot,
   DiagnosticReference,
   InstalledBundleFocus,
   ResourceRead,
   ResourceReference,
+  RunCheckpointView,
+  RunGateReference,
   RunSnapshot,
   RunStepProgress,
   RunTimelineEvent,
@@ -148,6 +152,16 @@ function refKey(reference: ResourceReference | DiagnosticReference): string {
 function makeRunView(initial: RunSnapshot) {
   const [snapshot, setSnapshot] = createSignal<RunSnapshot>(initial);
   const reads = new Map<string, ResourceRead>();
+  // The answer seam is hand-driven: `answer` records the dispatch and returns the
+  // outcome accessor a test advances (pending → applied/refused), so the tests
+  // exercise the controls-unavailable-while-pending and refusal paths (#92).
+  const [answerOutcome, setAnswerOutcome] = createSignal<AnswerOutcome>({
+    kind: "pending",
+  });
+  const answers: {
+    gate: RunGateReference;
+    answer: "continue" | "stop";
+  }[] = [];
   const view: RunWorkbenchView = {
     openRun: () => snapshot,
     readResource: (reference) =>
@@ -160,6 +174,10 @@ function makeRunView(initial: RunSnapshot) {
           possibleEffects: "none",
         },
       },
+    answer: (gate, answer) => {
+      answers.push({ gate, answer });
+      return answerOutcome;
+    },
   };
   return {
     view,
@@ -171,6 +189,8 @@ function makeRunView(initial: RunSnapshot) {
       }),
     setSnapshot,
     setRead: (key: string, read: ResourceRead) => reads.set(key, read),
+    answers,
+    setAnswerOutcome,
   };
 }
 
@@ -206,6 +226,57 @@ function events(count: number): RunTimelineEvent[] {
     event: "attempt-settled",
     detail: `e${index}`,
   }));
+}
+
+// --- blocked-Run fixtures (#92) --------------------------------------------
+
+const GATE: RunGateReference = {
+  runId: "run-1",
+  stepId: "work",
+  attemptId: "a9",
+  shape: "approve-reject",
+};
+
+const ANSWER_OFFER: AnswerHumanGateOffer = {
+  action: "answer-human-gate",
+  gate: GATE,
+  continueConsequence:
+    "continue: grant one more review interval and resume the Run.",
+  stopConsequence:
+    "stop: end the Run failed, keeping its history and Artifacts.",
+};
+
+function checkpointOf(
+  over: Partial<RunCheckpointView> = {},
+): RunCheckpointView {
+  return {
+    message: over.message ?? "Review the batch",
+    interval: over.interval ?? 3,
+    completedIterations: over.completedIterations ?? 3,
+    latestVerdict: over.latestVerdict ?? {
+      name: "done",
+      value: "fail",
+      reference: {
+        runId: "run-1",
+        artifactName: "done",
+        versionId: "v3",
+        type: "verdict",
+      },
+    },
+    gate: over.gate ?? GATE,
+  };
+}
+
+/** A blocked Run resting at a Review checkpoint with the live answer offer. */
+function blockedRunOf(over: Partial<RunView> = {}): RunView {
+  return runOf({
+    state: "blocked",
+    progress: PROGRESS,
+    position: 1,
+    checkpoint: checkpointOf(),
+    actionOffers: [ANSWER_OFFER],
+    ...over,
+  });
 }
 
 // Mount the App and walk Home → Start a Run → launch → the Workbench. The wizard
@@ -636,6 +707,248 @@ test("resize relayouts the timeline without overflow and keeps every state reada
   await t.renderOnce();
   noOverflow(t.captureCharFrame(), 60);
   assert.match(t.captureCharFrame(), /FAILED/);
+});
+
+// --- Review checkpoint interaction (#92) -----------------------------------
+
+test("a blocked Run shows the checkpoint interaction in place of the footer, with the facts and evidence", async () => {
+  const { t } = await mountWorkbench(
+    blockedRunOf({
+      checkpoint: checkpointOf({
+        message: "Ship it?",
+        interval: 3,
+        completedIterations: 6,
+      }),
+      outputs: [
+        {
+          name: "report",
+          type: "text",
+          reference: {
+            runId: "run-1",
+            artifactName: "report",
+            versionId: "v1",
+            type: "text",
+          },
+        },
+      ],
+    }),
+  );
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Review checkpoint/);
+  assert.match(frame, /every 3 iteration\(s\)/); // cadence
+  assert.match(frame, /6 completed/); // completed-iteration count
+  assert.match(frame, /Ship it\?/); // the authored message
+  assert.match(frame, /latest: done = fail/); // the latest fail Verdict
+  assert.match(frame, /Continue 3 More Iterations/); // control names the count
+  assert.match(frame, /Stop Run/);
+  assert.match(frame, /report/); // evidence: the output link
+  assert.match(frame, /enter confirm/); // the interaction's own hints
+  assert.doesNotMatch(frame, /d details · end latest/); // footer was replaced
+});
+
+test("a non-blocked Run shows no checkpoint control and keeps its footer", async () => {
+  const { t } = await mountWorkbench(runOf({ timeline: events(3) }));
+  const frame = t.captureCharFrame();
+  assert.doesNotMatch(frame, /Review checkpoint/);
+  assert.doesNotMatch(frame, /More Iterations/);
+  assert.match(frame, /d details/); // footer present
+});
+
+test("a checkpoint without a live answer offer shows no controls", async () => {
+  const { t } = await mountWorkbench(
+    runOf({ state: "blocked", checkpoint: checkpointOf(), actionOffers: [] }),
+  );
+  const frame = t.captureCharFrame();
+  assert.doesNotMatch(frame, /More Iterations/); // no control lacks an offer
+  assert.match(frame, /waiting for review/); // the blocked note still shows
+});
+
+test("Continue dispatches answer-human-gate continue against the snapshot's gate, with the granted count in the label", async () => {
+  const { t, control, renderer } = await mountWorkbench(blockedRunOf());
+  // Focus lands on the interaction with Continue selected by default.
+  assert.match(t.captureCharFrame(), /› \[ Continue 3 More Iterations \]/);
+  await press(t, renderer, "return");
+  assert.equal(control.answers.length, 1);
+  assert.equal(control.answers[0]?.answer, "continue");
+  assert.deepEqual(control.answers[0]?.gate, GATE);
+});
+
+test("Stop dispatches answer-human-gate stop against the snapshot's gate", async () => {
+  const { t, control, renderer } = await mountWorkbench(blockedRunOf());
+  await press(t, renderer, "right"); // select Stop
+  assert.match(t.captureCharFrame(), /› \[ Stop Run \]/);
+  await press(t, renderer, "return");
+  assert.equal(control.answers.length, 1);
+  assert.equal(control.answers[0]?.answer, "stop");
+  assert.deepEqual(control.answers[0]?.gate, GATE);
+});
+
+test("the controls are unavailable while the answer is pending and gone once it applies", async () => {
+  const { t, control, renderer } = await mountWorkbench(blockedRunOf());
+  control.setAnswerOutcome({ kind: "pending" });
+  await press(t, renderer, "return"); // dispatch continue
+  await t.renderOnce();
+  assert.equal(control.answers.length, 1);
+  assert.match(t.captureCharFrame(), /submitting your answer/);
+  assert.match(t.captureCharFrame(), /unavailable/);
+  // A second confirm while pending dispatches nothing.
+  await press(t, renderer, "return");
+  assert.equal(control.answers.length, 1);
+  // Applied: the live snapshot leaves blocked and the interaction disappears.
+  control.setAnswerOutcome({ kind: "applied" });
+  control.setRun(
+    runOf({ state: "running", timeline: events(2), actionOffers: [] }),
+  );
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.doesNotMatch(frame, /Review checkpoint/);
+  assert.match(frame, /d details/); // footer returned
+});
+
+test("a refused answer surfaces its Problem and re-enables the controls", async () => {
+  const { t, control, renderer } = await mountWorkbench(blockedRunOf());
+  control.setAnswerOutcome({
+    kind: "refused",
+    problem: {
+      code: "gate-stale",
+      explanation: "The Gate moved on.",
+      remediation: "Re-open the Run.",
+      possibleEffects: "none",
+    },
+  });
+  await press(t, renderer, "return");
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /refused: The Gate moved on/);
+  assert.doesNotMatch(frame, /unavailable/); // controls available again
+});
+
+test("a Run that blocks again after a granted interval shows the interaction with the advanced count", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    blockedRunOf({ checkpoint: checkpointOf({ completedIterations: 3 }) }),
+  );
+  assert.match(t.captureCharFrame(), /3 completed/);
+  await press(t, renderer, "return"); // continue
+  control.setAnswerOutcome({ kind: "applied" });
+  control.setRun(
+    runOf({ state: "running", timeline: events(4), actionOffers: [] }),
+  );
+  await t.renderOnce();
+  assert.doesNotMatch(t.captureCharFrame(), /Review checkpoint/);
+  // It blocks again after the granted interval, with an advanced count.
+  control.setRun(
+    blockedRunOf({ checkpoint: checkpointOf({ completedIterations: 6 }) }),
+  );
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Review checkpoint/);
+  assert.match(frame, /6 completed/);
+});
+
+test("a re-block at a fresh Gate resets the control to Continue and clears a prior refusal", async () => {
+  const { t, control, renderer } = await mountWorkbench(blockedRunOf());
+  // Select Stop and dispatch; the answer is refused (the Gate moved on).
+  control.setAnswerOutcome({
+    kind: "refused",
+    problem: {
+      code: "gate-stale",
+      explanation: "The Gate moved on.",
+      remediation: "Re-open the Run.",
+      possibleEffects: "none",
+    },
+  });
+  await press(t, renderer, "right"); // select Stop
+  await press(t, renderer, "return");
+  await t.renderOnce();
+  assert.match(t.captureCharFrame(), /refused: The Gate moved on/);
+  assert.match(t.captureCharFrame(), /› \[ Stop Run \]/); // Stop still selected
+
+  // The Run runs on, then re-blocks at a *fresh* Gate (a different Attempt).
+  control.setRun(
+    runOf({ state: "running", timeline: events(2), actionOffers: [] }),
+  );
+  await t.renderOnce();
+  control.setRun(
+    blockedRunOf({
+      checkpoint: checkpointOf({
+        gate: { ...GATE, attemptId: "a10" },
+        completedIterations: 6,
+      }),
+    }),
+  );
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Review checkpoint/);
+  assert.match(frame, /6 completed/); // the advanced count
+  assert.doesNotMatch(frame, /refused/); // the stale refusal is gone
+  assert.match(frame, /› \[ Continue 3 More Iterations \]/); // reset to Continue
+});
+
+test("Stop leaves the Run failed with its timeline and Artifacts still browsable", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    blockedRunOf({ timeline: events(3) }),
+  );
+  await press(t, renderer, "right"); // Stop
+  await press(t, renderer, "return");
+  control.setAnswerOutcome({ kind: "applied" });
+  control.setRun(
+    runOf({
+      state: "failed",
+      timeline: events(3),
+      outputs: [
+        {
+          name: "report",
+          type: "text",
+          reference: {
+            runId: "run-1",
+            artifactName: "report",
+            versionId: "v1",
+            type: "text",
+          },
+        },
+      ],
+      actionOffers: [],
+    }),
+  );
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /FAILED/);
+  assert.doesNotMatch(frame, /Review checkpoint/);
+  assert.match(frame, / e0/); // the timeline is intact
+  await press(t, renderer, "d"); // Artifacts still browsable
+  assert.match(t.captureCharFrame(), /report \(text\)/);
+});
+
+test("focus lands on the checkpoint when it appears, tabs to the timeline, and returns when it leaves", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    blockedRunOf({ timeline: events(4) }),
+  );
+  assert.match(t.captureCharFrame(), /› Review checkpoint/); // focus on the interaction
+  await press(t, renderer, "tab"); // to the timeline
+  assert.match(t.captureCharFrame(), /› Timeline/);
+  await press(t, renderer, "tab"); // wraps back to the checkpoint
+  assert.match(t.captureCharFrame(), /› Review checkpoint/);
+  // When it leaves, focus returns to the timeline.
+  control.setAnswerOutcome({ kind: "applied" });
+  control.setRun(
+    runOf({ state: "failed", timeline: events(4), actionOffers: [] }),
+  );
+  await t.renderOnce();
+  assert.match(t.captureCharFrame(), /› Timeline/);
+});
+
+test("the checkpoint interaction fits small widths without overflow and states both consequences without colour", async () => {
+  const { t, renderer } = await mountWorkbench(blockedRunOf(), 100, 30);
+  let frame = t.captureCharFrame();
+  noOverflow(frame, 100);
+  assert.match(frame, /grant one more review interval/); // continue consequence, plain text
+  assert.match(frame, /end the Run failed/); // stop consequence, plain text
+  renderer.resize(40, 24);
+  await t.renderOnce();
+  frame = t.captureCharFrame();
+  noOverflow(frame, 40);
+  assert.match(frame, /Continue 3 More Iterations/); // controls still readable
+  assert.match(frame, /Stop Run/);
 });
 
 // --- not found -------------------------------------------------------------

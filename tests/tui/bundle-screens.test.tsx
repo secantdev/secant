@@ -173,6 +173,9 @@ function noRunView(): RunWorkbenchView {
     readResource() {
       throw new Error("run workbench not used in this test");
     },
+    answer() {
+      throw new Error("run workbench not used in this test");
+    },
   };
 }
 function fakeRenderer(): RendererPort {

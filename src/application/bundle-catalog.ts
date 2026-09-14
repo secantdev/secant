@@ -32,6 +32,13 @@ import type {
   RoutingNodeView,
   RoutingStepView,
 } from "./projection-port.js";
+import {
+  bundleBytesCorrupt,
+  bundleBytesMissing,
+  bundleNotInstalled,
+  noStableVersion,
+  versionNotInstalled,
+} from "./problems.js";
 
 // The `bundle-catalog` Projection join (#54). It reads Catalog Entries and their
 // managed bytes through the Catalog Interface, asks the Bundle Module to inspect
@@ -156,11 +163,22 @@ function inspectEntry(
 ): { inspection: BundleInspection } | { problem: Problem } {
   const bytes = deps.catalog.readManagedBytes(entry.digest);
   if (bytes === undefined) {
-    return { problem: managedBytesMissing(entry) };
+    return {
+      problem: bundleBytesMissing({
+        digest: entry.digest,
+        id: entry.id,
+        version: entry.version,
+      }),
+    };
   }
   const outcome = inspectBundle(bytes, deps.budgets, includeComposition);
   if (!outcome.ok) {
-    return { problem: managedBytesCorrupt(entry, outcome.finding.code) };
+    return {
+      problem: bundleBytesCorrupt(
+        { digest: entry.digest, id: entry.id, version: entry.version },
+        outcome.finding.code,
+      ),
+    };
   }
   return { inspection: outcome.inspection };
 }
@@ -348,64 +366,5 @@ function engineRange(engine: string, engineVersion: string): EngineRange {
       : {
           note: `needs Secant ≥ ${semver.major(floor)}.${semver.minor(floor)}`,
         }),
-  };
-}
-
-// --- problems --------------------------------------------------------------
-
-function bundleNotInstalled(id: string): Problem {
-  return {
-    code: "bundle-not-installed",
-    explanation: `No Bundle with id ${id} is installed.`,
-    remediation:
-      "Run `secant bundle list` to see installed Bundles, then inspect one by its id.",
-    possibleEffects: "none",
-    details: { id },
-  };
-}
-
-function versionNotInstalled(id: string, version: string): Problem {
-  return {
-    code: "bundle-version-not-installed",
-    explanation: `${id}@${version} is not installed.`,
-    remediation:
-      "Run `secant bundle list` to see the installed versions, then name one that is installed.",
-    possibleEffects: "none",
-    details: { id, version },
-  };
-}
-
-function noStableVersion(id: string): Problem {
-  return {
-    code: "no-stable-version-installed",
-    explanation: `Only prerelease versions of ${id} are installed; a prerelease must be named explicitly.`,
-    remediation:
-      "Run `secant bundle inspect <id>@<version>` naming a prerelease.",
-    possibleEffects: "none",
-    details: { id },
-  };
-}
-
-function managedBytesMissing(entry: CatalogEntry): Problem {
-  return {
-    code: "bundle-bytes-missing",
-    explanation: `${entry.id}@${entry.version} is recorded as installed, but its stored bytes are missing.`,
-    remediation:
-      "Reinstall the Bundle to restore its bytes, or remove the stale Catalog Entry.",
-    possibleEffects: "none",
-    details: { id: entry.id, version: entry.version },
-  };
-}
-
-function managedBytesCorrupt(
-  entry: CatalogEntry,
-  findingCode: string,
-): Problem {
-  return {
-    code: "bundle-bytes-corrupt",
-    explanation: `${entry.id}@${entry.version} is installed, but its stored bytes no longer validate (${findingCode}).`,
-    remediation: "Reinstall the Bundle to restore intact bytes.",
-    possibleEffects: "none",
-    details: { id: entry.id, version: entry.version, finding: findingCode },
   };
 }

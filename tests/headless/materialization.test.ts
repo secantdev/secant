@@ -1,21 +1,14 @@
 import assert from "node:assert/strict";
-import { realpathSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import {
-  createApplication,
-  type RunExecution,
-} from "../../src/application/application.js";
-import { openCatalog } from "../../src/catalog/catalog.js";
-import { executeRouting } from "../../src/run/execution/execution.js";
-import { openRunGroup } from "../../src/run/store/store.js";
-import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
+import { runHeadless } from "../../src/headless/headless.js";
 import {
   ensureRuntimeOnPath,
   hostPlatform,
   writeMaterializationBundle,
 } from "../helpers/commandBundle.js";
-import { makeTempDir } from "../helpers/tempDir.js";
+import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 
 // #88 through the headless CLI: `run show` names the conflict and its path and
 // prints the diagnostic (read through its reference, AC5); `run resume` continues
@@ -23,57 +16,23 @@ import { makeTempDir } from "../helpers/tempDir.js";
 
 ensureRuntimeOnPath();
 
-const runExecution: RunExecution = ({ routing, owner }) =>
-  executeRouting(routing, {
-    owner,
-    platform: hostPlatform(),
-    resolveAsset: () => undefined,
-  });
-
 function harness(t: TestContext) {
-  const catalog = openCatalog(makeTempDir("secant-matcli-home-"));
-  t.after(() => catalog.close());
-  const workspace = realpathSync.native(makeTempDir("secant-matcli-ws-"));
-  const runGroup = openRunGroup(makeTempDir("secant-matcli-store-"), workspace);
-  t.after(() => runGroup.close());
-  const clients = createApplication({
-    catalog,
-    launchWorkspacePath: workspace,
+  const h = openHeadlessHarness(t, {
+    slug: "secant-matcli",
     hostPlatform: hostPlatform(),
-    runGroup,
-    runExecution,
   });
-  const out: string[] = [];
-  const err: string[] = [];
-  const io: HeadlessIO = {
-    out: (text) => out.push(text),
-    err: (text) => err.push(text),
-    cwd: () => workspace,
-  };
   return {
-    clients,
-    catalog,
-    workspace,
-    io,
-    stdout: () => out.join(""),
-    stderr: () => err.join(""),
-    reset: () => {
-      out.length = 0;
-      err.length = 0;
-    },
+    ...h,
     install: (tamper: "modify" | "delete" | "none") => {
       const bundle = writeMaterializationBundle({
-        workspaceAbsPath: workspace,
+        workspaceAbsPath: h.workspace,
         tamper,
       });
-      assert.equal(
-        runHeadless(clients, ["bundle", "build", bundle.folder], io),
-        0,
-      );
-      out.length = 0;
-      const entry = catalog.listEntries().find((e) => e.id === bundle.id);
+      assert.equal(h.run(["bundle", "build", bundle.folder]), 0);
+      h.reset();
+      const entry = h.catalog.listEntries().find((e) => e.id === bundle.id);
       assert.ok(entry);
-      catalog.approveWorkspace(workspace, new Date());
+      h.catalog.approveWorkspace(h.workspace, new Date());
       return { id: bundle.id, digest: entry.digest };
     },
   };

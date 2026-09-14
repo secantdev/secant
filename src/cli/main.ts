@@ -41,10 +41,10 @@ async function main(argv: readonly string[]): Promise<void> {
 // false inside a Bun single-file executable on Windows (a Bun quirk verified in
 // #62) — so key off `Bun.main`, the entry path Bun exposes under the compiled
 // binary and `bun src/cli/main.ts` alike. Normalise separators because `Bun.main`
-// uses "/" while `fileURLToPath` yields the platform's. The Node test runner
-// imports this module (no `Bun` global, and not the entry), so main never runs
-// under test. This is the one target-source site allowed to touch a Bun API
-// (ADR 0030 runtime-neutrality allowlist).
+// uses "/" while `fileURLToPath` yields the platform's. A test importing this
+// module has no `Bun` global and is not the entry, so main never runs under test.
+// This is one of the target-source sites the ADR 0030 runtime-neutrality allowlist
+// permits a Bun API — here keyed to `Bun.main` and nothing else.
 function isMainEntry(): boolean {
   const bunMain = (globalThis as { Bun?: { main?: string } }).Bun?.main;
   if (bunMain === undefined) return false;

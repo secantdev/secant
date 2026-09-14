@@ -3,12 +3,15 @@
 Read this when changing tests or fixtures.
 
 The default suite discovers tests recursively and is deterministic: it requires no network, credentials, installed Harness, real terminal, arbitrary
-sleep, or other unstable external state. Tests requiring those resources are opt-in.
+sleep, or other unstable external state. Tests requiring those resources are opt-in. Tests are written against the `node:test` API and run under Bun's
+test runner (`bun test`), not `bun:test`; `bunfig.toml` records why the per-test timeout is a CLI `--timeout` flag rather than a `[test] timeout` key
+(that key applies only to `bun:test`, so it never reaches these tests).
 
 Package smoke tests install the produced artefact in an isolated temporary location and exercise its entrypoint: the Bun compiled single-file
-executable is copied out of `dist/` and run there, covering `--help` and `--version` plus the headless commands a slice lands (currently approving a
-Workspace under a temporary `SECANT_HOME` and reading it back with `--json`). They are the CI acceptance seam for headless work and do not invoke a
-real Harness.
+executable is copied out of `dist/` and run there. It covers far more than `--help`/`--version` now — approving a Workspace under a temporary
+`SECANT_HOME` and reading it back with `--json`, building a Proof Bundle, launching Runs that reach `succeeded`, that halt on a materialization
+conflict, and that pause at a Human Gate for an answer, plus the no-interactive-terminal and `git-worktree-root` refusals. They are the CI acceptance
+seam for headless work and do not invoke a real Harness.
 
 Test observable behavior through the same Interface callers use. Internal refactoring should not require test rewrites. When shallow Modules are
 replaced by a deeper Module, replace their implementation-coupled tests rather than retaining both suites.

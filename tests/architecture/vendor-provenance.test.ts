@@ -66,17 +66,34 @@ test("a bun: specifier written as a template literal does not evade the check", 
   );
 });
 
-test("an allowlisted target file may touch a Bun API", () => {
+test("an allowlisted target file may touch its permitted Bun API", () => {
   const root = synthetic((r) => {
     mkdirSync(join(r, "src", "cli"), { recursive: true });
-    // Both forms the check flags — a `bun:` import and a `Bun.*` call — pass
-    // here only because src/cli/main.ts is on the allowlist.
+    // src/cli/main.ts is keyed to `Bun.main` specifically; using exactly that
+    // permitted API passes.
     writeFileSync(
       join(r, "src", "cli", "main.ts"),
-      'import { Database } from "bun:sqlite";\nexport const w = Bun.stringWidth("x");\nexport const d = Database;\n',
+      "export const isEntry = Bun.main === import.meta.url;\n",
     );
   });
   assert.deepEqual(checkVendorProvenance(root), []);
+});
+
+test("an allowlisted file touching a Bun API other than its permitted one is rejected", () => {
+  const root = synthetic((r) => {
+    mkdirSync(join(r, "src", "run", "store"), { recursive: true });
+    // store.ts is keyed to `bun:sqlite` only; the extra `Bun.spawn` is a
+    // different Bun API and must be flagged even though the file is allowlisted.
+    writeFileSync(
+      join(r, "src", "run", "store", "store.ts"),
+      'import { Database } from "bun:sqlite";\nexport const child = Bun.spawn(["true"]);\nexport const d = Database;\n',
+    );
+  });
+  const issues = checkVendorProvenance(root);
+  // Exactly the non-permitted API is flagged; the permitted `bun:sqlite` import
+  // raises nothing on its own.
+  assert.equal(issues.length, 1);
+  assert.match(issues[0]!.message, /not Bun\.spawn/);
 });
 
 test("a vendored file without the provenance records is rejected", () => {

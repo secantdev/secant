@@ -90,7 +90,7 @@ what integrity and trust mean before execution.
   them. `--output` additionally exports those same bytes; `--no-install` skips only the store and Catalog write and requires `--output`.
   `bundle install <file.wfb>` imports a file obtained elsewhere through the identical validator, managed store, and Catalog path. Neither operation
   modifies its input, executes content, loads code, or fetches remote content.
-- Built-in Bundles are built once in CI as Shipped Bundles, ship inside the package, and are installed through `bundle install` ingestion at every
+- Built-in Bundles are built once in CI as Shipped Bundles, ship inside the single-file executable, and are installed through `bundle install` ingestion at every
   startup when their identity is absent. Their version is authored, independent of the package version, and locked with its digest so a content
   change forces a version bump. Upgrades install the new version beside the old one; see
   [ADR 0029](../adr/0029-ship-built-in-workflow-bundles-as-release-built-wfb-files-installed-at-startup.md).

@@ -16,7 +16,16 @@ import type {
   AttemptOutcome,
   ProducedArtifact,
 } from "../../workflow/workflow.js";
-import { openArtifactRepo, type StageProblem } from "./artifacts/artifacts.js";
+import {
+  isolatedGitEnvironment,
+  openArtifactRepo,
+  type StageProblem,
+} from "./artifacts/artifacts.js";
+
+// Re-exported from the Run Store entry so Preflight can harden its `git` worktree
+// probe with the same isolation the private Artifact repo uses, without importing
+// the private Artifact Module across the Module boundary (A31).
+export { isolatedGitEnvironment };
 
 // The Run Store owns each Run's canonical truth and the cross-Run coordination
 // for one Workspace. Runs sharing a resolved absolute Workspace path are grouped
@@ -386,9 +395,9 @@ function toRunRecord(row: z.infer<typeof runRecordRow>): RunRecord {
 function stageRunStore(dir: string, record: RunRecord): void {
   mkdirSync(dir, { recursive: true });
   mkdirSync(join(dir, "staging"), { recursive: true });
-  // ponytail: `diagnostics/` is created empty; the 90-day expiry runs once a
-  // slice actually writes diagnostics there — no writer exists yet, so pruning
-  // has nothing to do. Add the prune-on-open then.
+  // ponytail: `diagnostics/` is created empty here; `recordMaterializationConflict`
+  // is its writer (#88). The ADR 0023 90-day expiry is still not implemented —
+  // there is no prune-on-open anywhere in `src/`. T2 adds the prune.
   mkdirSync(join(dir, "diagnostics"), { recursive: true });
   const database = new Database(join(dir, "run.db"));
   try {

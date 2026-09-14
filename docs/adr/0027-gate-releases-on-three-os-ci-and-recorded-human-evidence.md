@@ -1,6 +1,6 @@
 # Gate Releases On Three-OS CI And Recorded Human Evidence
 
-Every push and pull request runs the canonical `npm run check` on Windows x64, macOS arm64, and Linux x64 with one pinned Node version, and a red job
+Every push and pull request runs the canonical `bun run check` on Windows x64, macOS arm64, and Linux x64 with one pinned Node version, and a red job
 on any operating system blocks merge. A release is a `v*` tag whose workflow re-runs that gate on all three, then publishes to npm from CI behind a
 `release` GitHub environment with one required human reviewer. Nothing is published from a developer machine. The
 [cross-platform gate decision](https://github.com/DevFlow-HQ/devflow-cli/issues/26) fixes this because the repository is public, so the runners
@@ -15,7 +15,7 @@ are free, Windows is the first-priority platform, and the OpenTUI prototype show
 - The package smoke installs the packed archive under a temporary global prefix and runs one headless Proof Bundle Run from the installed command,
   because missing `files` entries, ESM resolution, and OpenTUI's per-platform native binary only fail from the installed package.
 - A small real-terminal lifecycle suite runs under a throwaway pseudo-terminal as its own blocking CI job on all three operating systems, outside
-  `npm run check`. `node-pty` is a devDependency for that suite only; the import-boundary check keeps it out of `src/`. The
+  `bun run check`. `node-pty` is a devDependency for that suite only; the import-boundary check keeps it out of `src/`. The
   [runtime decision](https://github.com/DevFlow-HQ/devflow-cli/issues/21) retired PTY as a Harness transport, not as test instrumentation.
 - No CI retries. A flaky test is fixed or moved to the opt-in suite, and the implementing issue records which.
 

@@ -12,24 +12,20 @@ export type { WorkspaceView } from "./workspace-view.js";
 export type { BundleCatalogView } from "./bundle-view.js";
 export type { RunLaunchView, LaunchOutcome } from "./run-launch-view.js";
 export { createLiveRunLaunchView } from "./run-launch-view.js";
-// The Run Workbench read seam crosses the Module boundary for #91's renderer
-// tests, the way createLiveRunLaunchView does for #90 — the boundary suite
-// requires cross-Module test imports to go through this entrypoint. (The lifecycle
-// Renderer Port belongs to the sibling `renderer` Module; tests take its type from
-// that Module's own entrypoint, not re-exported here.)
+// The Run Workbench, Previous Runs, and Run Actions view types are the App prop
+// contract and cross the Module boundary for the #91/#92 renderer tests, which
+// import these types here — the boundary suite requires cross-Module test imports
+// to go through this entrypoint. Their live factories are built only inside
+// `mount.tsx`, so — unlike the launch seam above — they are not re-exported. (The
+// lifecycle Renderer Port belongs to the sibling `renderer` Module; tests take its
+// type from that Module's own entrypoint, not re-exported here.)
 export type { RunWorkbenchView, AnswerOutcome } from "./run-view.js";
-export { createLiveRunWorkbenchView } from "./run-view.js";
-// The Previous Runs read seam and the Run Actions submit seam (#92 ticket) cross
-// the Module boundary for the list/Workbench renderer tests, the same way — the
-// boundary suite requires cross-Module test imports to go through this entrypoint.
 export type {
   RunListView,
   RunListController,
   RunListState,
 } from "./run-list-view.js";
-export { createLiveRunListView } from "./run-list-view.js";
 export type { RunActionsView, RunActionOutcome } from "./run-actions-view.js";
-export { createLiveRunActionsView } from "./run-actions-view.js";
 // The Workbench's pure timeline model, exposed for #91's unit tests across the
 // boundary, for the same reason.
 export {

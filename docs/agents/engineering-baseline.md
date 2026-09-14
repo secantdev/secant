@@ -7,9 +7,9 @@ advisory.
 
 ## Activation
 
-This policy is authoritative while its mechanical gate is being established. Until the Minimum Verification contract is implemented and green, only
-work whose purpose is to enable this baseline may change production code or start a prototype. That bootstrap work runs every already-available check
-and is complete only when the full gate passes.
+The Minimum Verification gate is established and green — every bullet below is enforced by the canonical check — so this baseline is fully in force and
+every change to production code or a prototype obeys it. During the bootstrap, before the gate existed, only work whose purpose was to enable this
+baseline could change production code or start a prototype; that phase is over.
 
 ## Scope
 

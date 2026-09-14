@@ -16,75 +16,37 @@ import {
   writeRepeatBundle,
   type RepeatBundleOptions,
 } from "../helpers/commandBundle.js";
+import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 ensureRuntimeOnPath();
 
-async function harness(
-  t: TestContext,
-  opts: { commandTimeoutMs?: number } = {},
-) {
-  const runExecution: RunExecution = ({ routing, owner }) =>
-    executeRouting(routing, {
-      owner,
-      platform: hostPlatform(),
-      resolveAsset: () => undefined,
-      ...(opts.commandTimeoutMs !== undefined
-        ? { commandTimeoutMs: opts.commandTimeoutMs }
-        : {}),
-    });
-  const catalog = openCatalog(makeTempDir("secant-runcli-home-"));
-  t.after(() => catalog.close());
-  const workspace = realpathSync.native(makeTempDir("secant-runcli-ws-"));
-  const runGroup = openRunGroup(makeTempDir("secant-runcli-store-"), workspace);
-  t.after(() => runGroup.close());
-  const clients = createApplication({
-    catalog,
-    launchWorkspacePath: workspace,
-    runGroup,
-    runExecution,
+function harness(t: TestContext, opts: { commandTimeoutMs?: number } = {}) {
+  const h = openHeadlessHarness(t, {
+    slug: "secant-runcli",
+    ...(opts.commandTimeoutMs !== undefined
+      ? { commandTimeoutMs: opts.commandTimeoutMs }
+      : {}),
   });
-  const out: string[] = [];
-  const err: string[] = [];
-  const io: HeadlessIO = {
-    out: (text) => out.push(text),
-    err: (text) => err.push(text),
-    cwd: () => workspace,
-  };
   return {
-    clients,
-    catalog,
-    workspace,
-    io,
-    stdout: () => out.join(""),
-    stderr: () => err.join(""),
-    reset: () => {
-      out.length = 0;
-      err.length = 0;
-    },
-    install: (opts?: Parameters<typeof writeCommandBundle>[0]) => {
-      const cmd = writeCommandBundle(opts);
-      assert.equal(
-        runHeadless(clients, ["bundle", "build", cmd.folder], io),
-        0,
-      );
-      out.length = 0;
-      const entry = catalog.listEntries().find((e) => e.id === cmd.id);
+    ...h,
+    install: (bundleOpts?: Parameters<typeof writeCommandBundle>[0]) => {
+      const cmd = writeCommandBundle(bundleOpts);
+      assert.equal(h.run(["bundle", "build", cmd.folder]), 0);
+      h.reset();
+      const entry = h.catalog.listEntries().find((e) => e.id === cmd.id);
       assert.ok(entry);
       return { id: cmd.id, digest: entry.digest };
     },
-    installRepeat: (opts: RepeatBundleOptions) => {
-      const bundle = writeRepeatBundle(opts);
-      assert.equal(
-        runHeadless(clients, ["bundle", "build", bundle.folder], io),
-        0,
-      );
-      out.length = 0;
-      const entry = catalog.listEntries().find((e) => e.id === bundle.id);
+    installRepeat: (repeatOpts: RepeatBundleOptions) => {
+      const bundle = writeRepeatBundle(repeatOpts);
+      assert.equal(h.run(["bundle", "build", bundle.folder]), 0);
+      h.reset();
+      const entry = h.catalog.listEntries().find((e) => e.id === bundle.id);
       assert.ok(entry);
       return { id: bundle.id, digest: entry.digest };
     },
-    approve: () => catalog.approveWorkspace(workspace, new Date()),
+    approve: () => h.catalog.approveWorkspace(h.workspace, new Date()),
   };
 }
 

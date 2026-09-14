@@ -1,6 +1,7 @@
 # Secant
 
-> In development. Nothing is published to npm yet, and there is no usable command beyond `--help` and `--version`. Everything here will change.
+> In development. Nothing is published yet. The shell already carries `workspace`, `bundle`, and `run` command groups (approve a Workspace; build,
+> install, list, and inspect Bundles; launch, watch, answer, resume, cancel, and delete Runs) plus the interactive TUI. Everything here will change.
 
 Secant reaches an outcome by routing between Steps: it drives an external coding Harness through a Workflow Bundle against a Workspace. The
 implementation is being built from an empty, green baseline — see the migration decisions in [docs/adr](./docs/adr/) and the domain model in

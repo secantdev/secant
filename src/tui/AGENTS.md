@@ -19,6 +19,16 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - The timeline's scroll/live-edge/anchor/new-activity is a pure index reducer (`run-timeline.ts`), not OpenTUI's `<scrollbox>` (which OpenCode's session
   timeline uses): the durable timeline is append-only, so an absolute `top` index keeps naming the same first-visible event as newer events land — that
   append-stability _is_ the prepend anchor, and the new-activity count is `total − viewportBottom`. Neither exists in the scrollbox.
+- Exactly one screen mounts at a time (`app.tsx`), so a screen's key bindings exist only while it is active and cannot conflict with another's. And
+  `useBindings({ enabled })` must be gated off while a dialog overlays a screen (the approval dialog over Home, `home.tsx`), or the overlaid screen's
+  bindings fire under the dialog.
+- `clip()` (`clip.ts`) is not the horizontal-overflow guard — a container's `overflow="hidden"` already clips at width. It is the ellipsis affordance:
+  call it only on a row that should _advertise_ its truncation with a trailing `…` (a name, path, or status that can exceed the inner width), not on
+  every row.
+- Sanctioned Seam leak (A29): `createProductionRenderer` (`renderer/renderer.ts`) returns an `@opentui/core` `CliRenderer` that composition
+  (`composition/tui-runtime.ts`) binds and hands to `mountTui`, so an inferred `@opentui/core` type crosses into composition where the boundary suite —
+  which reads only import specifiers — cannot see it. Deliberate and ADR 0018-sanctioned: Solid's `render(node, renderer)` mounts onto that object while
+  the Renderer Port keeps lifecycle. Recorded here because the check is blind to it.
 
 ## Tests
 
@@ -36,3 +46,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   reference resolution the Workbench uses; `run-list-view.tsx` — the Previous Runs read seam that pages older rows by cursor and appends them, the only
   seam that re-opens its Projection to grow a page); a write goes through a per-screen submit seam (`run-actions-view.tsx` — resume/cancel/delete, mirroring
   `run-launch-view.tsx`). The Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`.
+- `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; reuses the single-active-index selection model of `bundle-list.tsx`).
+- `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-screen status wording — keep it matching `headless/render.ts` so
+  the TUI and headless surfaces say the same thing about the same fact.

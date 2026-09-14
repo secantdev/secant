@@ -673,9 +673,9 @@ function runCommand(step: CommandStep, context: StepContext): StepAttempt {
   // and is retryable.
   if (result.error !== undefined) {
     // ponytail: the original cause (result.error / partial stderr) is dropped —
-    // the Run Store has no diagnostic channel for a failed Attempt yet
-    // (`diagnostics/` has no writer). Preserve it there when that writer lands, so
-    // a user can see why a Step could not execute.
+    // the Run Store's `diagnostics/` has a writer (materialization conflicts, #88)
+    // but no channel for a failed Attempt yet. Route this cause there when that
+    // channel lands, so a user can see why a Step could not execute.
     return { outcome: "failed", outputs: [] };
   }
 

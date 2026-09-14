@@ -6,35 +6,16 @@ import test, { type TestContext } from "node:test";
 import { createApplication } from "../../src/application/application.js";
 import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
+import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
-async function harness(t: TestContext) {
-  const catalog = await openCatalog(makeTempDir("secant-headless-home-"));
-  t.after(() => catalog.close());
-  const workspace = realpathSync.native(makeTempDir("secant-headless-ws-"));
-  const clients = createApplication({
-    catalog,
-    launchWorkspacePath: workspace,
+// This suite exercises Bundle and Workspace commands only, so it wires no Run
+// Store or execution.
+function harness(t: TestContext) {
+  return openHeadlessHarness(t, {
+    slug: "secant-headless",
+    runSupport: false,
   });
-  const out: string[] = [];
-  const err: string[] = [];
-  const io: HeadlessIO = {
-    out: (text) => out.push(text),
-    err: (text) => err.push(text),
-    cwd: () => workspace,
-  };
-  return {
-    clients,
-    catalog,
-    workspace,
-    io,
-    stdout: () => out.join(""),
-    stderr: () => err.join(""),
-    reset: () => {
-      out.length = 0;
-      err.length = 0;
-    },
-  };
 }
 
 test("approve then show --json reports approved with the canonical path", async (t) => {

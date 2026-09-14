@@ -5,18 +5,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import {
-  createApplication,
-  type RunExecution,
-} from "../../src/application/application.js";
-import { openCatalog } from "../../src/catalog/catalog.js";
-import { executeRouting } from "../../src/run/execution/execution.js";
-import { openRunGroup } from "../../src/run/store/store.js";
-import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
-import {
   ensureRuntimeOnPath,
   hostPlatform,
   RUNTIME_NAME,
 } from "../helpers/commandBundle.js";
+import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // #86 through a real child process on every OS (AC1, AC4, AC5, AC6): a Secant
@@ -133,48 +126,26 @@ test(
     };
     const bundleFolder = writeRecoveryBundle(markers);
 
-    const runExecution: RunExecution = ({ routing, owner }) =>
-      executeRouting(routing, {
-        owner,
-        platform: hostPlatform(),
-        resolveAsset: () => undefined,
-      });
-
     // In-process setup over the same home the child will use: build, approve, and
-    // read the installed digest, then let the child launch under it.
-    const sink = () => {
-      const lines: string[] = [];
-      const io: HeadlessIO = {
-        out: (s) => lines.push(s),
-        err: (s) => lines.push(s),
-        cwd: () => workspace,
-      };
-      return { io, text: () => lines.join("") };
-    };
+    // read the installed digest, then close the handles before the child launches
+    // under the same home (autoClose off so the close happens before the spawn).
     let digest: string;
     {
-      const catalog = openCatalog(home);
-      const group = openRunGroup(home, workspace);
-      const app = createApplication({
-        catalog,
-        launchWorkspacePath: workspace,
+      const h = openHeadlessHarness(t, {
+        slug: "secant-recovery",
+        home,
+        workspace,
         hostPlatform: hostPlatform(),
-        runGroup: group,
-        runExecution,
+        autoClose: false,
       });
-      const s = sink();
-      assert.equal(
-        runHeadless(app, ["bundle", "build", bundleFolder], s.io),
-        0,
-      );
-      const entry = catalog
+      assert.equal(h.run(["bundle", "build", bundleFolder]), 0);
+      const entry = h.catalog
         .listEntries()
         .find((e) => e.id === "dev.secant.recovery");
-      assert.ok(entry, s.text());
-      catalog.approveWorkspace(workspace, new Date());
+      assert.ok(entry, h.output());
+      h.catalog.approveWorkspace(workspace, new Date());
       digest = entry.digest;
-      group.close();
-      catalog.close();
+      h.close();
     }
 
     // A real child process launches the Run and blocks in the `block` Step's sleep.
@@ -212,17 +183,13 @@ test(
     }
 
     // Reopen the home in-process: startup recovery reconciles the killed Run.
-    const catalog = openCatalog(home);
-    t.after(() => catalog.close());
-    const group = openRunGroup(home, workspace);
-    t.after(() => group.close());
-    const app = createApplication({
-      catalog,
-      launchWorkspacePath: workspace,
+    const h = openHeadlessHarness(t, {
+      slug: "secant-recovery",
+      home,
+      workspace,
       hostPlatform: hostPlatform(),
-      runGroup: group,
-      runExecution,
     });
+    const group = h.runGroup!;
 
     const listed = group.listRuns();
     assert.equal(listed.length, 1);
@@ -242,9 +209,10 @@ test(
 
     // Let the interrupted Step complete instantly on resume, then resume in-process.
     writeFileSync(markers.proceed, "go");
-    const r = sink();
-    assert.equal(runHeadless(app, ["run", "resume", runId], r.io), 0);
-    assert.match(r.text(), /^State: succeeded$/m);
+    h.reset();
+    assert.equal(h.run(["run", "resume", runId]), 0);
+    // Match against combined stdout+stderr, as the pre-harness capture did.
+    assert.match(h.output(), /^State: succeeded$/m);
 
     // The earlier Step was not re-run (still one line); the final Step ran on resume.
     assert.equal(readFileSync(markers.first, "utf8"), "ran\n");

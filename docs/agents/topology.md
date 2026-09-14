@@ -44,13 +44,14 @@ An `index.ts` is valid for one cohesive Module after declaring it in that table.
   Its private Artifact Module owns Git mechanics. The scheduler dispatches a closed Step-kind table; it never branches on Workflow identity.
 - Harness knows no Routing, Step kind, retry budget, or Run policy. Its native Adapters, protocol models, qualification cache, and executable
   discovery remain private. Command executable resolution and `git-worktree-root` checks remain private to their respective execution/Preflight
-  responsibilities. Shared OS mechanisms earn extraction only through actual repeated use; there is no public Git or generic infrastructure Module.
+  responsibilities. #14 ruled out a Git Step kind and a Git engine Module — Git is ordinary Command-step behaviour plus private mechanics — not a small
+  shared helper: the isolated-Git-environment hardening is extracted once, exported from the Run Store entry, and reused by Preflight on repeated use (A31).
 - Each Interface owns its exposed types. Import another owner's public contract when the meaning is identical; Application translates facts for
   clients. Extract a small common value only for demonstrated consumers. A central `types/`, `models/`, or utility barrel is not a default owner.
 - SQLite belongs to Catalog and Run Store; OpenTUI belongs to presentation/renderer; Harness-native dependencies belong to Harness. Target code
-  excludes OpenCode domain imports and PTY transport; Bun APIs (`Bun.*` calls and `bun:` imports) are confined to a named allowlist of target files —
-  the CLI entry check, and later the SQLite adapter and the Windows console guard. Renderer drawing may use OpenTUI directly; the Renderer Port covers
-  lifecycle only.
+  excludes OpenCode domain imports and PTY transport; Bun APIs (`Bun.*` calls and `bun:` imports) are confined to a named per-API allowlist of four
+  target files — the CLI entry (`Bun.main`), the Catalog and Run Store SQLite adapters (`bun:sqlite`), and the Windows console guard (`bun:ffi`), each
+  keyed to the one specifier it needs (D6). Renderer drawing may use OpenTUI directly; the Renderer Port covers lifecycle only.
 
 ## Enforcement And Tests
 
@@ -63,11 +64,8 @@ Tests mirror production domains under `tests/` and cross the same declared Inter
 registered as a narrower owner, as the Artifact Module is. Shared Harness conformance coverage and versioned protocol fixtures stay under the
 Harness test domain; real resources and opt-in runtime/terminal qualification follow the existing testing baseline.
 
-The explicit legacy file list is a migration exemption, not a new legacy domain. Add no new exemptions; migrate or delete entries as their slices
-land. Target code cannot reach legacy implementation. Existing legacy callers may use target public Interfaces; only the CLI host invokes outer
-composition. The checker does not decide whether an edit inside an exempt legacy file has crossed a Seam; the baseline's review ratchet does.
-
-At adoption the target paths are intentionally absent. Synthetic allowed/forbidden source graphs prove the checker works before production arrives;
-a green check does not claim the target architecture has been implemented. It also does not prove semantic opacity, lifecycle correctness, or file
-cohesion. Those remain Interface/contract coverage and focused review responsibilities. [ADR 0025](../adr/0025-organize-target-code-around-owned-deep-modules.md)
-records the ownership trade-offs and installation/Run lifecycle guarantees.
+Target code cannot import legacy or unowned implementation. Only the CLI host invokes outer composition; every other cross-Module reach goes through a
+public Interface. The synthetic allowed/forbidden source graphs the suite still carries proved the checker before the target code existed and now guard
+it against regression. A green check proves import direction only — not semantic opacity, lifecycle correctness, or file cohesion, which remain
+Interface/contract coverage and focused review responsibilities. [ADR 0025](../adr/0025-organize-target-code-around-owned-deep-modules.md) records the
+ownership trade-offs and installation/Run lifecycle guarantees.

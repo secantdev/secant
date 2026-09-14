@@ -8,7 +8,7 @@ import { TARGETS, hostTargetKey } from "./targets.mjs";
 // (ADR 0030): Windows x64, macOS arm64, Linux x64. `--all` cross-compiles the
 // three (the Linux CI leg, after `bun install --os="*" --cpu="*"` has fetched
 // every platform's @opentui native package); with no flag it builds only the
-// host target, which is all `npm run check`'s per-OS smoke needs. The version is
+// host target, which is all `bun run check`'s per-OS smoke needs. The version is
 // embedded as a build-time define — a single-file executable has no on-disk
 // package.json to read.
 

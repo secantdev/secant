@@ -24,6 +24,26 @@ import type {
 // is runtime-neutral, so no new dependency, notice, or Bun-API allowlist entry.
 // A missing `git` binary is surfaced as a precise `git-unavailable` Problem.
 
+/** The one isolated-Git-environment hardening, shared by every `git` invocation
+ *  Secant makes. Severing the host's system and global Git config makes behaviour
+ *  a function of the arguments alone, no ambient config leaking in. Callers layer
+ *  their own vars on top through `overrides` — the Artifact
+ *  repo adds `GIT_DIR` and a fixed identity (keeping commit ids a function of
+ *  content and time only); Preflight's worktree probe needs nothing more. It lives
+ *  here (the only home the private Artifact Module and the Run Store entry both
+ *  reach without a cycle) and is re-exported from the Run Store entry for Preflight
+ *  across the Module boundary. */
+export function isolatedGitEnvironment(
+  overrides?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "",
+    ...overrides,
+  };
+}
+
 /** A candidate output a producer wrote once, ready to publish. */
 export interface StageOutput {
   readonly name: string;
@@ -71,19 +91,16 @@ class GitUnavailable extends Error {}
 
 export function openArtifactRepo(runDir: string): ArtifactRepo {
   const gitDir = join(runDir, "artifacts.git");
-  // GIT_CONFIG_NOSYSTEM + no global config keeps behaviour independent of the
-  // host's git config; a fixed identity keeps commit ids a function of content
+  // The shared isolation (no system/global config) plus this repo's own vars: a
+  // fixed `GIT_DIR` and a fixed identity, keeping commit ids a function of content
   // and time only (no ambient user.name/email).
-  const baseEnv = {
-    ...process.env,
+  const baseEnv = isolatedGitEnvironment({
     GIT_DIR: gitDir,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "",
     GIT_AUTHOR_NAME: "Secant",
     GIT_AUTHOR_EMAIL: "secant@localhost",
     GIT_COMMITTER_NAME: "Secant",
     GIT_COMMITTER_EMAIL: "secant@localhost",
-  } as NodeJS.ProcessEnv;
+  });
 
   /** Run `git`, returning stdout bytes. Throws GitUnavailable if the binary is
    *  absent; throws a plain Error on any nonzero exit (a broken invariant). */

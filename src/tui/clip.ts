@@ -1,7 +1,9 @@
-// Single-line truncation shared by the TUI screens: OpenTUI's `<text>` never wraps
-// a one-line row, so every row clips its concatenated string to the inner width
-// itself, marking a cut with a trailing ellipsis. One implementation so the
-// truncation behaviour stays identical across screens.
+// Single-line truncation with an ellipsis affordance, shared by the screens that
+// want to *show* a row was cut. It is not the overflow guard: a screen's container
+// already sets `overflow="hidden"`, which clips horizontally on its own (verified
+// at 30 and 40 columns), so `clip`'s real job is the trailing "…" marking the cut,
+// not preventing overflow. Only the rows that should advertise truncation call it —
+// one implementation so that ellipsis behaviour stays identical across screens.
 
 /** Truncate `text` to `width` columns, marking a cut with a trailing ellipsis. */
 export function clip(text: string, width: number): string {

@@ -1,74 +1,32 @@
 import assert from "node:assert/strict";
-import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
-import {
-  createApplication,
-  type RunExecution,
-} from "../../src/application/application.js";
-import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
-import { openCatalog } from "../../src/catalog/catalog.js";
-import { executeRouting } from "../../src/run/execution/execution.js";
-import { openRunGroup } from "../../src/run/store/store.js";
+import { runHeadless } from "../../src/headless/headless.js";
 import {
   ensureRuntimeOnPath,
-  hostPlatform,
   writeCommandBundle,
 } from "../helpers/commandBundle.js";
-import { makeTempDir } from "../helpers/tempDir.js";
+import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 
 ensureRuntimeOnPath();
 
-async function harness(t: TestContext) {
-  const runExecution: RunExecution = ({ routing, owner }) =>
-    executeRouting(routing, {
-      owner,
-      platform: hostPlatform(),
-      resolveAsset: () => undefined,
-    });
-  const catalog = openCatalog(makeTempDir("secant-rlcd-home-"));
-  t.after(() => catalog.close());
-  const workspace = realpathSync.native(makeTempDir("secant-rlcd-ws-"));
-  const runGroup = openRunGroup(makeTempDir("secant-rlcd-store-"), workspace);
-  t.after(() => runGroup.close());
-  const clients = createApplication({
-    catalog,
-    launchWorkspacePath: workspace,
-    runGroup,
-    runExecution,
-  });
-  const out: string[] = [];
-  const err: string[] = [];
-  const io: HeadlessIO = {
-    out: (t) => out.push(t),
-    err: (t) => err.push(t),
-    cwd: () => workspace,
-  };
+function harness(t: TestContext) {
+  const h = openHeadlessHarness(t, { slug: "secant-rlcd" });
   const install = () => {
     const cmd = writeCommandBundle();
-    assert.equal(runHeadless(clients, ["bundle", "build", cmd.folder], io), 0);
-    out.length = 0;
-    const entry = catalog.listEntries().find((e) => e.id === cmd.id)!;
+    assert.equal(h.run(["bundle", "build", cmd.folder]), 0);
+    h.reset();
+    const entry = h.catalog.listEntries().find((e) => e.id === cmd.id)!;
     return { id: cmd.id, digest: entry.digest };
   };
   const launch = () => {
     const { id, digest } = install();
-    catalog.approveWorkspace(workspace, new Date());
-    runHeadless(clients, ["run", "launch", id, "--trust", digest], io);
-    const runId = /^Run (\S+)$/m.exec(out.join(""))![1]!;
-    out.length = 0;
+    h.catalog.approveWorkspace(h.workspace, new Date());
+    h.run(["run", "launch", id, "--trust", digest]);
+    const runId = /^Run (\S+)$/m.exec(h.stdout())![1]!;
+    h.reset();
     return runId;
   };
-  return {
-    clients,
-    io,
-    launch,
-    stdout: () => out.join(""),
-    stderr: () => err.join(""),
-    reset: () => {
-      out.length = 0;
-      err.length = 0;
-    },
-  };
+  return { ...h, launch };
 }
 
 test("run list on an empty Workspace prints an informational snapshot", async (t) => {

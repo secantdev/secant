@@ -21,7 +21,7 @@ cluster that matches the task, followed by its related ADRs when the task needs 
   every **Bundle Asset** it carries. Built-in and **External Workflow Bundles** use the same package and execution contract.
 - **External Workflow Bundle** — a **Workflow Bundle** supplied outside Crucible's built-in set. It follows the same package and execution
   contract as a built-in Workflow Bundle.
-- **Built-in Workflow Bundle** — a **Workflow Bundle** installed at startup from the copy shipped inside the Secant package. See the
+- **Built-in Workflow Bundle** — a **Workflow Bundle** installed at startup from the copy shipped inside the Secant single-file executable. See the
   [Workflow Bundle](./docs/glossary/workflow-bundle.md) cluster for **Shipped Bundle** and the built-in rules.
 - **Routing** — the ordered arrangement of **Steps** a **Workflow Bundle** declares over Crucible's **step kinds**, with contiguous spans optionally
   declared as **Repeat groups**. Strictly sequential: no branching, no parallelism, and no nested groups. A Bundle is runnable when its routing

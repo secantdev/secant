@@ -1,7 +1,6 @@
 import { realpathSync } from "node:fs";
 import {
   DEFAULT_BUDGETS,
-  generateExecutionSummary,
   inspectBundle,
   type Budgets,
 } from "../bundle/bundle.js";
@@ -21,8 +20,6 @@ import {
 import type { BundleManagement } from "./bundle-management.js";
 import { createBundleManagement } from "./build-bundle.js";
 import {
-  bundleBytesCorruptForRun,
-  bundleBytesMissingForRun,
   deriveRun,
   deriveRunFacts,
   GATE_ANSWER_ARTIFACT,
@@ -31,6 +28,30 @@ import {
   selectRunEntry,
   type RunProjectionDependencies,
 } from "./run-projection.js";
+import {
+  bundleBytesCorrupt,
+  bundleBytesMissing,
+  bundleTrustRequired,
+  gateStale,
+  operationIdReused,
+  operationNotFound,
+  pathNotFound,
+  runDiagnosticMissing,
+  runExecutionFault,
+  runIsLive,
+  runLiveElsewhere,
+  runNotBlocked,
+  runNotFound,
+  runNotLive,
+  runNotResumable,
+  runOutputMissing,
+  runStoreDamaged,
+  runSupportUnavailable,
+  trustDigestMismatch,
+  workspaceBusy,
+  workspaceNotApproved,
+} from "./problems.js";
+import { UpdateStream } from "./update-stream.js";
 import { listRunsSnapshot } from "./run-list.js";
 import { preflight } from "./preflight.js";
 import type {
@@ -45,7 +66,6 @@ import type {
   OperationSnapshot,
   ProjectionPort,
   ProjectionSelector,
-  ProjectionUpdate,
   Problem,
   DiagnosticReference,
   ResourceRead,
@@ -322,7 +342,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     const owner = runGroup.acquireRun(runId);
     if (owner === undefined) {
       tracking.done = true;
-      return { status: "not-applied", problem: runStoreUnreadable(runId) };
+      return { status: "not-applied", problem: runStoreDamaged(runId) };
     }
     tracking.owner = owner;
     try {
@@ -620,7 +640,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     if (bytes === undefined) {
       return {
         admitted: false,
-        problem: bundleBytesMissingForRun(entry.digest),
+        problem: bundleBytesMissing({ digest: entry.digest }),
       };
     }
     // Include the Composition re-check: a Run pins this Snapshot, so Preflight
@@ -629,7 +649,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
     if (!inspected.ok) {
       return {
         admitted: false,
-        problem: bundleBytesCorruptForRun(entry.digest, inspected.finding.code),
+        problem: bundleBytesCorrupt(
+          { digest: entry.digest },
+          inspected.finding.code,
+        ),
       };
     }
     const manifest = inspected.inspection.manifest;
@@ -733,16 +756,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
     if (entry === undefined) {
       // The exact digest is no longer installed (uninstalled, or replaced by a
       // different install): its bytes cannot be trusted to be the pinned Snapshot.
-      return { problem: bundleBytesMissingForRun(digest) };
+      return { problem: bundleBytesMissing({ digest }) };
     }
     const bytes = catalog.readManagedBytes(digest);
     if (bytes === undefined) {
-      return { problem: bundleBytesMissingForRun(digest) };
+      return { problem: bundleBytesMissing({ digest }) };
     }
     const inspected = inspectBundle(bytes, budgets, true);
     if (!inspected.ok) {
       return {
-        problem: bundleBytesCorruptForRun(digest, inspected.finding.code),
+        problem: bundleBytesCorrupt({ digest }, inspected.finding.code),
       };
     }
     const manifest = inspected.inspection.manifest;
@@ -800,7 +823,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         problem:
           read.problem.kind === "unknown-run"
             ? runNotFound(input.runId)
-            : runStoreUnreadable(input.runId),
+            : runStoreDamaged(input.runId),
       };
     }
     const record = read.run;
@@ -909,7 +932,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         problem:
           read.problem.kind === "unknown-run"
             ? runNotFound(input.runId)
-            : runStoreUnreadable(input.runId),
+            : runStoreDamaged(input.runId),
       };
     }
     const record = read.run;
@@ -946,7 +969,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     if (owner === undefined) {
       return {
         status: "not-applied",
-        problem: runStoreUnreadable(input.runId),
+        problem: runStoreDamaged(input.runId),
       };
     }
     runs.set(input.runId, {
@@ -1096,7 +1119,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     }
     const owner = runGroup.acquireRun(runId);
     if (owner === undefined) {
-      return { status: "not-applied", problem: runStoreUnreadable(runId) };
+      return { status: "not-applied", problem: runStoreDamaged(runId) };
     }
     try {
       // Our epoch is the freshest, so this write is not fenced. A concurrent second
@@ -1205,7 +1228,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       }
       const owner = live ?? runGroup.acquireRun(reference.runId);
       if (owner === undefined) {
-        return { found: false, problem: runStoreUnreadable(reference.runId) };
+        return { found: false, problem: runStoreDamaged(reference.runId) };
       }
       try {
         const bytes =
@@ -1259,18 +1282,6 @@ function canonicalizeWorkspacePath(rawPath: string): string {
   return realpathSync.native(rawPath);
 }
 
-function pathNotFound(rawPath: string, error: unknown): Problem {
-  const code = (error as NodeJS.ErrnoException).code;
-  return {
-    code: "workspace-path-not-found",
-    explanation: `The path ${rawPath} could not be resolved to an existing directory.`,
-    remediation:
-      "Pass a path that exists, or create the directory first, then run the command again.",
-    possibleEffects: "none",
-    details: code ? { path: rawPath, errno: code } : { path: rawPath },
-  };
-}
-
 /** A stable replay key for a launch: the identity, the sorted inputs, and any
  *  acknowledged digest. A re-submitted operation id with an equal key replays. */
 function launchReplayKey(input: LaunchRunInput): string {
@@ -1283,218 +1294,6 @@ function launchReplayKey(input: LaunchRunInput): string {
     inputs,
     input.trustDigest ?? null,
   ]);
-}
-
-function workspaceNotApproved(path: string): Problem {
-  return {
-    code: "workspace-not-approved",
-    explanation: `The launch Workspace ${path} is not approved.`,
-    remediation:
-      "Run `secant workspace approve` to approve this Workspace, then launch again.",
-    possibleEffects: "none",
-    details: { path },
-  };
-}
-
-// The `bundle-trust-required` Problem carries the Execution summary for the host
-// platform and the fixed authority warning in its explanation, and names the
-// exact digest to acknowledge in its remediation (ADR 0021, #82 AC1). The summary
-// resolves commands for the host platform when the Bundle supports it — the same
-// rule `bundle-catalog`'s focus uses — so the user sees what will actually run,
-// not the first declared platform.
-function bundleTrustRequired(
-  manifest: AuthoredManifest,
-  digest: string,
-  host: Platform | undefined,
-): Problem {
-  const platforms = manifest.platforms ?? [];
-  const platform: Platform =
-    host !== undefined && platforms.includes(host)
-      ? host
-      : (platforms[0] ?? "linux");
-  const summary = generateExecutionSummary(manifest, digest, platform);
-  const kinds = Object.entries(summary.stepKindCounts)
-    .map(([kind, count]) => `${kind}=${count}`)
-    .join(", ");
-  const commands = summary.commands
-    .map((command) => `${command.stepId}: ${command.executable}`)
-    .join("; ");
-  const explanation =
-    `Launching ${summary.identity.id}@${summary.identity.version} needs your trust for the exact installed bytes. ` +
-    `Execution summary (platform ${summary.platform}): step kinds ${kinds || "(none)"}; ` +
-    `commands ${commands || "(none)"}. ${summary.warning}`;
-  return {
-    code: "bundle-trust-required",
-    explanation,
-    remediation: `Re-run with --trust ${digest} to acknowledge and trust this exact Bundle, then launch.`,
-    possibleEffects: "none",
-    details: { digest, platform: summary.platform },
-  };
-}
-
-function trustDigestMismatch(installed: string, acknowledged: string): Problem {
-  return {
-    code: "trust-digest-mismatch",
-    explanation: `The acknowledged digest ${acknowledged} does not match the installed digest ${installed}; nothing was trusted.`,
-    remediation: `Re-run with --trust ${installed} to acknowledge the exact installed Bundle.`,
-    possibleEffects: "none",
-    details: { installed, acknowledged },
-  };
-}
-
-function workspaceBusy(liveRunId: string): Problem {
-  return {
-    code: "workspace-busy",
-    explanation: `Another Run (${liveRunId}) is live in this Workspace; only one Run runs at a time.`,
-    remediation: "Wait for the live Run to reach rest, then launch again.",
-    possibleEffects: "none",
-    details: { liveRunId },
-  };
-}
-
-function runSupportUnavailable(): Problem {
-  return {
-    code: "run-support-unavailable",
-    explanation: "This client was wired without Run support.",
-    remediation:
-      "Launch Runs through the headless CLI or the shell, which wire the Run Store and execution.",
-    possibleEffects: "none",
-  };
-}
-
-function runStoreUnreadable(runId: string): Problem {
-  return {
-    code: "run-store-damaged",
-    explanation: `Run ${runId} could not be acquired; its canonical store is unreadable.`,
-    remediation:
-      "The Run's store is damaged; delete the Run and launch a fresh one.",
-    possibleEffects: "unknown",
-    details: { runId },
-  };
-}
-
-function runExecutionFault(runId: string, error: unknown): Problem {
-  const message = error instanceof Error ? error.message : String(error);
-  return {
-    code: "run-execution-fault",
-    explanation: `Run ${runId} could not be driven to rest: ${message}`,
-    remediation:
-      "This is a coordination or environment fault; check the Run store and retry the launch.",
-    possibleEffects: "unknown",
-    details: { runId },
-  };
-}
-
-function runLiveElsewhere(runId: string): Problem {
-  return {
-    code: "run-live-elsewhere",
-    explanation: `Run ${runId} is live in another process; its outputs cannot be read until it reaches rest.`,
-    remediation:
-      "Wait for the Run to reach rest (its launch process prints the final state), then read the output.",
-    possibleEffects: "none",
-    details: { runId },
-  };
-}
-
-function runOutputMissing(reference: ResourceReference): Problem {
-  return {
-    code: "run-output-not-found",
-    explanation: `Output ${reference.artifactName} has no bytes at the referenced version.`,
-    remediation:
-      "Open the Run to see its current outputs, then read one that is bound.",
-    possibleEffects: "none",
-    details: { runId: reference.runId, artifactName: reference.artifactName },
-  };
-}
-
-function runDiagnosticMissing(reference: DiagnosticReference): Problem {
-  return {
-    code: "run-diagnostic-not-found",
-    explanation: `Diagnostic ${reference.diagnosticId} is not recorded for this Run.`,
-    remediation:
-      "Open the Run to see its current conflict, then read the diagnostic it references.",
-    possibleEffects: "none",
-    details: { runId: reference.runId, diagnosticId: reference.diagnosticId },
-  };
-}
-
-function runNotFound(runId: string): Problem {
-  return {
-    code: "run-not-found",
-    explanation: `No Run ${runId} exists in this Workspace.`,
-    remediation:
-      "Check the Run id (it is printed when a Run is launched), or launch a Run first.",
-    possibleEffects: "none",
-    details: { runId },
-  };
-}
-
-function runNotResumable(runId: string, state: string): Problem {
-  return {
-    code: "run-not-resumable",
-    explanation: `Run ${runId} is ${state}; only a halted or failed Run can be resumed.`,
-    remediation:
-      "Resume applies to a Run resting halted or failed; open the Run to see its state.",
-    possibleEffects: "none",
-    details: { runId, state },
-  };
-}
-
-/** A Run that is not live cannot be cancelled: there is no execution to stop (#87). */
-function runNotLive(runId: string): Problem {
-  return {
-    code: "run-not-live",
-    explanation: `Run ${runId} is not live; only a live Run can be cancelled.`,
-    remediation:
-      "A resting or terminal Run has nothing to cancel; delete it instead to remove it.",
-    possibleEffects: "none",
-    details: { runId },
-  };
-}
-
-/** A live Run cannot be deleted: its store is in use (#87). */
-function runIsLive(runId: string): Problem {
-  return {
-    code: "run-is-live",
-    explanation: `Run ${runId} is live; a live Run cannot be deleted.`,
-    remediation:
-      "Cancel the Run first (or wait for it to reach rest), then delete it.",
-    possibleEffects: "none",
-    details: { runId },
-  };
-}
-
-/** A Run that is not blocked cannot be answered: the Gate does not exist (#85). */
-function runNotBlocked(runId: string, state: string): Problem {
-  return {
-    code: "run-not-blocked",
-    explanation: `Run ${runId} is ${state}, not blocked; there is no Human Gate to answer.`,
-    remediation:
-      "Open the Run to see its state; only a blocked Run rests at an answerable Gate.",
-    possibleEffects: "none",
-    details: { runId, state },
-  };
-}
-
-/** The submitted Gate reference no longer matches the Run's live Gate (#85): the
- *  block moved on, so the answer targets a stale Attempt and is not applied. */
-function gateStale(
-  runId: string,
-  submitted: RunGateReference,
-  current: RunGateReference,
-): Problem {
-  return {
-    code: "gate-reference-stale",
-    explanation: `The answered Gate (attempt ${submitted.attemptId}) is not the Run's current Gate (attempt ${current.attemptId}); nothing was applied.`,
-    remediation:
-      "Open the Run to read its current Gate reference, then answer that one.",
-    possibleEffects: "none",
-    details: {
-      runId,
-      submittedAttemptId: submitted.attemptId,
-      currentAttemptId: current.attemptId,
-    },
-  };
 }
 
 /** Whether two Gate references name the same Attempt of the same Run (#85). */
@@ -1533,70 +1332,4 @@ function cancelReplayKey(runId: string): string {
 /** A stable replay key for a delete: the Run id (#87). */
 function deleteReplayKey(runId: string): string {
   return JSON.stringify(["delete", runId]);
-}
-
-function operationNotFound(operationId: string): Problem {
-  return {
-    code: "operation-not-found",
-    explanation: `No Operation ${operationId} has been submitted.`,
-    remediation:
-      "Submit the Operation before opening its Projection, or check the operation id.",
-    possibleEffects: "none",
-    details: { operationId },
-  };
-}
-
-function operationIdReused(operationId: string): Problem {
-  return {
-    code: "operation-id-reused",
-    explanation: `Operation id ${operationId} was already used for a different request.`,
-    remediation:
-      "Repeat the original request with the same input, or use a fresh operation id.",
-    possibleEffects: "none",
-  };
-}
-
-/** A minimal single-consumer async push stream for durable Projection updates. */
-class UpdateStream implements AsyncIterable<ProjectionUpdate> {
-  private readonly queue: ProjectionUpdate[] = [];
-  private waiting?: (result: IteratorResult<ProjectionUpdate>) => void;
-  private closed = false;
-
-  push(update: ProjectionUpdate): void {
-    if (this.closed) return;
-    const waiting = this.waiting;
-    if (waiting !== undefined) {
-      this.waiting = undefined;
-      waiting({ value: update, done: false });
-    } else {
-      this.queue.push(update);
-    }
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    const waiting = this.waiting;
-    if (waiting !== undefined) {
-      this.waiting = undefined;
-      waiting({ value: undefined, done: true });
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<ProjectionUpdate> {
-    return {
-      next: () => {
-        const value = this.queue.shift();
-        if (value !== undefined) {
-          return Promise.resolve({ value, done: false });
-        }
-        if (this.closed) {
-          return Promise.resolve({ value: undefined, done: true });
-        }
-        return new Promise((resolve) => {
-          this.waiting = resolve;
-        });
-      },
-    };
-  }
 }

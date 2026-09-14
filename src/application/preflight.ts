@@ -11,6 +11,7 @@ import {
   type Step,
 } from "../workflow/workflow.js";
 import { EXECUTABLE_STEP_KINDS } from "../run/execution/execution.js";
+import { isolatedGitEnvironment } from "../run/store/store.js";
 import type { FieldViolation, Problem } from "./projection-port.js";
 
 // Preflight: the Application-owned precondition gate that refuses to create a Run
@@ -186,8 +187,9 @@ function isNonEmptyFile(path: string): boolean {
 
 /** Prove Git is runnable and the Workspace is the root of a non-bare worktree.
  *  Linked and unborn (no-commit) worktrees qualify; a subdirectory, a bare repo,
- *  and a plain directory do not. GIT_CONFIG_NOSYSTEM/GLOBAL keep the result
- *  independent of the host's Git config (mirrors the Artifact repo's hardening). */
+ *  and a plain directory do not. It runs under the Run Store's
+ *  `isolatedGitEnvironment()` so the host's Git config cannot change the result —
+ *  the one hardening the Artifact repo also uses. */
 function probeGitWorktreeRoot(workspacePath: string): PreflightResult {
   // Prove Git is runnable through the same PATH resolution the Command check uses,
   // so "Git absent" is a deterministic decision, not a spawn-lookup side effect.
@@ -199,7 +201,7 @@ function probeGitWorktreeRoot(workspacePath: string): PreflightResult {
     ["-C", workspacePath, "rev-parse", "--show-toplevel"],
     {
       encoding: "utf8",
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "" },
+      env: isolatedGitEnvironment(),
     },
   );
   if (result.error !== undefined) {

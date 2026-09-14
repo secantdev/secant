@@ -29,6 +29,15 @@ import type {
   RunStepStatus,
   RunTimelineEvent,
 } from "./projection-port.js";
+import {
+  bundleBytesCorrupt,
+  bundleBytesMissing,
+  bundleNotInstalled,
+  noStableVersion,
+  runNotFound,
+  runStoreDamaged,
+  versionNotInstalled,
+} from "./problems.js";
 
 /** The bound Artifact name a Human Gate answer publishes to (#85), so the answer
  *  reads back through `run show`/`run read` like any output. The latest answer
@@ -241,10 +250,13 @@ export function deriveRunFacts(
   digest: string,
 ): { facts: RunFacts } | { problem: Problem } {
   const bytes = deps.catalog.readManagedBytes(digest);
-  if (bytes === undefined) return { problem: bundleBytesMissingForRun(digest) };
+  if (bytes === undefined)
+    return { problem: bundleBytesMissing({ digest: digest }) };
   const outcome = inspectBundle(bytes, deps.budgets, false);
   if (!outcome.ok) {
-    return { problem: bundleBytesCorruptForRun(digest, outcome.finding.code) };
+    return {
+      problem: bundleBytesCorrupt({ digest: digest }, outcome.finding.code),
+    };
   }
   const { manifest } = outcome.inspection;
   return {
@@ -765,85 +777,4 @@ export function selectRunEntry(
   return stable.length > 0
     ? { entry: stable[0]! }
     : { problem: noStableVersion(id) };
-}
-
-// --- problems --------------------------------------------------------------
-
-function bundleNotInstalled(id: string): Problem {
-  return {
-    code: "bundle-not-installed",
-    explanation: `No Bundle with id ${id} is installed.`,
-    remediation:
-      "Run `secant bundle list` to see installed Bundles, then launch one by its id.",
-    possibleEffects: "none",
-    details: { id },
-  };
-}
-
-function versionNotInstalled(id: string, version: string): Problem {
-  return {
-    code: "bundle-version-not-installed",
-    explanation: `${id}@${version} is not installed.`,
-    remediation:
-      "Run `secant bundle list` to see the installed versions, then name one that is installed.",
-    possibleEffects: "none",
-    details: { id, version },
-  };
-}
-
-function noStableVersion(id: string): Problem {
-  return {
-    code: "no-stable-version-installed",
-    explanation: `Only prerelease versions of ${id} are installed; a prerelease must be named explicitly.`,
-    remediation: "Run `secant run launch <id>@<version>` naming a prerelease.",
-    possibleEffects: "none",
-    details: { id },
-  };
-}
-
-function runNotFound(runId: string): Problem {
-  return {
-    code: "run-not-found",
-    explanation: `No Run ${runId} exists in this Workspace.`,
-    remediation:
-      "Launch a Run first, or check the Run id (it is printed when a Run is launched).",
-    possibleEffects: "none",
-    details: { runId },
-  };
-}
-
-function runStoreDamaged(runId: string): Problem {
-  return {
-    code: "run-store-damaged",
-    explanation: `Run ${runId} is recorded but its store could not be read.`,
-    remediation:
-      "The Run's canonical store is damaged; delete the Run and launch a fresh one.",
-    possibleEffects: "unknown",
-    details: { runId },
-  };
-}
-
-export function bundleBytesMissingForRun(digest: string): Problem {
-  return {
-    code: "bundle-bytes-missing",
-    explanation: `The Bundle for digest ${digest} is recorded as installed, but its stored bytes are missing.`,
-    remediation:
-      "Reinstall the Bundle to restore its bytes, then launch again.",
-    possibleEffects: "none",
-    details: { digest },
-  };
-}
-
-export function bundleBytesCorruptForRun(
-  digest: string,
-  finding: string,
-): Problem {
-  return {
-    code: "bundle-bytes-corrupt",
-    explanation: `The Bundle for digest ${digest} is installed, but its stored bytes no longer validate (${finding}).`,
-    remediation:
-      "Reinstall the Bundle to restore intact bytes, then launch again.",
-    possibleEffects: "none",
-    details: { digest, finding },
-  };
 }

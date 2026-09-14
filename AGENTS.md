@@ -1,6 +1,6 @@
 # Agent Instructions
 
-Read the line that matches your task, then the file it names. The canonical gate (`npm run check`) is the safety net; these lines are the route.
+Read the line that matches your task, then the file it names. The canonical gate (`bun run check`) is the safety net; these lines are the route.
 
 ## Tracker and domain
 
@@ -28,6 +28,8 @@ Read the line that matches your task, then the file it names. The canonical gate
 
 Before editing under a Module root that carries its own `AGENTS.md`, read that file. Each one is listed here by path when it is created:
 
+- `src/application/AGENTS.md` — Application Module: observed-owner writes, the Trust-grant order, live-Run read rules, and derived-state invariants.
+- `src/headless/AGENTS.md` — headless CLI Module: the exit-code contract, gate re-read, frozen `--json` shapes, and commander-settings ordering.
 - `src/tui/AGENTS.md` — presentation Module: OpenTUI layout invariants for screen authors.
 - `src/bundle/AGENTS.md` — Bundle Module: digest, validator, and budget invariants for slice authors.
 - `src/run/store/AGENTS.md` — Run Store Module: coordination/run.db split, crash-safety ordering, and fencing invariants for slice authors.

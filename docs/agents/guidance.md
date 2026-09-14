@@ -6,7 +6,8 @@ mechanics and reliability evidence are in [agent-guidance progressive disclosure
 
 ## Shape
 
-- Root `AGENTS.md` is the always-loaded index: one trigger line per focused document and per Module-local `AGENTS.md`, and no rules of its own.
+- Root `AGENTS.md` is the always-loaded index: one trigger line per focused document and per Module-local `AGENTS.md`. Its only rules of its own are
+  the short always-on `## Commits` convention every commit needs in context; everything else routes to a focused document.
 - `CLAUDE.md` is a one-line `@AGENTS.md` import, never a symlink. Git checks symlinks out as plain text wherever `core.symlinks` is off, which is
   the common Windows result.
 - `engineering-baseline.md` is the mandatory kernel. Each focused document under `docs/agents/` owns one concern and may point deeper.

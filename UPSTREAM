@@ -134,6 +134,38 @@ Port; no OpenCode source crosses for them. What was taken and changed:
 No new vendored (copied) files were needed: the screens build on the primitives
 the shell already established, so the VENDORED PATHS list is unchanged.
 
+Added 2026-09-14 for the M2 Run screens (#89–#93: watch, review, and browse
+Runs in the timeline-first Run Workbench). No OpenCode source crosses; each file
+records the upstream it studied and what it deliberately did not take.
+
+  src/tui/run-workbench.tsx   studied routes/session/index.tsx @ 1ead9e3d7f
+  src/tui/run-timeline.ts     studied routes/session/index.tsx @ 1ead9e3d7f
+  src/tui/previous-runs.tsx   studied packages/tui/src/ui/dialog-select.tsx
+  src/tui/start-run.tsx       studied routes/session/index.tsx @ 1ead9e3d7f
+  src/tui/keymap.ts           studied packages/tui/src/keymap.tsx
+
+What was taken and changed:
+
+  run-workbench.tsx / run-timeline.ts (from routes/session/index.tsx):
+    Taken:   the live-edge-following session timeline shape.
+    Changed: the scroll/follow/anchor model is a hand-rolled pure reducer over
+             the event array's absolute indices, deliberately NOT OpenTUI's
+             `<scrollbox>` (`stickyScroll`/`stickyStart="bottom"`): the
+             new-activity count and the append-only prepend anchor are net-new
+             (they don't exist upstream) and need event-index control the
+             scrollbox's pixel offset does not give (#91 AC3).
+
+  keymap.ts (from keymap.tsx):
+    Taken:   nothing copied. The upstream ~760-line adapter is not vendored.
+    Changed: the shell caps @opentui/keymap directly and gates its one modal
+             dialog with a binding-layer `enabled` accessor instead of the
+             upstream mode stack (ADR 0018: don't reinvent what upstream solved).
+
+  previous-runs.tsx (from dialog-select.tsx):
+    Taken:   the single-active-index selection model, reused from bundle-list.
+    Changed: rows are the read-only Previous Runs Projection; the empty state
+             names the headless Run commands.
+
 
 THEME ASSETS (25 vendored, unmodified palettes)
 -----------------------------------------------

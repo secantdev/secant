@@ -88,7 +88,7 @@ export type RunExecution = (context: {
   readonly routing: readonly RoutingNode[];
   readonly digest: string;
   readonly owner: RunOwner;
-}) => RunReport;
+}) => Promise<RunReport>;
 
 // Application owns the Workspace-approval use case behind the Projection Port.
 // The Port is in-memory: it resolves paths, records approvals through the
@@ -116,10 +116,13 @@ export interface ApplicationDependencies {
   /** The host platform the Execution summary resolves commands for. */
   readonly hostPlatform?: Platform;
   /** How a submitted Operation's settlement is scheduled. The default runs it
-   *  synchronously inline (an opened `operation` Projection is already settled).
-   *  A test supplies a controllable settler to exercise the `pending` → settled
-   *  path without a real long-lived Run. */
-  readonly scheduleSettlement?: (settle: () => void) => void;
+   *  inline: a synchronous settler (approve-workspace, cancel, delete) is already
+   *  settled when an `operation` Projection opens; an async one (a Run reaching
+   *  rest) settles on the operation stream's first durable update. A test supplies
+   *  a controllable settler to exercise the `pending` → settled path. */
+  readonly scheduleSettlement?: (
+    settle: () => void | Promise<void>,
+  ) => void | Promise<void>;
   /** The Run Store for the launch Workspace, opened by composition (which owns
    *  its lifetime). Absent when a caller wires no Run support; `launch-run` and
    *  the `run` Projection then report a Problem rather than executing. */
@@ -147,7 +150,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
     deps.launchWorkspacePath,
   );
   const scheduleSettlement =
-    deps.scheduleSettlement ?? ((settle: () => void) => settle());
+    deps.scheduleSettlement ??
+    ((settle: () => void | Promise<void>) => settle());
   const now = deps.now ?? (() => new Date());
   const budgets = deps.bundleBudgets ?? DEFAULT_BUDGETS;
   // Each Operation carries a settler (run inline by default, deferred under a
@@ -162,7 +166,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       outcome: OperationOutcome;
       readonly observers: Set<UpdateStream>;
       readonly runId?: string;
-      readonly settle: () => OperationOutcome;
+      readonly settle: () => OperationOutcome | Promise<OperationOutcome>;
     }
   >();
   // A launched Run tracked in this process: its routing and Bundle facts, the
@@ -245,18 +249,28 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // in place (the observer Set and settler stay stable), and delivers it to any
   // Projection opened on this id while it was pending. Runs via
   // `scheduleSettlement`, so inline by default and deferred under a test.
-  function settleOperation(operationId: string): void {
+  function settleOperation(operationId: string): void | Promise<void> {
     const entry = operations.get(operationId);
     if (entry === undefined) return;
-    entry.outcome = entry.settle();
-    const snapshot: OperationSnapshot = {
-      family: "operation",
-      operationId,
-      outcome: entry.outcome,
+    const record = (outcome: OperationOutcome): void => {
+      entry.outcome = outcome;
+      const snapshot: OperationSnapshot = {
+        family: "operation",
+        operationId,
+        outcome,
+      };
+      for (const observer of entry.observers) {
+        observer.push({ kind: "durable", snapshot });
+      }
     };
-    for (const observer of entry.observers) {
-      observer.push({ kind: "durable", snapshot });
-    }
+    // A synchronous settler (approve-workspace, cancel, delete) settles inline so an
+    // `operation` Projection opened right after `submit` is already settled; only a
+    // Run settler (launch, resume, answer) is a Promise, which settles on the stream's
+    // first durable update. Keeping the sync path sync preserves every non-Run
+    // Operation's synchronous observation.
+    const settled = entry.settle();
+    if (settled instanceof Promise) return settled.then(record);
+    record(settled);
   }
 
   // Push the current Run snapshot to every observer watching this Run. Called
@@ -336,7 +350,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // `finally`, so a reopened home re-derives the block from the current Step
   // Attempt); a fenced owner or publication fault is a coordination/environment
   // fault that execution throws, carried here as a `not-applied` Problem.
-  function runAndSettle(runId: string): OperationOutcome {
+  async function runAndSettle(runId: string): Promise<OperationOutcome> {
     const tracking = runs.get(runId);
     if (
       tracking === undefined ||
@@ -352,7 +366,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     }
     tracking.owner = owner;
     try {
-      runExecution({
+      await runExecution({
         routing: tracking.routing,
         digest: tracking.digest,
         owner: observedOwner(owner, runId),
@@ -928,10 +942,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // the Run `failed` (`stop`) or drive the granted interval to its next rest
   // (`continue`) — in this process. A stale/mismatched Gate or a Run that is not
   // blocked settles `not-applied` and changes nothing.
-  function answerAndSettle(
+  async function answerAndSettle(
     operationId: string,
     input: AnswerHumanGateInput,
-  ): OperationOutcome {
+  ): Promise<OperationOutcome> {
     if (
       runGroup === undefined ||
       runExecution === undefined ||
@@ -1068,7 +1082,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       }
       if (input.answer === "stop") return { status: "applied" };
       // `continue`: the answering process drives the granted interval to rest.
-      runExecution({
+      await runExecution({
         routing: facts.routing,
         digest: record.bundleSnapshotDigest,
         owner: observed,

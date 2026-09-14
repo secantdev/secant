@@ -21,6 +21,7 @@ import {
   writeRepeatBundle,
   type RepeatBundleOptions,
 } from "../helpers/commandBundle.js";
+import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // The `answer-human-gate` Operation on the Projection Port (#85): a `blocked` Run
@@ -61,7 +62,10 @@ function fixture(t: TestContext): Fixture {
 }
 
 /** Launch a Repeat Bundle to a blocked rest and return the Run id. */
-function launchBlocked(f: Fixture, options: RepeatBundleOptions): string {
+async function launchBlocked(
+  f: Fixture,
+  options: RepeatBundleOptions,
+): Promise<string> {
   const bundle = writeRepeatBundle(options);
   const built = f.app.bundleManagement.build(bundle.folder, {
     noInstall: false,
@@ -79,6 +83,7 @@ function launchBlocked(f: Fixture, options: RepeatBundleOptions): string {
     },
   });
   assert.ok(admission.admitted);
+  await settleOutcome(f.app, admission.operationId);
   return admission.runId!;
 }
 
@@ -97,22 +102,18 @@ function gateOf(app: Application, runId: string): RunGateReference {
   return gate!;
 }
 
-function settleOutcome(
+// Await a Run Operation's settled outcome: after `submit`, a Run Operation is
+// `pending` and settles later as a durable update on the operation stream.
+async function settleOutcome(
   app: Application,
   operationId: string,
-): OperationOutcome {
-  const opened = app.projectionPort.openProjection({
-    family: "operation",
-    operationId,
-  });
-  const outcome = opened.snapshot.outcome;
-  opened.close();
-  return outcome;
+): Promise<OperationOutcome> {
+  return awaitSettled(app.projectionPort, operationId);
 }
 
 test("continue grants an interval, resolves succeeded, and records a readable answer (#85)", async (t) => {
   const f = fixture(t);
-  const runId = launchBlocked(f, { interval: 2, passAt: 3 });
+  const runId = await launchBlocked(f, { interval: 2, passAt: 3 });
   const gate = gateOf(f.app, runId);
 
   const admission = f.app.projectionPort.submit({
@@ -121,7 +122,9 @@ test("continue grants an interval, resolves succeeded, and records a readable an
     input: { runId, gate, answer: "continue" },
   });
   assert.ok(admission.admitted);
-  assert.deepEqual(settleOutcome(f.app, "answer-1"), { status: "applied" });
+  assert.deepEqual(await settleOutcome(f.app, "answer-1"), {
+    status: "applied",
+  });
 
   const run = runOf(f.app, runId);
   assert.equal(run.state, "succeeded");
@@ -140,7 +143,7 @@ test("continue grants an interval, resolves succeeded, and records a readable an
 
 test("continue that keeps failing re-blocks with the count reset to the interval (#85)", async (t) => {
   const f = fixture(t);
-  const runId = launchBlocked(f, { interval: 2 }); // always fails
+  const runId = await launchBlocked(f, { interval: 2 }); // always fails
   const firstGate = gateOf(f.app, runId);
   assert.equal(runOf(f.app, runId).checkpoint?.completedIterations, 2);
 
@@ -150,7 +153,9 @@ test("continue that keeps failing re-blocks with the count reset to the interval
     input: { runId, gate: firstGate, answer: "continue" },
   });
   assert.ok(admission.admitted);
-  assert.deepEqual(settleOutcome(f.app, "answer-1"), { status: "applied" });
+  assert.deepEqual(await settleOutcome(f.app, "answer-1"), {
+    status: "applied",
+  });
 
   const run = runOf(f.app, runId);
   assert.equal(run.state, "blocked");
@@ -162,7 +167,7 @@ test("continue that keeps failing re-blocks with the count reset to the interval
 
 test("stop ends the Run failed with history and Artifacts intact (#85)", async (t) => {
   const f = fixture(t);
-  const runId = launchBlocked(f, { interval: 2 });
+  const runId = await launchBlocked(f, { interval: 2 });
   const gate = gateOf(f.app, runId);
 
   const admission = f.app.projectionPort.submit({
@@ -171,7 +176,9 @@ test("stop ends the Run failed with history and Artifacts intact (#85)", async (
     input: { runId, gate, answer: "stop" },
   });
   assert.ok(admission.admitted);
-  assert.deepEqual(settleOutcome(f.app, "answer-1"), { status: "applied" });
+  assert.deepEqual(await settleOutcome(f.app, "answer-1"), {
+    status: "applied",
+  });
 
   const run = runOf(f.app, runId);
   assert.equal(run.state, "failed");
@@ -189,7 +196,7 @@ test("stop ends the Run failed with history and Artifacts intact (#85)", async (
 
 test("the same operation id answered twice yields the same outcome and records once (#85)", async (t) => {
   const f = fixture(t);
-  const runId = launchBlocked(f, { interval: 2, passAt: 3 });
+  const runId = await launchBlocked(f, { interval: 2, passAt: 3 });
   const gate = gateOf(f.app, runId);
 
   const first = f.app.projectionPort.submit({
@@ -198,7 +205,9 @@ test("the same operation id answered twice yields the same outcome and records o
     input: { runId, gate, answer: "continue" },
   });
   assert.ok(first.admitted);
-  assert.deepEqual(settleOutcome(f.app, "answer-1"), { status: "applied" });
+  assert.deepEqual(await settleOutcome(f.app, "answer-1"), {
+    status: "applied",
+  });
   assert.equal(runOf(f.app, runId).state, "succeeded");
 
   // A replay of the same operation id is admitted and applied, with no second
@@ -209,7 +218,9 @@ test("the same operation id answered twice yields the same outcome and records o
     input: { runId, gate, answer: "continue" },
   });
   assert.ok(replay.admitted);
-  assert.deepEqual(settleOutcome(f.app, "answer-1"), { status: "applied" });
+  assert.deepEqual(await settleOutcome(f.app, "answer-1"), {
+    status: "applied",
+  });
   assert.equal(runOf(f.app, runId).state, "succeeded");
 
   const owner = f.runGroup.acquireRun(runId)!;
@@ -219,7 +230,7 @@ test("the same operation id answered twice yields the same outcome and records o
 
 test("a stale Gate reference is not applied and changes nothing (#85)", async (t) => {
   const f = fixture(t);
-  const runId = launchBlocked(f, { interval: 2 });
+  const runId = await launchBlocked(f, { interval: 2 });
   const gate = gateOf(f.app, runId);
   const stale: RunGateReference = {
     ...gate,
@@ -232,7 +243,7 @@ test("a stale Gate reference is not applied and changes nothing (#85)", async (t
     input: { runId, gate: stale, answer: "continue" },
   });
   assert.ok(admission.admitted);
-  const outcome = settleOutcome(f.app, "answer-1");
+  const outcome = await settleOutcome(f.app, "answer-1");
   assert.equal(outcome.status, "not-applied");
   if (outcome.status !== "not-applied") throw new Error("unreachable");
   assert.equal(outcome.problem.code, "gate-reference-stale");
@@ -268,6 +279,7 @@ test("answering a Run that is not blocked is not applied (#85)", async (t) => {
   });
   assert.ok(launch.admitted);
   const runId = launch.runId!;
+  await settleOutcome(f.app, launch.operationId);
   assert.equal(runOf(f.app, runId).state, "succeeded");
 
   const admission = f.app.projectionPort.submit({
@@ -285,7 +297,7 @@ test("answering a Run that is not blocked is not applied (#85)", async (t) => {
     },
   });
   assert.ok(admission.admitted);
-  const outcome = settleOutcome(f.app, "answer-1");
+  const outcome = await settleOutcome(f.app, "answer-1");
   assert.equal(outcome.status, "not-applied");
   if (outcome.status !== "not-applied") throw new Error("unreachable");
   assert.equal(outcome.problem.code, "run-not-blocked");

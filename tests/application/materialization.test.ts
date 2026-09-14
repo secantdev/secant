@@ -15,6 +15,7 @@ import {
   hostPlatform,
   writeMaterializationBundle,
 } from "../helpers/commandBundle.js";
+import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // #88 through the Projection Port: a `home: workspace` conflict is visible in the
@@ -73,7 +74,11 @@ function installMaterializationBundle(
   return { id: bundle.id, digest: entry.digest };
 }
 
-function launch(f: Fixture, id: string, digest: string): string {
+async function settled(f: Fixture, operationId: string) {
+  return awaitSettled(f.app.projectionPort, operationId);
+}
+
+async function launch(f: Fixture, id: string, digest: string): Promise<string> {
   f.catalog.approveWorkspace(f.workspace, new Date());
   const admission = f.app.projectionPort.submit({
     operationId: `launch-${Math.random()}`,
@@ -82,6 +87,7 @@ function launch(f: Fixture, id: string, digest: string): string {
   });
   assert.ok(admission.admitted);
   assert.ok(admission.runId);
+  await settled(f, admission.operationId);
   return admission.runId;
 }
 
@@ -93,10 +99,10 @@ function runView(f: Fixture, runId: string) {
   return result.run;
 }
 
-test("a modified Workspace copy is a visible conflict resting the Run halted", (t) => {
+test("a modified Workspace copy is a visible conflict resting the Run halted", async (t) => {
   const f = fixture(t);
   const { id, digest } = installMaterializationBundle(f, "modify");
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
 
   const run = runView(f, runId);
   assert.equal(run.state, "halted");
@@ -123,19 +129,19 @@ test("a modified Workspace copy is a visible conflict resting the Run halted", (
   assert.ok(!run.outputs.some((o) => o.name === "y"));
 });
 
-test("a deleted Workspace copy also rests the Run halted", (t) => {
+test("a deleted Workspace copy also rests the Run halted", async (t) => {
   const f = fixture(t);
   const { id, digest } = installMaterializationBundle(f, "delete");
-  const run = runView(f, launch(f, id, digest));
+  const run = runView(f, await launch(f, id, digest));
   assert.equal(run.state, "halted");
   assert.ok(run.conflict);
   assert.equal(run.conflict.path, "out/x.txt");
 });
 
-test("resuming after restoring the file continues the Run to succeeded", (t) => {
+test("resuming after restoring the file continues the Run to succeeded", async (t) => {
   const f = fixture(t);
   const { id, digest } = installMaterializationBundle(f, "modify");
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
   assert.equal(runView(f, runId).state, "halted");
 
   // Restore the file to its bound content, then resume through the Port.
@@ -146,6 +152,7 @@ test("resuming after restoring the file continues the Run to succeeded", (t) => 
     input: { runId },
   });
   assert.ok(admission.admitted);
+  await settled(f, admission.operationId);
 
   const run = runView(f, runId);
   assert.equal(run.state, "succeeded");
@@ -169,11 +176,11 @@ test("resume of an unknown Run is refused, not thrown", (t) => {
   assert.equal(admission.problem.code, "run-not-found");
 });
 
-test("resume of a Run that is not halted is refused", (t) => {
+test("resume of a Run that is not halted is refused", async (t) => {
   const f = fixture(t);
   // A conflict-free Bundle runs to succeeded; resuming it is refused.
   const { id, digest } = installMaterializationBundle(f, "none");
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
   assert.equal(runView(f, runId).state, "succeeded");
 
   const admission = f.app.projectionPort.submit({
@@ -238,10 +245,10 @@ test("resume of a Run whose stored launch payload is not a string map is refused
   assert.equal(admission.problem.code, "run-store-damaged");
 });
 
-test("resume is idempotent per operation id (#86, AC3)", (t) => {
+test("resume is idempotent per operation id (#86, AC3)", async (t) => {
   const f = fixture(t);
   const { id, digest } = installMaterializationBundle(f, "modify");
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
   assert.equal(runView(f, runId).state, "halted");
   // Restore the tampered Workspace copy so the resume can complete.
   writeFileSync(join(f.workspace, "out", "x.txt"), "materialized-content");
@@ -252,6 +259,7 @@ test("resume is idempotent per operation id (#86, AC3)", (t) => {
     input: { runId },
   });
   assert.ok(first.admitted);
+  await settled(f, first.operationId);
   assert.equal(runView(f, runId).state, "succeeded");
 
   // A second submit with the same operation id replays: same Run, no re-execution.
@@ -261,14 +269,15 @@ test("resume is idempotent per operation id (#86, AC3)", (t) => {
     input: { runId },
   });
   assert.ok(second.admitted);
+  await settled(f, second.operationId);
   assert.equal(second.runId, first.runId);
   assert.equal(runView(f, runId).state, "succeeded");
 });
 
-test("resume after the pinned digest is no longer installed names the reinstall (#86, AC3)", (t) => {
+test("resume after the pinned digest is no longer installed names the reinstall (#86, AC3)", async (t) => {
   const f = fixture(t);
   const { id, digest } = installMaterializationBundle(f, "modify");
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
   assert.equal(runView(f, runId).state, "halted");
   writeFileSync(join(f.workspace, "out", "x.txt"), "materialized-content");
 

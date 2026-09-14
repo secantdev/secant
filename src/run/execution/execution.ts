@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import which from "which";
@@ -70,8 +70,24 @@ export interface ExecutionDeps {
   readonly defaultRetryBudget?: number;
   /** Wall-clock bound a Command may run before it is killed and the Attempt fails. */
   readonly commandTimeoutMs?: number;
+  /** A caller's cancel Seam (`cancel-run`, T4). When it aborts mid-command the
+   *  child's process group is killed and the walk unwinds with a RunCancelledError
+   *  — no Attempt is published, so `cancel-run` owns the `cancelled` rest. Absent
+   *  for a normal Run, which only ever aborts on its own timeout. */
+  readonly cancelSignal?: AbortSignal;
   /** Injectable clock so Attempt timestamps are deterministic in tests. */
   readonly now?: () => Date;
+}
+
+/** Thrown by `executeRouting` when the caller's cancel signal aborts a Command
+ *  mid-run: the child's process group is killed and the walk unwinds without
+ *  publishing an Attempt or resting the Run, so `cancel-run` (T4) owns the
+ *  `cancelled` rest. Production never passes a cancel signal until T4 wires it. */
+export class RunCancelledError extends Error {
+  constructor() {
+    super("execution: the Run was cancelled mid-command.");
+    this.name = "RunCancelledError";
+  }
 }
 
 /** How a Run came to rest. `blocked` is a durable pause at a Review checkpoint,
@@ -95,10 +111,17 @@ type NodeOutcome =
 // may override per Step). Retries measure transient flakiness, not problem size.
 const DEFAULT_RETRY_BUDGET = 2;
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
-// spawnSync's 1 MiB default would truncate ordinary command output, so cap higher.
-// This is execution's own cap, independent of the Artifact Module's git-pipe cap:
-// that Module is private to the Run Store and this one cannot import it.
-const MAX_CAPTURE_BYTES = 256 * 1024 * 1024;
+// A streaming byte cap on captured output: past it, further chunks are dropped
+// (the counter keeps running) and a truncation marker is appended to the `text`
+// artifact, so a runaway Command cannot exhaust memory (D3). This is execution's
+// own cap, independent of the Artifact Module's git-pipe cap: that Module is
+// private to the Run Store and this one cannot import it.
+export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
+export const TRUNCATION_MARKER = `\n[secant: output truncated at ${MAX_CAPTURE_BYTES / (1024 * 1024)} MiB]\n`;
+// After an abort (timeout or cancel) the group gets SIGTERM, then SIGKILL if a
+// child is still alive this long later — long enough for a well-behaved child to
+// flush and exit, short enough to bound a hang (D2, #21).
+const KILL_ESCALATION_MS = 3000;
 
 /** One Step Attempt's outcome and, when it ran, the outputs to publish. */
 interface StepAttempt {
@@ -111,9 +134,10 @@ interface StepContext {
   readonly platform: Platform;
   readonly resolveAsset: AssetResolver;
   readonly commandTimeoutMs: number;
+  readonly cancelSignal?: AbortSignal;
 }
 
-type StepExecutor = (step: Step, context: StepContext) => StepAttempt;
+type StepExecutor = (step: Step, context: StepContext) => Promise<StepAttempt>;
 
 // The closed executable Step-kind dispatch table (#13). Exactly one entry in M2;
 // a Human Gate is a durable pause rather than a dispatch, and Repeat groups land
@@ -161,16 +185,19 @@ interface WalkContext {
  * a pass). A fenced owner or a publication Problem is a coordination/environment
  * fault and throws — the caller (composition) owns it.
  */
-export function executeRouting(
+export async function executeRouting(
   routing: readonly RoutingNode[],
   deps: ExecutionDeps,
-): RunReport {
+): Promise<RunReport> {
   const context: WalkContext = {
     step: {
       owner: deps.owner,
       platform: deps.platform,
       resolveAsset: deps.resolveAsset,
       commandTimeoutMs: deps.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+      ...(deps.cancelSignal !== undefined
+        ? { cancelSignal: deps.cancelSignal }
+        : {}),
     },
     budget: deps.defaultRetryBudget ?? DEFAULT_RETRY_BUDGET,
     now: deps.now ?? (() => new Date()),
@@ -194,8 +221,8 @@ export function executeRouting(
     const isLastNode = index === lastIndex;
     const outcome =
       "repeat" in node
-        ? runRepeatGroup(node.repeat, context, isLastNode)
-        : runStep(node, context, isLastNode);
+        ? await runRepeatGroup(node.repeat, context, isLastNode)
+        : await runStep(node, context, isLastNode);
     if (outcome === "failed") return { outcome: "failed" };
     if (outcome === "blocked") return { outcome: "blocked" };
     if (outcome === "halted") return { outcome: "halted" };
@@ -215,13 +242,13 @@ export function executeRouting(
  *  `failed`; a success on the last node rests `succeeded`. Advancing separately
  *  would leave a crash between the Attempt commit and the state write stuck at
  *  `running`. */
-function runStep(
+async function runStep(
   step: Step,
   context: WalkContext,
   isLastNode: boolean,
-): NodeOutcome {
+): Promise<NodeOutcome> {
   // A plain Step runs once per Run, so its Iteration is always zero.
-  const outcome = runStepAttempts(
+  const outcome = await runStepAttempts(
     step,
     context,
     0,
@@ -250,11 +277,11 @@ function runStep(
  * shared counter file or moving a binding) and only newly-run iterations count
  * toward the cadence — one grant buys exactly one more interval (ADR 0020, A1).
  */
-function runRepeatGroup(
+async function runRepeatGroup(
   repeat: RepeatGroup["repeat"],
   context: WalkContext,
   isLastNode: boolean,
-): NodeOutcome {
+): Promise<NodeOutcome> {
   const interval = Math.min(
     repeat.reviewCheckpoint.interval,
     MAX_REVIEW_CHECKPOINT_INTERVAL,
@@ -270,7 +297,7 @@ function runRepeatGroup(
   // iteration counts toward the review cadence, so one grant buys one interval.
   let freshIterations = 0;
   for (let iteration = 0; ; iteration++) {
-    const result = runIteration(repeat, context, isLastNode, iteration);
+    const result = await runIteration(repeat, context, isLastNode, iteration);
     if (result.outcome === "failed") return "failed";
     if (result.outcome === "halted") return "halted";
     if (result.ran) freshIterations++;
@@ -294,12 +321,12 @@ function runRepeatGroup(
  *  span Step's Attempt rests the Run `succeeded` — the deciding Attempt. `ran` is
  *  false when every span Step was skipped (a resume replaying a completed
  *  iteration), so the caller does not count it toward the review cadence. */
-function runIteration(
+async function runIteration(
   repeat: RepeatGroup["repeat"],
   context: WalkContext,
   isLastNode: boolean,
   iteration: number,
-): { outcome: NodeOutcome; ran: boolean } {
+): Promise<{ outcome: NodeOutcome; ran: boolean }> {
   const { steps, until } = repeat;
   let ran = false;
   for (let s = 0; s < steps.length; s++) {
@@ -309,7 +336,7 @@ function runIteration(
     // it leaves the `until` Verdict reading `pass`. Compute that intent from the
     // Attempt's own outputs (a Step producing the Verdict) or the current binding.
     const decideOnPass = isLastNode && isLastSpanStep;
-    const outcome = runStepAttempts(
+    const outcome = await runStepAttempts(
       step,
       context,
       iteration,
@@ -346,13 +373,13 @@ function runIteration(
  * `home: workspace` Artifacts are verified — a conflict rests the Run `halted` and
  * returns `"halted"`. Returns the final outcome.
  */
-function runStepAttempts(
+async function runStepAttempts(
   step: Step,
   context: WalkContext,
   iteration: number,
   successAdvance: string | undefined,
   decideSuccessAdvance?: (result: StepAttempt) => string | undefined,
-): AttemptOutcome | "halted" | "skipped" {
+): Promise<AttemptOutcome | "halted" | "skipped"> {
   const instance = instanceKey(step.id, iteration);
   // A Step instance that already settled `succeeded` on a prior run is skipped:
   // its outputs stay bound and materialized, so re-running it would duplicate work
@@ -395,7 +422,9 @@ function runStepAttempts(
       iteration,
       baseAttempt + attempt,
     );
-    const result = executor(step, context.step);
+    // A cancel abort throws RunCancelledError out of the executor: it unwinds the
+    // walk here without publishing this Attempt, so `cancel-run` (T4) owns the rest.
+    const result = await executor(step, context.step);
     outcome = result.outcome;
     // An interrupted Attempt (a termination signal, never our timeout) has no
     // result: it is settled `indeterminate`, never retried, and rests the Run
@@ -851,7 +880,10 @@ function expandDp0(token: string, shimDir: string): string {
 
 // --- Command step (the one executable dispatch entry) ----------------------
 
-function runCommand(step: CommandStep, context: StepContext): StepAttempt {
+async function runCommand(
+  step: CommandStep,
+  context: StepContext,
+): Promise<StepAttempt> {
   const invocation = resolveInvocation(step.command, context.platform);
   const args = invocation.arguments.map((token) =>
     resolveToken(token, context),
@@ -867,52 +899,205 @@ function runCommand(step: CommandStep, context: StepContext): StepAttempt {
     // could not execute, so the Attempt failed and is retryable (ADR 0020).
     return { outcome: "failed", outputs: [] };
   }
-  const result = spawnSync(
-    resolution.executable,
-    [...resolution.prefixArgs, ...args],
-    {
-      cwd: invocation.workingDirectory,
-      env: resolveEnv(invocation, context),
-      timeout: context.commandTimeoutMs,
-      maxBuffer: MAX_CAPTURE_BYTES,
-      windowsHide: true,
-    },
-  );
+
+  const result = await spawnCommand({
+    executable: resolution.executable,
+    args: [...resolution.prefixArgs, ...args],
+    cwd: invocation.workingDirectory,
+    env: resolveEnv(invocation, context),
+    timeoutMs: context.commandTimeoutMs,
+    ...(context.cancelSignal !== undefined
+      ? { cancelSignal: context.cancelSignal }
+      : {}),
+  });
 
   // Translate the OS outcome at this Seam into a typed Attempt outcome (D-rule:
-  // external failures become typed domain failures at their owning Seam). A spawn
-  // error (ENOENT missing binary) or our own timeout kill (result.error carries
-  // ETIMEDOUT) means the command could not run to an exit -> the Attempt failed
-  // and is retryable.
-  if (result.error !== undefined) {
-    // ponytail: the original cause (result.error / partial stderr) is dropped —
+  // external failures become typed domain failures at their owning Seam).
+  switch (result.kind) {
+    // A spawn error (ENOENT missing binary) or our own timeout kill means the
+    // command could not run to an exit -> the Attempt failed and is retryable.
+    // ponytail: the original cause (the spawn error / partial stderr) is dropped —
     // the Run Store's `diagnostics/` has a writer (materialization conflicts, #88)
     // but no channel for a failed Attempt yet. Route this cause there when that
     // channel lands, so a user can see why a Step could not execute.
-    return { outcome: "failed", outputs: [] };
+    case "spawn-error":
+    case "timeout":
+      return { outcome: "failed", outputs: [] };
+    // The caller's cancel signal aborted the command: kill the group and unwind
+    // without publishing, so `cancel-run` (T4) owns the `cancelled` rest.
+    case "cancelled":
+      throw new RunCancelledError();
+    // Death by an external signal with no exit — Ctrl+C, an outside SIGTERM, the
+    // terminal closing during a live Run. The Attempt's result is genuinely
+    // unknown, so it is `indeterminate`: never retried, and the Run rests `halted`
+    // for human resume (ADR 0019, #86).
+    // ponytail: every external signal death maps to `indeterminate`, including a
+    // command that faults in its own code (segfault, abort). Splitting crash
+    // signals to a retryable `failed` would stop a deterministically crashing
+    // command from looping `halted` on manual resume, but reliably telling crash
+    // from interrupt by the reported signal is not portable across Bun on the
+    // three OSes (macOS reports SIGABRT for abort(); Linux does not, and hangs
+    // ~30s first), so the split was withdrawn. Revisit with a diagnostic channel
+    // that records the signal, not a by-signal-name classifier.
+    case "signal":
+      return { outcome: "indeterminate", outputs: [] };
+    case "exited":
+      return {
+        outcome: "succeeded",
+        outputs: commandOutputs(step, result.status === 0, result.text),
+      };
   }
+}
 
-  // No exit and no error means a signal killed the command — Ctrl+C, SIGTERM, the
-  // terminal closing during a live Run. The Attempt's result is genuinely unknown,
-  // so it is `indeterminate`: never retried, and the Run rests `halted` for human
-  // resume (ADR 0019, #86).
-  // ponytail: every signal death maps to `indeterminate`, including a command that
-  // faults in its own code (segfault, abort). Splitting crash signals to a
-  // retryable `failed` would stop a deterministically crashing command from looping
-  // `halted` on manual resume, but reliably telling crash from interrupt by the
-  // reported signal is not portable across Bun on the three OSes (macOS reports
-  // SIGABRT for abort(); Linux does not, and hangs ~30s first), so the split was
-  // withdrawn. Revisit with a diagnostic channel that records the signal, not a
-  // by-signal-name classifier.
-  if (result.status === null) {
-    return { outcome: "indeterminate", outputs: [] };
+/** What became of one spawned Command. `timeout` and `cancelled` are our own
+ *  aborts (we killed the group); `signal` is a death by an outside signal we did
+ *  not cause; `spawn-error` is a child that never ran. */
+type SpawnResult =
+  | {
+      readonly kind: "exited";
+      readonly status: number;
+      readonly text: Uint8Array;
+    }
+  | { readonly kind: "spawn-error" }
+  | { readonly kind: "timeout" }
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "signal" };
+
+interface SpawnOptions {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly cwd: string | undefined;
+  readonly env: NodeJS.ProcessEnv;
+  readonly timeoutMs: number;
+  readonly cancelSignal?: AbortSignal;
+}
+
+/**
+ * Spawn a resolved Command target directly (never a shell), stream its output
+ * under a byte cap, and settle to a typed SpawnResult. On POSIX the child is
+ * detached so it leads its own process group; a timeout or cancel aborts, and the
+ * whole group is killed — `kill(-pid, SIGTERM)` on POSIX, `taskkill /T /F` on
+ * Windows — escalating to SIGKILL after a grace period so a grandchild holding
+ * stdout open cannot outlive its parent (D2, #21). stdin is closed so a command
+ * that reads it gets EOF rather than hanging.
+ */
+function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
+  return new Promise<SpawnResult>((resolve) => {
+    const timeoutSignal = AbortSignal.timeout(options.timeoutMs);
+    const abort =
+      options.cancelSignal !== undefined
+        ? AbortSignal.any([timeoutSignal, options.cancelSignal])
+        : timeoutSignal;
+
+    const child = spawn(options.executable, [...options.args], {
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      // A detached POSIX child leads its own process group, so `kill(-pid, ...)`
+      // reaches every descendant. Windows has no process groups; taskkill /T walks
+      // the tree instead, so detaching there would only orphan the child.
+      detached: process.platform !== "win32",
+    });
+
+    // Stream stdout then stderr under a shared cap: past it, chunks are dropped and
+    // a marker is appended (D3). Buffers preserve the "stdout first" ordering the
+    // synchronous path had, without holding unbounded output in memory.
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let captured = 0;
+    let truncated = false;
+    const collect = (into: Buffer[], chunk: Buffer): void => {
+      const remaining = MAX_CAPTURE_BYTES - captured;
+      if (remaining <= 0) {
+        truncated = true;
+        return;
+      }
+      if (chunk.length > remaining) {
+        into.push(chunk.subarray(0, remaining));
+        captured = MAX_CAPTURE_BYTES;
+        truncated = true;
+      } else {
+        into.push(chunk);
+        captured += chunk.length;
+      }
+    };
+    child.stdout?.on("data", (chunk: Buffer) => collect(stdoutChunks, chunk));
+    child.stderr?.on("data", (chunk: Buffer) => collect(stderrChunks, chunk));
+
+    let escalation: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      killGroup(child, "SIGTERM");
+      escalation = setTimeout(
+        () => killGroup(child, "SIGKILL"),
+        KILL_ESCALATION_MS,
+      );
+      escalation.unref?.();
+    };
+    if (abort.aborted) onAbort();
+    else abort.addEventListener("abort", onAbort, { once: true });
+
+    let settled = false;
+    const finish = (result: SpawnResult): void => {
+      if (settled) return;
+      settled = true;
+      if (escalation !== undefined) clearTimeout(escalation);
+      abort.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+
+    child.on("error", () => finish({ kind: "spawn-error" }));
+    // `close` fires after the process exited and its stdio streams closed, so all
+    // captured output is in hand — and, with the group killed, only once a
+    // grandchild holding stdout open has died too.
+    child.on("close", (code) => {
+      // Attribute the exit. On POSIX our kill delivers a signal (a null exit code),
+      // so a real exit code proves the child exited on its own — trust it even if an
+      // abort fired in the same tick, closing the natural-exit-vs-timeout race there.
+      // On Windows `taskkill /F` yields exit code 1, so a killed child has a non-null
+      // code; there the abort flag is the only signal that we killed it.
+      const killedByUs = process.platform === "win32" || code === null;
+      if (killedByUs && options.cancelSignal?.aborted) {
+        return finish({ kind: "cancelled" });
+      }
+      if (killedByUs && timeoutSignal.aborted)
+        return finish({ kind: "timeout" });
+      if (code === null) return finish({ kind: "signal" });
+      let text = Buffer.concat([...stdoutChunks, ...stderrChunks]);
+      if (truncated) {
+        text = Buffer.concat([text, Buffer.from(TRUNCATION_MARKER)]);
+      }
+      finish({ kind: "exited", status: code, text });
+    });
+  });
+}
+
+/** Kill a spawned child and everything under it. On POSIX the negative pid targets
+ *  the whole process group (the child was detached to lead one); on Windows
+ *  `taskkill /T /F` walks the process tree. A not-found error means the child had
+ *  already exited between the liveness check and the kill — swallow it (D2). */
+function killGroup(child: ChildProcess, signal: "SIGTERM" | "SIGKILL"): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === "win32") {
+    // taskkill /F already force-terminates the tree, so the SIGKILL escalation is a
+    // harmless retry rather than a stronger signal.
+    const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    // taskkill.exe may be unspawnable (stripped image, restrictive sandbox); an
+    // unhandled 'error' event would crash the whole process, so swallow it — a
+    // failed kill leaves the child to its own timeout, never a fault here.
+    killer.on("error", () => {});
+    return;
   }
-
-  const captured = concatCaptured(result.stdout, result.stderr);
-  return {
-    outcome: "succeeded",
-    outputs: commandOutputs(step, result.status === 0, captured),
-  };
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
 }
 
 /** The Command's `verdict` (pass/fail from the exit status) and `text` (captured
@@ -1002,14 +1187,6 @@ function resolveEnv(
     resolved[name] = resolveToken(value, context);
   }
   return resolved;
-}
-
-/** Combine captured stdout and stderr (stdout first) into the `text` output. */
-function concatCaptured(
-  stdout: Buffer | null,
-  stderr: Buffer | null,
-): Uint8Array {
-  return Buffer.concat([stdout ?? Buffer.alloc(0), stderr ?? Buffer.alloc(0)]);
 }
 
 function encode(text: string): Uint8Array {

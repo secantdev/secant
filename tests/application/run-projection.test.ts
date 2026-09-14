@@ -20,6 +20,7 @@ import {
   writeRepeatBundle,
   type RepeatBundleOptions,
 } from "../helpers/commandBundle.js";
+import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 ensureRuntimeOnPath();
@@ -84,6 +85,12 @@ function runResult(app: Application, runId: string) {
   return snapshot.result;
 }
 
+// Await a Run Operation's settled outcome before reading the Run snapshot: after
+// `submit`, a Run Operation is `pending` and settles later as a durable update.
+async function settled(app: Application, operationId: string) {
+  return awaitSettled(app.projectionPort, operationId);
+}
+
 test("launch on an untrusted digest yields bundle-trust-required, no Run and no grant", async (t) => {
   const f = fixture(t);
   const { id, digest } = installCommandBundle(f);
@@ -124,6 +131,7 @@ test("a matching acknowledgement records the grant and runs to succeeded; a seco
   assert.ok(first.admitted);
   const firstRunId = first.runId;
   assert.ok(firstRunId);
+  await settled(f.app, first.operationId);
   // The grant is recorded and the Run rested succeeded.
   assert.ok(f.catalog.getTrustGrant(digest, 1));
   const firstResult = runResult(f.app, firstRunId);
@@ -137,6 +145,7 @@ test("a matching acknowledgement records the grant and runs to succeeded; a seco
     input: { bundle: { id }, launchInputs: {} },
   });
   assert.ok(second.admitted);
+  await settled(f.app, second.operationId);
   const secondResult = runResult(f.app, second.runId!);
   assert.ok(secondResult.found);
   assert.equal(secondResult.run.state, "succeeded");
@@ -261,6 +270,7 @@ test("run projection reports identity, state, progress, position, timeline, and 
   });
   assert.ok(admission.admitted);
   const runId = admission.runId!;
+  await settled(f.app, admission.operationId);
 
   const result = runResult(f.app, runId);
   assert.ok(result.found);
@@ -312,6 +322,7 @@ test("a re-submitted launch operation id replays with the same Run; different in
     input: { bundle: { id }, launchInputs: {}, trustDigest: digest },
   });
   assert.ok(first.admitted);
+  await settled(f.app, first.operationId);
   const replay = f.app.projectionPort.submit({
     operationId: "op-1",
     operation: "launch-run",
@@ -423,6 +434,7 @@ test("a fresh Application (no in-process tracking) reads a Run back from its sto
   });
   assert.ok(admission.admitted);
   const runId = admission.runId!;
+  await settled(f.app, admission.operationId);
 
   // A second Application over the same Catalog and Run Store has no tracking for
   // this Run, so it must re-derive the routing from the pinned bytes — the
@@ -464,7 +476,7 @@ function installRepeatBundle(
 }
 
 /** Launch an installed Bundle in an approved Workspace, returning the Run id. */
-function launch(f: Fixture, id: string, digest: string): string {
+async function launch(f: Fixture, id: string, digest: string): Promise<string> {
   f.catalog.approveWorkspace(f.workspace, new Date());
   const admission = f.app.projectionPort.submit({
     operationId: `op-${id}`,
@@ -472,6 +484,7 @@ function launch(f: Fixture, id: string, digest: string): string {
     input: { bundle: { id }, launchInputs: {}, trustDigest: digest },
   });
   assert.ok(admission.admitted);
+  await settled(f.app, admission.operationId);
   return admission.runId!;
 }
 
@@ -481,7 +494,7 @@ test("a Repeat group that always fails rests blocked and surfaces the checkpoint
     interval: 3,
     message: "human, please look",
   });
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
 
   const result = runResult(f.app, runId);
   assert.ok(result.found);
@@ -525,7 +538,7 @@ test("a Repeat group that always fails rests blocked and surfaces the checkpoint
 test("a Repeat group that fails twice then passes rests succeeded with three iterations", async (t) => {
   const f = fixture(t);
   const { id, digest } = installRepeatBundle(f, { interval: 5, passAt: 3 });
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
 
   const result = runResult(f.app, runId);
   assert.ok(result.found);
@@ -550,7 +563,7 @@ test("a Repeat group already passing before entry runs zero iterations and the R
     interval: 3,
     baselinePass: true,
   });
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
 
   const result = runResult(f.app, runId);
   assert.ok(result.found);
@@ -583,7 +596,7 @@ test("reopening the Run Store shows a blocked Run still blocked with the same Ga
   });
   const f: Fixture = { app, catalog, runGroup, workspace };
   const { id, digest } = installRepeatBundle(f, { interval: 2 });
-  const runId = launch(f, id, digest);
+  const runId = await launch(f, id, digest);
 
   const before = runResult(app, runId);
   assert.ok(before.found);

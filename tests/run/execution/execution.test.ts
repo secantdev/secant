@@ -12,6 +12,9 @@ import {
 } from "../../../src/workflow/workflow.js";
 import {
   executeRouting,
+  MAX_CAPTURE_BYTES,
+  RunCancelledError,
+  TRUNCATION_MARKER,
   type AssetResolver,
 } from "../../../src/run/execution/execution.js";
 import { openRunGroup, type RunOwner } from "../../../src/run/store/store.js";
@@ -112,7 +115,7 @@ test("a two-Command Routing whose scripts exit 0 runs to succeeded", async (t) =
     ),
   ];
 
-  const report = run(routing, owner);
+  const report = await run(routing, owner);
   assert.deepEqual(report, { outcome: "succeeded" });
   // The deciding Attempt rested the Run in one transaction, not a stuck `running`.
   assert.equal(state(), "succeeded");
@@ -157,7 +160,7 @@ test(
       }),
     ];
 
-    const report = run(routing, owner);
+    const report = await run(routing, owner);
     assert.deepEqual(report, { outcome: "halted" });
     assert.equal(state(), "halted");
     // Exactly one Attempt, indeterminate: no retry, and the following Step never ran.
@@ -191,7 +194,7 @@ test("a script exiting 1 yields a fail Verdict, a succeeded Attempt, and the Run
     ),
   ];
 
-  const report = run(routing, owner);
+  const report = await run(routing, owner);
   assert.deepEqual(report, { outcome: "succeeded" });
   // Exit 1 is a `fail` Verdict, not an Attempt failure.
   assert.equal(dec(readBound(owner, "verdict")), "fail");
@@ -213,7 +216,7 @@ test("a missing executable is retried within the bound, then rests the Run faile
     ),
   ];
 
-  const report = run(routing, owner);
+  const report = await run(routing, owner);
   assert.deepEqual(report, { outcome: "failed" });
   assert.equal(state(), "failed");
   // retry: 2 means 3 attempts, every one a `failed` Attempt in the log.
@@ -238,7 +241,7 @@ test("a timed-out command is retried within the bound, then rests the Run failed
     ),
   ];
 
-  const report = run(routing, owner, { commandTimeoutMs: 200 });
+  const report = await run(routing, owner, { commandTimeoutMs: 200 });
   assert.deepEqual(report, { outcome: "failed" });
   // retry: 1 means 2 attempts, both `failed`.
   assert.deepEqual(
@@ -246,6 +249,105 @@ test("a timed-out command is retried within the bound, then rests the Run failed
     ["failed", "failed"],
   );
 });
+
+// D2 (#97): a command that spawns a grandchild holding stdout open and then hangs
+// is killed by the process-group kill within the timeout plus the escalation grace,
+// not left leaking. A per-child kill would leave the grandchild holding the pipe and
+// this would hang; the group kill (POSIX `kill(-pid)`, Windows `taskkill /T`) reaches
+// it. Bounded by a short deterministic timeout, so a regression turns it red by
+// hanging past the test timeout, not by flaking.
+test(
+  "a hung command whose grandchild holds stdout open is group-killed and the Attempt fails (D2)",
+  { timeout: 20_000 },
+  async (t) => {
+    const { owner, state } = ownerForFreshRun(t);
+    // The child spawns a grandchild that inherits stdout (so it holds our capture
+    // pipe open) and sleeps, then the child itself hangs. Only killing the whole
+    // group closes the pipe and lets the Attempt settle.
+    const hang =
+      "const{spawn}=require('node:child_process');" +
+      "spawn(process.execPath,['-e','setTimeout(()=>{},1e9)'],{stdio:['ignore','inherit','inherit']});" +
+      "setTimeout(()=>{},1e9);";
+    const routing: RoutingNode[] = [
+      commandStep(
+        "hang",
+        { executable: NODE, arguments: ["-e", hang] },
+        { retry: 0, produces: produces({ name: "v", type: "verdict" }) },
+      ),
+    ];
+
+    const report = await run(routing, owner, { commandTimeoutMs: 300 });
+    // Our own timeout kill -> the Attempt failed and is retryable (retry: 0 = one).
+    assert.deepEqual(report, { outcome: "failed" });
+    assert.equal(state(), "failed");
+    assert.deepEqual(
+      owner.attemptLog().map((entry) => entry.outcome),
+      ["failed"],
+    );
+  },
+);
+
+// D3 (#97): output past the ~4 MiB cap is dropped while a truncation marker is
+// appended to the `text` artifact, and the Attempt still succeeds (the command ran
+// to an exit). The cap bounds memory without failing an ordinary noisy command.
+test("a command exceeding the capture cap yields a truncated text ending in the marker, and succeeds (D3)", async (t) => {
+  const { owner } = ownerForFreshRun(t);
+  // Write more than the cap, then exit 0.
+  const flood = `process.stdout.write('x'.repeat(${MAX_CAPTURE_BYTES + 1024 * 1024}))`;
+  const routing: RoutingNode[] = [
+    commandStep(
+      "noisy",
+      { executable: NODE, arguments: ["-e", flood] },
+      {
+        produces: produces(
+          { name: "v", type: "verdict" },
+          { name: "log", type: "text" },
+        ),
+      },
+    ),
+  ];
+
+  const report = await run(routing, owner);
+  assert.deepEqual(report, { outcome: "succeeded" });
+  // The Attempt still succeeded with a pass Verdict (exit 0).
+  assert.equal(dec(readBound(owner, "v")), "pass");
+  const text = readBound(owner, "log");
+  assert.ok(text);
+  // The text is exactly the cap's worth of bytes plus the appended marker.
+  assert.equal(
+    text!.byteLength,
+    MAX_CAPTURE_BYTES + Buffer.byteLength(TRUNCATION_MARKER),
+  );
+  assert.ok(dec(text)!.endsWith(TRUNCATION_MARKER));
+});
+
+// #97: an abort from the caller's cancel signal kills the child's group and unwinds
+// with RunCancelledError, publishing no Attempt — so `cancel-run` (T4) owns the
+// `cancelled` rest. The child is spawned synchronously before executeRouting first
+// awaits, so aborting right after the call cancels a live child with no sleep.
+test(
+  "aborting via the cancel signal kills the child and unwinds without writing an Attempt",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const { owner, state } = ownerForFreshRun(t);
+    const controller = new AbortController();
+    const routing: RoutingNode[] = [
+      commandStep(
+        "cancelme",
+        { executable: NODE, arguments: ["-e", "setTimeout(()=>{},1e9)"] },
+        { retry: 2, produces: produces({ name: "v", type: "verdict" }) },
+      ),
+    ];
+
+    const promise = run(routing, owner, { cancelSignal: controller.signal });
+    controller.abort();
+    await assert.rejects(promise, RunCancelledError);
+    // No Attempt was published, and the deciding rest is left to cancel-run (T4):
+    // the stored state stays `running`.
+    assert.equal(owner.attemptLog().length, 0);
+    assert.equal(state(), "running");
+  },
+);
 
 test("the platform override selects the Windows invocation on Windows and the POSIX one elsewhere", async (t) => {
   // The base (POSIX) invocation prints "posix"; the Windows override prints
@@ -265,19 +367,19 @@ test("the platform override selects the Windows invocation on Windows and the PO
     ] as RoutingNode[];
 
   const posix = ownerForFreshRun(t);
-  assert.deepEqual(run(step(), posix.owner, { platform: "linux" }), {
+  assert.deepEqual(await run(step(), posix.owner, { platform: "linux" }), {
     outcome: "succeeded",
   });
   assert.equal(dec(readBound(posix.owner, "out")), "posix\n");
 
   const macos = ownerForFreshRun(t);
-  assert.deepEqual(run(step(), macos.owner, { platform: "macos" }), {
+  assert.deepEqual(await run(step(), macos.owner, { platform: "macos" }), {
     outcome: "succeeded",
   });
   assert.equal(dec(readBound(macos.owner, "out")), "posix\n");
 
   const windows = ownerForFreshRun(t);
-  run(step(), windows.owner, { platform: "windows" });
+  await run(step(), windows.owner, { platform: "windows" });
   assert.equal(dec(readBound(windows.owner, "out")), "windows\n");
 });
 
@@ -313,7 +415,7 @@ test("asset and artifact references in arguments resolve to the Snapshot asset a
     ),
   ];
 
-  const report = run(routing, owner, { resolveAsset });
+  const report = await run(routing, owner, { resolveAsset });
   assert.deepEqual(report, { outcome: "succeeded" });
   assert.equal(dec(readBound(owner, "msg")), "from-asset\n");
   // The artifact reference resolved to the bound bytes ("from-asset\n").
@@ -327,7 +429,7 @@ test("an unknown Step kind is refused (M2 is command-only)", async (t) => {
     kind: "human-gate",
     shape: "approve-reject",
   } as unknown as RoutingNode;
-  assert.throws(() => run([gate], owner), /not dispatchable/);
+  await assert.rejects(run([gate], owner), /not dispatchable/);
 });
 
 // --- Repeat groups (#84, ADR 0020) -----------------------------------------
@@ -377,7 +479,7 @@ test("a Repeat group that fails twice then passes runs three iterations and rest
   const { owner, state } = ownerForFreshRun(t);
   const routing = [repeatOver(freshCounter(), 3, 5)];
 
-  const report = run(routing, owner);
+  const report = await run(routing, owner);
   assert.deepEqual(report, { outcome: "succeeded" });
   // The last iteration's deciding Attempt rested the Run in one transaction.
   assert.equal(state(), "succeeded");
@@ -410,7 +512,7 @@ test("a Repeat group whose Verdict is already pass before entry runs zero iterat
     ),
   ];
 
-  const report = run(routing, owner);
+  const report = await run(routing, owner);
   assert.deepEqual(report, { outcome: "succeeded" });
   assert.equal(state(), "succeeded");
   // Only the baseline and the trailing step ran — the group ran zero iterations.
@@ -443,7 +545,7 @@ function alwaysFailRepeat(interval: number): RoutingNode {
 
 test("a Repeat group that always fails blocks after `interval` iterations", async (t) => {
   const { owner, state } = ownerForFreshRun(t);
-  const report = run([alwaysFailRepeat(3)], owner);
+  const report = await run([alwaysFailRepeat(3)], owner);
   assert.deepEqual(report, { outcome: "blocked" });
   // `blocked` is never written: the stored state stays `running`, and the block
   // is derived from the current Step Attempt (a reopened home re-derives it).
@@ -461,7 +563,7 @@ test(
   { timeout: 60_000 },
   async (t) => {
     const { owner } = ownerForFreshRun(t);
-    const report = run(
+    const report = await run(
       [alwaysFailRepeat(MAX_REVIEW_CHECKPOINT_INTERVAL + 150)],
       owner,
     );
@@ -479,14 +581,18 @@ test(
 test("resuming a blocked Repeat group runs exactly one more interval and blocks again (#85)", async (t) => {
   const { owner, state } = ownerForFreshRun(t);
   // First interval: three iterations, then blocked (nothing written).
-  assert.deepEqual(run([alwaysFailRepeat(3)], owner), { outcome: "blocked" });
+  assert.deepEqual(await run([alwaysFailRepeat(3)], owner), {
+    outcome: "blocked",
+  });
   assert.equal(owner.attemptLog().length, 3);
   assert.equal(state(), "running");
 
   // Resume in the same owner (a `continue` grant re-walks the Routing): the three
   // prior iterations are dropped, and a fresh interval of three runs before the
   // Run blocks again — the count advanced from 3 to 6.
-  assert.deepEqual(run([alwaysFailRepeat(3)], owner), { outcome: "blocked" });
+  assert.deepEqual(await run([alwaysFailRepeat(3)], owner), {
+    outcome: "blocked",
+  });
   assert.equal(
     owner.attemptLog().filter((e) => e.outcome === "succeeded").length,
     6,
@@ -498,14 +604,14 @@ test("a granted interval that makes the Verdict pass rests the Run succeeded (#8
   const { owner, state } = ownerForFreshRun(t);
   const counter = freshCounter();
   // passAt 5, interval 3: the first interval (iterations 1-3) fails and blocks.
-  assert.deepEqual(run([repeatOver(counter, 5, 3)], owner), {
+  assert.deepEqual(await run([repeatOver(counter, 5, 3)], owner), {
     outcome: "blocked",
   });
   assert.equal(owner.attemptLog().length, 3);
 
   // The granted interval continues the shared counter (4, then 5 = pass) and the
   // deciding Attempt rests the Run succeeded within the interval.
-  assert.deepEqual(run([repeatOver(counter, 5, 3)], owner), {
+  assert.deepEqual(await run([repeatOver(counter, 5, 3)], owner), {
     outcome: "succeeded",
   });
   assert.equal(state(), "succeeded");
@@ -531,13 +637,13 @@ test("resuming past a group that already passed consumes no skip and does not re
       { produces: produces({ name: "done", type: "text" }) },
     ),
   ];
-  assert.deepEqual(run(routing, owner), { outcome: "succeeded" });
+  assert.deepEqual(await run(routing, owner), { outcome: "succeeded" });
   assert.equal(owner.attemptLog().length, 2); // baseline + after
 
   // Resume: the already-passed group must consume none of the skip budget (it is
   // not the terminal node), so `after` stays skipped rather than re-running, and
   // the group's Command never runs.
-  assert.deepEqual(run(routing, owner), { outcome: "succeeded" });
+  assert.deepEqual(await run(routing, owner), { outcome: "succeeded" });
   assert.equal(owner.attemptLog().length, 2);
   assert.equal(existsSync(counter), false);
 });
@@ -565,7 +671,7 @@ test("resume re-runs a Step that failed after a passed Repeat group, never resti
   ];
 
   // First run: baseline succeeds, the group passes on iteration 1, `after` fails.
-  assert.deepEqual(run(routing, owner), { outcome: "failed" });
+  assert.deepEqual(await run(routing, owner), { outcome: "failed" });
   assert.equal(state(), "failed");
   assert.equal(
     owner.attemptLog().filter((e) => e.outcome === "succeeded").length,
@@ -577,7 +683,7 @@ test("resume re-runs a Step that failed after a passed Repeat group, never resti
   // Resume: the old flat cursor leaked the group's iteration budget to `after` and
   // skipped it, resting the Run `succeeded` with no new Attempt. Skipping by Step
   // identity, `after` re-runs and the Run rests `failed` — never succeeded.
-  assert.deepEqual(run(routing, owner), { outcome: "failed" });
+  assert.deepEqual(await run(routing, owner), { outcome: "failed" });
   assert.equal(state(), "failed");
   assert.equal(afterAttempts(), 2); // `after` re-ran
   // The already-passed group did not re-run — its shared counter is untouched.

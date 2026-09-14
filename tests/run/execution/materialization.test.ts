@@ -58,11 +58,14 @@ function commandStep(
 }
 
 /** Run one Routing to rest against a fresh owner, closing it after. */
-function drive(h: Harness, routing: RoutingNode[]): { outcome: string } {
+async function drive(
+  h: Harness,
+  routing: RoutingNode[],
+): Promise<{ outcome: string }> {
   const owner = h.group.acquireRun(h.runId);
   assert.ok(owner);
   try {
-    return executeRouting(routing, {
+    return await executeRouting(routing, {
       owner,
       platform: HOST,
       resolveAsset: () => undefined,
@@ -144,11 +147,11 @@ function deleteStep(id: string, absPath: string): CommandStep {
   );
 }
 
-test("materializes a home:workspace output and a later Step uses it (AC1)", (t) => {
+test("materializes a home:workspace output and a later Step uses it (AC1)", async (t) => {
   const h = harness(t);
   const xPath = join(h.workspace, "out", "x.txt");
 
-  const report = drive(h, [produceStep, consumeStep]);
+  const report = await drive(h, [produceStep, consumeStep]);
 
   assert.deepEqual(report, { outcome: "succeeded" });
   assert.equal(state(h), "succeeded");
@@ -160,11 +163,11 @@ test("materializes a home:workspace output and a later Step uses it (AC1)", (t) 
   assert.equal(dec(boundBytes(h, "y")), "used");
 });
 
-test("modifying the file between Steps halts with a conflict, untouched (AC2)", (t) => {
+test("modifying the file between Steps halts with a conflict, untouched (AC2)", async (t) => {
   const h = harness(t);
   const xPath = join(h.workspace, "out", "x.txt");
 
-  const report = drive(h, [
+  const report = await drive(h, [
     produceStep,
     rewriteStep("tamper", xPath, "tampered!!"),
     consumeStep,
@@ -195,11 +198,11 @@ test("modifying the file between Steps halts with a conflict, untouched (AC2)", 
   }
 });
 
-test("deleting the file between Steps halts with a conflict (AC3)", (t) => {
+test("deleting the file between Steps halts with a conflict (AC3)", async (t) => {
   const h = harness(t);
   const xPath = join(h.workspace, "out", "x.txt");
 
-  const report = drive(h, [
+  const report = await drive(h, [
     produceStep,
     deleteStep("remove", xPath),
     consumeStep,
@@ -224,7 +227,7 @@ test("deleting the file between Steps halts with a conflict (AC3)", (t) => {
   }
 });
 
-test("restoring the file and resuming continues the Run (AC2/AC3)", (t) => {
+test("restoring the file and resuming continues the Run (AC2/AC3)", async (t) => {
   const h = harness(t);
   const xPath = join(h.workspace, "out", "x.txt");
   const routing = [
@@ -233,14 +236,14 @@ test("restoring the file and resuming continues the Run (AC2/AC3)", (t) => {
     consumeStep,
   ];
 
-  assert.deepEqual(drive(h, routing), { outcome: "halted" });
+  assert.deepEqual(await drive(h, routing), { outcome: "halted" });
 
   // The user restores the file to its bound content, then resumes.
   writeFileSync(xPath, "hello-world");
   const claim = h.group.resumeRun(h.runId);
   assert.equal(claim.outcome, "resumed");
 
-  const report = drive(h, routing);
+  const report = await drive(h, routing);
   assert.deepEqual(report, { outcome: "succeeded" });
   assert.equal(state(h), "succeeded");
   // The consuming Step ran on resume; the completed Steps were not re-run (the
@@ -249,7 +252,7 @@ test("restoring the file and resuming continues the Run (AC2/AC3)", (t) => {
   assert.equal(readFileSync(xPath, "utf8"), "hello-world");
 });
 
-test("byte comparison is exact — a changed line ending is a conflict (AC4)", (t) => {
+test("byte comparison is exact — a changed line ending is a conflict (AC4)", async (t) => {
   const h = harness(t);
   const xPath = join(h.workspace, "crlf.txt");
   const produceCrlf = commandStep(
@@ -266,12 +269,12 @@ test("byte comparison is exact — a changed line ending is a conflict (AC4)", (
   );
 
   // Materialized exactly, CRLF preserved.
-  assert.deepEqual(drive(h, [produceCrlf]), { outcome: "succeeded" });
+  assert.deepEqual(await drive(h, [produceCrlf]), { outcome: "succeeded" });
   assert.deepEqual([...readFileSync(xPath)], [...Buffer.from("a\r\nb")]);
 
   // Rewriting only the line ending (LF) must still be a conflict — no
   // normalization treats "a\nb" as equal to the bound "a\r\nb".
-  const report = drive(h, [
+  const report = await drive(h, [
     produceCrlf,
     rewriteStep("normalize", xPath, "a\nb"),
     consumeStep,

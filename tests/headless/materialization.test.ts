@@ -23,12 +23,12 @@ function harness(t: TestContext) {
   });
   return {
     ...h,
-    install: (tamper: "modify" | "delete" | "none") => {
+    install: async (tamper: "modify" | "delete" | "none") => {
       const bundle = writeMaterializationBundle({
         workspaceAbsPath: h.workspace,
         tamper,
       });
-      assert.equal(h.run(["bundle", "build", bundle.folder]), 0);
+      assert.equal(await h.run(["bundle", "build", bundle.folder]), 0);
       h.reset();
       const entry = h.catalog.listEntries().find((e) => e.id === bundle.id);
       assert.ok(entry);
@@ -38,13 +38,17 @@ function harness(t: TestContext) {
   };
 }
 
-test("run show names the conflict, its path, and prints the diagnostic", (t) => {
+test("run show names the conflict, its path, and prints the diagnostic", async (t) => {
   const h = harness(t);
-  const { id, digest } = h.install("modify");
+  const { id, digest } = await h.install("modify");
 
   // A launch that halts on a conflict exits non-zero and prints the state.
   assert.equal(
-    runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io),
+    await runHeadless(
+      h.clients,
+      ["run", "launch", id, "--trust", digest],
+      h.io,
+    ),
     1,
   );
   assert.match(h.stdout(), /^State: halted$/m);
@@ -52,7 +56,7 @@ test("run show names the conflict, its path, and prints the diagnostic", (t) => 
   assert.ok(runId);
   h.reset();
 
-  assert.equal(runHeadless(h.clients, ["run", "show", runId], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["run", "show", runId], h.io), 0);
   const shown = h.stdout();
   assert.match(shown, /State: halted/);
   assert.match(shown, /Materialization conflict:/);
@@ -64,29 +68,29 @@ test("run show names the conflict, its path, and prints the diagnostic", (t) => 
   assert.match(shown, /Restore "out\/x\.txt"/);
 });
 
-test("run resume continues a halted Run after the file is restored", (t) => {
+test("run resume continues a halted Run after the file is restored", async (t) => {
   const h = harness(t);
-  const { id, digest } = h.install("modify");
-  runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io);
+  const { id, digest } = await h.install("modify");
+  await runHeadless(h.clients, ["run", "launch", id, "--trust", digest], h.io);
   const runId = h.stdout().match(/^Run (\S+)/m)?.[1];
   assert.ok(runId);
   h.reset();
 
   // Resuming while still in conflict stays halted and exits non-zero.
-  assert.equal(runHeadless(h.clients, ["run", "resume", runId], h.io), 1);
+  assert.equal(await runHeadless(h.clients, ["run", "resume", runId], h.io), 1);
   assert.match(h.stdout(), /^State: halted$/m);
   h.reset();
 
   // Restore the file, then resume: the Run reaches succeeded.
   writeFileSync(join(h.workspace, "out", "x.txt"), "materialized-content");
-  assert.equal(runHeadless(h.clients, ["run", "resume", runId], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["run", "resume", runId], h.io), 0);
   assert.match(h.stdout(), /^State: succeeded$/m);
 });
 
-test("run resume of an unknown Run reports run-not-found", (t) => {
+test("run resume of an unknown Run reports run-not-found", async (t) => {
   const h = harness(t);
   assert.equal(
-    runHeadless(h.clients, ["run", "resume", "no-such-run"], h.io),
+    await runHeadless(h.clients, ["run", "resume", "no-such-run"], h.io),
     1,
   );
   assert.match(h.stderr(), /run-not-found/);

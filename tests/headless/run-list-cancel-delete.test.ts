@@ -11,17 +11,17 @@ ensureRuntimeOnPath();
 
 function harness(t: TestContext) {
   const h = openHeadlessHarness(t, { slug: "secant-rlcd" });
-  const install = () => {
+  const install = async () => {
     const cmd = writeCommandBundle();
-    assert.equal(h.run(["bundle", "build", cmd.folder]), 0);
+    assert.equal(await h.run(["bundle", "build", cmd.folder]), 0);
     h.reset();
     const entry = h.catalog.listEntries().find((e) => e.id === cmd.id)!;
     return { id: cmd.id, digest: entry.digest };
   };
-  const launch = () => {
-    const { id, digest } = install();
+  const launch = async () => {
+    const { id, digest } = await install();
     h.catalog.approveWorkspace(h.workspace, new Date());
-    h.run(["run", "launch", id, "--trust", digest]);
+    await h.run(["run", "launch", id, "--trust", digest]);
     const runId = /^Run (\S+)$/m.exec(h.stdout())![1]!;
     h.reset();
     return runId;
@@ -31,15 +31,15 @@ function harness(t: TestContext) {
 
 test("run list on an empty Workspace prints an informational snapshot", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["run", "list"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["run", "list"], h.io), 0);
   assert.match(h.stdout(), /Previous Runs: none yet\./);
 });
 
 test("run list shows a launched Run under Today and marks the beginning of history", async (t) => {
   const h = await harness(t);
-  const runId = h.launch();
+  const runId = await h.launch();
 
-  assert.equal(runHeadless(h.clients, ["run", "list"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["run", "list"], h.io), 0);
   const out = h.stdout();
   assert.match(out, /Previous Runs:/);
   assert.match(out, /Today:/);
@@ -47,7 +47,10 @@ test("run list shows a launched Run under Today and marks the beginning of histo
   assert.match(out, /\(beginning of history\)/);
   h.reset();
 
-  assert.equal(runHeadless(h.clients, ["run", "list", "--json"], h.io), 0);
+  assert.equal(
+    await runHeadless(h.clients, ["run", "list", "--json"], h.io),
+    0,
+  );
   const snapshot = JSON.parse(h.stdout()) as {
     family: string;
     rows: { runId: string; group: string }[];
@@ -62,39 +65,39 @@ test("run list shows a launched Run under Today and marks the beginning of histo
 
 test("run show offers delete on a resting Run", async (t) => {
   const h = await harness(t);
-  const runId = h.launch();
-  assert.equal(runHeadless(h.clients, ["run", "show", runId], h.io), 0);
+  const runId = await h.launch();
+  assert.equal(await runHeadless(h.clients, ["run", "show", runId], h.io), 0);
   assert.match(h.stdout(), new RegExp(`run delete ${runId}`));
 });
 
 test("run delete removes a resting Run; run show then reports run-not-found", async (t) => {
   const h = await harness(t);
-  const runId = h.launch();
+  const runId = await h.launch();
 
-  assert.equal(runHeadless(h.clients, ["run", "delete", runId], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["run", "delete", runId], h.io), 0);
   assert.match(h.stdout(), new RegExp(`Deleted run ${runId}`));
   h.reset();
 
-  assert.equal(runHeadless(h.clients, ["run", "show", runId], h.io), 1);
+  assert.equal(await runHeadless(h.clients, ["run", "show", runId], h.io), 1);
   assert.match(h.stderr(), /run-not-found/);
   h.reset();
 
-  assert.equal(runHeadless(h.clients, ["run", "list"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["run", "list"], h.io), 0);
   assert.match(h.stdout(), /none yet/);
 });
 
 test("run cancel on a resting Run is refused with run-not-live", async (t) => {
   const h = await harness(t);
-  const runId = h.launch();
-  assert.equal(runHeadless(h.clients, ["run", "cancel", runId], h.io), 1);
+  const runId = await h.launch();
+  assert.equal(await runHeadless(h.clients, ["run", "cancel", runId], h.io), 1);
   assert.match(h.stderr(), /run-not-live/);
 });
 
 test("run cancel and run delete without a Run id exit non-zero", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["run", "cancel"], h.io), 1);
+  assert.equal(await runHeadless(h.clients, ["run", "cancel"], h.io), 1);
   assert.match(h.stderr(), /missing-run-id/);
   h.reset();
-  assert.equal(runHeadless(h.clients, ["run", "delete"], h.io), 1);
+  assert.equal(await runHeadless(h.clients, ["run", "delete"], h.io), 1);
   assert.match(h.stderr(), /missing-run-id/);
 });

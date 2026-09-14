@@ -46,8 +46,9 @@ export interface HeadlessHarness {
   readonly runGroup: ReturnType<typeof openRunGroup> | undefined;
   readonly workspace: string;
   readonly io: HeadlessIO;
-  /** Run the CLI over the captured IO and return its exit code. */
-  readonly run: (argv: string[]) => number;
+  /** Run the CLI over the captured IO and return its exit code. Async because a
+   *  Run command settles asynchronously (execution spawns). */
+  readonly run: (argv: string[]) => Promise<number>;
   readonly stdout: () => string;
   readonly stderr: () => string;
   /** stdout + stderr, for a combined assertion message. */

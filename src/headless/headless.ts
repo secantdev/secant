@@ -6,6 +6,7 @@ import type {
   BundleResult,
 } from "../application/bundle-management.js";
 import type {
+  OperationOutcome,
   Problem,
   ProjectionPort,
 } from "../application/projection-port.js";
@@ -19,10 +20,11 @@ import { renderFocus, renderRow, renderRun, renderRunList } from "./render.js";
 //
 // One `commander` command tree owns all argument parsing (help is generated, so
 // it never drifts from the commands that exist). The tree is built once by
-// `buildProgram` and driven two ways: `runHeadless` parses synchronously with
-// clients in hand (tests, and any in-process caller); `runHeadlessCli` parses
-// asynchronously behind a `CommandExecutor` the CLI host uses to wire the
-// composition root lazily, so SQLite stays off the `--help`/`--version` paths.
+// `buildProgram` and driven two ways: `runHeadless` parses with clients in hand
+// (tests, and any in-process caller); `runHeadlessCli` parses behind a
+// `CommandExecutor` the CLI host uses to wire the composition root lazily, so
+// SQLite stays off the `--help`/`--version` paths. Both `parseAsync` and await
+// the action, since a Run command settles asynchronously (execution spawns).
 
 export interface HeadlessClients {
   readonly projectionPort: ProjectionPort;
@@ -43,21 +45,23 @@ export interface HeadlessIO {
  * and version paths.
  */
 export type CommandExecutor = (
-  run: (clients: HeadlessClients) => number,
+  run: (clients: HeadlessClients) => number | Promise<number>,
 ) => number | Promise<number>;
 
 /** Runs one headless invocation with clients in hand. `args` is everything after
- *  `secant`. */
-export function runHeadless(
+ *  `secant`. Async because a Run command (launch, resume, answer) drives
+ *  execution, which spawns and settles asynchronously; `parseAsync` awaits the
+ *  action so the exit code is final before this resolves. */
+export async function runHeadless(
   clients: HeadlessClients,
   args: readonly string[],
   io: HeadlessIO,
-): number {
+): Promise<number> {
   const { program, state } = buildProgram(io, "0.0.0-dev", (run) =>
     run(clients),
   );
   try {
-    program.parse(args as string[], { from: "user" });
+    await program.parseAsync(args as string[], { from: "user" });
   } catch (error) {
     return translateCommanderError(error, io);
   }
@@ -734,14 +738,41 @@ function splitSelector(selector: string): {
     : { id: selector.slice(0, at), version: selector.slice(at + 1) };
 }
 
-function launchRun(
+/** Await a submitted Operation's settled outcome. A Run settles asynchronously
+ *  now (execution spawns), so the outcome may still be `pending` on the opened
+ *  snapshot; when it is, the settled outcome arrives as the operation stream's
+ *  first durable update (no sleep, no poll). A synchronous Operation is already
+ *  settled and returns at once. */
+async function settledOutcome(
+  port: ProjectionPort,
+  operationId: string,
+): Promise<OperationOutcome> {
+  const view = port.openProjection({ family: "operation", operationId });
+  try {
+    if (view.snapshot.outcome.status !== "pending")
+      return view.snapshot.outcome;
+    for await (const update of view.updates) {
+      if (
+        update.kind === "durable" &&
+        update.snapshot.outcome.status !== "pending"
+      ) {
+        return update.snapshot.outcome;
+      }
+    }
+    return view.snapshot.outcome;
+  } finally {
+    view.close();
+  }
+}
+
+async function launchRun(
   port: ProjectionPort,
   io: HeadlessIO,
   json: boolean,
   selector: string,
   trust: string | undefined,
   inputs: Record<string, string>,
-): number {
+): Promise<number> {
   const { id, version } = splitSelector(selector);
   const admission = port.submit({
     operationId: randomUUID(),
@@ -764,14 +795,9 @@ function launchRun(
     });
   }
 
-  // The launch settles inline (headless default), so the Operation is already
-  // applied here; surface a settlement Problem before reading the Run.
-  const operationView = port.openProjection({
-    family: "operation",
-    operationId: admission.operationId,
-  });
-  const outcome = operationView.snapshot.outcome;
-  operationView.close();
+  // The launch drives execution (async now); await its settled outcome and
+  // surface a settlement Problem before reading the Run.
+  const outcome = await settledOutcome(port, admission.operationId);
   if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
 
   const opened = port.openProjection({ family: "run", runId });
@@ -821,12 +847,12 @@ function showRun(
   }
 }
 
-function resumeRun(
+async function resumeRun(
   port: ProjectionPort,
   io: HeadlessIO,
   json: boolean,
   runId: string,
-): number {
+): Promise<number> {
   const admission = port.submit({
     operationId: randomUUID(),
     operation: "resume-run",
@@ -834,14 +860,9 @@ function resumeRun(
   });
   if (!admission.admitted) return fail(io, json, admission.problem);
 
-  // The resume settles inline (headless default); surface a settlement Problem
-  // before reading the Run, like `run launch`.
-  const operationView = port.openProjection({
-    family: "operation",
-    operationId: admission.operationId,
-  });
-  const outcome = operationView.snapshot.outcome;
-  operationView.close();
+  // The resume drives execution (async now); await its settled outcome and
+  // surface a settlement Problem before reading the Run, like `run launch`.
+  const outcome = await settledOutcome(port, admission.operationId);
   if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
 
   const opened = port.openProjection({ family: "run", runId });
@@ -863,13 +884,13 @@ function resumeRun(
   }
 }
 
-function answerRun(
+async function answerRun(
   port: ProjectionPort,
   io: HeadlessIO,
   json: boolean,
   runId: string,
   answer: "continue" | "stop",
-): number {
+): Promise<number> {
   // Read the Run's current Gate reference and submit against it, so a Gate that
   // moved between the read and the submit is caught as stale by the Application.
   const opened = port.openProjection({ family: "run", runId });
@@ -900,14 +921,9 @@ function answerRun(
   });
   if (!admission.admitted) return fail(io, json, admission.problem);
 
-  // The answer settles inline (headless default); surface a settlement Problem
-  // before reading the Run, like `run launch`/`run resume`.
-  const operationView = port.openProjection({
-    family: "operation",
-    operationId: admission.operationId,
-  });
-  const outcome = operationView.snapshot.outcome;
-  operationView.close();
+  // A `continue` answer drives execution (async now); await its settled outcome
+  // and surface a settlement Problem before reading the Run, like `run launch`.
+  const outcome = await settledOutcome(port, admission.operationId);
   if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
 
   const after = port.openProjection({ family: "run", runId });

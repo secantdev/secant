@@ -138,7 +138,7 @@ test(
         hostPlatform: hostPlatform(),
         autoClose: false,
       });
-      assert.equal(h.run(["bundle", "build", bundleFolder]), 0);
+      assert.equal(await h.run(["bundle", "build", bundleFolder]), 0);
       const entry = h.catalog
         .listEntries()
         .find((e) => e.id === "dev.secant.recovery");
@@ -210,7 +210,7 @@ test(
     // Let the interrupted Step complete instantly on resume, then resume in-process.
     writeFileSync(markers.proceed, "go");
     h.reset();
-    assert.equal(h.run(["run", "resume", runId]), 0);
+    assert.equal(await h.run(["run", "resume", runId]), 0);
     // Match against combined stdout+stderr, as the pre-harness capture did.
     assert.match(h.output(), /^State: succeeded$/m);
 

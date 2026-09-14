@@ -16,6 +16,12 @@ import {
   writeCommandBundle,
 } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { awaitSettled } from "../helpers/settleOperation.js";
+
+/** Await a submitted Run Operation's settled outcome (execution settles async). */
+async function settled(wired: Wiring, operationId: string): Promise<void> {
+  await awaitSettled(wired.projectionPort, operationId);
+}
 
 // The composition wiring suite (#74 A18): it constructs the Application through
 // the one wiring path both roots take — against a temporary home, without a
@@ -94,7 +100,7 @@ test("the wiring hands the Application the engine version, host platform, and la
   assert.equal(bundle.executionSummary.platform, "linux");
 });
 
-test("the wiring constructs the Run Store and Run execution through the single root, so a launch runs to succeeded", (t) => {
+test("the wiring constructs the Run Store and Run execution through the single root, so a launch runs to succeeded", async (t) => {
   ensureRuntimeOnPath();
   const workspace = makeTempDir("secant-wire-run-ws-");
   const wired = wireApplication({
@@ -131,6 +137,7 @@ test("the wiring constructs the Run Store and Run execution through the single r
   assert.ok(admission.admitted, JSON.stringify(admission));
   const runId = admission.runId;
   assert.ok(runId);
+  await settled(wired, "op-launch");
 
   const opened = wired.projectionPort.openProjection({ family: "run", runId });
   try {
@@ -143,7 +150,7 @@ test("the wiring constructs the Run Store and Run execution through the single r
   }
 });
 
-test("the wiring's AssetResolver maps a Bundle's script asset to its file in the Catalog's tree so a Command can run it", (t) => {
+test("the wiring's AssetResolver maps a Bundle's script asset to its file in the Catalog's tree so a Command can run it", async (t) => {
   ensureRuntimeOnPath();
   const workspace = makeTempDir("secant-wire-asset-ws-");
   const wired = wireApplication({
@@ -183,6 +190,7 @@ test("the wiring's AssetResolver maps a Bundle's script asset to its file in the
   });
   assert.ok(admission.admitted, JSON.stringify(admission));
   const runId = admission.runId!;
+  await settled(wired, "op-launch");
 
   const opened = wired.projectionPort.openProjection({ family: "run", runId });
   try {
@@ -201,7 +209,7 @@ test("the wiring's AssetResolver maps a Bundle's script asset to its file in the
   }
 });
 
-test("the headless client and the TUI client render the same Port snapshot", (t) => {
+test("the headless client and the TUI client render the same Port snapshot", async (t) => {
   // Defaults for engineVersion and hostPlatform, so both come from the process —
   // the production behaviour of both roots. The headless client and the TUI view
   // both read the focus snapshot the Port hands out (bundle-view seeds its signal
@@ -216,7 +224,7 @@ test("the headless client and the TUI client render the same Port snapshot", (t)
     cwd: () => process.cwd(),
   };
   assert.equal(
-    runHeadless(
+    await runHeadless(
       {
         projectionPort: wired.projectionPort,
         bundleManagement: wired.bundleManagement,
@@ -271,18 +279,19 @@ function assetFixture(t: TestContext) {
 
 /** Launch and return the Run's state plus its `output` text (the script's
  *  printed path), or the refusal Problem. */
-function launch(
+async function launch(
   wired: Wiring,
   bundleId: string,
   digest: string,
   operationId: string,
-): { state: string; output: string } | { problemCode: string } {
+): Promise<{ state: string; output: string } | { problemCode: string }> {
   const admission = wired.projectionPort.submit({
     operationId,
     operation: "launch-run",
     input: { bundle: { id: bundleId }, launchInputs: {}, trustDigest: digest },
   });
   if (!admission.admitted) return { problemCode: admission.problem.code };
+  await settled(wired, operationId);
   const opened = wired.projectionPort.openProjection({
     family: "run",
     runId: admission.runId!,
@@ -301,10 +310,10 @@ function launch(
   }
 }
 
-test("two launches of one digest copy nothing per Run and resolve the same asset path under the Catalog's tree", (t) => {
+test("two launches of one digest copy nothing per Run and resolve the same asset path under the Catalog's tree", async (t) => {
   const { home, wired, cmd, entry } = assetFixture(t);
-  const first = launch(wired, cmd.id, entry.digest, "op-1");
-  const second = launch(wired, cmd.id, entry.digest, "op-2");
+  const first = await launch(wired, cmd.id, entry.digest, "op-1");
+  const second = await launch(wired, cmd.id, entry.digest, "op-2");
   assert.ok("state" in first && "state" in second);
   assert.equal(first.state, "succeeded");
   assert.equal(second.state, "succeeded");
@@ -318,18 +327,18 @@ test("two launches of one digest copy nothing per Run and resolve the same asset
   assert.ok(!existsSync(join(home, "run-assets")));
 });
 
-test("a tree deleted by hand is re-extracted at launch; deleted managed bytes refuse with bundle-bytes-missing", (t) => {
+test("a tree deleted by hand is re-extracted at launch; deleted managed bytes refuse with bundle-bytes-missing", async (t) => {
   const { home, wired, cmd, entry } = assetFixture(t);
   const root = wired.catalog.assetRoot(entry.digest);
   assert.ok(root !== undefined);
   rmSync(root, { recursive: true, force: true });
-  const relaunched = launch(wired, cmd.id, entry.digest, "op-1");
+  const relaunched = await launch(wired, cmd.id, entry.digest, "op-1");
   assert.ok("state" in relaunched);
   assert.equal(relaunched.state, "succeeded");
   assert.ok(existsSync(join(root, "check.js")));
 
   rmSync(join(home, "bundles", `${entry.digest}.wfb`));
-  const refused = launch(wired, cmd.id, entry.digest, "op-2");
+  const refused = await launch(wired, cmd.id, entry.digest, "op-2");
   assert.deepEqual(refused, { problemCode: "bundle-bytes-missing" });
 });
 

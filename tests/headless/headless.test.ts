@@ -20,10 +20,10 @@ function harness(t: TestContext) {
 
 test("approve then show --json reports approved with the canonical path", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["workspace", "approve"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["workspace", "approve"], h.io), 0);
 
   h.reset();
-  assert.equal(runHeadless(h.clients, ["workspace", "--json"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["workspace", "--json"], h.io), 0);
   const snapshot: unknown = JSON.parse(h.stdout());
   assert.deepEqual(snapshot, {
     family: "workspace",
@@ -40,7 +40,7 @@ test("approve then show --json reports approved with the canonical path", async 
 
 test("show on an unapproved workspace names the approve command", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["workspace"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["workspace"], h.io), 0);
   const text = h.stdout();
   assert.match(text, /unapproved/);
   assert.match(text, /secant workspace approve/);
@@ -49,7 +49,7 @@ test("show on an unapproved workspace names the approve command", async (t) => {
 test("approve --json prints the operation result verbatim", async (t) => {
   const h = await harness(t);
   assert.equal(
-    runHeadless(h.clients, ["workspace", "approve", "--json"], h.io),
+    await runHeadless(h.clients, ["workspace", "approve", "--json"], h.io),
     0,
   );
   const snapshot: unknown = JSON.parse(h.stdout());
@@ -63,7 +63,7 @@ test("approving a missing path exits non-zero and prints the Problem", async (t)
   const h = await harness(t);
   const missing = join(makeTempDir("secant-headless-missing-"), "nope");
   assert.equal(
-    runHeadless(h.clients, ["workspace", "approve", missing], h.io),
+    await runHeadless(h.clients, ["workspace", "approve", missing], h.io),
     1,
   );
   assert.match(h.stderr(), /workspace-path-not-found/);
@@ -89,10 +89,13 @@ test("workspace approve <relative> resolves against io.cwd(), not process.cwd()"
     cwd: () => parent,
   };
 
-  assert.equal(runHeadless(clients, ["workspace", "approve", "sub"], io), 0);
+  assert.equal(
+    await runHeadless(clients, ["workspace", "approve", "sub"], io),
+    0,
+  );
 
   out.length = 0;
-  assert.equal(runHeadless(clients, ["workspace", "--json"], io), 0);
+  assert.equal(await runHeadless(clients, ["workspace", "--json"], io), 0);
   const snapshot = JSON.parse(out.join("")) as {
     approval: { state: string };
   };
@@ -101,25 +104,28 @@ test("workspace approve <relative> resolves against io.cwd(), not process.cwd()"
 
 test("an unknown command exits non-zero with guidance", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["bundle", "frobnicate"], h.io), 1);
+  assert.equal(await runHeadless(h.clients, ["bundle", "frobnicate"], h.io), 1);
   assert.match(h.stderr(), /unknown-command/);
 });
 
 test("an unknown top-level command exits non-zero", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["frobnicate"], h.io), 1);
+  assert.equal(await runHeadless(h.clients, ["frobnicate"], h.io), 1);
   assert.match(h.stderr(), /unknown-command/);
 });
 
 test("an unknown flag exits non-zero", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["bundle", "list", "--bogus"], h.io), 1);
+  assert.equal(
+    await runHeadless(h.clients, ["bundle", "list", "--bogus"], h.io),
+    1,
+  );
   assert.match(h.stderr(), /unknown-option/);
 });
 
 test("--help lists every command, including bundle install, and exits zero", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["--help"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["--help"], h.io), 0);
   const text = h.stdout();
   assert.match(text, /Usage: secant/);
   for (const command of [
@@ -138,7 +144,7 @@ test("--help lists every command, including bundle install, and exits zero", asy
 test("a subcommand's --help prints that subcommand and exits zero", async (t) => {
   const h = await harness(t);
   assert.equal(
-    runHeadless(h.clients, ["bundle", "inspect", "--help"], h.io),
+    await runHeadless(h.clients, ["bundle", "inspect", "--help"], h.io),
     0,
   );
   assert.match(h.stdout(), /secant bundle inspect/);
@@ -147,7 +153,7 @@ test("a subcommand's --help prints that subcommand and exits zero", async (t) =>
 
 test("--version prints the embedded version and exits zero", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["--version"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["--version"], h.io), 0);
   assert.equal(h.stdout(), "0.0.0-dev\n");
 });
 
@@ -163,7 +169,7 @@ test("bundle build --no-install --output prints the digest and output path", asy
   const h = await harness(t);
   const output = join(makeTempDir("secant-headless-wfb-"), "out.wfb");
   assert.equal(
-    runHeadless(
+    await runHeadless(
       h.clients,
       ["bundle", "build", proofBundle, "--no-install", "--output", output],
       h.io,
@@ -182,7 +188,7 @@ test("bundle build parses the folder even when flags precede it", async (t) => {
   const h = await harness(t);
   const output = join(makeTempDir("secant-headless-wfb-"), "out.wfb");
   assert.equal(
-    runHeadless(
+    await runHeadless(
       h.clients,
       ["bundle", "build", "--no-install", "--output", output, proofBundle],
       h.io,
@@ -230,7 +236,7 @@ test("bundle build on a non-composing folder exits non-zero, prints the findings
 
   const output = join(makeTempDir("secant-headless-wfb-"), "out.wfb");
   assert.equal(
-    runHeadless(
+    await runHeadless(
       h.clients,
       ["bundle", "build", folder, "--no-install", "--output", output],
       h.io,
@@ -246,7 +252,7 @@ test("bundle build on a non-composing folder exits non-zero, prints the findings
 test("bundle build --no-install without --output refuses with a Problem", async (t) => {
   const h = await harness(t);
   assert.equal(
-    runHeadless(
+    await runHeadless(
       h.clients,
       ["bundle", "build", proofBundle, "--no-install"],
       h.io,
@@ -259,14 +265,14 @@ test("bundle build --no-install without --output refuses with a Problem", async 
 test("bundle build installs by default and the Home count reads back one", async (t) => {
   const h = await harness(t);
   assert.equal(
-    runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    await runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
     0,
   );
   assert.match(h.stdout(), /Bundle: dev\.secant\.test-repair@1\.0\.0/);
   assert.match(h.stdout(), /^Installed\.$/m);
 
   h.reset();
-  assert.equal(runHeadless(h.clients, ["workspace", "--json"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["workspace", "--json"], h.io), 0);
   const snapshot = JSON.parse(h.stdout()) as { installedBundleCount: number };
   assert.equal(snapshot.installedBundleCount, 1);
 });
@@ -274,12 +280,12 @@ test("bundle build installs by default and the Home count reads back one", async
 test("bundle list shows the installed row and --json carries the snapshot", async (t) => {
   const h = await harness(t);
   assert.equal(
-    runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    await runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
     0,
   );
 
   h.reset();
-  assert.equal(runHeadless(h.clients, ["bundle", "list"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["bundle", "list"], h.io), 0);
   const text = h.stdout();
   assert.match(text, /dev\.secant\.test-repair@1\.0\.0/);
   assert.match(text, /digest: sha256:[0-9a-f]{64}/);
@@ -287,7 +293,10 @@ test("bundle list shows the installed row and --json carries the snapshot", asyn
   assert.match(text, /not yet trusted/);
 
   h.reset();
-  assert.equal(runHeadless(h.clients, ["bundle", "list", "--json"], h.io), 0);
+  assert.equal(
+    await runHeadless(h.clients, ["bundle", "list", "--json"], h.io),
+    0,
+  );
   const snapshot = JSON.parse(h.stdout()) as {
     family: string;
     result: { found: boolean; bundles: { id: string }[] };
@@ -299,7 +308,7 @@ test("bundle list shows the installed row and --json carries the snapshot", asyn
 test("bundle list and inspect show a trusted Bundle once a grant is recorded", async (t) => {
   const h = await harness(t);
   assert.equal(
-    runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    await runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
     0,
   );
   const [entry] = h.catalog.listEntries();
@@ -311,14 +320,17 @@ test("bundle list and inspect show a trusted Bundle once a grant is recorded", a
   });
 
   h.reset();
-  assert.equal(runHeadless(h.clients, ["bundle", "list"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["bundle", "list"], h.io), 0);
   assert.match(
     h.stdout(),
     /trust: trusted \(granted 2026-09-12T09:00:00\.000Z\)/,
   );
 
   h.reset();
-  assert.equal(runHeadless(h.clients, ["bundle", "list", "--json"], h.io), 0);
+  assert.equal(
+    await runHeadless(h.clients, ["bundle", "list", "--json"], h.io),
+    0,
+  );
   const snapshot = JSON.parse(h.stdout()) as {
     result: { bundles: { trust: { state: string; operationId?: string } }[] };
   };
@@ -330,7 +342,7 @@ test("bundle list and inspect show a trusted Bundle once a grant is recorded", a
 
   h.reset();
   assert.equal(
-    runHeadless(
+    await runHeadless(
       h.clients,
       ["bundle", "inspect", "dev.secant.test-repair"],
       h.io,
@@ -345,20 +357,20 @@ test("bundle list and inspect show a trusted Bundle once a grant is recorded", a
 
 test("bundle list with nothing installed says so", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["bundle", "list"], h.io), 0);
+  assert.equal(await runHeadless(h.clients, ["bundle", "list"], h.io), 0);
   assert.match(h.stdout(), /No Bundles are installed/);
 });
 
 test("bundle inspect shows the full focus and --json carries the bundle", async (t) => {
   const h = await harness(t);
   assert.equal(
-    runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    await runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
     0,
   );
 
   h.reset();
   assert.equal(
-    runHeadless(
+    await runHeadless(
       h.clients,
       ["bundle", "inspect", "dev.secant.test-repair"],
       h.io,
@@ -373,7 +385,7 @@ test("bundle inspect shows the full focus and --json carries the bundle", async 
 
   h.reset();
   assert.equal(
-    runHeadless(
+    await runHeadless(
       h.clients,
       ["bundle", "inspect", "dev.secant.test-repair", "--json"],
       h.io,
@@ -395,7 +407,11 @@ test("bundle inspect shows the full focus and --json carries the bundle", async 
 test("bundle inspect of an unknown id exits non-zero with a Problem", async (t) => {
   const h = await harness(t);
   assert.equal(
-    runHeadless(h.clients, ["bundle", "inspect", "io.example.absent"], h.io),
+    await runHeadless(
+      h.clients,
+      ["bundle", "inspect", "io.example.absent"],
+      h.io,
+    ),
     1,
   );
   assert.match(h.stderr(), /bundle-not-installed/);
@@ -404,7 +420,7 @@ test("bundle inspect of an unknown id exits non-zero with a Problem", async (t) 
 
 test("bundle inspect without an id exits non-zero", async (t) => {
   const h = await harness(t);
-  assert.equal(runHeadless(h.clients, ["bundle", "inspect"], h.io), 1);
+  assert.equal(await runHeadless(h.clients, ["bundle", "inspect"], h.io), 1);
   assert.match(h.stderr(), /missing-bundle-id/);
 });
 
@@ -412,7 +428,7 @@ test("bundle install of the built file reports already installed", async (t) => 
   const h = await harness(t);
   const output = join(makeTempDir("secant-headless-wfb-"), "out.wfb");
   assert.equal(
-    runHeadless(
+    await runHeadless(
       h.clients,
       ["bundle", "build", proofBundle, "--output", output],
       h.io,
@@ -422,6 +438,9 @@ test("bundle install of the built file reports already installed", async (t) => 
   assert.ok(existsSync(output));
 
   h.reset();
-  assert.equal(runHeadless(h.clients, ["bundle", "install", output], h.io), 0);
+  assert.equal(
+    await runHeadless(h.clients, ["bundle", "install", output], h.io),
+    0,
+  );
   assert.match(h.stdout(), /Already installed/);
 });

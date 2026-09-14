@@ -19,6 +19,7 @@ import {
   writeCommandBundle,
   type CommandBundleOptions,
 } from "../helpers/commandBundle.js";
+import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { readArchiveEntries } from "../helpers/zip.js";
 import {
@@ -81,6 +82,12 @@ function install(
   const entry = f.catalog.listEntries().find((e) => e.id === cmd.id);
   assert.ok(entry);
   return { id: cmd.id, digest: entry.digest };
+}
+
+/** Await a launched Run's async settlement, so its execution finishes before the
+ *  test's fixture closes the Run Store (execution spawns and settles off-thread). */
+async function settled(f: Fixture, operationId: string): Promise<void> {
+  await awaitSettled(f.app.projectionPort, operationId);
 }
 
 function launch(
@@ -224,7 +231,7 @@ test("missing or type-invalid Launch inputs yield one field violation per input,
   assert.deepEqual(f.runGroup.listRuns(), []);
 });
 
-test("valid Launch inputs of every type pin to the created Run and are visible in run show", (t) => {
+test("valid Launch inputs of every type pin to the created Run and are visible in run show", async (t) => {
   const dir = makeTempDir("secant-pf-valid-");
   const fileA = join(dir, "a.txt");
   writeFileSync(fileA, "a\n");
@@ -256,6 +263,8 @@ test("valid Launch inputs of every type pin to the created Run and are visible i
   const record = f.runGroup.readRun(admission.runId!);
   assert.ok(record.ok);
   if (record.ok) assert.deepEqual(record.run.launch, inputs);
+  // Let the launched Run settle before the fixture closes the Run Store.
+  await settled(f, "op-1");
 });
 
 // --- Composition re-check (corrupted pinned Snapshot) ----------------------

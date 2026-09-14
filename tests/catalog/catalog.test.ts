@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { Database } from "bun:sqlite";
@@ -129,8 +137,10 @@ test("a byte-different Bundle of the same identity is an identity collision", as
   assert.ok(collision.outcome === "identity-collision");
   assert.equal(collision.existing.digest, digestOf(new Uint8Array([1])));
   assert.equal(catalog.countInstalledBundles(), 1);
-  // The colliding bytes were never stored.
-  assert.deepEqual(readdirSync(join(home, "bundles")), [
+  // The colliding bytes were never stored: only the first digest's bytes and
+  // its derived asset tree are in the store.
+  assert.deepEqual(readdirSync(join(home, "bundles")).sort(), [
+    digestOf(new Uint8Array([1])),
     `${digestOf(new Uint8Array([1]))}.wfb`,
   ]);
 });
@@ -363,4 +373,116 @@ test("different identities both install and persist across reopening", async (t)
   );
   assert.equal(c.outcome, "installed");
   assert.equal(second.countInstalledBundles(), 3);
+});
+
+// --- the derived asset tree (#100) ------------------------------------------
+//
+// The Catalog never parses an archive: composition injects a reader that turns
+// exact `.wfb` bytes into the manifest-declared asset files. These tests inject a
+// stub keyed by the bytes' first byte, so the tree behaviour is proved without
+// real archives.
+
+const treeAssets = [
+  { path: "scripts/check.js", data: Buffer.from("console.log('check')") },
+  { path: "prompt.md", data: Buffer.from("do the work") },
+];
+const readStubAssets = (bytes: Uint8Array) =>
+  bytes[0] === 0xff ? undefined : treeAssets;
+
+test("an install extracts exactly the declared assets into a digest-named tree beside the bytes", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  const catalog = await openCatalog(home, { readAssets: readStubAssets });
+  t.after(() => catalog.close());
+
+  const bytes = new Uint8Array([7, 7, 7]);
+  const result = catalog.installBundle(install("io.example.a", "1.0.0", bytes));
+  assert.equal(result.outcome, "installed");
+
+  const root = catalog.assetRoot(digestOf(bytes));
+  assert.equal(root, join(home, "bundles", digestOf(bytes)));
+  assert.ok(root !== undefined);
+  assert.equal(
+    readFileSync(join(root, "scripts", "check.js"), "utf8"),
+    "console.log('check')",
+  );
+  assert.equal(readFileSync(join(root, "prompt.md"), "utf8"), "do the work");
+  assert.deepEqual(readdirSync(root).sort(), ["prompt.md", "scripts"]);
+  // No staging directory lingers beside the committed tree.
+  assert.deepEqual(readdirSync(join(home, "bundles")).sort(), [
+    digestOf(bytes),
+    `${digestOf(bytes)}.wfb`,
+  ]);
+  if (process.platform !== "win32") {
+    // POSIX: the tree's files are read-only.
+    assert.equal(statSync(join(root, "prompt.md")).mode & 0o222, 0);
+  }
+});
+
+test("a failed install leaves no tree, no bytes, and no Entry", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  const catalog = await openCatalog(home, { readAssets: readStubAssets });
+  t.after(() => catalog.close());
+
+  assert.throws(() =>
+    catalog.installBundle(
+      install(
+        "io.example.a",
+        "1.0.0",
+        new Uint8Array([5]),
+        undefined,
+        "0".repeat(64),
+      ),
+    ),
+  );
+  const bundlesDir = join(home, "bundles");
+  assert.ok(!existsSync(bundlesDir) || readdirSync(bundlesDir).length === 0);
+  assert.equal(catalog.assetRoot("0".repeat(64)), undefined);
+  assert.equal(catalog.countInstalledBundles(), 0);
+});
+
+test("assetRoot is undefined for a digest that is not installed", async (t) => {
+  const catalog = await openCatalog(makeTempDir("secant-catalog-"), {
+    readAssets: readStubAssets,
+  });
+  t.after(() => catalog.close());
+  assert.equal(catalog.assetRoot("a".repeat(64)), undefined);
+});
+
+test("a missing or corrupt tree is re-extracted from the managed bytes; missing bytes read as not installed", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  const catalog = await openCatalog(home, { readAssets: readStubAssets });
+  t.after(() => catalog.close());
+
+  const bytes = new Uint8Array([8, 8]);
+  catalog.installBundle(install("io.example.a", "1.0.0", bytes));
+  const digest = digestOf(bytes);
+  const root = catalog.assetRoot(digest);
+  assert.ok(root !== undefined);
+
+  // Deleted by hand: re-extracted on the next ask.
+  rmSync(root, { recursive: true, force: true });
+  assert.equal(catalog.assetRoot(digest), root);
+  assert.equal(readFileSync(join(root, "prompt.md"), "utf8"), "do the work");
+
+  // Corrupt (a declared file truncated): re-extracted from the bytes.
+  chmodSync(join(root, "prompt.md"), 0o644);
+  writeFileSync(join(root, "prompt.md"), "x");
+  assert.equal(catalog.assetRoot(digest), root);
+  assert.equal(readFileSync(join(root, "prompt.md"), "utf8"), "do the work");
+
+  // The bytes are the authority: without them there is nothing to derive from.
+  rmSync(join(home, "bundles", `${digest}.wfb`));
+  assert.equal(catalog.assetRoot(digest), undefined);
+});
+
+test("a Catalog opened without an asset reader derives an empty tree", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  const catalog = await openCatalog(home);
+  t.after(() => catalog.close());
+  const bytes = new Uint8Array([3]);
+  catalog.installBundle(install("io.example.a", "1.0.0", bytes));
+  const root = catalog.assetRoot(digestOf(bytes));
+  assert.equal(root, join(home, "bundles", digestOf(bytes)));
+  assert.ok(root !== undefined);
+  assert.deepEqual(readdirSync(root), []);
 });

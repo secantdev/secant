@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import { z } from "zod";
 
@@ -55,6 +58,27 @@ export interface BundleInstall {
   readonly installedAt: Date;
 }
 
+/** One manifest-declared asset file inside exact `.wfb` bytes. */
+export interface AssetFile {
+  readonly path: string; // the archive entry's relative path
+  readonly data: Uint8Array;
+}
+
+/**
+ * Reads the manifest-declared asset files out of exact `.wfb` bytes, or undefined
+ * when the bytes are not a readable Bundle. Composition supplies the Bundle
+ * Module's reader; the Catalog itself never parses an archive, so it keeps
+ * depending only on the Workflow vocabulary. Without a reader every install
+ * derives an empty tree.
+ */
+export type AssetReader = (
+  bytes: Uint8Array,
+) => readonly AssetFile[] | undefined;
+
+export interface CatalogOptions {
+  readonly readAssets?: AssetReader;
+}
+
 /**
  * The outcome of an install. First-install-wins by identity (id, version): an
  * equal digest is already installed, a different digest is an identity
@@ -76,10 +100,11 @@ export interface Catalog {
   approveWorkspace(path: string, approvedAt: Date): WorkspaceApproval;
   /**
    * Install a Bundle atomically: stage the bytes, store them under the digest,
-   * verify the stored bytes against the digest, and commit the Entry, all in one
-   * serialized transaction. Any failure leaves no store bytes and no Entry.
-   * Throws only on a caller-contract violation or storage fault (after cleaning
-   * up), never for the three ordinary outcomes.
+   * verify the stored bytes against the digest, derive the digest-named asset
+   * tree beside them, and commit the Entry, all in one serialized transaction.
+   * Any failure leaves no store bytes, no tree, and no Entry. Throws only on a
+   * caller-contract violation or storage fault (after cleaning up), never for
+   * the three ordinary outcomes.
    */
   installBundle(install: BundleInstall): BundleInstallResult;
   /**
@@ -121,6 +146,16 @@ export interface Catalog {
    * the Catalog (ADR 0025).
    */
   readManagedBytes(digest: string): Uint8Array | undefined;
+  /**
+   * The directory holding an installed digest's extracted, read-only asset tree
+   * — one file per manifest-declared asset, at its archive-relative path — or
+   * undefined when the digest is not installed. The tree is a derived cache of
+   * the managed bytes, never an identity or a second source of truth: a missing
+   * or corrupt tree is re-extracted from the bytes here before the directory is
+   * returned, and only missing bytes read as not installed (ADR 0021, #100).
+   * Nothing else about the store layout crosses this Interface.
+   */
+  assetRoot(digest: string): string | undefined;
   /** Release the database; safe to call from a `finally` — it does not throw. */
   close(): void;
 }
@@ -152,7 +187,11 @@ const trustGrantRow = z.object({
  * compiled binary; it is the sole SQLite dependency and lives only behind this
  * Interface (ADR 0030, runtime-neutrality allowlist).
  */
-export function openCatalog(secantHome: string): Catalog {
+export function openCatalog(
+  secantHome: string,
+  options: CatalogOptions = {},
+): Catalog {
+  const readAssets: AssetReader = options.readAssets ?? (() => []);
   mkdirSync(secantHome, { recursive: true });
   const database = new Database(join(secantHome, "catalog.db"));
   // Serialize concurrent Secant processes at the database rather than corrupt.
@@ -181,8 +220,80 @@ export function openCatalog(secantHome: string): Catalog {
       "operation_id TEXT NOT NULL, granted_at TEXT NOT NULL, " +
       "PRIMARY KEY (digest, installation_generation)) STRICT",
   );
-  // The digest-named managed store holds each Bundle's exact bytes.
+  // The digest-named managed store holds each Bundle's exact bytes as
+  // `<digest>.wfb`, and beside each one the derived asset tree in `<digest>/`.
   const storeDir = join(secantHome, "bundles");
+  const bytesPath = (digest: string) => join(storeDir, `${digest}.wfb`);
+  const treePath = (digest: string) => join(storeDir, digest);
+
+  // Derive the asset tree for a digest from its exact bytes with the same
+  // quarantine the bytes use: write every declared file into a staging directory,
+  // read each back and compare, then rename the whole tree into its digest name.
+  // On POSIX each file is made read-only (a Run must never edit the shared
+  // layer); Windows gets no read-only attribute, which would only obstruct the
+  // sweep and rewrite below. Throws on a storage fault or unreadable bytes after
+  // removing the staging tree; the caller owns the final tree's cleanup.
+  // ponytail: files are read-only, directories stay writable, so a rewrite can
+  // `rmSync` the old tree without a chmod pass first. Lock the directories too
+  // if a Run is ever seen adding files beside the assets.
+  function extractTree(digest: string, bytes: Uint8Array): void {
+    const assets = readAssets(bytes);
+    if (assets === undefined) {
+      throw new Error(
+        `Catalog: the managed bytes for ${digest} are not a readable Bundle.`,
+      );
+    }
+    const final = treePath(digest);
+    const staging = `${final}.staging`;
+    rmSync(staging, { recursive: true, force: true });
+    try {
+      mkdirSync(staging, { recursive: true });
+      for (const asset of assets) {
+        const target = join(staging, asset.path);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, asset.data);
+        if (!Buffer.from(readFileSync(target)).equals(asset.data)) {
+          throw new Error(
+            `Catalog: the extracted asset ${asset.path} of ${digest} did not read back intact.`,
+          );
+        }
+        if (process.platform !== "win32") chmodSync(target, 0o444);
+      }
+      rmSync(final, { recursive: true, force: true });
+      renameSync(staging, final);
+    } catch (error) {
+      rmSync(staging, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  // True when every declared asset is present in the tree at its declared size.
+  // ponytail: a size check, not a hash, decides "corrupt"; the bytes remain the
+  // authority either way, so a same-length edit merely survives until the next
+  // reinstall. Hash the files here if that ever matters.
+  function treeIntact(digest: string, bytes: Uint8Array): boolean {
+    const assets = readAssets(bytes);
+    if (assets === undefined) return false;
+    const root = treePath(digest);
+    if (!existsSync(root)) return false;
+    return assets.every((asset) => {
+      try {
+        return statSync(join(root, asset.path)).size === asset.data.length;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  function readManaged(digest: string): Uint8Array | undefined {
+    try {
+      return readFileSync(bytesPath(digest));
+    } catch {
+      // Absent bytes read as undefined; a corrupt read surfaces to the caller
+      // as a missing Bundle, not a thrown storage fault.
+      return undefined;
+    }
+  }
 
   // `.query()` (not `.prepare()`) so the Database owns these statements and
   // finalizes them on close; with no caller-owned statement outstanding, close()
@@ -274,9 +385,10 @@ export function openCatalog(secantHome: string): Catalog {
   // The atomic install: serialized by BEGIN IMMEDIATE, so a concurrent writer
   // waits on `busy_timeout` or fails without corrupting. First-install-wins is
   // decided under the lock; a fresh install stages the bytes, verifies the
-  // stored copy against the digest, then commits the row. On any throw the
-  // partial store file is removed before the transaction rolls the row back, so
-  // a failure leaves neither bytes nor Entry.
+  // stored copy against the digest, derives the asset tree beside them, then
+  // commits the row. On any throw the partial store file and tree are removed
+  // before the transaction rolls the row back, so a failure leaves neither
+  // bytes, nor tree, nor Entry.
   // ponytail: the byte staging (write, read-back, hash, rename) runs inside the
   // write lock, so a large install briefly blocks other writers. Fine at M1
   // Bundle sizes; if a multi-MB install ever stalls concurrent commands, stage
@@ -296,7 +408,7 @@ export function openCatalog(secantHome: string): Catalog {
           : { outcome: "identity-collision", existing: entry };
       }
 
-      const finalPath = join(storeDir, `${install.digest}.wfb`);
+      const finalPath = bytesPath(install.digest);
       const stagePath = `${finalPath}.staging`;
       try {
         mkdirSync(storeDir, { recursive: true });
@@ -313,6 +425,8 @@ export function openCatalog(secantHome: string): Catalog {
         // placement, so the store never holds a half-written digest file.
         rmSync(finalPath, { force: true });
         renameSync(stagePath, finalPath);
+        // A re-install of this digest at a fresh generation rewrites the tree.
+        extractTree(install.digest, install.bytes);
 
         const generation = (nextGeneration.get() as { g: number }).g;
         insertEntry.run(
@@ -335,6 +449,7 @@ export function openCatalog(secantHome: string): Catalog {
       } catch (error) {
         rmSync(stagePath, { force: true });
         rmSync(finalPath, { force: true });
+        rmSync(treePath(install.digest), { recursive: true, force: true });
         throw error;
       }
     },
@@ -411,14 +526,23 @@ export function openCatalog(secantHome: string): Catalog {
     listEntries() {
       return (selectAllEntries.all() as Record<string, unknown>[]).map(toEntry);
     },
-    readManagedBytes(digest) {
-      try {
-        return readFileSync(join(storeDir, `${digest}.wfb`));
-      } catch {
-        // Absent bytes read as undefined; a corrupt read surfaces to the caller
-        // as a missing Bundle, not a thrown storage fault.
-        return undefined;
+    readManagedBytes: readManaged,
+    assetRoot(digest) {
+      const bytes = readManaged(digest);
+      if (bytes === undefined) return undefined;
+      // ponytail: the archive is re-read on every ask to know what "intact"
+      // means, and the re-extraction runs outside the install lock, so two
+      // processes launching one digest can both rewrite the same tree — each
+      // writes identical files, so the loser of the rename sees the winner's
+      // tree. Cache the declared paths or take the write lock if either bites.
+      if (!treeIntact(digest, bytes)) {
+        try {
+          extractTree(digest, bytes);
+        } catch (error) {
+          if (!treeIntact(digest, bytes)) throw error;
+        }
       }
+      return treePath(digest);
     },
     /**
      * Release the connection and the catalog file handle. Deterministic because

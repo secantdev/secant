@@ -1,13 +1,13 @@
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import {
   createApplication,
   type Application,
   type RunExecution,
 } from "../application/application.js";
 import { openCatalog, type Catalog } from "../catalog/catalog.js";
-import { DEFAULT_BUDGETS, readZip } from "../bundle/bundle.js";
+import { DEFAULT_BUDGETS, readBundleAssets } from "../bundle/bundle.js";
 import {
   executeRouting,
   type AssetResolver,
@@ -70,7 +70,15 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
   const launchWorkspacePath = overrides.launchCwd ?? process.cwd();
   const host = overrides.hostPlatform ?? hostPlatform(process.platform);
 
-  const catalog = openCatalog(secantHome);
+  // The Catalog derives each installed digest's read-only asset tree through the
+  // Bundle Module's reader, injected here so Catalog keeps depending only on the
+  // Workflow vocabulary (#100, A8).
+  const catalog = openCatalog(secantHome, {
+    readAssets: (bytes) => readBundleAssets(bytes, DEFAULT_BUDGETS),
+  });
+  // Sweep the per-Run extraction directory earlier releases wrote under the home;
+  // Runs copy nothing now.
+  rmSync(join(secantHome, "run-assets"), { recursive: true, force: true });
   try {
     // The Run Store groups Runs by the resolved absolute Workspace path; open it
     // against the same canonicalisation the Application applies (A6), so a fresh
@@ -86,7 +94,7 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
         engineVersion: overrides.engineVersion ?? engineVersion,
         ...(host !== undefined ? { hostPlatform: host } : {}),
         runGroup,
-        runExecution: makeRunExecution(catalog, secantHome, host ?? "linux"),
+        runExecution: makeRunExecution(catalog, host ?? "linux"),
       });
       return { catalog, runGroup, ...application };
     } catch (error) {
@@ -102,54 +110,30 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
 }
 
 // The Run execution seam #81 left open: an installed Bundle's `{asset}` paths
-// become on-disk paths by extracting the pinned Snapshot's bytes
-// (`catalog.readManagedBytes(digest)`) under the Secant home, once per Run, then
-// mapping each declared asset path to the extracted file. No pinned-Snapshot
-// extraction mechanism existed before this slice, so this is the genuinely new
-// wiring. `run read` returns only `text`/`verdict` in M2 (execution's
-// file-materialization gap is a documented `ponytail:`).
-function makeRunExecution(
-  catalog: Catalog,
-  secantHome: string,
-  platform: Platform,
-): RunExecution {
-  return ({ routing, digest, owner }) => {
-    const assetDir = join(secantHome, "run-assets", owner.runId);
-    return executeRouting(routing, {
+// become on-disk paths under the Catalog's digest-named asset tree — extracted
+// once at install, shared by every Run of that digest, and re-derived by the
+// Catalog when missing (#100, A8). A Run copies nothing. `run read` returns only
+// `text`/`verdict` in M2 (execution's file-materialization gap is a documented
+// `ponytail:`).
+function makeRunExecution(catalog: Catalog, platform: Platform): RunExecution {
+  return ({ routing, digest, owner }) =>
+    executeRouting(routing, {
       owner,
       platform,
-      resolveAsset: extractAssets(catalog, digest, assetDir),
+      resolveAsset: treeResolver(catalog, digest),
     });
-  };
 }
 
-/** Extract the pinned Bundle Snapshot's entries to `assetDir` and return a
- *  resolver mapping a declared asset path to its extracted on-disk path. A digest
- *  whose managed bytes are missing or do not read resolves nothing; execution
- *  then throws on the first unresolved `{asset}`, which composition owns. */
-// ponytail: extracts every archive entry to a fresh per-Run directory on each
-// launch — no cache by digest, no filtering to only the assets a Routing
-// references. Fine at M2 Bundle sizes (a Command-only Bundle is a manifest and a
-// script or two). If large payloads or many launches make this bite, extract once
-// per digest into a shared `run-assets/<digest>` and resolve only declared assets.
-function extractAssets(
-  catalog: Catalog,
-  digest: string,
-  assetDir: string,
-): AssetResolver {
-  const bytes = catalog.readManagedBytes(digest);
-  if (bytes === undefined) return () => undefined;
-  const archive = readZip(bytes, DEFAULT_BUDGETS);
-  if (!archive.ok) return () => undefined;
-  const extracted = new Map<string, string>();
-  for (const entry of archive.entries) {
-    const target = join(assetDir, entry.path);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, entry.data);
-    extracted.set(entry.path, target);
-  }
+/** A resolver mapping a declared asset path to its file in the digest's asset
+ *  tree. A digest whose managed bytes are missing resolves nothing; so does a
+ *  path that escapes the tree or names no file in it. Execution then throws on
+ *  the first unresolved `{asset}`, which composition owns. */
+function treeResolver(catalog: Catalog, digest: string): AssetResolver {
+  const root = catalog.assetRoot(digest);
+  if (root === undefined) return () => undefined;
   return (assetPath) => {
-    const path = extracted.get(assetPath);
-    return path !== undefined && existsSync(path) ? path : undefined;
+    const target = resolve(root, assetPath);
+    if (!target.startsWith(root + sep)) return undefined;
+    return existsSync(target) ? target : undefined;
   };
 }

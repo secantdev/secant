@@ -50,7 +50,10 @@ export function createBundleManagement(
     if (!outcome.ok)
       return {
         ok: false,
-        problem: toProblem(outcome.finding, outcome.findings),
+        problem:
+          "composition" in outcome
+            ? compositionProblem(outcome.composition)
+            : toProblem(outcome.finding, outcome.findings),
       };
     const result = commit(catalog, outcome.read, bytes, origin, extra);
     if (result.ok && result.report.installed?.status === "installed") {
@@ -196,7 +199,7 @@ function compositionProblem(findings: readonly CompositionFinding[]): Problem {
     code: "composition-check-failed",
     explanation: `The Bundle does not compose: ${errors.length} error-severity finding${errors.length === 1 ? "" : "s"}.`,
     remediation:
-      "Correct the named Steps or fields in the authoring folder, then build again.",
+      "Correct the named Steps or fields in the authoring folder or archive, then build or install again.",
     possibleEffects: "none",
     fieldViolations: errors.map((finding) => ({
       field: finding.target,

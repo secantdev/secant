@@ -33,9 +33,10 @@ removed the provisional Git Step family and any separate Git-write authority. Gi
 the only Crucible-owned Git behaviour is the private probe implementing the authored `git-worktree-root` Workspace prerequisite. This keeps the
 manifest honest about what it can know: it exposes direct commands and scripts but does not claim to infer their transitive tools or effects.
 
-A Run records its Bundle identity and digest as a **Bundle Snapshot**, not another permanent copy of the archive. For an External Workflow Bundle,
-normal uninstall is refused only while a live (`running` or `blocked`) Run uses that exact Installed Bundle; resting (`halted` or `failed`) Runs do
-not retain it. Removal deletes only Crucible's managed bytes, Catalog Entry, and Trust grant, preserving external inputs and Run history. Such a
-resting Run can resume after the exact digest is reinstalled, while another version or colliding digest never substitutes. Forced removal must first
-interrupt and clean up live Runs or leave the Bundle untouched. V1 exposes no removal of built-in Bundles; whether a later version permits it remains
-open.
+Managed Bundle bytes include a derived, read-only extracted asset tree named by the same digest, created and removed with the bytes, never an
+identity or a second source of truth. A Run records its Bundle identity and digest as a **Bundle Snapshot**, not another permanent copy of the
+archive. For an External Workflow Bundle, normal uninstall is refused only while a live (`running` or `blocked`) Run uses that exact Installed
+Bundle; resting (`halted` or `failed`) Runs do not retain it. Removal deletes only Crucible's managed bytes, Catalog Entry, and Trust grant,
+preserving external inputs and Run history. Such a resting Run can resume after the exact digest is reinstalled, while another version or colliding
+digest never substitutes. Forced removal must first interrupt and clean up live Runs or leave the Bundle untouched. V1 exposes no removal of built-in
+Bundles; whether a later version permits it remains open.

@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { realpathSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
@@ -137,7 +143,7 @@ test("the wiring constructs the Run Store and Run execution through the single r
   }
 });
 
-test("the wiring's AssetResolver extracts a Bundle's script asset to disk so a Command can run it", (t) => {
+test("the wiring's AssetResolver maps a Bundle's script asset to its file in the Catalog's tree so a Command can run it", (t) => {
   ensureRuntimeOnPath();
   const workspace = makeTempDir("secant-wire-asset-ws-");
   const wired = wireApplication({
@@ -150,8 +156,9 @@ test("the wiring's AssetResolver extracts a Bundle's script asset to disk so a C
   });
 
   // The Command runs `<runtime> {asset:check.js}`; only the composition-built
-  // AssetResolver (extracting the pinned Snapshot's bytes to disk) makes that
-  // `{asset}` reference resolve to an on-disk path — the seam #81 left open.
+  // AssetResolver (a path join under the Catalog's digest-named asset tree)
+  // makes that `{asset}` reference resolve to an on-disk path — the seam #81
+  // left open.
   const cmd = writeCommandBundle({
     asset: { path: "check.js", content: "console.log('ran-from-asset')" },
   });
@@ -232,4 +239,111 @@ test("the headless client and the TUI client render the same Port snapshot", (t)
   // The dev sentinel does not satisfy the 0.1.0 floor, confirming the default
   // engine version flowed through rather than a value that trivially satisfies.
   assert.equal(shared.engine.satisfied, false);
+});
+
+// --- zero-copy Runs over the Catalog's derived asset tree (#100, A8) ---------
+
+/** Wire a fresh home + Workspace, install a Command Bundle whose script asset
+ *  prints its own on-disk path, and approve the Workspace. */
+function assetFixture(t: TestContext) {
+  ensureRuntimeOnPath();
+  const home = makeTempDir("secant-wire-zc-home-");
+  const workspace = makeTempDir("secant-wire-zc-ws-");
+  const wired = wireApplication({ secantHome: home, launchCwd: workspace });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+  const cmd = writeCommandBundle({
+    asset: { path: "check.js", content: "console.log(__filename)" },
+  });
+  assert.ok(wired.bundleManagement.build(cmd.folder, { noInstall: false }).ok);
+  assert.ok(
+    wired.projectionPort.submit({
+      operationId: "op-approve",
+      operation: "approve-workspace",
+      input: { path: workspace },
+    }).admitted,
+  );
+  const entry = wired.catalog.listEntries()[0]!;
+  return { home, wired, cmd, entry };
+}
+
+/** Launch and return the Run's state plus its `output` text (the script's
+ *  printed path), or the refusal Problem. */
+function launch(
+  wired: Wiring,
+  bundleId: string,
+  digest: string,
+  operationId: string,
+): { state: string; output: string } | { problemCode: string } {
+  const admission = wired.projectionPort.submit({
+    operationId,
+    operation: "launch-run",
+    input: { bundle: { id: bundleId }, launchInputs: {}, trustDigest: digest },
+  });
+  if (!admission.admitted) return { problemCode: admission.problem.code };
+  const opened = wired.projectionPort.openProjection({
+    family: "run",
+    runId: admission.runId!,
+  });
+  try {
+    assert.ok(opened.snapshot.result.found);
+    if (!opened.snapshot.result.found) throw new Error("unreachable");
+    const run = opened.snapshot.result.run;
+    const output = run.outputs.find((o) => o.name === "output");
+    assert.ok(output);
+    const read = wired.projectionPort.readResource(output.reference);
+    assert.ok(read.found);
+    return { state: run.state, output: read.found ? read.content.trim() : "" };
+  } finally {
+    opened.close();
+  }
+}
+
+test("two launches of one digest copy nothing per Run and resolve the same asset path under the Catalog's tree", (t) => {
+  const { home, wired, cmd, entry } = assetFixture(t);
+  const first = launch(wired, cmd.id, entry.digest, "op-1");
+  const second = launch(wired, cmd.id, entry.digest, "op-2");
+  assert.ok("state" in first && "state" in second);
+  assert.equal(first.state, "succeeded");
+  assert.equal(second.state, "succeeded");
+  assert.equal(first.output, second.output);
+  const root = wired.catalog.assetRoot(entry.digest);
+  assert.ok(root !== undefined);
+  assert.equal(
+    realpathSync.native(first.output),
+    realpathSync.native(join(root, "check.js")),
+  );
+  assert.ok(!existsSync(join(home, "run-assets")));
+});
+
+test("a tree deleted by hand is re-extracted at launch; deleted managed bytes refuse with bundle-bytes-missing", (t) => {
+  const { home, wired, cmd, entry } = assetFixture(t);
+  const root = wired.catalog.assetRoot(entry.digest);
+  assert.ok(root !== undefined);
+  rmSync(root, { recursive: true, force: true });
+  const relaunched = launch(wired, cmd.id, entry.digest, "op-1");
+  assert.ok("state" in relaunched);
+  assert.equal(relaunched.state, "succeeded");
+  assert.ok(existsSync(join(root, "check.js")));
+
+  rmSync(join(home, "bundles", `${entry.digest}.wfb`));
+  const refused = launch(wired, cmd.id, entry.digest, "op-2");
+  assert.deepEqual(refused, { problemCode: "bundle-bytes-missing" });
+});
+
+test("a legacy run-assets directory is swept once at open", (t) => {
+  const home = makeTempDir("secant-wire-sweep-home-");
+  mkdirSync(join(home, "run-assets", "run-1"), { recursive: true });
+  writeFileSync(join(home, "run-assets", "run-1", "x.js"), "x");
+  const wired = wireApplication({
+    secantHome: home,
+    launchCwd: makeTempDir("secant-wire-sweep-ws-"),
+  });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+  assert.ok(!existsSync(join(home, "run-assets")));
 });

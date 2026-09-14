@@ -82,7 +82,8 @@ export type ReadOutcome =
       readonly ok: false;
       readonly finding: BundleFinding;
       readonly findings?: readonly BundleFinding[];
-    };
+    }
+  | { readonly ok: false; readonly composition: readonly CompositionFinding[] };
 
 // Every v1 feature maps to the Secant version that introduced format version 1.
 // The builder derives requires.engine as the max over features actually used;
@@ -184,11 +185,10 @@ function finding(code: string, message: string, path?: string): BuildOutcome {
  * (zip.ts), validate the packaged manifest with the same validator the build
  * runs, and independently re-derive the engine to reject an understated range.
  * Executes, loads, and fetches nothing. Both a fresh build and a received file
- * install through here, so the two are indistinguishable once stored.
- * ponytail: install does not re-run the Composition check — the digest makes a
- * built and an imported archive identical, and archive shape, manifest shape,
- * and engine range are the install-time contract. Add it if a foreign archive
- * must be proven to compose before it is stored.
+ * install through here, so the two are indistinguishable once stored. A received
+ * archive is proven to compose before it is stored (#100, A41): the same
+ * Composition check the build runs, over the archived prompt and schema text,
+ * with the same finding codes.
  */
 export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
   const archive = readZip(bytes, budgets);
@@ -213,6 +213,11 @@ export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
     );
   }
 
+  const composition = composeArchive(archive.entries, parsed.manifest);
+  if (composition.some((finding) => finding.severity === "error")) {
+    return { ok: false, composition };
+  }
+
   const digest = createHash("sha256").update(bytes).digest("hex");
   return {
     ok: true,
@@ -224,6 +229,28 @@ export function readBundle(bytes: Uint8Array, budgets: Budgets): ReadOutcome {
       digest,
     },
   };
+}
+
+/**
+ * The manifest-declared asset files inside exact `.wfb` bytes — every archive
+ * entry a declared asset path claims (the file itself or a file under a declared
+ * directory), never `manifest.json` or an unclaimed entry — or undefined when the
+ * bytes are not a readable Bundle. Composition hands this to the Catalog, which
+ * derives its read-only asset tree from it without parsing an archive itself
+ * (#100, A8).
+ */
+export function readBundleAssets(
+  bytes: Uint8Array,
+  budgets: Budgets,
+): readonly ZipEntry[] | undefined {
+  const archive = readZip(bytes, budgets);
+  if (!archive.ok) return undefined;
+  const parsed = parsePackagedArchive(archive.entries);
+  if (!parsed.ok) return undefined;
+  const assets = parsed.manifest.assets;
+  return archive.entries.filter((entry) =>
+    assets.some((asset) => claims(asset, entry.path)),
+  );
 }
 
 // --- inspection ------------------------------------------------------------
@@ -275,10 +302,7 @@ export function inspectBundle(
   // The list view (summaryOf) never reads composition; opting out skips decoding
   // every prompt/schema asset and re-running the check for a plain `bundle list`.
   const composition = includeComposition
-    ? checkComposition(
-        parsed.manifest,
-        decodeArchiveTextAssets(archive.entries, parsed.manifest),
-      )
+    ? composeArchive(archive.entries, parsed.manifest)
     : [];
   const digest = createHash("sha256").update(bytes).digest("hex");
   return {
@@ -324,6 +348,16 @@ function parsePackagedArchive(
     return { ok: false, finding, findings: [finding] };
   }
   return validatePackagedManifest(manifestText);
+}
+
+// The one Composition check over a read archive, shared by install (`readBundle`)
+// and inspection (`inspectBundle`) so the two can never diverge on how the
+// archived prompt and schema text is decoded or composed.
+function composeArchive(
+  entries: readonly ZipEntry[],
+  manifest: AuthoredManifest,
+): readonly CompositionFinding[] {
+  return checkComposition(manifest, decodeArchiveTextAssets(entries, manifest));
 }
 
 // Decode the archived prompt and schema asset bytes for the Composition check,

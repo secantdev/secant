@@ -7,6 +7,7 @@ import {
   buildBundle,
   DEFAULT_BUDGETS,
   readBundle,
+  readBundleAssets,
   writeZip,
   type Budgets,
   type ZipEntry,
@@ -459,7 +460,7 @@ for (const rejection of archiveRejections) {
       rejection.bytes(),
       rejection.budgets ?? DEFAULT_BUDGETS,
     );
-    assert.ok(!result.ok, "expected a rejection");
+    assert.ok(!result.ok && "finding" in result, "expected a rejection");
     assert.equal(result.finding.code, rejection.code);
   });
 }
@@ -467,7 +468,7 @@ for (const rejection of archiveRejections) {
 test("readBundle rejects an archive with no manifest.json", () => {
   const bytes = writeZip([{ path: "note.txt", data: Buffer.from("x") }]);
   const outcome = readBundle(bytes, DEFAULT_BUDGETS);
-  assert.ok(!outcome.ok);
+  assert.ok(!outcome.ok && "finding" in outcome);
   assert.equal(outcome.finding.code, "manifest-missing");
 });
 
@@ -485,7 +486,7 @@ test("readBundle rejects an understated engine range", () => {
     ),
   );
   const outcome = readBundle(bytes, DEFAULT_BUDGETS);
-  assert.ok(!outcome.ok);
+  assert.ok(!outcome.ok && "finding" in outcome);
   assert.equal(outcome.finding.code, "engine-understated");
 });
 
@@ -523,7 +524,10 @@ test("readBundle rejects a decompression bomb that understates its expanded size
   buffer.writeUInt32LE(10, 22); // local uncompressed size
   buffer.writeUInt32LE(10, central + 24); // central uncompressed size
   const result = readBundle(buffer, DEFAULT_BUDGETS);
-  assert.ok(!result.ok, "expected the bomb to be rejected");
+  assert.ok(
+    !result.ok && "finding" in result,
+    "expected the bomb to be rejected",
+  );
   assert.equal(result.finding.code, "corrupt-entry");
 });
 
@@ -559,9 +563,89 @@ for (const { input, safe } of [
       DEFAULT_BUDGETS,
     );
     const archiveRejected =
-      !archive.ok && archive.finding.code === "unsafe-path";
+      !archive.ok &&
+      "finding" in archive &&
+      archive.finding.code === "unsafe-path";
 
     assert.equal(manifestRejected, !safe, `manifest disagreed on ${input}`);
     assert.equal(archiveRejected, !safe, `archive disagreed on ${input}`);
   });
 }
+
+// --- install-time Composition check and declared-asset reading (#100) --------
+
+/** A packaged (post-build shape) manifest whose Repeat group loops on a Verdict
+ *  nothing binds before entry: shape-valid, non-composing. */
+function nonComposingPackagedManifest(): Record<string, unknown> {
+  return {
+    formatVersion: 1,
+    bundle: {
+      id: "dev.secant.non-composing",
+      version: "1.0.0",
+      name: "Non Composing",
+      description: "Loops on an unbound Verdict.",
+    },
+    requires: { engine: ">=0.1.0" },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [],
+    routing: [
+      {
+        repeat: {
+          until: "never-bound",
+          reviewCheckpoint: { interval: 1, message: "continue?" },
+          steps: [
+            {
+              id: "a",
+              kind: "command",
+              produces: [{ name: "v", type: "verdict" }],
+              command: { executable: "bun", arguments: [] },
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
+
+test("readBundle refuses a shape-valid archive that does not compose with the build-time finding codes", () => {
+  const bytes = writeZip([
+    {
+      path: "manifest.json",
+      data: Buffer.from(JSON.stringify(nonComposingPackagedManifest())),
+    },
+  ]);
+  const outcome = readBundle(bytes, DEFAULT_BUDGETS);
+  assert.ok(!outcome.ok);
+  assert.ok("composition" in outcome, "expected composition findings");
+  assert.deepEqual(
+    outcome.composition.map((finding) => finding.code),
+    ["verdict-unbound-before-entry"],
+  );
+});
+
+test("readBundleAssets returns only the manifest-declared entries, never manifest.json or an unclaimed entry", () => {
+  const entries = readArchiveEntries(proofBytes());
+  const withStray = writeZip([
+    ...entries,
+    { path: "stray.txt", data: Buffer.from("not declared") },
+  ]);
+  const assets = readBundleAssets(withStray, DEFAULT_BUDGETS);
+  assert.ok(assets !== undefined);
+  const paths = assets.map((asset) => asset.path).sort();
+  assert.ok(paths.length > 0);
+  assert.ok(!paths.includes("manifest.json"));
+  assert.ok(!paths.includes("stray.txt"));
+  assert.deepEqual(
+    paths,
+    entries
+      .map((entry) => entry.path)
+      .filter((path) => path !== "manifest.json")
+      .sort(),
+  );
+  // Bytes that are not a readable Bundle read as undefined, not a throw.
+  assert.equal(
+    readBundleAssets(new Uint8Array([1, 2, 3]), DEFAULT_BUDGETS),
+    undefined,
+  );
+});

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   renameSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -779,6 +780,93 @@ test("a fenced owner cannot record a gate answer (#85)", async (t) => {
     { ok: false, reason: "fenced" },
   );
   assert.equal(fresh.gateAnswers().length, 0);
+});
+
+// --- Read-ingress validation of the two enum columns (A11) ------------------
+
+test("a garbage attempt_log.outcome is rejected at the read, never trusted", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  owner.publishAttempt({
+    attemptId: "a1",
+    outcome: "succeeded",
+    required: need("text"),
+    outputs: [candidate("text", "ok")],
+    at: AT,
+  });
+  // A drifted or corrupt store: an outcome outside the closed set. The read must
+  // refuse it rather than cast it to a trusted AttemptOutcome (it would otherwise
+  // reach the resume skip cursor and deriveRun).
+  const runDbPath = join(groupDirOf(home), created.runId, "run.db");
+  const raw = new Database(runDbPath);
+  raw.exec("UPDATE attempt_log SET outcome = 'not-an-outcome'");
+  raw.close();
+
+  assert.throws(() => owner.attemptLog());
+});
+
+test("a garbage gate_answer.answer is rejected at the read, never trusted", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  const recorded = owner.recordGateAnswer({
+    operationId: "grant-1",
+    gateAttemptId: "attempt-xyz",
+    answer: "continue",
+    iterationsAtGrant: 0,
+    artifactName: "human-gate-answer",
+    at: AT,
+  });
+  assert.ok(recorded.ok);
+  const runDbPath = join(groupDirOf(home), created.runId, "run.db");
+  const raw = new Database(runDbPath);
+  raw.exec("UPDATE gate_answer SET answer = 'maybe'");
+  raw.close();
+
+  assert.throws(() => owner.gateAnswers());
+});
+
+// --- Diagnostics 90-day retention pruned at group open (A9, ADR 0023) --------
+
+test("group open prunes diagnostics older than 90 days and keeps newer ones", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  group.close();
+
+  const diagnosticsDir = join(groupDirOf(home), created.runId, "diagnostics");
+  const stale = join(diagnosticsDir, "stale-diagnostic");
+  const fresh = join(diagnosticsDir, "fresh-diagnostic");
+  writeFileSync(stale, "old conflict detail");
+  writeFileSync(fresh, "recent conflict detail");
+  const now = new Date("2026-09-14T00:00:00.000Z");
+  const day = 24 * 60 * 60 * 1000;
+  // 100 days old (past the 90-day window) and 10 days old (inside it).
+  const staleTime = new Date(now.getTime() - 100 * day);
+  const freshTime = new Date(now.getTime() - 10 * day);
+  utimesSync(stale, staleTime, staleTime);
+  utimesSync(fresh, freshTime, freshTime);
+
+  // Reopen against the injected clock: the prune runs at open.
+  const reopened = openRunGroup(home, WORKSPACE, { now: () => now });
+  t.after(() => reopened.close());
+
+  assert.equal(existsSync(stale), false);
+  assert.equal(existsSync(fresh), true);
 });
 
 /** The `<slug>--<digest>` directory openRunGroup derives for WORKSPACE, recomputed

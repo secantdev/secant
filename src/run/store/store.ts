@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
@@ -317,15 +318,31 @@ const registrationRow = z.object({
   created_at: z.string(),
 });
 const bindingRow = z.object({ version_id: z.string() });
+// The two columns domain logic branches on are validated to their closed sets at
+// the read ingress, not cast (A11): a garbage `outcome` must never reach the
+// resume skip cursor or `deriveRun` as a trusted value, nor a garbage `answer`
+// the grant count. `z.enum` is the exact schema; the tuples mirror `AttemptOutcome`
+// and the Gate answer shape in Workflow / the store's own request types.
+const attemptOutcome = z.enum([
+  "succeeded",
+  "failed",
+  "indeterminate",
+  "cancelled",
+]);
+const gateAnswer = z.enum(["continue", "stop"]);
 const attemptRow = z.object({
-  outcome: z.string(),
+  outcome: attemptOutcome,
   version_id: z.string().nullable(),
 });
 const attemptLogRow = z.object({
   attempt_id: z.string(),
-  outcome: z.string(),
+  outcome: attemptOutcome,
   at: z.string(),
 });
+// The two-column read `reconcileRunStore` makes is validated like every other
+// read ingress (A11 / D9), not cast — the sibling `readRunStore` validates the
+// same `run_record` table through `runRecordRow`.
+const reconcileRow = z.object({ run_id: z.string(), state: z.string() });
 const conflictRow = z.object({
   diagnostic_id: z.string(),
   artifact_name: z.string(),
@@ -337,7 +354,7 @@ const gateAnswerRow = z.object({
   answer_id: z.string(),
   operation_id: z.string(),
   gate_attempt_id: z.string(),
-  answer: z.string(),
+  answer: gateAnswer,
   iterations_at_grant: z.number(),
   version_id: z.string(),
   at: z.string(),
@@ -395,9 +412,9 @@ function toRunRecord(row: z.infer<typeof runRecordRow>): RunRecord {
 function stageRunStore(dir: string, record: RunRecord): void {
   mkdirSync(dir, { recursive: true });
   mkdirSync(join(dir, "staging"), { recursive: true });
-  // ponytail: `diagnostics/` is created empty here; `recordMaterializationConflict`
-  // is its writer (#88). The ADR 0023 90-day expiry is still not implemented —
-  // there is no prune-on-open anywhere in `src/`. T2 adds the prune.
+  // `diagnostics/` is created empty here; `recordMaterializationConflict` is its
+  // writer (#88), and `pruneDiagnostics` enforces the ADR 0023 90-day retention at
+  // group open.
   mkdirSync(join(dir, "diagnostics"), { recursive: true });
   const database = new Database(join(dir, "run.db"));
   try {
@@ -516,10 +533,14 @@ function reconcileRunStore(dir: string, at: Date): boolean {
   try {
     database = new Database(path);
     database.exec("PRAGMA busy_timeout = 5000");
-    const row = database
+    const raw = database
       .query("SELECT run_id, state FROM run_record LIMIT 1")
-      .get() as { run_id: string; state: string } | null;
-    if (row == null || (row.state !== "running" && row.state !== "created")) {
+      .get();
+    if (raw == null) return false;
+    const parsed = reconcileRow.safeParse(raw);
+    if (!parsed.success) return false; // a damaged row is left for readRun to surface
+    const row = parsed.data;
+    if (row.state !== "running" && row.state !== "created") {
       return false;
     }
     const isoAt = at.toISOString();
@@ -558,6 +579,38 @@ function runDirNames(groupDir: string): string[] {
         !entry.name.endsWith(".deleting"),
     )
     .map((entry) => entry.name);
+}
+
+// ADR 0023: detailed diagnostics expire after 90 days by default. `diagnostics/`
+// has had a writer since #88 (`recordMaterializationConflict`), so the retention
+// is implemented as a prune at group open — the one moment every Run in the group
+// is visited without holding a Run open.
+const DIAGNOSTICS_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** Remove every diagnostics file older than the 90-day retention window from each
+ *  Run's `diagnostics/`, run once at group open against an injectable clock. A file
+ *  whose mtime is at or before `now - 90 days` is deleted; a newer one is kept.
+ *  Best-effort: a Run without a `diagnostics/` dir, an unreadable entry, or a file
+ *  a racing delete already removed is skipped, never fatal to opening the group. */
+function pruneDiagnostics(groupDir: string, now: Date): void {
+  const cutoff = now.getTime() - DIAGNOSTICS_RETENTION_MS;
+  for (const runName of runDirNames(groupDir)) {
+    const dir = join(groupDir, runName, "diagnostics");
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue; // no diagnostics dir yet (or unreadable) — nothing to prune
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry);
+      try {
+        if (statSync(path).mtimeMs <= cutoff) rmSync(path, { force: true });
+      } catch {
+        // A racing delete or an unreadable entry: leave it for the next open.
+      }
+    }
+  }
 }
 
 /** Remove any leftover `.creating` / `.deleting` quarantine a crash left behind. */
@@ -624,6 +677,7 @@ function openCoordination(
 export function openRunGroup(
   secantHome: string,
   workspacePath: string,
+  options: { readonly now?: () => Date } = {},
 ): RunGroup {
   const groupDir = join(secantHome, "runs", groupDirName(workspacePath));
   mkdirSync(groupDir, { recursive: true });
@@ -632,6 +686,9 @@ export function openRunGroup(
     groupDir,
   );
   cleanQuarantine(groupDir);
+  // ADR 0023 retention: prune expired diagnostics at open (A9), before any Run is
+  // acquired. Best-effort and injectable-clock-driven for deterministic tests.
+  pruneDiagnostics(groupDir, (options.now ?? (() => new Date()))());
   // Reconcile the directory against the registrations. An intact coordination DB
   // is authoritative, so a Run directory it does not list is a crash orphan — an
   // unpublished create (renamed but uncommitted) or a committed delete whose
@@ -1053,7 +1110,7 @@ export function openRunGroup(
             const parsed = attemptLogRow.parse(row);
             return {
               attemptId: parsed.attempt_id,
-              outcome: parsed.outcome as AttemptOutcome,
+              outcome: parsed.outcome,
               at: parsed.at,
             };
           });
@@ -1138,7 +1195,7 @@ export function openRunGroup(
                 answerId: parsed.answer_id,
                 operationId: parsed.operation_id,
                 gateAttemptId: parsed.gate_attempt_id,
-                answer: parsed.answer as "continue" | "stop",
+                answer: parsed.answer,
                 iterationsAtGrant: parsed.iterations_at_grant,
                 versionId: parsed.version_id,
                 at: parsed.at,

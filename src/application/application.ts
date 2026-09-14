@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { z } from "zod";
 import {
   DEFAULT_BUDGETS,
   inspectBundle,
@@ -134,6 +135,11 @@ export interface Application {
   readonly projectionPort: ProjectionPort;
   readonly bundleManagement: BundleManagement;
 }
+
+// Launch inputs are a name→value string map (LaunchInput values are opaque
+// strings); the resume path validates the opaque run.db payload against this
+// before Preflight (A10).
+const launchInputMap = z.record(z.string(), z.string());
 
 export function createApplication(deps: ApplicationDependencies): Application {
   const { catalog, runGroup, runExecution } = deps;
@@ -839,9 +845,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // Re-check Trust, Preflight, and that the exact pinned digest is still
     // installed before authorizing more work (#86); a removed or replaced install
     // is refused with a reinstall Problem, not resumed.
+    // Launch inputs are stored and read back opaque (RunRecord.launch: unknown).
+    // Validate them to the string map Preflight consumes before handing them on: a
+    // drifted or corrupt run.db row is a damaged store refused with a typed Problem
+    // here, ahead of Preflight, never a trusted cast (A10).
+    const launchInputs = launchInputMap.safeParse(record.launch ?? {});
+    if (!launchInputs.success) {
+      return { admitted: false, problem: runStoreDamaged(input.runId) };
+    }
     const runnable = resumePreconditions(
       record.bundleSnapshotDigest,
-      (record.launch ?? {}) as Readonly<Record<string, string>>,
+      launchInputs.data,
     );
     if ("problem" in runnable) {
       return { admitted: false, problem: runnable.problem };

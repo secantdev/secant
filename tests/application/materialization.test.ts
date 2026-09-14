@@ -210,6 +210,34 @@ test("resume of a live (running) Run is refused, not thrown (#86)", (t) => {
   assert.equal(admission.problem.code, "run-not-resumable");
 });
 
+test("resume of a Run whose stored launch payload is not a string map is refused before Preflight (A10)", (t) => {
+  const f = fixture(t);
+  // A drifted run.db: the launch row is not the string map Preflight consumes. It
+  // is created malformed and rested `failed` so it reaches the resume read. The
+  // pinned digest is not installed, so if the launch cast were still trusted the
+  // resume would fail later with `bundle-bytes-missing`; asserting
+  // `run-store-damaged` proves the payload is refused first, ahead of Preflight.
+  const created = f.runGroup.createRun({
+    operationId: "bad-launch-1",
+    bundleSnapshotDigest: "sha256:deadbeef",
+    launch: ["not", "a", "string", "map"],
+    at: new Date(),
+  });
+  assert.ok(created.outcome === "created");
+  const owner = f.runGroup.acquireRun(created.runId);
+  assert.ok(owner);
+  assert.deepEqual(owner.writeState("failed"), { ok: true });
+  owner.close();
+
+  const admission = f.app.projectionPort.submit({
+    operationId: "resume-bad-launch",
+    operation: "resume-run",
+    input: { runId: created.runId },
+  });
+  assert.ok(!admission.admitted);
+  assert.equal(admission.problem.code, "run-store-damaged");
+});
+
 test("resume is idempotent per operation id (#86, AC3)", (t) => {
   const f = fixture(t);
   const { id, digest } = installMaterializationBundle(f, "modify");

@@ -32,6 +32,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Reconciliation's one accepted micro-window: reaching a derived-`blocked` rest and releasing the claim is not atomic (execution returns `blocked`, then the
   caller's `finally` runs `endRun`), so a kill in that synchronous gap leaves the Run `running` with a live claim and reconciliation mislabels it `halted` — a
   resume then runs a fresh interval instead of an answer. Narrow, no data loss, same class as the create rename/commit window; persist a rested marker if it bites.
+- Diagnostics retention (ADR 0023, #96): `diagnostics/` has had a writer since #88, so the 90-day expiry is a best-effort prune at group open (`pruneDiagnostics`,
+  driven by an injectable clock) — files with an mtime at or before `now - 90 days` are deleted, newer ones kept. It walks Run directories on the filesystem, not
+  the registrations, so it runs before any Run is acquired and never fails the open. The two enum columns domain logic branches on — `attempt_log.outcome` and
+  `gate_answer.answer` — are validated with `z.enum` at their read ingress (not cast), so a drifted value is rejected there rather than trusted by the resume cursor
+  or the grant count.
 - A Human Gate answer (#85) is a bound Artifact recorded through `recordGateAnswer` — a publication-shaped write (stage a commit, then one transaction moves the
   binding and appends the `gate_answer` row) that deliberately skips `attempt_log`, so `blocked` stays derived and iterations still count off the log. Idempotent
   per `operation_id` (a UNIQUE column); its `iterations_at_grant` is the offset the derived "iterations since the last grant" count resets from.

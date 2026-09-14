@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
 import {
   flattenSteps,
   type AuthoredManifest,
@@ -10,7 +9,10 @@ import {
   type Platform,
   type Step,
 } from "../workflow/workflow.js";
-import { EXECUTABLE_STEP_KINDS } from "../run/execution/execution.js";
+import {
+  EXECUTABLE_STEP_KINDS,
+  resolveExecutable,
+} from "../run/execution/execution.js";
 import { isolatedGitEnvironment } from "../run/store/store.js";
 import type { FieldViolation, Problem } from "./projection-port.js";
 
@@ -24,11 +26,12 @@ import type { FieldViolation, Problem } from "./projection-port.js";
 // union of authored Workspace prerequisites holds, and that each selected Command
 // step's executable resolves on `PATH`.
 //
-// The two world probes — the `git-worktree-root` probe and `PATH` resolution —
-// live here and stay private to Preflight (topology.md, glossary): Git has no
-// Step kind and no public Module, and Command executable resolution is not a
-// shared utility. Both translate their external result into a typed Problem here;
-// presentation only formats it.
+// The `git-worktree-root` probe stays private to Preflight (topology.md,
+// glossary): Git has no Step kind and no public Module. Command executable
+// resolution is *not* private: it is the execution Module's exported resolver, so
+// Preflight's precondition and execution's spawn agree by construction (A40).
+// Preflight translates each external result into a typed Problem; presentation
+// only formats it.
 
 export interface PreflightRequest {
   readonly manifest: AuthoredManifest;
@@ -96,8 +99,21 @@ export function preflight(request: PreflightRequest): PreflightResult {
   for (const step of steps) {
     if (step.kind !== "command") continue;
     const executable = selectExecutable(step.command, platform);
-    if (!executableOnPath(executable)) {
+    // The same resolver execution spawns through, so a pass here means the Command
+    // will spawn (A40): a missing binary is refused, and a Windows `.cmd`/`.bat`
+    // that is not an npm-style node shim is refused with the interpreter remedy.
+    const resolution = resolveExecutable(executable);
+    if (resolution.kind === "not-found") {
       return { problem: commandExecutableNotFound(step.id, executable) };
+    }
+    if (resolution.kind === "unsupported-shim") {
+      return {
+        problem: commandExecutableUnsupportedShim(
+          step.id,
+          executable,
+          resolution.path,
+        ),
+      };
     }
   }
 
@@ -191,9 +207,9 @@ function isNonEmptyFile(path: string): boolean {
  *  `isolatedGitEnvironment()` so the host's Git config cannot change the result —
  *  the one hardening the Artifact repo also uses. */
 function probeGitWorktreeRoot(workspacePath: string): PreflightResult {
-  // Prove Git is runnable through the same PATH resolution the Command check uses,
-  // so "Git absent" is a deterministic decision, not a spawn-lookup side effect.
-  if (!executableOnPath("git")) {
+  // Prove Git is runnable through the same resolver the Command check uses, so
+  // "Git absent" is a deterministic decision, not a spawn-lookup side effect.
+  if (resolveExecutable("git").kind !== "found") {
     return { problem: gitNotRunnable() };
   }
   const result = spawnSync(
@@ -224,7 +240,7 @@ function probeGitWorktreeRoot(workspacePath: string): PreflightResult {
     : { problem: worktreeRootFailed(workspacePath) };
 }
 
-// --- PATH resolution (private to Preflight) --------------------------------
+// --- Platform / executable selection ---------------------------------------
 
 /** The Command invocation's executable for the selected platform: the platform
  *  override's `executable` if it names one, else the base (mirrors execution's
@@ -241,40 +257,6 @@ function selectPlatform(
 ): Platform {
   if (host !== undefined && platforms.includes(host)) return host;
   return platforms[0] ?? "linux";
-}
-
-/** Whether a bare executable name resolves on the current PATH, the way spawnSync
- *  will resolve it — walking PATH entries, and PATHEXT extensions on Windows.
- *  ponytail: no cross-spawn-class `.cmd`/`.bat` shim special-casing beyond
- *  PATHEXT; add it if a Windows shim executable is ever authored (#83 scope). */
-function executableOnPath(executable: string): boolean {
-  // The manifest validator refuses absolute or shell-shaped executables, so a
-  // name with a separator is defensive only: resolve it directly.
-  if (executable.includes("/") || executable.includes("\\")) {
-    return isExistingFile(executable);
-  }
-  const dirs = (process.env.PATH ?? "")
-    .split(delimiter)
-    .filter((dir) => dir.length > 0);
-  // On Windows try the bare name first (an executable authored with its own
-  // extension, e.g. `bun.exe`, resolves as-is) and then each PATHEXT extension
-  // (a bare `git` resolves as `git.EXE`); appending only PATHEXT would miss the
-  // former.
-  const extensions =
-    process.platform === "win32"
-      ? [
-          "",
-          ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
-            .split(";")
-            .filter(Boolean),
-        ]
-      : [""];
-  for (const dir of dirs) {
-    for (const extension of extensions) {
-      if (isExistingFile(join(dir, executable + extension))) return true;
-    }
-  }
-  return false;
 }
 
 // --- Problems --------------------------------------------------------------
@@ -344,5 +326,23 @@ function commandExecutableNotFound(
     remediation: `Install "${executable}" and make sure it is on PATH, then launch again.`,
     possibleEffects: "none",
     details: { step: stepId, executable },
+  };
+}
+
+// A Windows `.cmd`/`.bat` that is not an npm-style node shim: Secant resolves an
+// npm shim to its real target and spawns it directly, but never runs an arbitrary
+// batch script through a shell (#21), so the author must name the real interpreter.
+function commandExecutableUnsupportedShim(
+  stepId: string,
+  executable: string,
+  path: string,
+): Problem {
+  return {
+    code: "command-executable-unsupported-shim",
+    explanation: `Command step "${stepId}" resolves "${executable}" to the Windows script shim "${path}", which Secant will not run through a shell.`,
+    remediation:
+      "Name the real interpreter and the script as the Command executable and arguments (for example the interpreter plus the script path) instead of the shim, then launch again.",
+    possibleEffects: "none",
+    details: { step: stepId, executable, path },
   };
 }

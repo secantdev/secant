@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
+import which from "which";
 import {
   flattenSteps,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
@@ -146,10 +146,10 @@ interface WalkContext {
   /** Artifact name → declared relative Workspace path for `home: workspace`
    *  outputs, so a Step verifies the copies it uses before running (#88). */
   readonly materializations: ReadonlyMap<string, string>;
-  /** Resume cursor: the count of Steps whose Attempts already settled on a prior
-   *  run, skipped so a resumed Run does not re-run completed work (#88). Mutable;
-   *  each executed Step decrements it. */
-  readonly skip: { remaining: number };
+  /** Resume by Step identity, reconstructed from the attempt log (A1): which Step
+   *  instances already settled succeeded (skipped on resume) and how many Attempts
+   *  each already has (so a re-run gets a fresh Attempt id, never a replay). */
+  readonly resume: ResumeState;
 }
 
 /**
@@ -177,13 +177,12 @@ export function executeRouting(
     // `home: workspace` outputs and where they materialize (#88). Keyed on the
     // authored declaration (#13 rule 6: never on Bundle identity).
     materializations: collectMaterializations(flattenSteps(routing)),
-    // Resume (#88, #85): skip the Steps whose Attempts already settled on a prior
-    // run, so a resumed Run re-verifies the Step that halted (#88) or continues a
-    // granted Repeat interval (#85) rather than re-running completed work. Zero on
-    // a fresh launch. A Repeat group's already-run iterations are part of this
-    // count; `runRepeatGroup` drops its share (whole spans) so the granted
-    // interval starts fresh from the block — see there.
-    skip: { remaining: countSucceeded(deps.owner.attemptLog()) },
+    // Resume by Step identity (A1): each Step Attempt's id encodes its Step,
+    // Iteration, and Attempt number, so the attempt log names exactly which Step
+    // instances already succeeded (skip them) and which failed or never settled
+    // (re-run them). Empty on a fresh launch. This replaces the old flat count of
+    // succeeded Attempts, whose budget a passed Repeat group leaked to later nodes.
+    resume: buildResumeState(deps.owner.attemptLog()),
   };
 
   writeStateOrThrow(deps.owner, "running");
@@ -221,9 +220,11 @@ function runStep(
   context: WalkContext,
   isLastNode: boolean,
 ): NodeOutcome {
+  // A plain Step runs once per Run, so its Iteration is always zero.
   const outcome = runStepAttempts(
     step,
     context,
+    0,
     isLastNode ? "succeeded" : undefined,
   );
   if (outcome === "halted") return "halted";
@@ -243,11 +244,11 @@ function runStep(
  * the current Step Attempt (a reopened home re-derives it with no new Attempt).
  *
  * A `continue`-answered Run resumes here in the answering process (#85): the block
- * released its Workspace claim, so a fresh process re-walks the Routing. The skip
- * cursor entering the group is its already-completed iterations; those are dropped
- * whole-span (never re-run), and the local `iterations` counter restarts at zero —
- * so the block decision counts iterations *since the last grant* (ADR 0020), and
- * one grant buys exactly one more interval.
+ * released its Workspace claim, so a fresh process re-walks the Routing. Iterations
+ * run in absolute order from zero and each Step instance is skipped by identity, so
+ * the already-completed iterations replay without re-running (never touching the
+ * shared counter file or moving a binding) and only newly-run iterations count
+ * toward the cadence — one grant buys exactly one more interval (ADR 0020, A1).
  */
 function runRepeatGroup(
   repeat: RepeatGroup["repeat"],
@@ -259,53 +260,48 @@ function runRepeatGroup(
     MAX_REVIEW_CHECKPOINT_INTERVAL,
   );
   const owner = context.step.owner;
-  // Zero-iteration case: the Verdict is already bound `pass` before entry. On a
-  // resume this also covers a group a prior granted interval already passed —
-  // return before touching the skip budget, so the remaining budget stays with
-  // the later nodes it belongs to (a passed group is never the terminal node).
+  // The Verdict is already bound `pass` before entry — zero iterations. On resume
+  // this also covers a group a prior granted interval already passed.
   if (verdictPasses(owner, repeat.until)) return "succeeded-open";
-  // Resume (#85): reaching here, the group is still failing — which means it is
-  // the terminal reached node (the walk cannot pass a failing `until` group), so
-  // all remaining skip budget is this group's own prior granted iterations. Drop
-  // them a whole span at a time (the block only ever leaves complete iterations,
-  // so the budget is a whole multiple of the span) and the granted interval
-  // restarts fresh from the block.
-  const spanLength = repeat.steps.length;
-  if (spanLength > 0) {
-    const priorIterations = Math.floor(context.skip.remaining / spanLength);
-    context.skip.remaining -= priorIterations * spanLength;
-  }
 
-  // Iterations are bounded independently of the per-Step retry budget, and count
-  // from zero each granted interval (see the resume note above).
-  let iterations = 0;
-  for (;;) {
-    const outcome = runIteration(repeat, context, isLastNode);
-    if (outcome === "failed") return "failed";
-    if (outcome === "halted") return "halted";
-    iterations++;
-    // Re-evaluate the condition after the iteration (equivalently, before the
-    // next). A pass ends the group; `succeeded-rested` means the iteration's
-    // deciding Attempt already rested the Run when this is the last node.
-    if (outcome === "succeeded-rested" || verdictPasses(owner, repeat.until)) {
-      return outcome;
+  // Iterations count from absolute zero so each Attempt id is unique across
+  // resumes; a resume replays the completed iterations (every Step skipped by
+  // identity) without re-running them, then runs fresh ones. Only a newly-run
+  // iteration counts toward the review cadence, so one grant buys one interval.
+  let freshIterations = 0;
+  for (let iteration = 0; ; iteration++) {
+    const result = runIteration(repeat, context, isLastNode, iteration);
+    if (result.outcome === "failed") return "failed";
+    if (result.outcome === "halted") return "halted";
+    if (result.ran) freshIterations++;
+    // Re-evaluate the condition after the iteration. A pass ends the group;
+    // `succeeded-rested` means the iteration's deciding Attempt already rested the
+    // Run when this is the last node.
+    if (
+      result.outcome === "succeeded-rested" ||
+      verdictPasses(owner, repeat.until)
+    ) {
+      return result.outcome;
     }
     // Still not passing: block once the cadence is reached without a pass.
-    if (iterations >= interval) return "blocked";
+    if (freshIterations >= interval) return "blocked";
   }
 }
 
-/** Run one iteration of a Repeat group's span. A span Step whose Attempt exhausts
- *  its budget rests the Run `failed`. When this is the last Routing node and the
- *  iteration makes the `until` Verdict pass, the last span Step's Attempt rests
- *  the Run `succeeded` — the deciding Attempt — so no separate state write is
- *  needed. */
+/** Run one iteration of a Repeat group's span at the given absolute Iteration. A
+ *  span Step whose Attempt exhausts its budget rests the Run `failed`. When this is
+ *  the last Routing node and the iteration makes the `until` Verdict pass, the last
+ *  span Step's Attempt rests the Run `succeeded` — the deciding Attempt. `ran` is
+ *  false when every span Step was skipped (a resume replaying a completed
+ *  iteration), so the caller does not count it toward the review cadence. */
 function runIteration(
   repeat: RepeatGroup["repeat"],
   context: WalkContext,
   isLastNode: boolean,
-): NodeOutcome {
+  iteration: number,
+): { outcome: NodeOutcome; ran: boolean } {
   const { steps, until } = repeat;
+  let ran = false;
   for (let s = 0; s < steps.length; s++) {
     const step = steps[s]!;
     const isLastSpanStep = s === steps.length - 1;
@@ -316,6 +312,7 @@ function runIteration(
     const outcome = runStepAttempts(
       step,
       context,
+      iteration,
       undefined,
       decideOnPass
         ? (result) =>
@@ -324,12 +321,17 @@ function runIteration(
               : undefined
         : undefined,
     );
-    if (outcome === "halted") return "halted";
-    if (outcome === "failed") return "failed";
+    if (outcome === "halted") return { outcome: "halted", ran };
+    if (outcome === "failed") return { outcome: "failed", ran };
+    if (outcome !== "skipped") ran = true;
   }
-  return isLastNode && verdictPasses(context.step.owner, until)
-    ? "succeeded-rested"
-    : "succeeded-open";
+  return {
+    outcome:
+      isLastNode && verdictPasses(context.step.owner, until)
+        ? "succeeded-rested"
+        : "succeeded-open",
+    ran,
+  };
 }
 
 /**
@@ -347,16 +349,19 @@ function runIteration(
 function runStepAttempts(
   step: Step,
   context: WalkContext,
+  iteration: number,
   successAdvance: string | undefined,
   decideSuccessAdvance?: (result: StepAttempt) => string | undefined,
 ): AttemptOutcome | "halted" | "skipped" {
-  // Resume (#88): a Step whose Attempt already settled on a prior run is skipped —
+  const instance = instanceKey(step.id, iteration);
+  // A Step instance that already settled `succeeded` on a prior run is skipped:
   // its outputs stay bound and materialized, so re-running it would duplicate work
-  // and (for a Step that changed the copy) undo the user's fix. Consume one skip.
-  if (context.skip.remaining > 0) {
-    context.skip.remaining--;
-    return "skipped";
-  }
+  // and (for a Step that changed a Workspace copy) undo the user's fix.
+  if (context.resume.succeeded.has(instance)) return "skipped";
+  // Attempts already recorded for this instance (failed retries, or an interrupted
+  // Attempt's `indeterminate` marker) set the base Attempt number, so a re-run
+  // publishes a fresh id the store never replays as a settled Attempt.
+  const baseAttempt = context.resume.attempts.get(instance) ?? 0;
   // Before the Step runs, verify every `home: workspace` Artifact it uses against
   // its bound version (ADR 0023). A missing or changed copy records a conflict and
   // rests the Run `halted`; the Workspace is never overwritten nor its bytes adopted.
@@ -382,6 +387,14 @@ function runStepAttempts(
   const retries = Math.max(0, step.retry ?? context.budget);
   let outcome: AttemptOutcome = "failed";
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // The Attempt id encodes Step, Iteration, and Attempt number (A1): it names
+    // this instance in the log so resume can skip it, and the Attempt number
+    // (continuing past any prior Attempts) keeps a re-run's id fresh.
+    const attemptId = encodeAttemptId(
+      step.id,
+      iteration,
+      baseAttempt + attempt,
+    );
     const result = executor(step, context.step);
     outcome = result.outcome;
     // An interrupted Attempt (a termination signal, never our timeout) has no
@@ -390,7 +403,7 @@ function runStepAttempts(
     if (result.outcome === "indeterminate") {
       publishOrThrow(
         context.step.owner.publishAttempt({
-          attemptId: randomUUID(),
+          attemptId,
           outcome: "indeterminate",
           required: [],
           outputs: [],
@@ -408,7 +421,7 @@ function runStepAttempts(
         : (decideSuccessAdvance?.(result) ?? successAdvance);
     publishOrThrow(
       context.step.owner.publishAttempt({
-        attemptId: randomUUID(),
+        attemptId,
         outcome: result.outcome,
         // A failed Attempt moves no binding; a succeeded one publishes exactly
         // the Step's declared outputs.
@@ -483,12 +496,65 @@ function collectMaterializations(steps: readonly Step[]): Map<string, string> {
   return map;
 }
 
-/** How many Attempts settled `succeeded` — the count of completed Steps in a
- *  straight-line M2 Routing, so the next Step to run on resume. */
-function countSucceeded(log: readonly AttemptLogEntry[]): number {
-  let count = 0;
-  for (const entry of log) if (entry.outcome === "succeeded") count++;
-  return count;
+// --- Resume by Step identity (A1) ------------------------------------------
+
+/** Which Step instances already settled, reconstructed from the attempt log. A
+ *  Step instance is one (Step, Iteration) pair; its Attempt ids encode that pair
+ *  plus the Attempt number, so the log alone says what to skip and what to re-run. */
+interface ResumeState {
+  /** Instance keys (Step + Iteration) with at least one `succeeded` Attempt. */
+  readonly succeeded: ReadonlySet<string>;
+  /** Instance key → number of Attempts already recorded, so a re-run continues the
+   *  Attempt numbering rather than colliding with a settled Attempt. */
+  readonly attempts: ReadonlyMap<string, number>;
+}
+
+/** The instance key for a (Step, Iteration): the Iteration is a number, so its
+ *  digits before the separator make the key unambiguous whatever the Step id is. */
+function instanceKey(stepId: string, iteration: number): string {
+  return `${iteration} ${stepId}`;
+}
+
+/** Encode an Attempt id from its Step, Iteration, and Attempt number. The numeric
+ *  fields lead so the id parses back unambiguously for any Step id, and it stays
+ *  human-readable where it surfaces (e.g. a Review checkpoint's Gate Attempt). */
+function encodeAttemptId(
+  stepId: string,
+  iteration: number,
+  attempt: number,
+): string {
+  return `${iteration}.${attempt}:${stepId}`;
+}
+
+/** Parse an Attempt id back to its parts, or undefined for an id this Module did
+ *  not mint (the Run Store's reconciliation marker is a random UUID). */
+function decodeAttemptId(
+  id: string,
+): { stepId: string; iteration: number; attempt: number } | undefined {
+  const match = /^(\d+)\.(\d+):([\s\S]*)$/.exec(id);
+  if (match === null) return undefined;
+  return {
+    iteration: Number(match[1]),
+    attempt: Number(match[2]),
+    stepId: match[3]!,
+  };
+}
+
+/** Reconstruct the resume state from the attempt log: which Step instances
+ *  succeeded, and how many Attempts each already has. Entries this Module did not
+ *  mint (a reconciliation marker) decode to nothing and are ignored — they are
+ *  never `succeeded`, so the interrupted Step re-runs. */
+function buildResumeState(log: readonly AttemptLogEntry[]): ResumeState {
+  const succeeded = new Set<string>();
+  const attempts = new Map<string, number>();
+  for (const entry of log) {
+    const decoded = decodeAttemptId(entry.attemptId);
+    if (decoded === undefined) continue;
+    const key = instanceKey(decoded.stepId, decoded.iteration);
+    attempts.set(key, (attempts.get(key) ?? 0) + 1);
+    if (entry.outcome === "succeeded") succeeded.add(key);
+  }
+  return { succeeded, attempts };
 }
 
 /** Verify every `home: workspace` Artifact this Step is about to use. Returns the
@@ -647,6 +713,142 @@ function recordConflictOrThrow(
   }
 }
 
+// --- Executable resolution (owned here, shared with Preflight) -------------
+
+/**
+ * How a Command's authored executable resolves on this host to something spawnable
+ * directly, never through a shell (#21). This is the one executable resolver the
+ * execution Module owns and exports; Preflight consumes it (application → execution
+ * is an allowed import) so its precondition check and this Module's spawn agree by
+ * construction (A40, D1).
+ *
+ * - `found`: spawn `executable` with `prefixArgs` ahead of the Command's own
+ *   arguments. A native binary resolves to itself with no prefix. An npm-style
+ *   Windows `.cmd` shim resolves to its real target — `node` plus the script the
+ *   shim wraps — so it runs without `cmd.exe` (cross-spawn is rejected precisely
+ *   because it routes `.cmd` through `cmd.exe`).
+ * - `not-found`: nothing on PATH satisfies the name, or a shim's own interpreter is
+ *   unresolvable.
+ * - `unsupported-shim`: a Windows `.cmd`/`.bat` that is not an npm-style node shim;
+ *   Preflight refuses it and asks the author to name the interpreter.
+ */
+export type ExecutableResolution =
+  | {
+      readonly kind: "found";
+      readonly executable: string;
+      readonly prefixArgs: readonly string[];
+    }
+  | { readonly kind: "not-found" }
+  | { readonly kind: "unsupported-shim"; readonly path: string };
+
+/** The PATH walk and the host platform are the two external facts resolution
+ *  depends on; both are injectable adapters (testing.md) so the Windows shim path
+ *  is exercised on any OS. Production passes neither. */
+export interface ResolveExecutableOptions {
+  /** Override PATH the walk searches (the real `which` still decides the match). */
+  readonly path?: string;
+  /** Override the host platform that gates the `.cmd`/`.bat` shim rule. */
+  readonly platform?: NodeJS.Platform;
+  /** Replace the PATH walk entirely, so the shim rule is testable without PATHEXT. */
+  readonly resolve?: (name: string) => string | undefined;
+}
+
+/** The single PATH walk in `src/` (D1): `which` resolves the name to an absolute
+ *  path, checking the executable bit (POSIX) and PATHEXT (Windows), so a
+ *  non-executable file earlier on PATH never satisfies resolution. */
+function walkPath(
+  name: string,
+  options: ResolveExecutableOptions,
+): string | undefined {
+  if (options.resolve !== undefined) return options.resolve(name);
+  const result = which.sync(name, {
+    nothrow: true,
+    ...(options.path !== undefined ? { path: options.path } : {}),
+  });
+  return typeof result === "string" ? result : undefined;
+}
+
+export function resolveExecutable(
+  name: string,
+  options: ResolveExecutableOptions = {},
+): ExecutableResolution {
+  const resolved = walkPath(name, options);
+  if (resolved === undefined) return { kind: "not-found" };
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    const ext = extname(resolved).toLowerCase();
+    if (ext === ".cmd" || ext === ".bat") {
+      return resolveWindowsShim(resolved, options);
+    }
+  }
+  return { kind: "found", executable: resolved, prefixArgs: [] };
+}
+
+/** Resolve a Windows `.cmd`/`.bat` to its real target. An npm-style node shim
+ *  (`cmd-shim`) is resolved to `node` plus the script it wraps and spawned
+ *  directly; anything else is `unsupported-shim` (Preflight refuses it). */
+function resolveWindowsShim(
+  shimPath: string,
+  options: ResolveExecutableOptions,
+): ExecutableResolution {
+  let text: string;
+  try {
+    text = readFileSync(shimPath, "utf8");
+  } catch {
+    return { kind: "unsupported-shim", path: shimPath };
+  }
+  const target = parseNpmCmdShim(text, dirname(shimPath));
+  if (target === undefined) return { kind: "unsupported-shim", path: shimPath };
+  // The shim's own interpreter must itself resolve on PATH, or the real target
+  // cannot run — that is a not-found, not an unsupported shim.
+  const interpreter = walkPath(target.interpreter, options);
+  if (interpreter === undefined) return { kind: "not-found" };
+  return {
+    kind: "found",
+    executable: interpreter,
+    prefixArgs: [target.script],
+  };
+}
+
+/** Parse an npm `cmd-shim` `.cmd`: it sets `_prog` to its interpreter (a colocated
+ *  binary in the `IF EXIST` branch, else the bare name on PATH in the `ELSE`
+ *  branch) and invokes it on a `%dp0%`-relative script. Returns the bare
+ *  interpreter name to resolve on PATH and the absolute script path, or undefined
+ *  for any `.cmd`/`.bat` that is not this npm-style interpreter-plus-script shape. */
+function parseNpmCmdShim(
+  text: string,
+  shimDir: string,
+): { interpreter: string; script: string } | undefined {
+  // The program-invocation line runs `"%_prog%" "<script>" %*`.
+  const invocation = text
+    .split(/\r?\n/)
+    .find((line) => line.includes("%_prog%"));
+  if (invocation === undefined) return undefined;
+  const quoted = [...invocation.matchAll(/"([^"]*)"/g)].map(
+    (match) => match[1]!,
+  );
+  const scriptToken = quoted.find(
+    (token) => /%dp0%/i.test(token) && /\.[cm]?js$/i.test(token),
+  );
+  if (scriptToken === undefined) return undefined;
+  // The interpreter is the `_prog` value that is a bare PATH name — the `ELSE`
+  // branch — not the `%dp0%`-relative colocated one. Its absence means this is not
+  // an npm-style shim, so it is refused rather than run through a shell.
+  const interpreter = [...text.matchAll(/SET\s+"?_prog=([^"\r\n]+)"?/gi)]
+    .map((match) => match[1]!.replace(/"$/, "").trim())
+    .find((value) => value.length > 0 && !/%dp0%/i.test(value));
+  if (interpreter === undefined) return undefined;
+  return { interpreter, script: expandDp0(scriptToken, shimDir) };
+}
+
+/** Expand a `%dp0%`-relative shim token to an absolute path under the shim's
+ *  directory, joining on either separator so the result is a host-native path. */
+function expandDp0(token: string, shimDir: string): string {
+  const relative = token.replace(/^%dp0%/i, "");
+  const segments = relative.split(/[\\/]+/).filter((segment) => segment.length);
+  return join(shimDir, ...segments);
+}
+
 // --- Command step (the one executable dispatch entry) ----------------------
 
 function runCommand(step: CommandStep, context: StepContext): StepAttempt {
@@ -654,17 +856,28 @@ function runCommand(step: CommandStep, context: StepContext): StepAttempt {
   const args = invocation.arguments.map((token) =>
     resolveToken(token, context),
   );
-  // ponytail: no `shell: true`. Resolved `{artifact}` bytes flow into args, so a
-  // shell would open those to injection. The cost is that a Windows `.cmd`/`.bat`
-  // shim (npm, npx) will not resolve through CreateProcess — take a cross-spawn-
-  // class resolver (a dependency decision, its own issue) when a Bundle needs one.
-  const result = spawnSync(invocation.executable, args, {
-    cwd: invocation.workingDirectory,
-    env: resolveEnv(invocation, context),
-    timeout: context.commandTimeoutMs,
-    maxBuffer: MAX_CAPTURE_BYTES,
-    windowsHide: true,
-  });
+  // No `shell: true`: resolved `{artifact}` bytes flow into args, so a shell would
+  // open those to injection. The executable is resolved to a spawnable target here
+  // (a native binary, or an npm `.cmd` shim's real `node` + script) so a Windows
+  // shim runs directly, never through `cmd.exe` (#21).
+  const resolution = resolveExecutable(invocation.executable);
+  if (resolution.kind !== "found") {
+    // Preflight already refused an unresolvable executable or an unsupported shim;
+    // reaching here means it was removed between Preflight and spawn — the command
+    // could not execute, so the Attempt failed and is retryable (ADR 0020).
+    return { outcome: "failed", outputs: [] };
+  }
+  const result = spawnSync(
+    resolution.executable,
+    [...resolution.prefixArgs, ...args],
+    {
+      cwd: invocation.workingDirectory,
+      env: resolveEnv(invocation, context),
+      timeout: context.commandTimeoutMs,
+      maxBuffer: MAX_CAPTURE_BYTES,
+      windowsHide: true,
+    },
+  );
 
   // Translate the OS outcome at this Seam into a typed Attempt outcome (D-rule:
   // external failures become typed domain failures at their owning Seam). A spawn

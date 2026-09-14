@@ -840,6 +840,131 @@ try {
     }
   }
 
+  // Windows `.cmd` shim resolution (issue #96 A40, #26): a Bundle whose Command
+  // step names an npm-style `.cmd` shim resolves through the shim to its real
+  // target and runs to a Verdict without a shell; a Bundle naming a plain `.bat`
+  // is refused at Preflight with the interpreter remediation. POSIX has no shim
+  // rule (the executable resolves directly), so this case is Windows-only.
+  if (process.platform === "win32") {
+    const runtime = basename(process.execPath); // resolvable via workspaceEnv PATH
+    const shimDir = join(smokeRoot, "shims");
+    await mkdir(shimDir, { recursive: true });
+    // The worker the npm-style shim wraps: exit 0 -> a pass Verdict.
+    await writeFile(join(shimDir, "worker.js"), "process.exit(0)\n");
+    // An npm `cmd-shim` shape: `_prog` is the interpreter (the runtime already on
+    // PATH), invoked on the `%dp0%`-relative worker script.
+    const cmdShim = [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      "",
+      `IF EXIST "%dp0%\\${runtime}" (`,
+      `  SET "_prog=%dp0%\\${runtime}"`,
+      ") ELSE (",
+      `  SET "_prog=${runtime}"`,
+      "  SET PATHEXT=%PATHEXT:;.JS;=;%",
+      ")",
+      "",
+      `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\worker.js" %*`,
+    ].join("\r\n");
+    await writeFile(join(shimDir, "shimtool.cmd"), cmdShim);
+    // A plain `.bat` that is not an npm-style shim: Preflight must refuse it.
+    await writeFile(
+      join(shimDir, "battool.bat"),
+      "@echo off\r\necho not a node shim\r\n",
+    );
+    const shimEnv = {
+      ...workspaceEnv,
+      PATH: `${shimDir}${delimiter}${workspaceEnv.PATH ?? ""}`,
+    };
+
+    const shimBundle = (id, name, executable) => ({
+      formatVersion: 1,
+      bundle: { id, version: "1.0.0", name, description: `${name} smoke.` },
+      platforms: ["windows", "macos", "linux"],
+      inputs: {},
+      assets: [],
+      routing: [
+        {
+          id: "shimstep",
+          kind: "command",
+          produces: [{ name: "v", type: "verdict" }],
+          command: { executable, arguments: [] },
+        },
+      ],
+    });
+
+    const buildAndInstall = async (folderName, manifest) => {
+      const folder = join(smokeRoot, folderName);
+      await mkdir(folder, { recursive: true });
+      await writeFile(
+        join(folder, "manifest.json"),
+        JSON.stringify(manifest, null, 2),
+      );
+      run(binary, ["bundle", "build", folder], {
+        cwd: smokeRoot,
+        env: shimEnv,
+      });
+      const installed = JSON.parse(
+        run(binary, ["bundle", "list", "--json"], {
+          cwd: workspaceDirectory,
+          env: shimEnv,
+        }),
+      ).result.bundles.find((bundle) => bundle.id === manifest.bundle.id);
+      if (installed === undefined) {
+        throw new Error(`${folderName} Bundle was not installed.`);
+      }
+      return installed;
+    };
+
+    // The npm-style `.cmd` shim: Preflight passes and the Command runs to a Verdict.
+    const okId = "dev.secant.cmd-shim-ok";
+    const okInstalled = await buildAndInstall(
+      "cmd-shim-ok",
+      shimBundle(okId, "Cmd Shim Ok", "shimtool"),
+    );
+    const okLaunch = spawnSync(
+      binary,
+      ["run", "launch", okId, "--trust", okInstalled.digest, "--json"],
+      { cwd: workspaceDirectory, encoding: "utf8", env: shimEnv },
+    );
+    if (okLaunch.error) throw okLaunch.error;
+    if (JSON.parse(okLaunch.stdout).result.run.state !== "succeeded") {
+      throw new Error(
+        `npm-style .cmd shim Command did not run to succeeded: ${okLaunch.stdout}${okLaunch.stderr}`,
+      );
+    }
+
+    // The plain `.bat`: refused at Preflight (before Trust) with the shim Problem.
+    const batId = "dev.secant.cmd-shim-bat";
+    await buildAndInstall(
+      "cmd-shim-bat",
+      shimBundle(batId, "Cmd Shim Bat", "battool"),
+    );
+    const batLaunch = spawnSync(binary, ["run", "launch", batId], {
+      cwd: workspaceDirectory,
+      encoding: "utf8",
+      env: shimEnv,
+    });
+    if (batLaunch.error) throw batLaunch.error;
+    if (batLaunch.status === 0) {
+      throw new Error(
+        "Launching a Bundle naming a plain .bat should be refused.",
+      );
+    }
+    const batOutput = `${batLaunch.stdout}${batLaunch.stderr}`;
+    if (!batOutput.includes("command-executable-unsupported-shim")) {
+      throw new Error(
+        `The .bat Bundle was not refused with the unsupported-shim Problem: ${batOutput}`,
+      );
+    }
+  }
+
   // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
   // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
   // startup Problem and a non-zero exit before the renderer is created.

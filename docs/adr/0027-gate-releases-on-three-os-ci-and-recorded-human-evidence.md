@@ -9,7 +9,7 @@ are free, Windows is the first-priority platform, and the OpenTUI prototype show
 ## What CI proves
 
 - The deterministic suite runs the Proof Bundle end to end through the headless client against fake Harness programs that replay the recorded
-  protocol fixtures over stdio, so real process spawning, Windows `.cmd` shim resolution, `node:sqlite`, and per-Run Git are exercised on each OS
+  protocol fixtures over stdio, so real process spawning, Windows `.cmd` shim resolution, `bun:sqlite` (superseded `node:sqlite`, ADR 0030), and per-Run Git are exercised on each OS
   without credentials. The replayer proves nothing about compatibility with a real Harness; only the recordings' provenance and the per-release
   real-Harness run make that claim.
 - The package smoke installs the packed archive under a temporary global prefix and runs one headless Proof Bundle Run from the installed command,

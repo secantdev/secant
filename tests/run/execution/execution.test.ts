@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -540,6 +540,48 @@ test("resuming past a group that already passed consumes no skip and does not re
   assert.deepEqual(run(routing, owner), { outcome: "succeeded" });
   assert.equal(owner.attemptLog().length, 2);
   assert.equal(existsSync(counter), false);
+});
+
+test("resume re-runs a Step that failed after a passed Repeat group, never resting succeeded (A1)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const counter = freshCounter();
+  const afterAttempts = () =>
+    owner.attemptLog().filter((e) => e.attemptId.endsWith(":after")).length;
+  const routing: RoutingNode[] = [
+    commandStep(
+      "baseline",
+      { executable: NODE, arguments: ["-e", "process.exit(0)"] },
+      { produces: produces({ name: "b", type: "text" }) },
+    ),
+    // Passes on its first iteration, so on resume it early-returns already-pass.
+    repeatOver(counter, 1, 5),
+    // Cannot spawn (missing binary), so it rests the Run failed. retry: 0 keeps
+    // one failed Attempt per run, so the re-run is unambiguous to count.
+    commandStep(
+      "after",
+      { executable: "secant-no-such-binary-xyz", arguments: [] },
+      { produces: produces({ name: "after-done", type: "text" }), retry: 0 },
+    ),
+  ];
+
+  // First run: baseline succeeds, the group passes on iteration 1, `after` fails.
+  assert.deepEqual(run(routing, owner), { outcome: "failed" });
+  assert.equal(state(), "failed");
+  assert.equal(
+    owner.attemptLog().filter((e) => e.outcome === "succeeded").length,
+    2, // baseline + the one group iteration
+  );
+  assert.equal(afterAttempts(), 1);
+  assert.equal(readFileSync(counter, "utf8"), "1"); // one iteration ran
+
+  // Resume: the old flat cursor leaked the group's iteration budget to `after` and
+  // skipped it, resting the Run `succeeded` with no new Attempt. Skipping by Step
+  // identity, `after` re-runs and the Run rests `failed` — never succeeded.
+  assert.deepEqual(run(routing, owner), { outcome: "failed" });
+  assert.equal(state(), "failed");
+  assert.equal(afterAttempts(), 2); // `after` re-ran
+  // The already-passed group did not re-run — its shared counter is untouched.
+  assert.equal(readFileSync(counter, "utf8"), "1");
 });
 
 /** Read the bytes currently bound to an artifact name through the owner. */

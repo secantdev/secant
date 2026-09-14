@@ -50,3 +50,12 @@ The global store tree lives at `~/.secant` on every platform (`%USERPROFILE%\.se
 variable. Platform-specific data directories (XDG, `Application Support`, `%LOCALAPPDATA%`) were rejected as three code paths for no user benefit;
 the initial Harnesses use the same dotfile convention. Recorded while
 [approving the migration handoff](https://github.com/DevFlow-HQ/devflow-cli/issues/22).
+
+## Amendment — Run ownership replaces the Workspace claim (2026-09-14, ADR 0031)
+
+[ADR 0031](./0031-own-runs-per-run-not-per-workspace.md) removes the one-live-Run Workspace claim from `coordination.db`: the coordinator owns Run
+registration, per-Run **Run owner** records (owning process id plus fencing epoch), and create/resume/delete admission, and any number of Runs may be
+live in one Workspace. Explicit human resume acquires fresh ownership of that Run only. Startup recovery probes each owned Run's process rather than
+treating every owned Run as dead: an alive owner is left live, a dead owner's `running` Run rests `halted`, and a dead owner's derived-`blocked` Run
+stays `blocked`. Fencing, isolation, publication, materialization, retention, and the bare-bones coordinator rebuild (now "with no owner") are
+unchanged. Where this ADR and ADR 0031 differ, ADR 0031 governs.

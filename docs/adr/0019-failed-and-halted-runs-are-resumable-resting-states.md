@@ -27,3 +27,11 @@ halted Run's **Workspace** is unchanged when it resumes — other Runs may have 
 steps re-read the world when they run. And because a Run may halt on one model and resume on another, the Run pins only a _default_ model while each
 **Step Attempt** records the model it actually ran under; the **Harness** itself stays pinned, since artifacts and **Harness Sessions** were produced
 under it.
+
+## Amendment — no Workspace claim (2026-09-14, ADR 0031)
+
+[ADR 0031](./0031-own-runs-per-run-not-per-workspace.md), taken on [#102](https://github.com/secantdev/secant/issues/102) after the M2 audit,
+retires the one-live-Run-per-Workspace rule this ADR restated: any number of Runs may be live in one Workspace and each live Run has exactly one
+owner, held through `running` **and** `blocked`. "A halted Run holds no Workspace claim" therefore becomes the general case — no Run holds a
+Workspace claim — and the consequence above stands unchanged: Crucible never promises a Run's Workspace is unchanged when it resumes, so resume is
+best-effort and steps re-read the world. Where this ADR and ADR 0031 differ, ADR 0031 governs.

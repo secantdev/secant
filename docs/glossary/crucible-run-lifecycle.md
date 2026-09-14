@@ -46,7 +46,8 @@ This cluster defines the target Crucible terms for a **Run** and everything that
   version. Crucible preserves both truths and halts rather than silently restoring or adopting either one.
 - **Run Store** — the durable collection owned by exactly one **Run**, containing its structured truth, immutable Artifact history, publication
   staging, and separately retained diagnostics. Explicit Run deletion removes it as one lifecycle unit.
-- **Run owner** — the one Crucible runtime process or task currently fenced and authorized to advance a **Run**. It is not the Harness process.
+- **Run owner** — the one Crucible runtime process or task currently fenced and authorized to advance a **Run**, recorded as the owning process id
+  plus a fencing epoch and held until the Run rests, through `running` and `blocked` alike. It is not the Harness process. _Avoid_: Workspace claim.
 - **Workspace change** — any change inside the **Workspace** that is not a declared **Run Artifact**. Owned by the world and by Git, never by
   Crucible's artifact graph.
 - **Workspace prerequisite** — one of Crucible's closed semantic predicates that an authored **Step** may add and **Preflight** evaluates. V1 has
@@ -113,8 +114,8 @@ running it.
   source of truth. A changed or missing materialization is a **Materialization conflict**, not a new Artifact version.
 - Run-owned canonical truth and Artifact versions remain until explicit Run deletion. Detailed diagnostics are separate and expire after 90 days by
   default; exactly reproducible caches may be collected earlier.
-- One live **Run** — `running` or `blocked` — per **Workspace**. A `halted` Run holds no claim, so Crucible does not promise its Workspace is
-  unchanged when it resumes.
+- Any number of **Runs** may be live in one **Workspace**; each live Run has exactly one **Run owner**, and a second instance is refused for that Run
+  only. No Run holds a Workspace claim, so Crucible never promises a Run's Workspace is unchanged between Steps or when it resumes.
 - No **Step** is skippable. The **Routing** advances only by a Step completing, and no decision may jump over one. A **Repeat group** whose
   **Verdict** already passes runs zero **Iterations**, which is a loop that did not run rather than a Step that was skipped.
 - **Bundle Assets** are not **Run Artifacts**: they have no producer, no per-attempt version, and no place in the bindings.
@@ -129,6 +130,8 @@ running it.
   agent-emitted marker is retired.
 - [ADR 0023](../adr/0023-own-durable-run-truth-in-isolated-run-stores.md) owns durable Run truth, Artifact publication, Workspace materialization,
   retention, and recovery storage.
+- [ADR 0031](../adr/0031-own-runs-per-run-not-per-workspace.md) owns Run ownership: many live Runs per Workspace, one owner per Run, and what a
+  dead or alive owner means at startup.
 - [Define the minimum generic Workflow capabilities](https://github.com/DevFlow-HQ/devflow-cli/issues/13) records the step vocabulary and the rules
   by which a **Routing** composes.
 - [Decide which Git operations Crucible performs for a Workflow and where they sit in the routing](https://github.com/DevFlow-HQ/devflow-cli/issues/14)

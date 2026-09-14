@@ -512,7 +512,7 @@ interface ResumeState {
 /** The instance key for a (Step, Iteration): the Iteration is a number, so its
  *  digits before the separator make the key unambiguous whatever the Step id is. */
 function instanceKey(stepId: string, iteration: number): string {
-  return `${iteration} ${stepId}`;
+  return `${iteration}:${stepId}`;
 }
 
 /** Encode an Attempt id from its Step, Iteration, and Attempt number. The numeric

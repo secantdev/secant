@@ -40,9 +40,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   dispatch, and small-width/resize relayout without overflow. A lone Escape is held briefly by OpenTUI key disambiguation — poll in real time, not by
   frame count.
 
-- A destructive Run Action (cancel ends a Run for good; delete removes its store from disk) arms a confirming keypress before it dispatches
-  (`run-workbench.tsx` `pending`): `y` confirms, Escape backs out without leaving. Resume is not destructive and dispatches at once. This is the
-  terminal-native form of the IA prototype's confirm dialog; keep it for any later remove/overwrite control.
+- A destructive Run Action (cancel or delete) arms a confirming keypress before it dispatches (`run-workbench.tsx` `pending`): `y` confirms, Escape backs out.
+  An ordinary resume dispatches at once; a resume Offer carrying a takeover form first confirms once and names the foreign owner process.
+- The quit confirmation (`app.tsx` `GuardedExitProvider`/`QuitConfirmation`) lives on the vendored dialog stack, not a bare `<Show>` overlay: every screen's bindings are
+  gated `dialog.stack.length === 0`, so being on the stack is what makes it modal (else `q`/`return` fire the underlying screen too). Escape/Ctrl+C dismissal comes from the
+  dialog primitive. Route's approval-clear effect is a one-shot guarded on an `approvalOpen` signal so it never clears the quit dialog, and the approval dialog's `onClose`
+  declines only while still unapproved — a programmatic clear once approved is not a decline.
 
 ## Read next
 

@@ -26,6 +26,7 @@ import type {
   ResourceReference,
   RunCheckpointView,
   RunGateReference,
+  ResumeRunOffer,
   RunSnapshot,
   RunStepProgress,
   RunTimelineEvent,
@@ -215,6 +216,7 @@ function runOf(over: Partial<RunView> = {}): RunView {
     workspacePath: over.workspacePath ?? "/tmp/ws",
     launchedAt: over.launchedAt ?? "2026-01-01T00:00:00.000Z",
     state: over.state ?? "running",
+    liveness: over.liveness ?? { state: "not-live" },
     progress: over.progress ?? [],
     position: over.position ?? 0,
     timeline: over.timeline ?? [],
@@ -809,6 +811,24 @@ test("resize relayouts the timeline without overflow and keeps every state reada
   assert.match(t.captureCharFrame(), /FAILED/);
 });
 
+test("the header names whether the Run is live here or in another owner process", async () => {
+  const here = await mountWorkbench(
+    runOf({ liveness: { state: "live-here", ownerPid: 4101 } }),
+  );
+  assert.match(
+    here.t.captureCharFrame(),
+    /live in this instance \(process 4101\)/,
+  );
+
+  const elsewhere = await mountWorkbench(
+    runOf({ liveness: { state: "live-elsewhere", ownerPid: 5202 } }),
+  );
+  assert.match(
+    elsewhere.t.captureCharFrame(),
+    /live in another instance \(process 5202\)/,
+  );
+});
+
 // --- Review checkpoint interaction (#92) -----------------------------------
 
 test("a blocked Run shows the checkpoint interaction in place of the footer, with the facts and evidence", async () => {
@@ -1142,6 +1162,35 @@ test("resume dispatches and the Workbench follows into the running Run", async (
   assert.match(frame, /RUNNING/); // transitioned into the running Workbench
   assert.match(frame, /c cancel/); // now offers cancel (live), not resume
   assert.doesNotMatch(frame, /r resume/);
+});
+
+test("resume takeover asks once with the owner pid before dispatching the offered form", async () => {
+  const takeover = {
+    ...RESUME_OFFER,
+    takeover: { ownerPid: 7331 },
+  };
+  let received: ResumeRunOffer | undefined;
+  const { t, renderer } = await mountWorkbench(
+    runOf({
+      state: "running",
+      liveness: { state: "live-elsewhere", ownerPid: 7331 },
+      actionOffers: [takeover],
+    }),
+    100,
+    40,
+    okActions({
+      resume: (offer) => {
+        received = offer;
+        return () => ({ kind: "ok" });
+      },
+    }),
+  );
+
+  await press(t, renderer, "r");
+  assert.equal(received, undefined);
+  assert.match(t.captureCharFrame(), /Take over from process 7331/);
+  await press(t, renderer, "y");
+  assert.deepEqual(received, takeover);
 });
 
 test("delete confirms then dispatches and leaves the Workbench", async () => {

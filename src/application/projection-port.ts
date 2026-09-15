@@ -69,9 +69,9 @@ export interface LaunchRunInput {
   readonly trustDigest?: string;
 }
 
-/** Resume a Run resting `halted` or `failed` (ADR 0019, #86). Idempotent per
- *  operation id, offered only on a resting Run. Resume acquires fresh ownership
- *  and the Workspace claim (ADR 0023), re-checks Trust and Preflight against the
+/** Resume a Run resting `halted` or `failed`, or take over a Run owned elsewhere
+ *  (ADR 0019, ADR 0031). Idempotent per operation id. Resume acquires fresh ownership
+ *  per Run, re-checks Trust and Preflight against the
  *  still-installed pinned digest, and drives the Run to its next rest: a `halted`
  *  Run continues from the Step it stopped at (e.g. after a Materialization
  *  conflict is fixed, #88); a `failed` Run resets that Step's attempt and
@@ -83,6 +83,8 @@ export interface ResumeRunSubmission {
 }
 export interface ResumeRunInput {
   readonly runId: string;
+  /** The live foreign owner the user explicitly confirmed taking over. */
+  readonly takeover?: { readonly ownerPid: number };
 }
 
 /** Answer the durable Human Gate a `blocked` Run rests at (ADR 0020, #85). The
@@ -367,10 +369,9 @@ export type BundleFocusResult =
 // events. Run outputs are reached by reference (ResourceReference), never inlined
 // here, so the snapshot stays bounded however large an output grows.
 
-/** A Run's canonical lifecycle state, in words. `blocked` — a durable pause at a
- *  Repeat group's Review checkpoint (ADR 0020, #84) — is never persisted: the
- *  Application derives it from the current Step Attempt, so a reopened home
- *  re-derives it with no new Attempt. `halted` is a persisted rest state a
+/** A Run's canonical lifecycle state, in words. `blocked` is stored as the durable
+ *  pause while its Gate is derived from the current Step Attempt, so a reopened
+ *  home re-derives the same Gate with no new Attempt. `halted` is a persisted rest state a
  *  Materialization conflict leaves the Run in until the user restores the file
  *  and resumes (#88, ADR 0023). `cancelled` is the terminal rest a `cancel-run`
  *  leaves a live Run in (#87, #98). There is no `created`: a launched Run is
@@ -468,6 +469,10 @@ export interface RunView {
   readonly workspacePath: string;
   readonly launchedAt: string; // ISO 8601
   readonly state: RunStateName;
+  readonly liveness:
+    | { readonly state: "not-live" }
+    | { readonly state: "live-here"; readonly ownerPid: number }
+    | { readonly state: "live-elsewhere"; readonly ownerPid: number };
   readonly progress: readonly RunStepProgress[];
   /** Index of the current Step; `progress.length` once the Run is at rest. */
   readonly position: number;
@@ -509,8 +514,8 @@ export type RunListGroup = "today" | "yesterday" | "older";
  *  (`halted` and `failed`) ones. */
 export type RunListFilter = "all" | "resumable";
 
-/** One Previous-Runs row. Carries only identity, the Bundle's human name, the
- *  latest durable-activity time, and its day group — no Run state (#87). */
+/** One Previous-Runs row. Carries identity, the Bundle's human name, the latest
+ *  durable-activity time, liveness, and its day group — no Run state (#87). */
 export interface RunListRow {
   readonly runId: string;
   readonly bundleName: string;
@@ -518,6 +523,9 @@ export interface RunListRow {
    *  it with the Run's launch time; a per-Attempt "last touched" needs a Store
    *  timestamp the record does not yet carry (see run-list.ts). */
   readonly activityAt: string;
+  readonly live: boolean;
+  readonly ownedByThisProcess: boolean;
+  readonly ownerPid?: number;
   readonly group: RunListGroup;
 }
 
@@ -563,13 +571,14 @@ export interface AnswerHumanGateOffer {
   readonly stopConsequence: string;
 }
 
-/** Resume a resting Run (#86). Offered on the `run` Projection only while the Run
- *  rests `halted` or `failed`; absent while it is live or terminal. */
+/** Resume a resting Run or take over a nonterminal Run owned by another process. */
 export interface ResumeRunOffer {
   readonly action: "resume-run";
   readonly runId: string;
   /** What resume does from the Run's current resting state. */
   readonly consequence: string;
+  /** Present when resume requires an explicit takeover confirmation. */
+  readonly takeover?: { readonly ownerPid: number };
 }
 
 /** Cancel a live Run (#87). Offered on the `run` Projection only while the Run is

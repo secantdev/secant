@@ -38,7 +38,14 @@ export function listRunsSnapshot(
   // owner — so the list never fences an executing Run. The name is cached by
   // digest, since a Workspace's Runs often share one Bundle.
   const nameByDigest = new Map<string, string>();
-  const rows: { runId: string; bundleName: string; activityAt: string }[] = [];
+  const rows: {
+    runId: string;
+    bundleName: string;
+    activityAt: string;
+    live: boolean;
+    ownedByThisProcess: boolean;
+    ownerPid?: number;
+  }[] = [];
   for (const listing of deps.runGroup.listRuns()) {
     const read = deps.runGroup.readRun(listing.runId);
     // A registered Run whose record will not read is skipped from the list; it can
@@ -63,7 +70,7 @@ export function listRunsSnapshot(
         "facts" in derived ? derived.facts.name : record.bundleSnapshotDigest;
       nameByDigest.set(record.bundleSnapshotDigest, bundleName);
     }
-    rows.push({
+    const row: (typeof rows)[number] = {
       runId: listing.runId,
       bundleName,
       // M2 activity time is the Run's creation; a per-Attempt "latest activity"
@@ -71,7 +78,11 @@ export function listRunsSnapshot(
       // ponytail: use `createdAt`; add a `updatedAt` to run.db and read it here if
       // ordering by last Attempt (not launch) ever matters.
       activityAt: record.createdAt,
-    });
+      live: listing.live,
+      ownedByThisProcess: listing.ownedByThisProcess,
+    };
+    if (listing.ownerPid !== undefined) row.ownerPid = listing.ownerPid;
+    rows.push(row);
   }
 
   // A stable total order: newest activity first, ties broken by Run id descending.

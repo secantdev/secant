@@ -9,6 +9,7 @@ import { formatEngine, formatTrust } from "./bundle-format.js";
 import { useBundleCatalogView } from "./bundle-view.js";
 import { useBindings } from "./keymap.js";
 import { useExit } from "./vendor/exit.js";
+import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 // The Workflow Bundles list screen, rebuilt against OpenCode
@@ -33,6 +34,7 @@ export function BundleList(props: {
 }) {
   const { theme } = useTheme();
   const exit = useExit();
+  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const view = useBundleCatalogView();
   const snapshot = view.openList();
@@ -57,6 +59,7 @@ export function BundleList(props: {
   };
 
   useBindings(() => ({
+    enabled: dialog.stack.length === 0,
     bindings: [
       { key: "up", desc: "Previous", group: "Bundles", cmd: () => move(-1) },
       { key: "down", desc: "Next", group: "Bundles", cmd: () => move(1) },

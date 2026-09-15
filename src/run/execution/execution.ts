@@ -47,8 +47,8 @@ import type {
 // already-`pass` Verdict runs zero iterations. Iterations are bounded separately
 // from retries: on completing the review cadence (the authored interval, clamped
 // to the engine ceiling) without a pass, the Run rests `blocked` at a Review
-// checkpoint. `blocked` is never written — it is derived from the current Step
-// Attempt (the Application re-derives it), so the loop simply stops and returns.
+// checkpoint. The deciding Attempt still supplies the Gate identity; execution
+// stores `blocked` when it pauses so dead-owner reconciliation preserves the Gate.
 
 /**
  * How a `{asset}` reference reaches execution without importing Bundle or
@@ -224,7 +224,10 @@ export async function executeRouting(
         ? await runRepeatGroup(node.repeat, context, isLastNode)
         : await runStep(node, context, isLastNode);
     if (outcome === "failed") return { outcome: "failed" };
-    if (outcome === "blocked") return { outcome: "blocked" };
+    if (outcome === "blocked") {
+      writeStateOrThrow(deps.owner, "blocked");
+      return { outcome: "blocked" };
+    }
     if (outcome === "halted") return { outcome: "halted" };
     restedSucceeded = outcome === "succeeded-rested";
   }

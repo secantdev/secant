@@ -23,7 +23,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   fences the previous owner regardless of the liveness probe; `endRun` releases ownership (clears `owner_pid`) and its store stays until an explicit delete.
 - Takeover is what makes ownership safe, not the probe (ADR 0031): a plain `acquireRun`/`resumeRun` declines a Run owned by a live _other_ process (the
   courtesy probe, `process.kill(pid, 0)`), so the Application can confirm before fencing; the `takeover` flag bumps the epoch anyway, so the previous owner's
-  next canonical write is refused. `resumeRun` refuses such a Run `workspace-busy` (named by `runId`); a takeover is `acquireRun({ takeover: true })`.
+  next canonical write is refused. `resumeRun` refuses such a Run `run-live-elsewhere` with its `ownerPid`; a takeover is
+  `acquireRun({ takeover: true })`.
 - Every `run.db` handle a Run Store opens is closed before its directory is renamed or the group closes, so Windows temp cleanup is never blocked by a lock.
 - Artifact publication (#80) is all-or-nothing: the private Artifact Module stages one Git commit (its id is the version id) into `artifacts.git`, then one
   `run.db` transaction records the versions, moves the bindings, and settles the Attempt. A staged commit or ref alone is invisible candidate storage — only
@@ -40,10 +41,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   home stand in for two processes. `owner_pid` is `ALTER TABLE ADD COLUMN`-ed and the pre-ADR-0031 `state` column and `one_live_run` index are dropped in place
   during `prepareCoordination`. The marker lands in `attempt_log` (not an `attempt` row); the resume skip cursor reads that log, so it is the marker's
   `indeterminate` outcome — not any absence from the log — that keeps the succeeded-attempt cursor unchanged and re-runs the interrupted Step.
-- Reconciliation splits by stored state, so a Run must be _stored_ `blocked` to survive a dead-owner open as blocked. Until execution writes `blocked` on pause
-  (the Application/execution half, #104), a Run paused at a checkpoint is still stored `running`, so a kill while it is blocked reconciles it `halted` and a resume
-  runs a fresh interval instead of an answer. Narrow, no data loss, same class as the create rename/commit window; the store side already leaves a stored `blocked`
-  record untouched.
+- Reconciliation splits by stored state, so execution stores `blocked` before returning a checkpoint pause. A dead-owner open then keeps the pending checkpoint
+  `blocked` and releases only its ownership; it never invents an interrupted Attempt.
+- An acquired owner releases through its fencing epoch. A stale owner whose Run was taken over cannot clear the new owner's `owner_pid` during its own cleanup.
 - Diagnostics retention (ADR 0023, #96): `diagnostics/` has had a writer since #88, so the 90-day expiry is a best-effort prune at group open (`pruneDiagnostics`,
   driven by an injectable clock) — files with an mtime at or before `now - 90 days` are deleted, newer ones kept. It walks Run directories on the filesystem, not
   the registrations, so it runs before any Run is acquired and never fails the open. The two enum columns domain logic branches on — `attempt_log.outcome` and

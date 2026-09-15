@@ -84,16 +84,6 @@ export function trustDigestMismatch(
   };
 }
 
-export function workspaceBusy(liveRunId: string): Problem {
-  return {
-    code: "workspace-busy",
-    explanation: `Another Run (${liveRunId}) is live in this Workspace; only one Run runs at a time.`,
-    remediation: "Wait for the live Run to reach rest, then launch again.",
-    possibleEffects: "none",
-    details: { liveRunId },
-  };
-}
-
 export function runSupportUnavailable(): Problem {
   return {
     code: "run-support-unavailable",
@@ -134,9 +124,8 @@ export function runLiveElsewhere(runId: string, ownerPid?: number): Problem {
   const owner = ownerPid !== undefined ? ` (process ${ownerPid})` : "";
   return {
     code: "run-live-elsewhere",
-    explanation: `Run ${runId} is live in another process${owner}; it cannot be read, resumed, or reconciled until it reaches rest.`,
-    remediation:
-      "Wait for the Run to reach rest (its launch process prints the final state), then try again.",
+    explanation: `Run ${runId} is live in another process${owner}; this instance cannot change it without taking ownership.`,
+    remediation: `Wait for the Run to rest, or run \`secant run resume ${runId} --takeover\` to take ownership and continue it.`,
     possibleEffects: "none",
     details:
       ownerPid !== undefined

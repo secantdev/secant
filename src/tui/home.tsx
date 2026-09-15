@@ -3,6 +3,7 @@ import { useTerminalDimensions } from "@opentui/solid";
 import { createSignal, For, Show } from "solid-js";
 import { useBindings } from "./keymap.js";
 import { useExit } from "./vendor/exit.js";
+import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
 import { useWorkspaceView } from "./workspace-view.js";
 
@@ -21,6 +22,7 @@ export function Home(props: {
   const { theme } = useTheme();
   const view = useWorkspaceView();
   const exit = useExit();
+  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const approved = () => view.snapshot().approval.state === "approved";
 
@@ -40,7 +42,7 @@ export function Home(props: {
   // Bindings are live only once the Workspace is approved and Home is the
   // interactive surface; while the approval dialog is up they must not fire.
   useBindings(() => ({
-    enabled: approved(),
+    enabled: approved() && dialog.stack.length === 0,
     bindings: [
       { key: "up", desc: "Previous", group: "Home", cmd: () => move(-1) },
       { key: "down", desc: "Next", group: "Home", cmd: () => move(1) },

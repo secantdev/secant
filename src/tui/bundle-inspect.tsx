@@ -12,6 +12,7 @@ import { formatEngine, formatTrust } from "./bundle-format.js";
 import { useBundleCatalogView } from "./bundle-view.js";
 import { useBindings } from "./keymap.js";
 import { useExit } from "./vendor/exit.js";
+import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 // The Bundle inspection screen: exact focus of one Installed Bundle. Rebuilt
@@ -41,11 +42,13 @@ export function BundleInspect(props: {
 }) {
   const { theme } = useTheme();
   const exit = useExit();
+  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const view = useBundleCatalogView();
   const snapshot = view.openFocus(props.selector);
 
   useBindings(() => ({
+    enabled: dialog.stack.length === 0,
     bindings: [
       { key: "escape", desc: "Back", group: "Bundle", cmd: props.onBack },
       { key: "q", desc: "Quit", group: "Bundle", cmd: () => exit() },

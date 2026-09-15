@@ -5,6 +5,7 @@ import type {
   OperationOutcome,
   Problem,
   ProjectionPort,
+  ResumeRunOffer,
   RunStateName,
   RunView,
 } from "../application/projection-port.js";
@@ -118,25 +119,38 @@ export function registerRunCommands(
       "resume a halted or failed Run, running it until it rests again",
     )
     .argument("[run-id]", "the Run id printed at launch")
+    .option("--takeover", "take over a Run owned by another process")
     .option("--json", "print the Run snapshot as JSON")
-    .action((runId: string | undefined, options: { json?: boolean }) => {
-      const json = options.json ?? false;
-      if (runId === undefined) {
+    .action(
+      (
+        runId: string | undefined,
+        options: { takeover?: boolean; json?: boolean },
+      ) => {
+        const json = options.json ?? false;
+        if (runId === undefined) {
+          return settle(
+            fail(io, json, {
+              code: "missing-run-id",
+              explanation: "run resume needs a Run id.",
+              remediation: "Run `secant run resume <run-id>`.",
+              possibleEffects: "none",
+            }),
+          );
+        }
         return settle(
-          fail(io, json, {
-            code: "missing-run-id",
-            explanation: "run resume needs a Run id.",
-            remediation: "Run `secant run resume <run-id>`.",
-            possibleEffects: "none",
-          }),
+          execute((clients) =>
+            resumeRun({
+              port: clients.projectionPort,
+              io,
+              fail,
+              json,
+              runId,
+              takeover: options.takeover ?? false,
+            }),
+          ),
         );
-      }
-      return settle(
-        execute((clients) =>
-          resumeRun(clients.projectionPort, io, fail, json, runId),
-        ),
-      );
-    });
+      },
+    );
   run
     .command("answer")
     .description("answer the Human Gate a blocked Run rests at")
@@ -472,28 +486,53 @@ function showRun(
   }
 }
 
-async function resumeRun(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  fail: RunCommandDeps["fail"],
-  json: boolean,
-  runId: string,
-): Promise<number> {
-  const admission = port.submit({
+type TResumeRunParams = {
+  readonly port: ProjectionPort;
+  readonly io: HeadlessIO;
+  readonly fail: RunCommandDeps["fail"];
+  readonly json: boolean;
+  readonly runId: string;
+  readonly takeover: boolean;
+};
+
+async function resumeRun(params: TResumeRunParams): Promise<number> {
+  const input: { runId: string; takeover?: { ownerPid: number } } = {
+    runId: params.runId,
+  };
+  if (params.takeover) {
+    const opened = params.port.openProjection({
+      family: "run",
+      runId: params.runId,
+    });
+    try {
+      if (opened.snapshot.result.found) {
+        const offer = opened.snapshot.result.run.actionOffers.find(
+          (candidate): candidate is ResumeRunOffer =>
+            candidate.action === "resume-run",
+        );
+        if (offer?.takeover !== undefined) input.takeover = offer.takeover;
+      }
+    } finally {
+      opened.close();
+    }
+  }
+  const admission = params.port.submit({
     operationId: randomUUID(),
     operation: "resume-run",
-    input: { runId },
+    input,
   });
-  if (!admission.admitted) return fail(io, json, admission.problem);
+  if (!admission.admitted) {
+    return params.fail(params.io, params.json, admission.problem);
+  }
   // The resume drives execution (async now); await settlement and report, like
   // `run launch`.
   return settleAndReportRun(
-    port,
-    io,
-    fail,
-    json,
+    params.port,
+    params.io,
+    params.fail,
+    params.json,
     admission.operationId,
-    runId,
+    params.runId,
     (run) => [`Run ${run.runId}`],
   );
 }

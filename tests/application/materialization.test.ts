@@ -192,25 +192,46 @@ test("resume of a Run that is not halted is refused", async (t) => {
   assert.equal(admission.problem.code, "run-not-resumable");
 });
 
-test("resume of a live (running) Run is refused as live-elsewhere (#86, #98 S2)", (t) => {
+test("resume of a Run live in another process is refused as live-elsewhere (#86, #98 S2, ADR 0031)", (t) => {
   const f = fixture(t);
-  // A Run left `running` with its Workspace claim still live is a Run genuinely
-  // executing (here or in another process): resuming it would fence the process
-  // driving it, so it is refused `run-live-elsewhere` (naming the owner) before any
-  // resting-state check, not reconciled or resumed.
-  const created = f.runGroup.createRun({
+  // Ownership is per-Run now (ADR 0031): a `running` Run whose owner process is a
+  // *different* live instance is genuinely executing there, so resuming it — which
+  // would fence and abort that process — is refused `run-live-elsewhere` (naming
+  // the owner) before any resting-state check, not reconciled or resumed. The
+  // owning group runs under pid 1000; the observing instance runs under pid 2000
+  // and sees pid 1000 alive.
+  const store = makeTempDir("secant-mat-foreign-store-");
+  const owning = openRunGroup(store, f.workspace, {
+    selfPid: 1000,
+    isOwnerAlive: () => true,
+  });
+  t.after(() => owning.close());
+  const created = owning.createRun({
     operationId: "live-1",
     bundleSnapshotDigest: "sha256:deadbeef",
     launch: {},
     at: new Date(),
   });
   assert.ok(created.outcome === "created");
-  const owner = f.runGroup.acquireRun(created.runId);
+  const owner = owning.acquireRun(created.runId);
   assert.ok(owner);
   assert.deepEqual(owner.writeState("running"), { ok: true });
   owner.close();
 
-  const admission = f.app.projectionPort.submit({
+  const observing = openRunGroup(store, f.workspace, {
+    selfPid: 2000,
+    isOwnerAlive: (pid) => pid === 1000,
+  });
+  t.after(() => observing.close());
+  const app = createApplication({
+    catalog: f.catalog,
+    launchWorkspacePath: f.workspace,
+    hostPlatform: hostPlatform(),
+    runGroup: observing,
+    runExecution,
+  });
+
+  const admission = app.projectionPort.submit({
     operationId: "resume-live",
     operation: "resume-run",
     input: { runId: created.runId },

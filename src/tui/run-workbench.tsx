@@ -43,6 +43,7 @@ import {
   type TimelineScroll,
 } from "./run-timeline.js";
 import { useExit } from "./vendor/exit.js";
+import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 // The Run Workbench (#91): a timeline-first watch of one Run rendering the same
@@ -93,6 +94,7 @@ export function RunWorkbench(props: {
 }) {
   const { theme } = useTheme();
   const exit = useExit();
+  const dialog = useDialog();
   const view = useRunWorkbenchView();
   const actions = useRunActionsView();
   const snapshot = view.openRun(props.runId);
@@ -137,8 +139,7 @@ export function RunWorkbench(props: {
   // dispatches — iff its Offer is present, legality decided inside Secant (resume
   // on halted/failed; cancel while live, delete while not; #86, #87), so the
   // Workbench never re-derives it. `actionRefusal` shows a refused dispatch;
-  // `pending` arms the confirming keypress cancel/delete require (both are
-  // irreversible), the terminal-native form of the IA prototype's confirm dialog.
+  // `pending` arms the confirming keypress a takeover, cancel, or delete requires.
   const offers = createMemo(() => {
     const list = run()?.actionOffers ?? [];
     return {
@@ -154,7 +155,9 @@ export function RunWorkbench(props: {
     };
   });
   const [actionRefusal, setActionRefusal] = createSignal<Problem | undefined>();
-  const [pending, setPending] = createSignal<"cancel" | "delete" | undefined>();
+  const [pending, setPending] = createSignal<
+    "takeover" | "cancel" | "delete" | undefined
+  >();
   // A dispatched Run Action followed to settlement: resume drives execution and a
   // cancel-as-abort aborts a live Run, both asynchronous now (#98), so the outcome
   // starts `pending` and the effect below reports it. A second dispatch while one
@@ -172,7 +175,7 @@ export function RunWorkbench(props: {
     const offer = offers().resume;
     if (offer === undefined || actionInFlight()) return;
     setActionRefusal(undefined);
-    setActionFlight({ op: "resume", outcome: actions.resume(offer.runId) });
+    setActionFlight({ op: "resume", outcome: actions.resume(offer) });
   };
   // Called on the confirming keypress. Cancel keeps the Run's history; delete
   // removes it and leaves the Workbench for the list once it settles, since the
@@ -390,6 +393,7 @@ export function RunWorkbench(props: {
   };
 
   const handleKey = (key: RendererKeyEvent) => {
+    if (dialog.stack.length > 0) return;
     const name = key.name ?? "";
     if (name === "q" || (name === "c" && key.ctrl)) {
       exit();
@@ -402,24 +406,29 @@ export function RunWorkbench(props: {
       if (name === "escape") props.onLeave();
       return;
     }
-    // A pending Cancel/Delete waits for its confirming keypress: `y` confirms and
+    // A pending takeover/Cancel/Delete waits for its confirming keypress: `y` confirms and
     // Escape backs out (without dispatching or leaving); any other key is ignored
     // while the confirmation stays armed, so a stray keystroke never dispatches it.
     if (pending() !== undefined) {
       if (name === "y") {
         const action = pending();
         setPending(undefined);
-        if (action === "cancel") confirmCancel();
+        if (action === "takeover") dispatchResume();
+        else if (action === "cancel") confirmCancel();
         else confirmDelete();
       } else if (name === "escape") {
         setPending(undefined);
       }
       return;
     }
-    // Run Actions from any focus, gated on the Offer being present. Resume
-    // dispatches at once; Cancel and Delete arm a confirmation first.
+    // Run Actions from any focus, gated on the Offer being present. A local resume
+    // dispatches at once; takeover, Cancel, and Delete arm a confirmation first.
     if (name === "r" && offers().resume !== undefined) {
-      dispatchResume();
+      if (offers().resume?.takeover === undefined) dispatchResume();
+      else {
+        setActionRefusal(undefined);
+        setPending("takeover");
+      }
       return;
     }
     if (name === "c" && offers().cancel !== undefined) {
@@ -601,6 +610,17 @@ function positionText(run: RunView): string {
     : `step ${run.position + 1} of ${run.progress.length}`;
 }
 
+function livenessText(run: RunView): string {
+  switch (run.liveness.state) {
+    case "not-live":
+      return "not live";
+    case "live-here":
+      return `live in this instance (process ${run.liveness.ownerPid})`;
+    case "live-elsewhere":
+      return `live in another instance (process ${run.liveness.ownerPid})`;
+  }
+}
+
 function Workbench(props: {
   run: Accessor<RunView>;
   compactHeader: Accessor<boolean>;
@@ -626,7 +646,7 @@ function Workbench(props: {
   }>;
   anyActionOffer: Accessor<boolean>;
   actionRefusal: Accessor<Problem | undefined>;
-  actionPending: Accessor<"cancel" | "delete" | undefined>;
+  actionPending: Accessor<"takeover" | "cancel" | "delete" | undefined>;
   theme: Theme;
 }) {
   const { theme } = props;
@@ -658,7 +678,10 @@ function Workbench(props: {
           when={!props.compactHeader()}
           fallback={
             <text fg={stateColor(theme, run().state)}>
-              {clip(`Run ${run().runId} — ${run().state.toUpperCase()}`, w())}
+              {clip(
+                `Run ${run().runId} — ${run().state.toUpperCase()} · ${livenessText(run())}`,
+                w(),
+              )}
             </text>
           }
         >
@@ -666,7 +689,10 @@ function Workbench(props: {
             {clip(`${run().bundle.name} — ${run().state.toUpperCase()}`, w())}
           </text>
           <text fg={theme.textMuted}>
-            {clip(`Run ${run().runId} · ${positionText(run())}`, w())}
+            {clip(
+              `Run ${run().runId} · ${positionText(run())} · ${livenessText(run())}`,
+              w(),
+            )}
           </text>
         </Show>
       </box>
@@ -697,8 +723,8 @@ function Workbench(props: {
       </text>
 
       {/* Run Actions: each control shows only while its Offer is present, with the
-          consequence the Offer names verbatim and its shortcut. Cancel/Delete arm
-          a confirming keypress first; a refused dispatch shows the reason here. */}
+          consequence the Offer names verbatim and its shortcut. Takeover,
+          Cancel, and Delete arm a confirming keypress first. */}
       <Show when={props.anyActionOffer()}>
         <box flexDirection="column" flexShrink={0}>
           <text fg={theme.textMuted} flexShrink={0}>
@@ -729,9 +755,11 @@ function Workbench(props: {
             {(action) => (
               <text fg={theme.warning} flexShrink={0}>
                 {clip(
-                  action() === "delete"
-                    ? "  ⚠ Delete is permanent (Workspace files are kept). Press y to confirm · esc to keep"
-                    : "  ⚠ Cancel ends the Run (history is kept). Press y to confirm · esc to keep",
+                  action() === "takeover"
+                    ? `  ⚠ Take over from process ${props.actionOffers().resume?.takeover?.ownerPid ?? "unknown"}? Press y to confirm · esc to keep`
+                    : action() === "delete"
+                      ? "  ⚠ Delete is permanent (Workspace files are kept). Press y to confirm · esc to keep"
+                      : "  ⚠ Cancel ends the Run (history is kept). Press y to confirm · esc to keep",
                   w(),
                 )}
               </text>

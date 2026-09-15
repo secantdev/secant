@@ -406,35 +406,145 @@ test("a launch refused before creation grants no trust, and a second live Run is
   });
   assert.ok(b.admitted);
   assert.equal(f.runGroup.listRuns().filter((run) => run.live).length, 2);
+  const list = f.app.projectionPort.openProjection({ family: "run-list" });
+  assert.equal(list.snapshot.rows.length, 2);
+  assert.ok(list.snapshot.rows.every((row) => row.live));
+  const updates = list.updates[Symbol.asyncIterator]();
+
+  for (const settle of held) settle();
+  await Promise.all([settled(f.app, "op-a"), settled(f.app, "op-b")]);
+  let latest = list.snapshot;
+  while (latest.rows.some((row) => row.live)) {
+    const update = await updates.next();
+    assert.equal(update.done, false);
+    if (!update.done && update.value.kind === "durable") {
+      latest = update.value.snapshot;
+    }
+  }
+  assert.equal(latest.rows.length, 2);
+  assert.ok(latest.rows.every((row) => !row.live));
+  list.close();
 });
 
 test("reading a live Run's projection does not fence the owner executing it", async (t) => {
   const f = fixture(t);
   const { digest } = installCommandBundle(f);
-  // Simulate another process executing a Run: create it directly on the Run Store
-  // and hold an acquired owner, as a live launch process would.
-  const created = f.runGroup.createRun({
+  const store = makeTempDir("secant-foreign-run-store-");
+  const first = openRunGroup(store, f.workspace, {
+    selfPid: 1000,
+    isOwnerAlive: () => true,
+  });
+  t.after(() => first.close());
+  const created = first.createRun({
     operationId: "c",
     bundleSnapshotDigest: digest,
     launch: {},
     at: new Date(),
   });
   assert.ok(created.outcome === "created");
-  const owner = f.runGroup.acquireRun(created.runId);
+  const owner = first.acquireRun(created.runId);
   assert.ok(owner);
   t.after(() => owner.close());
   assert.equal(owner.writeState("running").ok, true);
+  const second = openRunGroup(store, f.workspace, {
+    selfPid: 2000,
+    isOwnerAlive: (pid) => pid === 1000,
+  });
+  t.after(() => second.close());
+  const observing = createApplication({
+    catalog: f.catalog,
+    launchWorkspacePath: f.workspace,
+    hostPlatform: hostPlatform(),
+    runGroup: second,
+    runExecution,
+  });
 
   // Read the projection through the Port while the Run is live and this
   // Application has no in-process tracking for it — the cross-process `run show`
   // path. It must show the record-level snapshot without acquiring an owner.
-  const result = runResult(f.app, created.runId);
+  const result = runResult(observing, created.runId);
   assert.ok(result.found);
   if (result.found) assert.equal(result.run.state, "running");
 
   // The executing owner's canonical writes still succeed: the read did not bump
   // the fencing epoch, so it did not abort the running Run.
   assert.equal(owner.writeState("running").ok, true);
+});
+
+test("a foreign live Run offers an owner-named takeover that resumes and fences its prior owner", async (t) => {
+  const f = fixture(t);
+  const { digest } = installCommandBundle(f);
+  f.catalog.approveWorkspace(f.workspace, new Date());
+  f.catalog.grantTrust({
+    operationId: "grant-takeover",
+    digest,
+    installationGeneration: 1,
+    grantedAt: new Date(),
+  });
+  const store = makeTempDir("secant-takeover-store-");
+  const first = openRunGroup(store, f.workspace, {
+    selfPid: 1000,
+    isOwnerAlive: () => true,
+  });
+  t.after(() => first.close());
+  const created = first.createRun({
+    operationId: "foreign-live",
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date(),
+  });
+  assert.equal(created.outcome, "created");
+  const priorOwner = first.acquireRun(created.runId);
+  assert.ok(priorOwner);
+  t.after(() => priorOwner.close());
+  priorOwner.writeState("running");
+
+  const second = openRunGroup(store, f.workspace, {
+    selfPid: 2000,
+    isOwnerAlive: (pid) => pid === 1000,
+  });
+  t.after(() => second.close());
+  const app = createApplication({
+    catalog: f.catalog,
+    launchWorkspacePath: f.workspace,
+    hostPlatform: hostPlatform(),
+    runGroup: second,
+    runExecution,
+  });
+  const result = runResult(app, created.runId);
+  assert.ok(result.found);
+  assert.deepEqual(result.run.liveness, {
+    state: "live-elsewhere",
+    ownerPid: 1000,
+  });
+  const offer = result.run.actionOffers.find(
+    (candidate) => candidate.action === "resume-run",
+  );
+  assert.deepEqual(offer?.takeover, { ownerPid: 1000 });
+  assert.ok(offer?.takeover);
+
+  const refused = app.projectionPort.submit({
+    operationId: "plain-resume",
+    operation: "resume-run",
+    input: { runId: created.runId },
+  });
+  assert.equal(refused.admitted, false);
+  if (!refused.admitted) {
+    assert.equal(refused.problem.code, "run-live-elsewhere");
+    assert.equal(refused.problem.details?.ownerPid, "1000");
+  }
+
+  const takeover = app.projectionPort.submit({
+    operationId: "takeover-resume",
+    operation: "resume-run",
+    input: { runId: offer.runId, takeover: offer.takeover },
+  });
+  assert.ok(takeover.admitted);
+  assert.deepEqual(await settled(app, takeover.operationId), {
+    status: "applied",
+  });
+  assert.equal(runResult(app, created.runId).found, true);
+  assert.equal(priorOwner.writeState("running").ok, false);
 });
 
 test("a fresh Application (no in-process tracking) reads a Run back from its stored bytes", async (t) => {

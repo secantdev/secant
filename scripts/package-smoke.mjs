@@ -860,6 +860,90 @@ try {
     if (!existsSync(lastMarker)) {
       throw new Error("SIGINT smoke resume did not run the final Step.");
     }
+
+    // Launch the same blocking Bundle again and exercise the cross-process
+    // resume contract from the installed binary. A plain resume names the live
+    // owner; --takeover fences that process and continues from durable state.
+    await rm(startedMarker, { force: true });
+    await rm(proceedMarker, { force: true });
+    await rm(lastMarker, { force: true });
+    const ownedChild = spawn(
+      binary,
+      ["run", "launch", id, "--trust", installed.digest],
+      { cwd: sigintWorkspace, env: sigintEnv },
+    );
+    const ownedErr = [];
+    ownedChild.stderr.on("data", (data) => ownedErr.push(data.toString()));
+    ownedChild.stdout.on("data", () => {});
+    const ownedExited = new Promise((resolve) =>
+      ownedChild.on("exit", () => resolve()),
+    );
+    if (!(await waitForFile(startedMarker, 20000))) {
+      ownedChild.kill("SIGKILL");
+      throw new Error(
+        `Takeover smoke child never reached the block Step: ${ownedErr.join("")}`,
+      );
+    }
+    const liveRows = JSON.parse(
+      run(binary, ["run", "list", "--json"], {
+        cwd: sigintWorkspace,
+        env: sigintEnv,
+      }),
+    ).rows;
+    const ownedRun = liveRows.find((row) => row.live === true);
+    if (ownedRun === undefined || typeof ownedRun.ownerPid !== "number") {
+      throw new Error(
+        `Takeover smoke did not list the owned Run live: ${JSON.stringify(liveRows)}`,
+      );
+    }
+    const ownedBlockPid = Number(readFileSync(startedMarker, "utf8").trim());
+    const refused = spawnSync(binary, ["run", "resume", ownedRun.runId], {
+      cwd: sigintWorkspace,
+      encoding: "utf8",
+      env: sigintEnv,
+    });
+    if (refused.error) throw refused.error;
+    const refusalText = `${refused.stdout}${refused.stderr}`;
+    if (
+      refused.status !== 1 ||
+      !refusalText.includes("run-live-elsewhere") ||
+      !refusalText.includes(String(ownedRun.ownerPid))
+    ) {
+      throw new Error(
+        `Plain resume did not name the live owner: ${refusalText}`,
+      );
+    }
+
+    await writeFile(proceedMarker, "go");
+    const takeover = run(
+      binary,
+      ["run", "resume", ownedRun.runId, "--takeover"],
+      { cwd: sigintWorkspace, env: sigintEnv },
+    );
+    if (!takeover.includes("State: succeeded")) {
+      throw new Error(`Takeover did not continue the Run: ${takeover}`);
+    }
+
+    // Stop the fenced process and verify its cleanup cannot overwrite or release
+    // the takeover result.
+    ownedChild.kill("SIGINT");
+    await ownedExited;
+    if (Number.isInteger(ownedBlockPid) && ownedBlockPid > 0) {
+      try {
+        process.kill(ownedBlockPid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    const afterTakeover = run(binary, ["run", "show", ownedRun.runId], {
+      cwd: sigintWorkspace,
+      env: sigintEnv,
+    });
+    if (!/State: succeeded/.test(afterTakeover)) {
+      throw new Error(
+        `The fenced owner changed the takeover result: ${afterTakeover}`,
+      );
+    }
   }
 
   // The maintained Command-only gate Bundle, built, installed, and run to

@@ -14,6 +14,7 @@ import type {
   GateAnswerRecord,
   MaterializationConflict,
   RunGroup,
+  RunListing,
   RunOwner,
 } from "../run/store/store.js";
 import type {
@@ -30,6 +31,7 @@ import type {
   RunStepStatus,
   RunTimelineEvent,
   RunTimelineKind,
+  RunView,
 } from "./projection-port.js";
 import {
   bundleBytesCorrupt,
@@ -111,11 +113,12 @@ function runResult(
   if ("problem" in derived) return { found: false, problem: derived.problem };
   const facts = derived.facts;
   const trackedState = context.state ?? record.state;
-  // Legality of cancel/delete is decided here, inside Secant (#87): a Run that
-  // holds the live Workspace claim can be cancelled; one that does not (resting,
-  // blocked, or terminal) can be deleted. Read from the coordination record, which
+  // Legality of cancel/delete is decided here, inside Secant (#87): an owned Run
+  // can be cancelled; an unowned resting or terminal Run can be deleted. Read from the coordination record, which
   // is the same whether the Run is live in this process or another.
-  const isLive = isLiveElsewhere(deps.runGroup, runId);
+  const listing = runListing(deps.runGroup, runId);
+  const isLive = listing?.live === true;
+  const liveElsewhere = isLive && listing?.ownedByThisProcess === false;
   const view = (
     owner: RunOwner | undefined,
     log: readonly AttemptLogEntry[],
@@ -125,9 +128,9 @@ function runResult(
   ): RunResult => {
     // Derive progress and the `blocked` state from the Routing and the ordered
     // attempt log (ADR 0020, #84): a Repeat group loops, so a flat succeeded-
-    // advances-one-Step mapping no longer identifies the current Step. `blocked`
-    // is never stored, so it is re-derived here from the current Step Attempt —
-    // needing the Verdict bindings, which only the owner can read. A persisted
+    // advances-one-Step mapping no longer identifies the current Step. Stored
+    // `blocked` preserves reconciliation; the checkpoint facts are re-derived from
+    // the current Step Attempt and Verdict binding. A persisted
     // `halted` (#88) passes through and marks its current Step `blocked`.
     const derivedRun = deriveRun(
       facts.routing,
@@ -156,6 +159,7 @@ function runResult(
         workspacePath: record.workspacePath,
         launchedAt: record.createdAt,
         state: derivedRun.state,
+        liveness: runLiveness(listing),
         progress: derivedRun.statuses,
         position: derivedRun.position,
         timeline: buildTimeline(
@@ -177,18 +181,18 @@ function runResult(
         // while resting halted or failed; cancel is offered while the Run is live or
         // `blocked` (a blocked Run has resumable work, so it is cancelled rather than
         // deleted — A6), delete only otherwise (mutually exclusive).
-        // ponytail: a `blocked` Run has released its Workspace claim (blocked is
-        // stored `running`, claim released), so acting on this cancel offer refuses
-        // `run-not-live` until #103 (ADR 0031) holds ownership through `blocked` and
-        // makes the cancel executable. The offer is placed now (A6, cancel-vs-delete
-        // half); its busy-check and the executable cancel-of-blocked land with #103.
         actionOffers: [
-          ...(derivedRun.checkpoint !== undefined
+          ...(derivedRun.checkpoint !== undefined && !liveElsewhere
             ? [answerHumanGateOffer(derivedRun.checkpoint.gate)]
             : []),
-          ...(derivedRun.state === "halted" || derivedRun.state === "failed"
-            ? [resumeRunOffer(runId, derivedRun.state)]
-            : []),
+          ...(liveElsewhere &&
+          listing?.ownerPid !== undefined &&
+          derivedRun.state !== "succeeded" &&
+          derivedRun.state !== "cancelled"
+            ? [resumeRunOffer(runId, derivedRun.state, listing.ownerPid)]
+            : derivedRun.state === "halted" || derivedRun.state === "failed"
+              ? [resumeRunOffer(runId, derivedRun.state)]
+              : []),
           isLive || derivedRun.state === "blocked"
             ? cancelRunOffer(runId)
             : deleteRunOffer(runId),
@@ -205,7 +209,7 @@ function runResult(
   // `acquireRun` bumps the fencing epoch, which would fence — and so abort — the
   // process actually executing the Run. A read must never break a running Run, so
   // show the record-level snapshot instead (no attempt log or outputs from here).
-  if (live === undefined && isLiveElsewhere(deps.runGroup, runId)) {
+  if (live === undefined && liveElsewhere) {
     return view(undefined, [], [], [], []);
   }
   const owner = live ?? deps.runGroup.acquireRun(runId);
@@ -247,7 +251,21 @@ function conflictView(
  *  process is executing it. A reader must not acquire (and fence) such a Run; it
  *  is also the legality test for cancel (live) vs delete (not live) (#87). */
 export function isLiveElsewhere(runGroup: RunGroup, runId: string): boolean {
-  return runGroup.listRuns().some((run) => run.runId === runId && run.live);
+  const listing = runListing(runGroup, runId);
+  return listing?.live === true && !listing.ownedByThisProcess;
+}
+
+function runListing(runGroup: RunGroup, runId: string): RunListing | undefined {
+  return runGroup.listRuns().find((run) => run.runId === runId);
+}
+
+function runLiveness(listing: RunListing | undefined): RunView["liveness"] {
+  if (listing?.live !== true || listing.ownerPid === undefined) {
+    return { state: "not-live" };
+  }
+  return listing.ownedByThisProcess
+    ? { state: "live-here", ownerPid: listing.ownerPid }
+    : { state: "live-elsewhere", ownerPid: listing.ownerPid };
 }
 
 /** Re-derive the routing and Bundle facts from the pinned Snapshot's stored
@@ -312,15 +330,30 @@ function collectOutputs(
 
 /** The `resume-run` offer for a resting Run: names what resume does from the
  *  current state so a client presents it without re-deriving the model (#86). */
-function resumeRunOffer(runId: string, state: RunStateName): ActionOffer {
-  return {
+function resumeRunOffer(
+  runId: string,
+  state: RunStateName,
+  takeoverOwnerPid?: number,
+): ActionOffer {
+  const offer: {
+    action: "resume-run";
+    runId: string;
+    consequence: string;
+    takeover?: { ownerPid: number };
+  } = {
     action: "resume-run",
     runId,
     consequence:
-      state === "failed"
-        ? "resume: reset this Step's attempt and iteration bounds and grant another try."
-        : "resume: continue from the Step the Run stopped at.",
+      takeoverOwnerPid !== undefined
+        ? `take over from process ${takeoverOwnerPid} and continue the Run.`
+        : state === "failed"
+          ? "resume: reset this Step's attempt and iteration bounds and grant another try."
+          : "resume: continue from the Step the Run stopped at.",
   };
+  if (takeoverOwnerPid !== undefined) {
+    offer.takeover = { ownerPid: takeoverOwnerPid };
+  }
+  return offer;
 }
 
 /** The `answer-human-gate` offer for a blocked Run: names the consequence of each
@@ -359,10 +392,11 @@ function deleteRunOffer(runId: string): ActionOffer {
 /** Map a stored/tracked canonical state to the client vocabulary (#98 A7). The
  *  retired `created` reads as `running` — a launched Run is observed running from
  *  the moment it is admitted — and every other stored state is already one of
- *  RunStateName. `blocked` is never an input (it is derived below). */
+ *  RunStateName. */
 export function toRunState(state: string): RunStateName {
   switch (state) {
     case "running":
+    case "blocked":
     case "succeeded":
     case "failed":
     case "halted":
@@ -374,7 +408,9 @@ export function toRunState(state: string): RunStateName {
 }
 
 export interface DerivedRun {
-  /** The effective state, which may be the derived `blocked` (never stored). */
+  /** The effective state, including the `blocked` a checkpoint pause derives from
+   *  the attempt log here (execution also stores `blocked` durably, so a killed Run
+   *  reconciles blocked; this derivation supplies the checkpoint facts). */
   readonly state: RunStateName;
   readonly statuses: RunStepProgress[];
   readonly position: number;
@@ -388,9 +424,11 @@ export interface DerivedRun {
  * Derive per-Step progress, the effective Run state, the per-iteration timeline,
  * and the Review checkpoint from the Routing and the ordered attempt log (ADR
  * 0020, #84). A Repeat group loops, so a flat succeeded-advances-one-Step mapping
- * no longer identifies the current Step; and `blocked` is never stored, so it is
+ * no longer identifies the current Step; and the `blocked` checkpoint facts are
  * re-derived here from the current Step Attempt — which needs the `until` Verdict
- * binding, readable only through the owner.
+ * binding, readable only through the owner. Execution also stores `blocked`
+ * durably (a killed Run reconciles blocked), but its checkpoint facts still come
+ * from this derivation, not the stored state.
  *
  * The attempt log carries no Step link, so iterations are reconstructed by
  * consuming attempts node by node: a Step consumes its `failed` retries then its

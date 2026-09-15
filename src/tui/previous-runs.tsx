@@ -16,11 +16,12 @@ import { clip } from "./clip.js";
 import { useBindings } from "./keymap.js";
 import { useRunListView } from "./run-list-view.js";
 import { useExit } from "./vendor/exit.js";
+import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 // The Previous Runs list (#92): the Workspace's earlier Runs, newest durable
 // activity first, grouped Today / Yesterday / Older, each row carrying only the
-// Run id, activity time, and Bundle human name (the Bundle name truncates last on
+// Run id, activity time, live marker, and Bundle human name (the Bundle name truncates last on
 // a small width). Selection mirrors bundle-list.tsx — a clamped active index moved
 // by up/down, Enter opens the selected Run's Workbench, Escape returns to Home,
 // the leading "› " glyph reads focus without colour. `f` toggles the Resumable
@@ -59,6 +60,7 @@ export function PreviousRuns(props: {
 }) {
   const { theme } = useTheme();
   const exit = useExit();
+  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const view = useRunListView();
   const controller = view.openRunList();
@@ -154,6 +156,7 @@ export function PreviousRuns(props: {
   });
 
   useBindings(() => ({
+    enabled: dialog.stack.length === 0,
     bindings: [
       { key: "up", desc: "Previous", group: "Runs", cmd: () => move(-1) },
       { key: "down", desc: "Next", group: "Runs", cmd: () => move(1) },
@@ -257,7 +260,7 @@ function Line(props: {
   // Read selection reactively (a getter, not a one-time const) so the focus glyph
   // and highlight follow up/down without re-slicing the window.
   const selected = () => item.rowIndex === props.active;
-  // One concatenated string per line: Run id and activity time first so the
+  // One concatenated string per line: Run id, activity time, and live marker first so the
   // Bundle name (last) is what a narrow width truncates.
   return (
     <text
@@ -266,7 +269,7 @@ function Line(props: {
       flexShrink={0}
     >
       {clip(
-        `${selected() ? "› " : "  "}${item.row.runId}  ${item.row.activityAt}  ${item.row.bundleName}`,
+        `${selected() ? "› " : "  "}${item.row.runId}  ${item.row.activityAt}${item.row.live ? "  ● live" : ""}  ${item.row.bundleName}`,
         props.width,
       )}
     </text>

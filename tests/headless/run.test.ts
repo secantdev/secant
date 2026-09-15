@@ -523,6 +523,102 @@ test("two invocations: block under one instance, continue under a fresh instance
   assert.match(b.text(), /^State: succeeded$/m);
 });
 
+test("run resume reports a live foreign owner and --takeover continues while fencing it", async (t) => {
+  const catalogHome = makeTempDir("secant-takeover-cat-");
+  const storeHome = makeTempDir("secant-takeover-store-");
+  const workspace = realpathSync.native(makeTempDir("secant-takeover-ws-"));
+  const catalog = openCatalog(catalogHome);
+  t.after(() => catalog.close());
+  const first = openRunGroup(storeHome, workspace, { selfPid: 1000 });
+  t.after(() => first.close());
+  const buildApp = createApplication({
+    catalog,
+    launchWorkspacePath: workspace,
+    runGroup: first,
+    runExecution: ({ routing, owner }) =>
+      executeRouting(routing, {
+        owner,
+        platform: hostPlatform(),
+        resolveAsset: () => undefined,
+      }),
+  });
+  const bundle = writeCommandBundle({ id: "dev.secant.takeover" });
+  const built = buildApp.bundleManagement.build(bundle.folder, {
+    noInstall: false,
+  });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = catalog
+    .listEntries()
+    .find((candidate) => candidate.id === bundle.id);
+  assert.ok(entry);
+  catalog.approveWorkspace(workspace, new Date());
+  catalog.grantTrust({
+    operationId: "trust-takeover",
+    digest: entry.digest,
+    installationGeneration: entry.installationGeneration,
+    grantedAt: new Date(),
+  });
+  const created = first.createRun({
+    operationId: "create-takeover",
+    bundleSnapshotDigest: entry.digest,
+    launch: {},
+    at: new Date(),
+  });
+  assert.equal(created.outcome, "created");
+  const priorOwner = first.acquireRun(created.runId);
+  assert.ok(priorOwner);
+  t.after(() => priorOwner.close());
+  assert.deepEqual(priorOwner.writeState("running"), { ok: true });
+
+  const second = openRunGroup(storeHome, workspace, {
+    selfPid: 2000,
+    isOwnerAlive: (pid) => pid === 1000,
+  });
+  t.after(() => second.close());
+  const app = createApplication({
+    catalog,
+    launchWorkspacePath: workspace,
+    runGroup: second,
+    runExecution: ({ routing, owner }) =>
+      executeRouting(routing, {
+        owner,
+        platform: hostPlatform(),
+        resolveAsset: () => undefined,
+      }),
+  });
+  const output: string[] = [];
+  const io: HeadlessIO = {
+    out: (text) => output.push(text),
+    err: (text) => output.push(text),
+    cwd: () => workspace,
+  };
+
+  assert.equal(await runHeadless(app, ["run", "resume", created.runId], io), 1);
+  assert.match(output.join(""), /run-live-elsewhere/);
+  assert.match(output.join(""), /process 1000/);
+  output.length = 0;
+
+  // `run show` names the foreign owner in its header while the Run is live
+  // elsewhere (ADR 0031).
+  assert.equal(await runHeadless(app, ["run", "show", created.runId], io), 0);
+  assert.match(
+    output.join(""),
+    /^Live: in another instance \(process 1000\)$/m,
+  );
+  output.length = 0;
+
+  assert.equal(
+    await runHeadless(app, ["run", "resume", created.runId, "--takeover"], io),
+    0,
+  );
+  assert.match(output.join(""), /^State: succeeded$/m);
+  assert.deepEqual(priorOwner.writeState("cancelled"), {
+    ok: false,
+    reason: "fenced",
+  });
+  assert.deepEqual(priorOwner.release(), { ok: false, reason: "fenced" });
+});
+
 test("run resume of a Run rested failed by a checkpoint stop resets bounds and blocks after another full interval (#86, AC2)", async (t) => {
   const h = await harness(t);
   const runId = await launchBlocked(h, { interval: 2 }); // always fails

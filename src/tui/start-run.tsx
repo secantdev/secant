@@ -23,6 +23,7 @@ import { useBundleCatalogView } from "./bundle-view.js";
 import { useBindings } from "./keymap.js";
 import { useRunLaunchView, type LaunchOutcome } from "./run-launch-view.js";
 import { useExit } from "./vendor/exit.js";
+import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 // The Start-a-Run flow (#90): from Home, one decision per screen — choose an
@@ -279,6 +280,7 @@ function ChooseStep(props: {
 }) {
   const { theme } = useTheme();
   const exit = useExit();
+  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const stacked = () => dimensions().width < NARROW_BREAKPOINT;
 
@@ -303,6 +305,7 @@ function ChooseStep(props: {
   };
 
   useBindings(() => ({
+    enabled: dialog.stack.length === 0,
     bindings: [
       {
         key: "up",
@@ -529,6 +532,7 @@ function InputsStep(props: {
 }) {
   const { theme } = useTheme();
   const exit = useExit();
+  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const inputs = () => props.bundle()?.launchInputs ?? [];
   const [field, setField] = createSignal(0);
@@ -573,6 +577,7 @@ function InputsStep(props: {
       ?.explanation;
 
   useBindings(() => ({
+    enabled: dialog.stack.length === 0,
     bindings: [
       {
         key: "up",
@@ -609,7 +614,7 @@ function InputsStep(props: {
   // Only when a choice/verdict input is focused do left/right cycle it; on a
   // text-like input they stay unbound so they reach the focused <input> cursor.
   useBindings(() => ({
-    enabled: choiceLike(),
+    enabled: choiceLike() && dialog.stack.length === 0,
     bindings: [
       {
         key: "left",
@@ -699,9 +704,11 @@ function ReviewStep(props: {
 }) {
   const { theme } = useTheme();
   const exit = useExit();
+  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
 
   useBindings(() => ({
+    enabled: dialog.stack.length === 0,
     bindings: [
       {
         key: "return",
@@ -779,7 +786,9 @@ function PendingStep() {
   const { theme } = useTheme();
   const dimensions = useTerminalDimensions();
   const exit = useExit();
+  const dialog = useDialog();
   useBindings(() => ({
+    enabled: dialog.stack.length === 0,
     bindings: [
       { key: "q", desc: "Quit", group: "Launching", cmd: () => exit() },
       { key: "ctrl+c", desc: "Quit", group: "Launching", cmd: () => exit() },

@@ -48,7 +48,6 @@ import {
   runStoreDamaged,
   runSupportUnavailable,
   trustDigestMismatch,
-  workspaceBusy,
   workspaceNotApproved,
 } from "./problems.js";
 import { UpdateStream } from "./update-stream.js";
@@ -206,11 +205,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
       done: boolean;
       readonly abort: AbortController;
       promise?: Promise<OperationOutcome>;
+      readonly takeover?: boolean;
       readonly observers: Set<UpdateStream>;
     }
   >();
   const workspaceObservers = new Set<UpdateStream>();
   const bundleCatalogObservers = new Set<UpdateStream>();
+  const runListObservers = new Set<{
+    readonly updates: UpdateStream;
+    readonly resumable: boolean;
+    readonly before?: string;
+  }>();
   const bundleCatalog: BundleCatalogDependencies = {
     catalog,
     budgets,
@@ -302,20 +307,39 @@ export function createApplication(deps: ApplicationDependencies): Application {
   function pushRunUpdate(runId: string): void {
     if (runProjection === undefined) return;
     const tracking = runs.get(runId);
-    if (tracking === undefined || tracking.observers.size === 0) return;
-    const snapshot = runSnapshot(runProjection, runId, {
-      facts: {
-        routing: tracking.routing,
-        name: tracking.name,
-        id: tracking.id,
-        version: tracking.version,
-        digest: tracking.digest,
-      },
-      ...(tracking.owner !== undefined ? { liveOwner: tracking.owner } : {}),
-      state: tracking.state,
-    });
-    for (const observer of tracking.observers) {
-      observer.push({ kind: "durable", snapshot });
+    if (tracking !== undefined && tracking.observers.size > 0) {
+      const snapshot = runSnapshot(runProjection, runId, {
+        facts: {
+          routing: tracking.routing,
+          name: tracking.name,
+          id: tracking.id,
+          version: tracking.version,
+          digest: tracking.digest,
+        },
+        ...(tracking.owner !== undefined ? { liveOwner: tracking.owner } : {}),
+        state: tracking.state,
+      });
+      for (const observer of tracking.observers) {
+        observer.push({ kind: "durable", snapshot });
+      }
+    }
+    pushRunListUpdates();
+  }
+
+  function pushRunListUpdates(): void {
+    if (runProjection === undefined) return;
+    for (const observer of runListObservers) {
+      const options = {
+        resumable: observer.resumable,
+        now: now(),
+      };
+      const snapshot = listRunsSnapshot(
+        runProjection,
+        observer.before === undefined
+          ? options
+          : { ...options, before: observer.before },
+      );
+      observer.updates.push({ kind: "durable", snapshot });
     }
   }
 
@@ -331,7 +355,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
       return undefined; // live in this process
     }
     try {
-      return runGroup.listRuns().find((run) => run.runId === runId && run.live);
+      return runGroup
+        .listRuns()
+        .find(
+          (run) => run.runId === runId && run.live && !run.ownedByThisProcess,
+        );
     } catch {
       // A malformed coordination row never throws out of submit (A4); the caller's
       // own store reads then surface it as a typed Problem.
@@ -398,12 +426,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
     };
   }
 
-  // Acquire the Run, drive it to rest through the injected execution, then close
-  // the owner and release the Workspace claim. The launch Operation is `applied`
+  // Acquire the Run and drive it through the injected execution. The launch
+  // Operation is `applied`
   // once the Run reaches rest (succeeded, failed, or a `blocked` pause at a Review
-  // checkpoint — nothing executes while blocked, and the claim is released on the
-  // `finally`, so a reopened home re-derives the block from the current Step
-  // Attempt); a fenced owner or publication fault is a coordination/environment
+  // checkpoint). Ownership stays held through `blocked` and is released only when
+  // the Run reaches a resting state; a fenced owner or publication fault is a coordination/environment
   // fault that execution throws, carried here as a `not-applied` Problem.
   async function runAndSettle(runId: string): Promise<OperationOutcome> {
     const tracking = runs.get(runId);
@@ -414,23 +441,33 @@ export function createApplication(deps: ApplicationDependencies): Application {
     ) {
       return { status: "not-applied", problem: runSupportUnavailable() };
     }
-    const owner = runGroup.acquireRun(runId);
+    const owner = runGroup.acquireRun(
+      runId,
+      tracking.takeover === true ? { takeover: true } : undefined,
+    );
     if (owner === undefined) {
       tracking.done = true;
       return { status: "not-applied", problem: runStoreDamaged(runId) };
     }
     tracking.owner = owner;
+    if (tracking.takeover === true && tracking.state === "blocked") {
+      tracking.promise = undefined;
+      tracking.done = false;
+      pushRunUpdate(runId);
+      return { status: "applied" };
+    }
     const observed = observedOwner(owner, runId);
-    // A signal-abort leaves the claim live so the next open reconciles the Run
-    // `halted` (ADR 0019); every other exit releases the claim in the finally.
+    // A signal-abort and a blocked pause retain ownership. Every rested outcome
+    // releases it in the finally.
     let leaveClaimLive = false;
     try {
-      await runExecution({
+      const report = await runExecution({
         routing: tracking.routing,
         digest: tracking.digest,
         owner: observed,
         cancelSignal: tracking.abort.signal,
       });
+      leaveClaimLive = report.outcome === "blocked";
       return { status: "applied" };
     } catch (error) {
       // Our own AbortController firing is the only cause of an execution abort, so
@@ -453,10 +490,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
         problem: runExecutionFault(runId, error),
       };
     } finally {
-      tracking.owner = undefined;
-      tracking.done = true;
-      owner.close();
-      if (!leaveClaimLive) runGroup.endRun(runId);
+      tracking.promise = undefined;
+      if (leaveClaimLive) {
+        tracking.done = false;
+      } else {
+        tracking.owner = undefined;
+        tracking.done = true;
+        owner.release();
+        owner.close();
+        pushRunUpdate(runId);
+      }
     }
   }
 
@@ -466,9 +509,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // runs its synchronous prefix (which acquires the owner) before the first await,
   // so the promise captured here already has the owner in hand.
   function startRun(runId: string): Promise<OperationOutcome> {
-    const promise = runAndSettle(runId);
     const tracking = runs.get(runId);
-    if (tracking !== undefined) tracking.promise = promise;
+    // A takeover that only re-acquires a Run resting `blocked` runs no execution:
+    // `runAndSettle` re-fences the owner, leaves the Run blocked, and settles
+    // synchronously (clearing its own `promise`). Its tracking entry must keep
+    // `promise === undefined` so cancel-run and shutdown treat it as the held
+    // blocked Run it is (write `cancelled`/`halted` and release the owner), not a
+    // live execution to abort — so do not overwrite the promise back in that case.
+    const blockedTakeover =
+      tracking?.takeover === true && tracking.state === "blocked";
+    const promise = runAndSettle(runId);
+    if (tracking !== undefined && !blockedTakeover) tracking.promise = promise;
     return promise;
   }
 
@@ -506,9 +557,6 @@ export function createApplication(deps: ApplicationDependencies): Application {
       return openRunProjection(selector.runId);
     }
     if (selector.family === "run-list") {
-      // A point-in-time page, like a bundle-catalog focus: no live updates in M2
-      // (the TUI adds observers in #93). An unwired Run Store yields an empty,
-      // informational snapshot rather than a throw.
       const updates = new UpdateStream();
       const snapshot: RunListSnapshot =
         runProjection === undefined
@@ -526,11 +574,18 @@ export function createApplication(deps: ApplicationDependencies): Application {
                 ? { before: selector.before }
                 : {}),
             });
+      const observer = {
+        updates,
+        resumable: selector.resumable ?? false,
+        ...(selector.before !== undefined ? { before: selector.before } : {}),
+      };
+      runListObservers.add(observer);
       return {
         snapshot,
         catchUp: "fresh",
         updates,
         close() {
+          runListObservers.delete(observer);
           updates.close();
         },
       };
@@ -784,7 +839,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // is `bundle-trust-required` (carrying the Execution summary, the fixed
     // warning, and the exact digest); a mismatching one grants nothing. The
     // acknowledgement is validated here but the grant is only recorded *after* the
-    // Run is created, so a `workspace-busy` refusal leaves no dangling grant.
+    // Run is created, so a failed create leaves no dangling grant.
     const grant = catalog.getTrustGrant(
       entry.digest,
       entry.installationGeneration,
@@ -815,13 +870,6 @@ export function createApplication(deps: ApplicationDependencies): Application {
       launch: input.launchInputs,
       at: new Date(),
     });
-    if (created.outcome === "workspace-busy") {
-      // Unreachable since ADR 0031 (#103): createRun never refuses for the Workspace
-      // — any number of Runs may be live at once. The branch stays only to narrow the
-      // still-present union variant; it and the `workspace-busy` Problem are removed
-      // with the rest of the Workspace-claim refusal in #104.
-      return { admitted: false, problem: workspaceBusy(created.liveRunId) };
-    }
     if (needsGrant) {
       catalog.grantTrust({
         operationId,
@@ -842,6 +890,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       abort: new AbortController(),
       observers: new Set<UpdateStream>(),
     });
+    pushRunListUpdates();
     operations.set(operationId, {
       replayKey: launchReplayKey(input),
       outcome: { status: "pending" },
@@ -898,8 +947,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { manifest };
   }
 
-  // Resume a Run resting `halted` or `failed` (ADR 0019): re-verify the pinned
-  // Snapshot is still installed and runnable, re-claim the Workspace (ADR 0023),
+  // Resume a Run resting `halted` or `failed`, or explicitly take over a live Run
+  // (ADR 0019, ADR 0031): re-verify the pinned Snapshot is still installed and runnable,
   // then drive it further through the same execution — which skips the completed
   // Steps and re-runs from where it rested. A `failed` Run's declared attempt and
   // Iteration bounds reset naturally: the failed Step's Attempts never settled
@@ -938,12 +987,12 @@ export function createApplication(deps: ApplicationDependencies): Application {
       };
     }
     const record = read.run;
-    // A Run whose owner process is still alive elsewhere is refused before anything
-    // is claimed (#98 S2): resuming it would fence — and abort — the process driving
-    // it. Named ahead of the resting-state check so a live-elsewhere Run reports the
-    // precise reason, not `run-not-resumable`.
     const foreign = liveElsewhere(input.runId);
-    if (foreign !== undefined) {
+    const takeoverMatches =
+      foreign !== undefined &&
+      foreign.ownerPid !== undefined &&
+      input.takeover?.ownerPid === foreign.ownerPid;
+    if (foreign !== undefined && !takeoverMatches) {
       return {
         admitted: false,
         problem: runLiveElsewhere(input.runId, foreign.ownerPid),
@@ -952,7 +1001,13 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // Resume applies only to a Run resting `halted` or `failed` (ADR 0019). A
     // `running` record means the Run is live (here or elsewhere); resuming it would
     // fence the process driving it. A `succeeded`/`cancelled` Run is terminal.
-    if (record.state !== "halted" && record.state !== "failed") {
+    if (
+      (takeoverMatches &&
+        (record.state === "succeeded" || record.state === "cancelled")) ||
+      (!takeoverMatches &&
+        record.state !== "halted" &&
+        record.state !== "failed")
+    ) {
       return {
         admitted: false,
         problem: runNotResumable(input.runId, record.state),
@@ -977,14 +1032,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
       return { admitted: false, problem: runnable.problem };
     }
     const manifest = runnable.manifest;
-    // Re-claim the Workspace before authorizing more work; a different live Run
-    // refuses, leaving this Run untouched.
-    const claim = runGroup.resumeRun(input.runId);
-    if (claim.outcome === "workspace-busy") {
-      return { admitted: false, problem: workspaceBusy(claim.liveRunId) };
-    }
-    if (claim.outcome === "unknown-run") {
-      return { admitted: false, problem: runNotFound(input.runId) };
+    if (!takeoverMatches) {
+      const claim = runGroup.resumeRun(input.runId);
+      if (claim.outcome === "run-live-elsewhere") {
+        return {
+          admitted: false,
+          problem: runLiveElsewhere(input.runId, claim.ownerPid),
+        };
+      }
+      if (claim.outcome === "unknown-run") {
+        return { admitted: false, problem: runNotFound(input.runId) };
+      }
     }
     runs.set(input.runId, {
       digest: record.bundleSnapshotDigest,
@@ -995,6 +1053,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       state: record.state,
       done: false,
       abort: new AbortController(),
+      ...(takeoverMatches ? { takeover: true } : {}),
       observers: new Set<UpdateStream>(),
     });
     operations.set(operationId, {
@@ -1097,52 +1156,66 @@ export function createApplication(deps: ApplicationDependencies): Application {
       return { status: "not-applied", problem: derivedFacts.problem };
     }
     const facts = derivedFacts.facts;
-    // A `blocked` Run is stored `running` (the block is derived), so only a
-    // `running`/`created` record can be blocked. Reject a clearly-terminal record
-    // (`succeeded`/`failed`/`halted`) before touching coordination, so answering a
+    // Reject a clearly-resting or terminal record before touching coordination, so answering a
     // Run that is not blocked changes nothing at all — no claim toggle, no epoch
     // bump. (A `running` record still needs the owner to tell blocked from a live
     // mid-execution Run; that is checked once acquired.)
-    if (record.state !== "running" && record.state !== "created") {
+    if (
+      record.state !== "blocked" &&
+      record.state !== "running" &&
+      record.state !== "created"
+    ) {
       return {
         status: "not-applied",
         problem: runNotBlocked(input.runId, record.state),
       };
     }
-    // Re-claim the Workspace — the block released it — before acquiring ownership;
-    // a different live Run refuses, leaving this Run untouched.
-    const claim = runGroup.resumeRun(input.runId);
-    if (claim.outcome === "workspace-busy") {
-      return { status: "not-applied", problem: workspaceBusy(claim.liveRunId) };
-    }
-    if (claim.outcome === "unknown-run") {
-      return { status: "not-applied", problem: runNotFound(input.runId) };
-    }
-    const owner = runGroup.acquireRun(input.runId);
+    let tracking = runs.get(input.runId);
+    let owner =
+      tracking !== undefined && !tracking.done ? tracking.owner : undefined;
+    const ownershipWasHeld = owner !== undefined;
     if (owner === undefined) {
-      return {
-        status: "not-applied",
-        problem: runStoreDamaged(input.runId),
+      const claim = runGroup.resumeRun(input.runId);
+      if (claim.outcome === "run-live-elsewhere") {
+        return {
+          status: "not-applied",
+          problem: runLiveElsewhere(input.runId, claim.ownerPid),
+        };
+      }
+      if (claim.outcome === "unknown-run") {
+        return { status: "not-applied", problem: runNotFound(input.runId) };
+      }
+      owner = runGroup.acquireRun(input.runId);
+      if (owner === undefined) {
+        return {
+          status: "not-applied",
+          problem: runStoreDamaged(input.runId),
+        };
+      }
+      tracking = {
+        digest: record.bundleSnapshotDigest,
+        routing: facts.routing,
+        name: facts.name,
+        id: facts.id,
+        version: facts.version,
+        state: record.state,
+        owner,
+        done: false,
+        abort: new AbortController(),
+        observers: new Set<UpdateStream>(),
       };
+      runs.set(input.runId, tracking);
     }
-    runs.set(input.runId, {
-      digest: record.bundleSnapshotDigest,
-      routing: facts.routing,
-      name: facts.name,
-      id: facts.id,
-      version: facts.version,
-      state: record.state,
-      owner,
-      done: false,
-      abort: new AbortController(),
-      observers: new Set<UpdateStream>(),
-    });
-    const tracking = runs.get(input.runId)!;
+    if (tracking === undefined || owner === undefined) {
+      return { status: "not-applied", problem: runStoreDamaged(input.runId) };
+    }
+    const activeTracking = tracking;
+    const activeOwner = owner;
     // A signal-abort of the granted interval leaves the claim live for the next
     // open to reconcile `halted`; every other exit releases the claim (#98).
-    let leaveClaimLive = false;
+    let leaveClaimLive = ownershipWasHeld;
     try {
-      const observed = observedOwner(owner, input.runId);
+      const observed = observedOwner(activeOwner, input.runId);
       // Idempotent across process death: an answer already recorded for this
       // operation id settles `applied` without re-validating the (now-moved) Gate
       // or re-driving execution.
@@ -1154,16 +1227,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
       // ponytail: that recovers the interrupted grant but reports it as a `halted`
       // resume rather than a `blocked` re-answer; a persisted grant-pending marker
       // would let it re-derive `blocked` instead — add it if the distinction matters.
-      const already = owner
+      const already = activeOwner
         .gateAnswers()
         .some((answer) => answer.operationId === operationId);
-      const priorAnswers = owner.gateAnswers();
+      const priorAnswers = activeOwner.gateAnswers();
       const derived = deriveRun(
         facts.routing,
-        owner.attemptLog(),
+        activeOwner.attemptLog(),
         record.state,
         input.runId,
-        owner,
+        activeOwner,
         priorAnswers,
       );
       if (!already) {
@@ -1209,21 +1282,26 @@ export function createApplication(deps: ApplicationDependencies): Application {
             : `cannot record the gate answer: ${recorded.problem.kind}`,
         );
       }
-      if (input.answer === "stop") return { status: "applied" };
+      if (input.answer === "stop") {
+        leaveClaimLive = false;
+        return { status: "applied" };
+      }
       // `continue`: the answering process drives the granted interval to rest.
-      await runExecution({
+      const report = await runExecution({
         routing: facts.routing,
         digest: record.bundleSnapshotDigest,
         owner: observed,
-        cancelSignal: tracking.abort.signal,
+        cancelSignal: activeTracking.abort.signal,
       });
+      leaveClaimLive = report.outcome === "blocked";
       return { status: "applied" };
     } catch (error) {
       // As in runAndSettle: our own abort — not the error's type — distinguishes a
       // cancel/signal from a genuine fault.
-      if (tracking.abort.signal.aborted) {
-        if (tracking.abort.signal.reason === CANCEL_ABORT) {
-          observedOwner(owner, input.runId).writeState("cancelled");
+      if (activeTracking.abort.signal.aborted) {
+        if (activeTracking.abort.signal.reason === CANCEL_ABORT) {
+          observedOwner(activeOwner, input.runId).writeState("cancelled");
+          leaveClaimLive = false;
           return { status: "applied" };
         }
         leaveClaimLive = true;
@@ -1234,10 +1312,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
         problem: runExecutionFault(input.runId, error),
       };
     } finally {
-      tracking.owner = undefined;
-      tracking.done = true;
-      owner.close();
-      if (!leaveClaimLive) runGroup.endRun(input.runId);
+      activeTracking.promise = undefined;
+      if (leaveClaimLive) {
+        activeTracking.done = false;
+      } else {
+        activeTracking.owner = undefined;
+        activeTracking.done = true;
+        activeOwner.release();
+        activeOwner.close();
+        pushRunUpdate(input.runId);
+      }
     }
   }
 
@@ -1287,6 +1371,22 @@ export function createApplication(deps: ApplicationDependencies): Application {
       tracking !== undefined &&
       !tracking.done &&
       tracking.owner !== undefined &&
+      tracking.promise === undefined
+    ) {
+      const owner = tracking.owner;
+      observedOwner(owner, runId).writeState("cancelled");
+      tracking.owner = undefined;
+      tracking.done = true;
+      owner.release();
+      owner.close();
+      pushRunUpdate(runId);
+      runs.delete(runId);
+      return { status: "applied" };
+    }
+    if (
+      tracking !== undefined &&
+      !tracking.done &&
+      tracking.owner !== undefined &&
       tracking.promise !== undefined
     ) {
       // Live in this process: abort execution (killing its child) and await the
@@ -1323,10 +1423,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
         // second cancel is the only actor that could fence it, and it is resting the
         // same Run cancelled too, so the outcome is unchanged either way.
         owner.writeState("cancelled");
+        owner.release();
       } finally {
         owner.close();
       }
-      runGroup.endRun(runId);
+      pushRunListUpdates();
       runs.delete(runId);
       return { status: "applied" };
     } catch {
@@ -1485,6 +1586,22 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // reconcile `halted` (ADR 0019, #98). Filter on `promise` (set in the same
     // synchronous prefix that sets `owner`), so the set aborted is exactly the set
     // awaited — shutdown never resolves before a live Run's settlement it aborted.
+    const blocked = [...runs.entries()].filter(
+      ([, tracking]) =>
+        !tracking.done &&
+        tracking.promise === undefined &&
+        tracking.owner !== undefined &&
+        tracking.state === "blocked",
+    );
+    for (const [runId, tracking] of blocked) {
+      const owner = tracking.owner!;
+      const rested = observedOwner(owner, runId).writeState("halted");
+      if (rested.ok) owner.release();
+      tracking.owner = undefined;
+      tracking.done = true;
+      owner.close();
+      pushRunUpdate(runId);
+    }
     const live = [...runs.values()].filter(
       (tracking) => !tracking.done && tracking.promise !== undefined,
     );
@@ -1551,7 +1668,11 @@ function gateEquals(a: RunGateReference, b: RunGateReference): boolean {
 /** A stable replay key for a resume: the Run id. A re-submitted operation id
  *  with an equal key replays; a different key is a conflict. */
 function resumeReplayKey(input: ResumeRunInput): string {
-  return JSON.stringify(["resume", input.runId]);
+  return JSON.stringify([
+    "resume",
+    input.runId,
+    input.takeover?.ownerPid ?? null,
+  ]);
 }
 
 /** A stable replay key for a gate answer: the Run, the answered Attempt, and the

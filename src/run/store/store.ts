@@ -47,7 +47,7 @@ export interface RunRecord {
   readonly workspacePath: string; // the resolved absolute Workspace value, pinned
   readonly bundleSnapshotDigest: string; // the pinned Bundle Snapshot reference
   readonly launch: unknown; // the Launch inputs, stored and returned opaque
-  readonly state: string; // canonical Run state (`blocked` is never stored)
+  readonly state: string; // canonical Run state, including a durable `blocked` pause
   readonly createdAt: string; // ISO 8601
 }
 
@@ -83,9 +83,7 @@ export interface CreateRunRequest {
 /**
  * The outcome of an admitted create. `created` and `already-created` (the same
  * operation id replayed) both name the Run. Create never refuses for the Workspace
- * (ADR 0031: any number of Runs may be live at once); the `workspace-busy` variant
- * is vestigial — the store never returns it — and is removed with the Application's
- * refusal in #104.
+ * (ADR 0031: any number of Runs may be live at once).
  */
 export type CreateRunResult =
   | {
@@ -97,8 +95,7 @@ export type CreateRunResult =
       readonly outcome: "already-created";
       readonly runId: string;
       readonly record: RunRecord;
-    }
-  | { readonly outcome: "workspace-busy"; readonly liveRunId: string };
+    };
 
 /** The outcome of an admitted delete; idempotent per operation id. */
 export type DeleteRunResult =
@@ -106,14 +103,18 @@ export type DeleteRunResult =
   | { readonly outcome: "already-deleted"; readonly runId: string };
 
 /** The outcome of a resume claim (ADR 0031: ownership is per Run). `resumed` takes
- *  ownership of this Run (or it was already owned here); `workspace-busy` refuses
+ *  ownership of this Run (or it was already owned here); `run-live-elsewhere` refuses
  *  only because this Run is already owned by a live *other* process (the owner is
- *  named through `listRuns`); `unknown-run` names a Run this group never registered.
- *  The `workspace-busy` outcome is the courtesy the probe gives — a takeover
- *  (`acquireRun` with `takeover`) fences that owner regardless (ADR 0031). */
+ *  named directly); `unknown-run` names a Run this group never registered. A
+ *  takeover (`acquireRun` with `takeover`) fences that owner regardless of the
+ *  courtesy probe (ADR 0031). */
 export type ResumeRunResult =
   | { readonly outcome: "resumed"; readonly runId: string }
-  | { readonly outcome: "workspace-busy"; readonly liveRunId: string }
+  | {
+      readonly outcome: "run-live-elsewhere";
+      readonly runId: string;
+      readonly ownerPid: number;
+    }
   | { readonly outcome: "unknown-run"; readonly runId: string };
 
 /** A write against a fenced owner is refused; nothing is written. */
@@ -269,6 +270,9 @@ export interface RunOwner {
   recordGateAnswer(request: RecordGateAnswerRequest): RecordGateAnswerResult;
   /** Every recorded Human Gate answer, in append order. */
   gateAnswers(): readonly GateAnswerRecord[];
+  /** Release this Run only if this owner still holds the fencing epoch. A stale
+   *  owner cannot clear ownership acquired by a takeover. */
+  release(): WriteResult;
   close(): void;
 }
 
@@ -299,7 +303,7 @@ export interface RunGroup {
   endRun(runId: string): void;
   /**
    * Take ownership of a Run so an explicit human resume can drive it further
-   * (ADR 0023, ADR 0031). Refused `workspace-busy` only when this Run is already
+   * (ADR 0023, ADR 0031). Refused `run-live-elsewhere` only when this Run is already
    * owned by a live *other* process; a no-op `resumed` if this process already owns
    * it, otherwise it claims ownership. The caller then `acquireRun`s for a fresh
    * fencing epoch.
@@ -806,6 +810,9 @@ export function openRunGroup(
   const endRun = database.query(
     "UPDATE runs SET owner_pid = NULL WHERE run_id = ?",
   );
+  const releaseOwnedRun = database.query(
+    "UPDATE runs SET owner_pid = NULL WHERE run_id = ? AND owner_epoch = ? RETURNING run_id",
+  );
   const claimRun = database.query(
     "UPDATE runs SET owner_pid = ? WHERE run_id = ?",
   );
@@ -930,7 +937,7 @@ export function openRunGroup(
     const ownerPid = registration.owner_pid;
     if (ownerPid === selfPid) return { outcome: "resumed", runId };
     if (ownerPid != null && isOwnerAlive(ownerPid)) {
-      return { outcome: "workspace-busy", liveRunId: runId };
+      return { outcome: "run-live-elsewhere", runId, ownerPid };
     }
     claimRun.run(selfPid, runId);
     return { outcome: "resumed", runId };
@@ -1301,6 +1308,12 @@ export function openRunGroup(
               };
             },
           );
+        },
+        release() {
+          const released = releaseOwnedRun.get(runId, epoch);
+          return released == null
+            ? { ok: false, reason: "fenced" }
+            : { ok: true };
         },
         close() {
           if (handles.delete(runDatabase)) runDatabase.close();

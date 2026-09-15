@@ -479,8 +479,9 @@ test("a live-owned Run refuses resume and a plain acquire, but takeover fences t
 
   // The courtesy probe refuses both resume and a plain acquire while pid 1000 lives.
   assert.deepEqual(second.resumeRun(created.runId), {
-    outcome: "workspace-busy",
-    liveRunId: created.runId,
+    outcome: "run-live-elsewhere",
+    runId: created.runId,
+    ownerPid: 1000,
   });
   assert.equal(second.acquireRun(created.runId), undefined);
 
@@ -493,6 +494,7 @@ test("a live-owned Run refuses resume and a plain acquire, but takeover fences t
     ok: false,
     reason: "fenced",
   });
+  assert.deepEqual(owner1.release(), { ok: false, reason: "fenced" });
   assert.deepEqual(owner2.writeState("cancelled"), { ok: true });
   // Ownership moved to pid 2000.
   const listing = second.listRuns().find((run) => run.runId === created.runId);

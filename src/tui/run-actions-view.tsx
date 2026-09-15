@@ -8,6 +8,7 @@ import {
 import type {
   Problem,
   ProjectionPort,
+  ResumeRunOffer,
 } from "../application/projection-port.js";
 import { submitAndSettle } from "./submit-and-settle.js";
 
@@ -36,8 +37,8 @@ export type RunActionOutcome =
   | { readonly kind: "refused"; readonly problem: Problem };
 
 export interface RunActionsView {
-  /** Resume a resting Run (halted/failed): drives it to its next rest (#86). */
-  resume(runId: string): Accessor<RunActionOutcome>;
+  /** Resume a resting Run or perform the takeover named by its current Offer. */
+  resume(offer: ResumeRunOffer): Accessor<RunActionOutcome>;
   /** Cancel a live Run: ends it `cancelled`, keeping history (#87). */
   cancel(runId: string): Accessor<RunActionOutcome>;
   /** Delete a resting or terminal Run: removes its store from disk (#87). */
@@ -83,7 +84,20 @@ export function createLiveRunActionsView(port: ProjectionPort): RunActionsView {
     };
   };
   return {
-    resume: (runId) => end("resume-run", runId),
+    resume: (offer) => {
+      const settle = submitAndSettle(port, {
+        operationId: randomUUID(),
+        operation: "resume-run",
+        input: {
+          runId: offer.runId,
+          ...(offer.takeover !== undefined ? { takeover: offer.takeover } : {}),
+        },
+      });
+      return () => {
+        const outcome = settle();
+        return outcome.kind === "applied" ? { kind: "ok" } : outcome;
+      };
+    },
     cancel: (runId) => end("cancel-run", runId),
     remove: (runId) => end("delete-run", runId),
   };

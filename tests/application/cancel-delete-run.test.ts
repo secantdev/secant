@@ -23,6 +23,7 @@ interface Fixture {
   readonly runGroup: RunGroup;
   readonly catalog: Catalog;
   readonly workspace: string;
+  readonly storeHome: string;
   readonly digest: string;
 }
 
@@ -30,7 +31,8 @@ function fixture(t: TestContext): Fixture {
   const catalog = openCatalog(makeTempDir("secant-cd-home-"));
   t.after(() => catalog.close());
   const workspace = realpathSync.native(makeTempDir("secant-cd-ws-"));
-  const runGroup = openRunGroup(makeTempDir("secant-cd-store-"), workspace);
+  const storeHome = makeTempDir("secant-cd-store-");
+  const runGroup = openRunGroup(storeHome, workspace);
   t.after(() => runGroup.close());
   const app = createApplication({
     catalog,
@@ -51,7 +53,7 @@ function fixture(t: TestContext): Fixture {
   const built = app.bundleManagement.build(cmd.folder, { noInstall: false });
   assert.ok(built.ok, JSON.stringify(built));
   const entry = catalog.listEntries().find((e) => e.id === cmd.id)!;
-  return { app, runGroup, catalog, workspace, digest: entry.digest };
+  return { app, runGroup, catalog, workspace, storeHome, digest: entry.digest };
 }
 
 /** Seed a Run and drive it to `state`; `live` leaves the Workspace claim held. */
@@ -199,7 +201,7 @@ test("cancel-run aborts a Run live in this process, rests it cancelled, and push
   assert.ok(seenStates.includes("cancelled"));
 });
 
-test("shutdown aborts a live Run and leaves its claim live for reconciliation (#98 signals)", async (t) => {
+test("shutdown aborts two live Runs and reconciliation rests each halted with one indeterminate marker", async (t) => {
   ensureRuntimeOnPath();
   const f = fixture(t);
   f.catalog.approveWorkspace(f.workspace, new Date());
@@ -213,30 +215,43 @@ test("shutdown aborts a live Run and leaves its claim live for reconciliation (#
   assert.ok(built.ok, JSON.stringify(built));
   const entry = f.catalog.listEntries().find((e) => e.id === blocking.id)!;
 
-  const launch = f.app.projectionPort.submit({
-    operationId: "op-launch-sig",
-    operation: "launch-run",
-    input: {
-      bundle: { id: blocking.id },
-      launchInputs: {},
-      trustDigest: entry.digest,
-    },
+  const runIds = ["a", "b"].map((suffix) => {
+    const launch = f.app.projectionPort.submit({
+      operationId: `op-launch-sig-${suffix}`,
+      operation: "launch-run",
+      input: {
+        bundle: { id: blocking.id },
+        launchInputs: {},
+        trustDigest: entry.digest,
+      },
+    });
+    assert.ok(launch.admitted);
+    return launch.runId!;
   });
-  assert.ok(launch.admitted);
-  const runId = launch.runId!;
 
   // Shutdown aborts the live Run and awaits its rest — it resolves only once the
   // child is dead — and leaves the Workspace claim live so the next open reconciles
   // the Run `halted` (it does not rest it `cancelled`, which is cancel-run's job).
   await f.app.shutdown();
 
-  assert.ok(
-    f.runGroup.listRuns().some((r) => r.runId === runId && r.live),
-    "the claim is left live for the next open to reconcile",
-  );
-  const read = f.runGroup.readRun(runId);
-  assert.ok(read.ok);
-  if (read.ok) assert.notEqual(read.run.state, "cancelled");
+  assert.equal(f.runGroup.listRuns().filter((run) => run.live).length, 2);
+
+  const reopened = openRunGroup(f.storeHome, f.workspace);
+  t.after(() => reopened.close());
+  for (const runId of runIds) {
+    const read = reopened.readRun(runId);
+    assert.ok(read.ok);
+    if (read.ok) assert.equal(read.run.state, "halted");
+    const listing = reopened.listRuns().find((run) => run.runId === runId);
+    assert.equal(listing?.live, false);
+    const owner = reopened.acquireRun(runId);
+    assert.ok(owner);
+    assert.deepEqual(
+      owner.attemptLog().map((entry) => entry.outcome),
+      ["indeterminate"],
+    );
+    owner.close();
+  }
 });
 
 test("cancel-run on a resting Run is refused and offers no cancel", async (t) => {

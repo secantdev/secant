@@ -547,9 +547,7 @@ test("a Repeat group that always fails blocks after `interval` iterations", asyn
   const { owner, state } = ownerForFreshRun(t);
   const report = await run([alwaysFailRepeat(3)], owner);
   assert.deepEqual(report, { outcome: "blocked" });
-  // `blocked` is never written: the stored state stays `running`, and the block
-  // is derived from the current Step Attempt (a reopened home re-derives it).
-  assert.equal(state(), "running");
+  assert.equal(state(), "blocked");
   // Exactly three iterations ran before the checkpoint; every one a fail Verdict.
   assert.deepEqual(
     owner.attemptLog().map((entry) => entry.outcome),
@@ -580,12 +578,12 @@ test(
 
 test("resuming a blocked Repeat group runs exactly one more interval and blocks again (#85)", async (t) => {
   const { owner, state } = ownerForFreshRun(t);
-  // First interval: three iterations, then blocked (nothing written).
+  // First interval: three iterations, then durably blocked.
   assert.deepEqual(await run([alwaysFailRepeat(3)], owner), {
     outcome: "blocked",
   });
   assert.equal(owner.attemptLog().length, 3);
-  assert.equal(state(), "running");
+  assert.equal(state(), "blocked");
 
   // Resume in the same owner (a `continue` grant re-walks the Routing): the three
   // prior iterations are dropped, and a fresh interval of three runs before the
@@ -597,7 +595,7 @@ test("resuming a blocked Repeat group runs exactly one more interval and blocks 
     owner.attemptLog().filter((e) => e.outcome === "succeeded").length,
     6,
   );
-  assert.equal(state(), "running");
+  assert.equal(state(), "blocked");
 });
 
 test("a granted interval that makes the Verdict pass rests the Run succeeded (#85)", async (t) => {

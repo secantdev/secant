@@ -106,6 +106,18 @@ export function renderRun(run: RunView): string {
     `Workspace: ${run.workspacePath}`,
     `Launched: ${run.launchedAt}`,
     `State: ${run.state}`,
+    // Whether the Run is live in this instance or another, naming the owner
+    // process (ADR 0031). Omitted when the Run is not live: its `State` already
+    // says so, and a rested Run has no owner to name.
+    ...(run.liveness.state === "not-live"
+      ? []
+      : [
+          `Live: ${
+            run.liveness.state === "live-here"
+              ? `in this instance (process ${run.liveness.ownerPid})`
+              : `in another instance (process ${run.liveness.ownerPid})`
+          }`,
+        ]),
     `Position: ${
       run.position >= run.progress.length
         ? "at rest"

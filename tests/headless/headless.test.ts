@@ -141,6 +141,15 @@ test("--help lists every command, including bundle install, and exits zero", asy
   assert.equal(h.stderr(), "");
 });
 
+test("run resume help exposes the explicit takeover flag", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    await runHeadless(h.clients, ["run", "resume", "--help"], h.io),
+    0,
+  );
+  assert.match(h.stdout(), /--takeover/);
+});
+
 test("a subcommand's --help prints that subcommand and exits zero", async (t) => {
   const h = await harness(t);
   assert.equal(

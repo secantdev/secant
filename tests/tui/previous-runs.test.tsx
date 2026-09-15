@@ -26,7 +26,7 @@ import type {
 
 // In-memory renderer tests for the Previous Runs list (#92), reached the real way:
 // Home → Previous Runs, over a fake `run-list` read seam. They cover ordering and
-// Today/Yesterday/Older grouping, the three-facts row, the Resumable filter, the
+// Today/Yesterday/Older grouping, the live-marked row, the Resumable filter, the
 // empty state, cursor paging with a stable first-visible row and the
 // beginning-of-history marker, small-width truncation and resize without overflow,
 // and Enter → the Run's Workbench with Escape restoring the row and delete
@@ -188,6 +188,8 @@ function row(
     bundleName: over.bundleName ?? "Alpha Flow",
     activityAt: over.activityAt ?? "2026-01-01T00:00:00.000Z",
     group: over.group ?? "today",
+    live: over.live ?? false,
+    ownedByThisProcess: over.ownedByThisProcess ?? false,
   };
 }
 
@@ -203,6 +205,7 @@ function runOf(over: Partial<RunView> = {}): RunView {
     workspacePath: over.workspacePath ?? WORKSPACE,
     launchedAt: over.launchedAt ?? "2026-01-01T00:00:00.000Z",
     state: over.state ?? "running",
+    liveness: over.liveness ?? { state: "not-live" },
     progress: over.progress ?? [],
     position: over.position ?? 0,
     timeline: over.timeline ?? [],
@@ -284,10 +287,16 @@ async function until(
 
 // --- AC1: ordering, grouping, three facts, empty ----------------------------
 
-test("rows render newest-first under Today / Yesterday / Older with the three facts", async () => {
+test("rows render newest-first under Today / Yesterday / Older with the live marker", async () => {
   const { t } = await openList({
     all: [
-      row({ runId: "run-a", bundleName: "Alpha", group: "today" }),
+      row({
+        runId: "run-a",
+        bundleName: "Alpha",
+        group: "today",
+        live: true,
+        ownedByThisProcess: true,
+      }),
       row({ runId: "run-b", bundleName: "Bravo", group: "yesterday" }),
       row({ runId: "run-c", bundleName: "Charlie", group: "older" }),
     ],
@@ -299,10 +308,11 @@ test("rows render newest-first under Today / Yesterday / Older with the three fa
   // Group order preserved (newest first).
   assert.ok(frame.indexOf("Today") < frame.indexOf("Yesterday"));
   assert.ok(frame.indexOf("Yesterday") < frame.indexOf("Older"));
-  // Each row carries id, activity time, and Bundle name.
+  // Each row carries id, activity time, live marker, and Bundle name.
   assert.match(frame, /run-a/);
   assert.match(frame, /2026-01-01/);
   assert.match(frame, /Alpha/);
+  assert.match(firstRunLine(frame), /● live/);
   assert.match(frame, /Charlie/);
   // Focus indicator on the first row, readable without colour.
   assert.match(selectedLine(frame), /run-a/);

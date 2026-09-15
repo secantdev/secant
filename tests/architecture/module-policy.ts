@@ -46,7 +46,13 @@ export const modules = [
     name: "catalog",
     root: "src/catalog/",
     entry: "catalog.ts",
-    imports: ["workflow"],
+    imports: ["workflow", "drizzle"],
+  },
+  {
+    name: "drizzle",
+    root: "src/drizzle/",
+    entry: "migrations.ts",
+    imports: [],
   },
   {
     name: "execution",
@@ -58,7 +64,7 @@ export const modules = [
     name: "store",
     root: "src/run/store/",
     entry: "store.ts",
-    imports: ["workflow", "harness", "artifacts"],
+    imports: ["workflow", "harness", "artifacts", "drizzle"],
   },
   {
     name: "artifacts",

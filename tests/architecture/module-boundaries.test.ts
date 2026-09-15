@@ -158,6 +158,26 @@ test("target code cannot import unowned implementation, and unowned source is re
   );
 });
 
+test("a Module may import a literal static asset it owns", async () => {
+  const result = await audit({
+    "src/catalog/catalog.ts":
+      'import migration from "./migrations/initial/migration.sql" with { type: "text" }; void migration;',
+    "src/catalog/migrations/initial/migration.sql": "SELECT 1;",
+  });
+  assert.deepEqual(result.issues, []);
+});
+
+test("a Module cannot import a literal static asset outside target ownership", async () => {
+  const result = await audit({
+    "src/catalog/catalog.ts":
+      'import migration from "../../migration.sql" with { type: "text" }; void migration;',
+    "migration.sql": "SELECT 1;",
+  });
+  assert.ok(
+    result.issues.some((issue) => issue.message.includes("legacy or unowned")),
+  );
+});
+
 test("tests cross a target Module's public Interface too", async () => {
   const result = await audit({
     "src/catalog/private.ts": "export const database = 1;",

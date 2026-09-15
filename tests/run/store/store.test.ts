@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -9,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Database } from "bun:sqlite";
 import type { ProducedArtifact } from "../../../src/workflow/workflow.js";
@@ -546,6 +548,30 @@ test("canonical truth survives reopening the same home", async (t) => {
   assert.ok(read.ok);
   assert.deepEqual(read.run.launch, { pinned: true });
   assert.equal(read.run.bundleSnapshotDigest, "sha256:deadbeef");
+});
+
+test("a home created by the pre-Drizzle release migrates in place", (t) => {
+  const home = makeTempDir("secant-store-migration-");
+  const fixtureRuns = fileURLToPath(
+    new URL("../../fixtures/pre-drizzle-home/runs", import.meta.url),
+  );
+  cpSync(fixtureRuns, join(home, "runs"), { recursive: true });
+
+  const group = openRunGroup(home, "/fixture/workspace", {
+    selfPid: 4242,
+    isOwnerAlive: () => false,
+  });
+  t.after(() => group.close());
+  const [listing] = group.listRuns();
+  assert.ok(listing);
+  const read = group.readRun(listing.runId);
+  assert.ok(read.ok);
+  assert.deepEqual(read.run.launch, { input: "fixture" });
+  assert.equal(read.run.state, "halted");
+
+  const created = create(group, "post-migration-create");
+  assert.equal(created.outcome, "created");
+  assert.equal(group.listRuns().length, 2);
 });
 
 test("SECANT_HOME-style separate homes keep separate Workspaces apart", async (t) => {

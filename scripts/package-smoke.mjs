@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -11,12 +12,15 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Database } from "bun:sqlite";
 // @ts-expect-error JS helper, no types
 import { TARGETS, hostTargetKey } from "./targets.mjs";
 
@@ -70,6 +74,22 @@ function run(command, args, options = {}) {
     );
   }
   return result.stdout;
+}
+
+function assertMigrated(databasePath, label) {
+  const database = new Database(databasePath);
+  try {
+    const row = database
+      .query("SELECT COUNT(*) AS count FROM __drizzle_migrations")
+      .get();
+    if (row?.count !== 1) {
+      throw new Error(
+        `Compiled binary did not record the embedded ${label} migration.`,
+      );
+    }
+  } finally {
+    database.close();
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -146,6 +166,73 @@ try {
     SECANT_HOME: secantHome,
     PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
   };
+
+  // A compiled binary carries all three migration registries with it. Relocate the
+  // checked-in pre-Drizzle home beneath this isolated install, retarget its one Run
+  // to a different working directory, then open it from there. This exercises the
+  // catalog, coordination, and run.db migrations without relying on the source tree
+  // or the process's original cwd, on every gated operating system (#101).
+  {
+    const legacyHome = join(smokeRoot, "pre-drizzle-home");
+    await cp(
+      join(projectRoot, "tests", "fixtures", "pre-drizzle-home"),
+      legacyHome,
+      {
+        recursive: true,
+      },
+    );
+    const legacyWorkspace = join(smokeRoot, "pre-drizzle-workspace");
+    await mkdir(legacyWorkspace, { recursive: true });
+    const canonicalLegacyWorkspace = realpathSync.native(legacyWorkspace);
+    const runsRoot = join(legacyHome, "runs");
+    const [fixtureGroup] = await readdir(runsRoot);
+    if (fixtureGroup === undefined) {
+      throw new Error("The pre-Drizzle fixture has no Run group.");
+    }
+    const slug = basename(canonicalLegacyWorkspace)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40);
+    const digest = createHash("sha256")
+      .update(canonicalLegacyWorkspace)
+      .digest("hex")
+      .slice(0, 16);
+    const relocatedGroup = `${slug || "workspace"}--${digest}`;
+    await rename(join(runsRoot, fixtureGroup), join(runsRoot, relocatedGroup));
+    const groupDir = join(runsRoot, relocatedGroup);
+    const [runId] = (await readdir(groupDir)).filter(
+      (entry) => entry !== "coordination.db",
+    );
+    if (runId === undefined) {
+      throw new Error("The pre-Drizzle fixture has no Run Store.");
+    }
+    const runDatabase = new Database(join(groupDir, runId, "run.db"));
+    runDatabase
+      .query("UPDATE run_record SET workspace_path = ?")
+      .run(canonicalLegacyWorkspace);
+    runDatabase.close();
+
+    const legacyEnv = {
+      ...process.env,
+      SECANT_HOME: legacyHome,
+      PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
+    };
+    const listed = JSON.parse(
+      run(binary, ["run", "list", "--json"], {
+        cwd: legacyWorkspace,
+        env: legacyEnv,
+      }),
+    );
+    if (!Array.isArray(listed.rows) || listed.rows[0]?.runId !== runId) {
+      throw new Error(
+        `Compiled binary did not migrate and open the pre-Drizzle home: ${JSON.stringify(listed)}`,
+      );
+    }
+    assertMigrated(join(legacyHome, "catalog.db"), "Catalog");
+    assertMigrated(join(groupDir, "coordination.db"), "coordination");
+    assertMigrated(join(groupDir, runId, "run.db"), "Run Store");
+  }
 
   run(binary, ["workspace", "approve"], {
     cwd: workspaceDirectory,

@@ -1,6 +1,6 @@
 import { isBuiltin } from "node:module";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 import { externalViolation, ownerOf } from "./module-policy.js";
 
@@ -91,8 +91,16 @@ export function checkModuleBoundaries(root: string): {
         parsed.options,
         ts.sys,
       ).resolvedModule;
-      const target =
-        resolved && pathOf(realpathSync(resolved.resolvedFileName));
+      const staticAsset =
+        resolved === undefined && specifier.startsWith(".")
+          ? resolve(dirname(file), specifier)
+          : undefined;
+      const resolvedPath =
+        resolved?.resolvedFileName ??
+        (staticAsset !== undefined && existsSync(staticAsset)
+          ? staticAsset
+          : undefined);
+      const target = resolvedPath && pathOf(realpathSync(resolvedPath));
       if (
         target &&
         !target.startsWith("../") &&

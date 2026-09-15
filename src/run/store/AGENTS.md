@@ -38,8 +38,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `indeterminate` attempt-log marker; every other state is already at rest and left as-is, so a `blocked` record stays `blocked` (nothing was cut off, the
   checkpoint still holds). Either way its ownership is released, running no Step work. The `pid !== selfPid` guard makes an owner equal to our own pid always
   reconcile — this handles pid reuse and lets a same-process reopen (the reconciliation tests) reconcile; `selfPid` is injectable so two `openRunGroup`s on one
-  home stand in for two processes. `owner_pid` is `ALTER TABLE ADD COLUMN`-ed and the pre-ADR-0031 `state` column and `one_live_run` index are dropped in place
-  during `prepareCoordination`. The marker lands in `attempt_log` (not an `attempt` row); the resume skip cursor reads that log, so it is the marker's
+  home stand in for two processes. The generated coordination schema models nullable `owner_pid` directly; previous-release databases migrate through the
+  embedded Drizzle journal at open. The marker lands in `attempt_log` (not an `attempt` row); the resume skip cursor reads that log, so it is the marker's
   `indeterminate` outcome — not any absence from the log — that keeps the succeeded-attempt cursor unchanged and re-runs the interrupted Step.
 - Reconciliation splits by stored state, so execution stores `blocked` before returning a checkpoint pause. A dead-owner open then keeps the pending checkpoint
   `blocked` and releases only its ownership; it never invents an interrupted Attempt.

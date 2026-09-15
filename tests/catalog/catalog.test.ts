@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   readFileSync,
   readdirSync,
@@ -10,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Database } from "bun:sqlite";
 import {
@@ -81,6 +83,31 @@ test("approvals survive reopening the same home", async (t) => {
   assert.equal(
     second.getWorkspaceApproval("/tmp/ws")?.approvedAt,
     "2026-03-03T00:00:00.000Z",
+  );
+});
+
+test("a home created by the pre-Drizzle release migrates in place", (t) => {
+  const home = makeTempDir("secant-catalog-migration-");
+  const fixture = fileURLToPath(
+    new URL("../fixtures/pre-drizzle-home/catalog.db", import.meta.url),
+  );
+  copyFileSync(fixture, join(home, "catalog.db"));
+
+  const catalog = openCatalog(home);
+  t.after(() => catalog.close());
+  assert.deepEqual(catalog.getWorkspaceApproval("/fixture/workspace"), {
+    path: "/fixture/workspace",
+    approvedAt: "2026-09-15T00:00:00.000Z",
+  });
+  assert.deepEqual(
+    catalog.approveWorkspace(
+      "/fixture/second",
+      new Date("2026-09-15T01:00:00.000Z"),
+    ),
+    {
+      path: "/fixture/second",
+      approvedAt: "2026-09-15T01:00:00.000Z",
+    },
   );
 });
 

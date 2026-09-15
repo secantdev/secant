@@ -16,6 +16,7 @@ One ESM package contains these ownership areas. Reserve the paths, but create fi
 | `src/workflow/`            | Execution-free Routing composition, static Step-kind contracts, and their authored value vocabulary            |
 | `src/bundle/`              | Non-executing archive validation/build, Bundle Asset capture, and managed Bundle bytes                         |
 | `src/catalog/`             | `catalog.db`, installation lifetime, Trust grants and their Operation receipts, replaceable Run index          |
+| `src/drizzle/`             | Generated per-database SQL migrations and the embedded ordered migration journals                              |
 | `src/run/execution/`       | Run lifecycle policy, uniform scheduling/retries, and private executable Step kinds                            |
 | `src/run/store/`           | Run creation/deletion, Workspace coordination and fencing, `run.db`, canonical records, and atomic publication |
 | `src/run/store/artifacts/` | Private Run Artifact capture, Git staging/history, and verified Workspace materialization                      |
@@ -40,6 +41,8 @@ An `index.ts` is valid for one cohesive Module after declaring it in that table.
   self-contained; they expose normalized semantic values rather than internal runtime, storage, or Harness objects.
 - Application coordinates the domain Modules through their Interfaces. Bundle and Catalog depend only on the static Workflow vocabulary.
   Catalog's Run index is advisory; Application uses Run Store authority for lifecycle decisions.
+- Drizzle owns only generated migration assets and their ordered journal Interface. Catalog and Run Store keep their schemas, queries, SQLite
+  lifecycle, and migration invocation; only those two owners import the Drizzle entrypoint.
 - Run execution uses Workflow, Run Store, and Harness Interfaces. Store may reuse normalized Harness evidence types, but owns no Harness process.
   Its private Artifact Module owns Git mechanics. The scheduler dispatches a closed Step-kind table; it never branches on Workflow identity.
 - Harness knows no Routing, Step kind, retry budget, or Run policy. Its native Adapters, protocol models, qualification cache, and executable

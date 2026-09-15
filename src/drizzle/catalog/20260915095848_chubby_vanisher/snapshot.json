@@ -1,0 +1,172 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "d2d79e7e-c667-4f12-8784-4524a5002412",
+  "prevIds": ["00000000-0000-0000-0000-000000000000"],
+  "ddl": [
+    {
+      "name": "catalog_entries",
+      "entityType": "tables"
+    },
+    {
+      "name": "trust_grants",
+      "entityType": "tables"
+    },
+    {
+      "name": "workspace_approvals",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "catalog_entries"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version",
+      "entityType": "columns",
+      "table": "catalog_entries"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "digest",
+      "entityType": "columns",
+      "table": "catalog_entries"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "origin_kind",
+      "entityType": "columns",
+      "table": "catalog_entries"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "origin_location",
+      "entityType": "columns",
+      "table": "catalog_entries"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "installed_at",
+      "entityType": "columns",
+      "table": "catalog_entries"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "installation_generation",
+      "entityType": "columns",
+      "table": "catalog_entries"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "digest",
+      "entityType": "columns",
+      "table": "trust_grants"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "installation_generation",
+      "entityType": "columns",
+      "table": "trust_grants"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "operation_id",
+      "entityType": "columns",
+      "table": "trust_grants"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "granted_at",
+      "entityType": "columns",
+      "table": "trust_grants"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "path",
+      "entityType": "columns",
+      "table": "workspace_approvals"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "approved_at",
+      "entityType": "columns",
+      "table": "workspace_approvals"
+    },
+    {
+      "columns": ["id", "version"],
+      "nameExplicit": false,
+      "name": "catalog_entries_pk",
+      "entityType": "pks",
+      "table": "catalog_entries"
+    },
+    {
+      "columns": ["digest", "installation_generation"],
+      "nameExplicit": false,
+      "name": "trust_grants_pk",
+      "entityType": "pks",
+      "table": "trust_grants"
+    },
+    {
+      "columns": ["path"],
+      "nameExplicit": false,
+      "name": "workspace_approvals_pk",
+      "table": "workspace_approvals",
+      "entityType": "pks"
+    }
+  ],
+  "renames": []
+}

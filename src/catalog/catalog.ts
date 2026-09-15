@@ -11,7 +11,12 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
+import { and, count, eq, max, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/bun-sqlite";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { z } from "zod";
+import { catalogMigrations } from "../drizzle/migrations.js";
+import { catalogEntries, trustGrants, workspaceApprovals } from "./schema.js";
 
 // The Catalog owns the catalog database under the Secant home. Everything about
 // SQLite stays behind this Interface: no SQLite type, row shape, or storage path
@@ -181,6 +186,27 @@ const trustGrantRow = z.object({
   granted_at: z.string(),
 });
 
+type TCommitGrantParams = {
+  readonly digest: string;
+  readonly generation: number;
+  readonly operationId: string;
+  readonly isoTime: string;
+};
+
+function openDatabase(path: string) {
+  const database = new Database(path);
+  try {
+    // Serialize concurrent Secant processes at the database rather than corrupt.
+    database.exec("PRAGMA busy_timeout = 5000");
+    const db = drizzle({ client: database });
+    migrate(db, catalogMigrations);
+    return { database, db };
+  } catch (error) {
+    database.close();
+    throw error;
+  }
+}
+
 /**
  * Open the catalog database at `<secantHome>/catalog.db`, creating the home when
  * absent. `bun:sqlite` is a Bun built-in, so the driver ships inside the
@@ -193,33 +219,7 @@ export function openCatalog(
 ): Catalog {
   const readAssets: AssetReader = options.readAssets ?? (() => []);
   mkdirSync(secantHome, { recursive: true });
-  const database = new Database(join(secantHome, "catalog.db"));
-  // Serialize concurrent Secant processes at the database rather than corrupt.
-  database.exec("PRAGMA busy_timeout = 5000");
-  database.exec(
-    "CREATE TABLE IF NOT EXISTS workspace_approvals (" +
-      "path TEXT PRIMARY KEY, approved_at TEXT NOT NULL) STRICT",
-  );
-  // Identity is (id, version); the digest names the store file. The generation
-  // is a private monotonic counter recording install order within this home.
-  database.exec(
-    "CREATE TABLE IF NOT EXISTS catalog_entries (" +
-      "id TEXT NOT NULL, version TEXT NOT NULL, digest TEXT NOT NULL, " +
-      "origin_kind TEXT NOT NULL, origin_location TEXT NOT NULL, " +
-      "installed_at TEXT NOT NULL, installation_generation INTEGER NOT NULL, " +
-      "PRIMARY KEY (id, version)) STRICT",
-  );
-  // A Trust grant is keyed by the exact installed (digest, generation): a
-  // re-installed digest gets a fresh generation the earlier grant no longer
-  // matches, and two Entries that ever shared a digest are still told apart by
-  // their distinct generations. Both come from the CatalogEntry the caller holds.
-  // (ADR 0021.)
-  database.exec(
-    "CREATE TABLE IF NOT EXISTS trust_grants (" +
-      "digest TEXT NOT NULL, installation_generation INTEGER NOT NULL, " +
-      "operation_id TEXT NOT NULL, granted_at TEXT NOT NULL, " +
-      "PRIMARY KEY (digest, installation_generation)) STRICT",
-  );
+  const { database, db } = openDatabase(join(secantHome, "catalog.db"));
   // The digest-named managed store holds each Bundle's exact bytes as
   // `<digest>.wfb`, and beside each one the derived asset tree in `<digest>/`.
   const storeDir = join(secantHome, "bundles");
@@ -295,74 +295,57 @@ export function openCatalog(
     }
   }
 
-  // `.query()` (not `.prepare()`) so the Database owns these statements and
-  // finalizes them on close; with no caller-owned statement outstanding, close()
-  // then releases the file handle immediately (see `close` below).
-  const insert = database.query(
-    "INSERT OR IGNORE INTO workspace_approvals (path, approved_at) VALUES (?, ?)",
-  );
-  const select = database.query(
-    "SELECT path, approved_at FROM workspace_approvals WHERE path = ?",
-  );
   // BEGIN IMMEDIATE with automatic COMMIT on return and ROLLBACK on throw, so a
   // failure leaves no partial row (ADR 0030's transaction helper).
-  const insertApproval = database.transaction((path: string, isoTime: string) =>
-    insert.run(path, isoTime),
-  );
-
-  const selectEntry = database.query(
-    "SELECT id, version, digest, origin_kind, origin_location, installed_at, " +
-      "installation_generation FROM catalog_entries WHERE id = ? AND version = ?",
-  );
-  const insertEntry = database.query(
-    "INSERT INTO catalog_entries (id, version, digest, origin_kind, " +
-      "origin_location, installed_at, installation_generation) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?)",
-  );
-  const nextGeneration = database.query(
-    "SELECT COALESCE(MAX(installation_generation), 0) + 1 AS g FROM catalog_entries",
-  );
-  const countEntries = database.query(
-    "SELECT COUNT(*) AS n FROM catalog_entries",
-  );
-  const selectAllEntries = database.query(
-    "SELECT id, version, digest, origin_kind, origin_location, installed_at, " +
-      "installation_generation FROM catalog_entries",
-  );
-  const entryAtGeneration = database.query(
-    "SELECT 1 AS present FROM catalog_entries " +
-      "WHERE digest = ? AND installation_generation = ?",
-  );
-  const insertGrant = database.query(
-    "INSERT OR IGNORE INTO trust_grants (digest, installation_generation, " +
-      "operation_id, granted_at) VALUES (?, ?, ?, ?)",
-  );
-  const selectGrant = database.query(
-    "SELECT operation_id, granted_at FROM trust_grants " +
-      "WHERE digest = ? AND installation_generation = ?",
-  );
+  function insertApproval(path: string, isoTime: string): void {
+    db.transaction(
+      (tx) => {
+        tx.insert(workspaceApprovals)
+          .values({ path, approved_at: isoTime })
+          .onConflictDoNothing()
+          .run();
+      },
+      { behavior: "immediate" },
+    );
+  }
   // The grant is written inside BEGIN IMMEDIATE with automatic COMMIT/ROLLBACK,
   // so the installed-at-this-generation check and the insert are one serialized
   // step and a fault (a corrupt store schema, say) leaves no grant row. Trusting
   // a (digest, generation) that is not installed is a caller-contract violation,
   // so it throws (and rolls back) rather than recording a dangling grant.
-  const commitGrant = database.transaction(
-    (
-      digest: string,
-      generation: number,
-      operationId: string,
-      isoTime: string,
-    ) => {
-      if (entryAtGeneration.get(digest, generation) == null) {
-        throw new Error(
-          `Catalog: cannot grant trust for digest ${digest}; it is not installed at generation ${generation}.`,
-        );
-      }
-      insertGrant.run(digest, generation, operationId, isoTime);
-    },
-  );
+  function commitGrant(params: TCommitGrantParams): void {
+    db.transaction(
+      (tx) => {
+        const entry = tx
+          .select({ present: sql<number>`1` })
+          .from(catalogEntries)
+          .where(
+            and(
+              eq(catalogEntries.digest, params.digest),
+              eq(catalogEntries.installation_generation, params.generation),
+            ),
+          )
+          .get();
+        if (entry === undefined) {
+          throw new Error(
+            `Catalog: cannot grant trust for digest ${params.digest}; it is not installed at generation ${params.generation}.`,
+          );
+        }
+        tx.insert(trustGrants)
+          .values({
+            digest: params.digest,
+            installation_generation: params.generation,
+            operation_id: params.operationId,
+            granted_at: params.isoTime,
+          })
+          .onConflictDoNothing()
+          .run();
+      },
+      { behavior: "immediate" },
+    );
+  }
 
-  function toEntry(row: Record<string, unknown>): CatalogEntry {
+  function toEntry(row: typeof catalogEntries.$inferSelect): CatalogEntry {
     const parsed = catalogEntryRow.safeParse(row);
     if (!parsed.success) {
       throw new Error("Catalog: a catalog_entries row is malformed.");
@@ -394,71 +377,95 @@ export function openCatalog(
   // Bundle sizes; if a multi-MB install ever stalls concurrent commands, stage
   // and verify to a temp file before the transaction and keep only the
   // first-install-wins check, rename, and insert under the lock.
-  const commitInstall = database.transaction(
-    (install: BundleInstall): BundleInstallResult => {
-      const { id, version } = install.identity;
-      const existing = selectEntry.get(id, version) as Record<
-        string,
-        unknown
-      > | null;
-      if (existing != null) {
-        const entry = toEntry(existing);
-        return entry.digest === install.digest
-          ? { outcome: "already-installed", entry }
-          : { outcome: "identity-collision", existing: entry };
-      }
-
-      const finalPath = bytesPath(install.digest);
-      const stagePath = `${finalPath}.staging`;
-      try {
-        mkdirSync(storeDir, { recursive: true });
-        writeFileSync(stagePath, install.bytes);
-        const storedDigest = createHash("sha256")
-          .update(readFileSync(stagePath))
-          .digest("hex");
-        if (storedDigest !== install.digest) {
-          throw new Error(
-            `Catalog: staged bytes hash to ${storedDigest}, not the ${install.digest} the caller declared.`,
-          );
+  function commitInstall(install: BundleInstall): BundleInstallResult {
+    return db.transaction(
+      (tx): BundleInstallResult => {
+        const { id, version } = install.identity;
+        const existing = tx
+          .select()
+          .from(catalogEntries)
+          .where(
+            and(eq(catalogEntries.id, id), eq(catalogEntries.version, version)),
+          )
+          .get();
+        if (existing != null) {
+          const entry = toEntry(existing);
+          return entry.digest === install.digest
+            ? { outcome: "already-installed", entry }
+            : { outcome: "identity-collision", existing: entry };
         }
-        // Rename the verified staged copy into its digest name: an atomic
-        // placement, so the store never holds a half-written digest file.
-        rmSync(finalPath, { force: true });
-        renameSync(stagePath, finalPath);
-        // A re-install of this digest at a fresh generation rewrites the tree.
-        extractTree(install.digest, install.bytes);
 
-        const generation = (nextGeneration.get() as { g: number }).g;
-        insertEntry.run(
-          id,
-          version,
-          install.digest,
-          install.origin.kind,
-          install.origin.kind === "local-build"
-            ? install.origin.folder
-            : install.origin.path,
-          install.installedAt.toISOString(),
-          generation,
-        );
-        return {
-          outcome: "installed",
-          entry: toEntry(
-            selectEntry.get(id, version) as Record<string, unknown>,
-          ),
-        };
-      } catch (error) {
-        rmSync(stagePath, { force: true });
-        rmSync(finalPath, { force: true });
-        rmSync(treePath(install.digest), { recursive: true, force: true });
-        throw error;
-      }
-    },
-  );
+        const finalPath = bytesPath(install.digest);
+        const stagePath = `${finalPath}.staging`;
+        try {
+          mkdirSync(storeDir, { recursive: true });
+          writeFileSync(stagePath, install.bytes);
+          const storedDigest = createHash("sha256")
+            .update(readFileSync(stagePath))
+            .digest("hex");
+          if (storedDigest !== install.digest) {
+            throw new Error(
+              `Catalog: staged bytes hash to ${storedDigest}, not the ${install.digest} the caller declared.`,
+            );
+          }
+          // Rename the verified staged copy into its digest name: an atomic
+          // placement, so the store never holds a half-written digest file.
+          rmSync(finalPath, { force: true });
+          renameSync(stagePath, finalPath);
+          // A re-install of this digest at a fresh generation rewrites the tree.
+          extractTree(install.digest, install.bytes);
+
+          const currentGeneration = tx
+            .select({ value: max(catalogEntries.installation_generation) })
+            .from(catalogEntries)
+            .get()?.value;
+          const generation = (currentGeneration ?? 0) + 1;
+          tx.insert(catalogEntries)
+            .values({
+              id,
+              version,
+              digest: install.digest,
+              origin_kind: install.origin.kind,
+              origin_location:
+                install.origin.kind === "local-build"
+                  ? install.origin.folder
+                  : install.origin.path,
+              installed_at: install.installedAt.toISOString(),
+              installation_generation: generation,
+            })
+            .run();
+          const inserted = tx
+            .select()
+            .from(catalogEntries)
+            .where(
+              and(
+                eq(catalogEntries.id, id),
+                eq(catalogEntries.version, version),
+              ),
+            )
+            .get();
+          if (inserted === undefined) {
+            throw new Error("Catalog: installed entry vanished before commit.");
+          }
+          return { outcome: "installed", entry: toEntry(inserted) };
+        } catch (error) {
+          rmSync(stagePath, { force: true });
+          rmSync(finalPath, { force: true });
+          rmSync(treePath(install.digest), { recursive: true, force: true });
+          throw error;
+        }
+      },
+      { behavior: "immediate" },
+    );
+  }
 
   function readApproval(path: string): WorkspaceApproval | undefined {
-    // `bun:sqlite` returns null (not undefined) when no row matches.
-    const row = select.get(path);
-    if (row == null) return undefined;
+    const row = db
+      .select()
+      .from(workspaceApprovals)
+      .where(eq(workspaceApprovals.path, path))
+      .get();
+    if (row === undefined) return undefined;
     // Validate the persisted shape at this ingress rather than trust it blindly.
     const parsed = approvalRow.safeParse(row);
     if (!parsed.success) {
@@ -471,8 +478,20 @@ export function openCatalog(
     digest: string,
     generation: number,
   ): TrustGrant | undefined {
-    const row = selectGrant.get(digest, generation);
-    if (row == null) return undefined;
+    const row = db
+      .select({
+        operation_id: trustGrants.operation_id,
+        granted_at: trustGrants.granted_at,
+      })
+      .from(trustGrants)
+      .where(
+        and(
+          eq(trustGrants.digest, digest),
+          eq(trustGrants.installation_generation, generation),
+        ),
+      )
+      .get();
+    if (row === undefined) return undefined;
     // Validate the persisted shape at this ingress; a malformed row is a broken
     // invariant (the store is corrupt), not a caller Problem (D7).
     const parsed = trustGrantRow.safeParse(row);
@@ -488,7 +507,7 @@ export function openCatalog(
   return {
     getWorkspaceApproval: readApproval,
     approveWorkspace(path, approvedAt) {
-      insertApproval.immediate(path, approvedAt.toISOString());
+      insertApproval(path, approvedAt.toISOString());
       const record = readApproval(path);
       if (record === undefined) {
         throw new Error("Catalog: workspace approval vanished after commit.");
@@ -496,18 +515,18 @@ export function openCatalog(
       return record;
     },
     installBundle(install) {
-      return commitInstall.immediate(install);
+      return commitInstall(install);
     },
     grantTrust(request) {
       // The transaction rejects a (digest, generation) that is not installed as
       // a caller-contract violation (throws); Application translates that to a
       // Problem at the Seam.
-      commitGrant.immediate(
-        request.digest,
-        request.installationGeneration,
-        request.operationId,
-        request.grantedAt.toISOString(),
-      );
+      commitGrant({
+        digest: request.digest,
+        generation: request.installationGeneration,
+        operationId: request.operationId,
+        isoTime: request.grantedAt.toISOString(),
+      });
       // Read back the effective grant: first-grant-wins means this is the
       // original receipt when a grant already existed for this (digest,
       // generation), and the just-recorded one otherwise.
@@ -521,10 +540,14 @@ export function openCatalog(
       return readGrant(digest, installationGeneration);
     },
     countInstalledBundles() {
-      return (countEntries.get() as { n: number }).n;
+      const row = db.select({ value: count() }).from(catalogEntries).get();
+      if (row === undefined) {
+        throw new Error("Catalog: installed Bundle count was not returned.");
+      }
+      return row.value;
     },
     listEntries() {
-      return (selectAllEntries.all() as Record<string, unknown>[]).map(toEntry);
+      return db.select().from(catalogEntries).all().map(toEntry);
     },
     readManagedBytes: readManaged,
     assetRoot(digest) {

@@ -3,14 +3,16 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
-  readFileSync,
   renameSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
 import { Database } from "bun:sqlite";
+import { and, count, eq, isNotNull } from "drizzle-orm";
+import { drizzle, type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
+import type { MigrationsJournal } from "drizzle-orm/migrator";
 import { z } from "zod";
 import type {
   ArtifactType,
@@ -18,10 +20,22 @@ import type {
   ProducedArtifact,
 } from "../../workflow/workflow.js";
 import {
+  coordinationMigrations,
+  runMigrations,
+} from "../../drizzle/migrations.js";
+import {
   isolatedGitEnvironment,
-  openArtifactRepo,
   type StageProblem,
 } from "./artifacts/artifacts.js";
+import { operations, runs } from "./coordination-schema.js";
+import {
+  DAMAGED,
+  acquireRunOwner,
+  readRunStore,
+  reconcileRunStore,
+  stageRunStore,
+  type TRunDatabaseHandle,
+} from "./run-owner.js";
 
 // Re-exported from the Run Store entry so Preflight can harden its `git` worktree
 // probe with the same isolation the private Artifact repo uses, without importing
@@ -328,68 +342,12 @@ export interface RunGroup {
   close(): void;
 }
 
-// One schema per persisted table validates a row at its read ingress (D7). A row
-// that fails is a broken invariant — the store drifted or is corrupt — surfaced
-// as a damaged-store Problem for reads and a throw for coordination, never a
-// silently trusted value.
-const runRecordRow = z.object({
-  run_id: z.string(),
-  workspace_path: z.string(),
-  bundle_snapshot_digest: z.string(),
-  launch: z.string(),
-  state: z.string(),
-  created_at: z.string(),
-});
 const registrationRow = z.object({
   run_id: z.string(),
   owner_epoch: z.number(),
   owner_pid: z.number().nullable(),
   created_at: z.string(),
 });
-const bindingRow = z.object({ version_id: z.string() });
-// The two columns domain logic branches on are validated to their closed sets at
-// the read ingress, not cast (A11): a garbage `outcome` must never reach the
-// resume skip cursor or `deriveRun` as a trusted value, nor a garbage `answer`
-// the grant count. `z.enum` is the exact schema; the tuples mirror `AttemptOutcome`
-// and the Gate answer shape in Workflow / the store's own request types.
-const attemptOutcome = z.enum([
-  "succeeded",
-  "failed",
-  "indeterminate",
-  "cancelled",
-]);
-const gateAnswer = z.enum(["continue", "stop"]);
-const attemptRow = z.object({
-  outcome: attemptOutcome,
-  version_id: z.string().nullable(),
-});
-const attemptLogRow = z.object({
-  attempt_id: z.string(),
-  outcome: attemptOutcome,
-  at: z.string(),
-});
-// The two-column read `reconcileRunStore` makes is validated like every other
-// read ingress (A11 / D9), not cast — the sibling `readRunStore` validates the
-// same `run_record` table through `runRecordRow`.
-const reconcileRow = z.object({ run_id: z.string(), state: z.string() });
-const conflictRow = z.object({
-  diagnostic_id: z.string(),
-  artifact_name: z.string(),
-  artifact_path: z.string(),
-  version_id: z.string(),
-  at: z.string(),
-});
-const gateAnswerRow = z.object({
-  answer_id: z.string(),
-  operation_id: z.string(),
-  gate_attempt_id: z.string(),
-  answer: gateAnswer,
-  iterations_at_grant: z.number(),
-  version_id: z.string(),
-  at: z.string(),
-});
-
-const DAMAGED = Symbol("run-store-damaged");
 
 /** Whether the process owning a live Run is still running (#98 S2). Signal 0
  *  performs the permission/existence check without delivering a signal: it returns
@@ -402,7 +360,11 @@ function processIsAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    return !(
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ESRCH"
+    );
   }
 }
 
@@ -421,215 +383,48 @@ function groupDirName(workspacePath: string): string {
   return `${slug}--${digest}`;
 }
 
-function prepareCoordination(database: Database): void {
-  database.exec("PRAGMA busy_timeout = 5000");
-  // Ownership is per Run (ADR 0031): the nullable `owner_pid` (the owning process,
-  // `NULL` = unowned) beside the monotonic fencing `owner_epoch`. There is no
-  // Workspace-wide `state` claim and no one-live-Run index — any number of Runs may
-  // be live at once, each owned separately.
-  database.exec(
-    "CREATE TABLE IF NOT EXISTS runs (" +
-      "run_id TEXT PRIMARY KEY, owner_epoch INTEGER NOT NULL, " +
-      "owner_pid INTEGER, created_at TEXT NOT NULL) STRICT",
-  );
-  // Migrate an older coordination DB in place. `IF NOT EXISTS` skips the CREATE when
-  // the table already exists, so a pre-ADR-0031 shape (the `state` claim column and
-  // its `one_live_run` partial index) lingers until dropped here, and a pre-#98
-  // shape lacks `owner_pid`. Read the columns once and reconcile: drop the index and
-  // the claim column, add the owner pid. Column-existence guards (not a catch-all)
-  // keep a genuine migration fault — a locked or corrupt DB — failing fast at open
-  // with its real cause rather than a confusing "no such column" deep in a query.
-  const columns = (
-    database.query("PRAGMA table_info(runs)").all() as { name: string }[]
-  ).map((column) => column.name);
-  database.exec("DROP INDEX IF EXISTS one_live_run");
-  if (columns.includes("state")) {
-    // Drop the index (above) before the column it indexes, or SQLite refuses.
-    database.exec("ALTER TABLE runs DROP COLUMN state");
-  }
-  if (!columns.includes("owner_pid")) {
-    database.exec("ALTER TABLE runs ADD COLUMN owner_pid INTEGER");
-  }
-  database.exec(
-    "CREATE TABLE IF NOT EXISTS operations (" +
-      "operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL, " +
-      "run_id TEXT NOT NULL, recorded_at TEXT NOT NULL) STRICT",
-  );
+interface StoreDatabase {
+  readonly db: SQLiteBunDatabase;
+  readonly sqlite: Database;
+  close(): void;
 }
 
-function toRunRecord(row: z.infer<typeof runRecordRow>): RunRecord {
-  return {
-    runId: row.run_id,
-    workspacePath: row.workspace_path,
-    bundleSnapshotDigest: row.bundle_snapshot_digest,
-    launch: JSON.parse(row.launch) as unknown,
-    state: row.state,
-    createdAt: row.created_at,
-  };
-}
-
-/** Build a fresh `run.db` (plus `staging/` and `diagnostics/`) inside `dir` and
- *  close its handle, so the directory can be renamed on Windows. */
-function stageRunStore(dir: string, record: RunRecord): void {
-  mkdirSync(dir, { recursive: true });
-  mkdirSync(join(dir, "staging"), { recursive: true });
-  // `diagnostics/` is created empty here; `recordMaterializationConflict` is its
-  // writer (#88), and `pruneDiagnostics` enforces the ADR 0023 90-day retention at
-  // group open.
-  mkdirSync(join(dir, "diagnostics"), { recursive: true });
-  const database = new Database(join(dir, "run.db"));
+function openDatabase(
+  path: string,
+  migrations: MigrationsJournal,
+): StoreDatabase {
+  const sqlite = new Database(path);
   try {
-    database.exec("PRAGMA busy_timeout = 5000");
-    database.exec(
-      "CREATE TABLE IF NOT EXISTS run_record (" +
-        "run_id TEXT PRIMARY KEY, workspace_path TEXT NOT NULL, " +
-        "bundle_snapshot_digest TEXT NOT NULL, launch TEXT NOT NULL, " +
-        "state TEXT NOT NULL, created_at TEXT NOT NULL) STRICT",
-    );
-    // Artifact publication tables (#80). A version row records one artifact of one
-    // publication commit; a binding names the current version per artifact; an
-    // attempt row settles an Attempt once (its PK makes publication idempotent);
-    // the log appends every outcome. The private `artifacts.git` beside `run.db`
-    // holds the content and is created lazily on the first publication.
-    database.exec(
-      "CREATE TABLE IF NOT EXISTS artifact_version (" +
-        "version_id TEXT NOT NULL, artifact_name TEXT NOT NULL, " +
-        "artifact_type TEXT NOT NULL, attempt_id TEXT NOT NULL, " +
-        "created_at TEXT NOT NULL, PRIMARY KEY (version_id, artifact_name)) STRICT",
-    );
-    database.exec(
-      "CREATE TABLE IF NOT EXISTS artifact_binding (" +
-        "artifact_name TEXT PRIMARY KEY, version_id TEXT NOT NULL, " +
-        "updated_at TEXT NOT NULL) STRICT",
-    );
-    database.exec(
-      "CREATE TABLE IF NOT EXISTS attempt (" +
-        "attempt_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, " +
-        "version_id TEXT, settled_at TEXT NOT NULL) STRICT",
-    );
-    database.exec(
-      "CREATE TABLE IF NOT EXISTS attempt_log (" +
-        "seq INTEGER PRIMARY KEY, attempt_id TEXT NOT NULL, " +
-        "outcome TEXT NOT NULL, at TEXT NOT NULL) STRICT",
-    );
-    // A Materialization conflict (#88): each row is one detected mismatch, its
-    // detailed diagnostic retained as a file under `diagnostics/`. Append-only —
-    // recording a conflict rests the Run `halted` in the same transaction.
-    database.exec(
-      "CREATE TABLE IF NOT EXISTS materialization_conflict (" +
-        "seq INTEGER PRIMARY KEY, diagnostic_id TEXT NOT NULL, " +
-        "artifact_name TEXT NOT NULL, artifact_path TEXT NOT NULL, " +
-        "version_id TEXT NOT NULL, at TEXT NOT NULL) STRICT",
-    );
-    // A durable Human Gate answer (#85): each row is one grant/stop against a
-    // blocked Run's Gate. `operation_id` is UNIQUE so a replayed answer records
-    // once. Append-only and separate from `attempt_log`, so `blocked` stays
-    // derived and iterations are counted since the latest row's grant point.
-    database.exec(
-      "CREATE TABLE IF NOT EXISTS gate_answer (" +
-        "seq INTEGER PRIMARY KEY, answer_id TEXT NOT NULL, " +
-        "operation_id TEXT NOT NULL UNIQUE, gate_attempt_id TEXT NOT NULL, " +
-        "answer TEXT NOT NULL, iterations_at_grant INTEGER NOT NULL, " +
-        "version_id TEXT NOT NULL, at TEXT NOT NULL) STRICT",
-    );
-    database
-      .query(
-        "INSERT INTO run_record (run_id, workspace_path, bundle_snapshot_digest, " +
-          "launch, state, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(
-        record.runId,
-        record.workspacePath,
-        record.bundleSnapshotDigest,
-        JSON.stringify(record.launch ?? null),
-        record.state,
-        record.createdAt,
-      );
-  } finally {
-    database.close();
+    sqlite.exec("PRAGMA busy_timeout = 5000");
+    const db = drizzle({ client: sqlite });
+    migrate(db, migrations);
+    return {
+      db,
+      sqlite,
+      close() {
+        sqlite.close();
+      },
+    };
+  } catch (error) {
+    sqlite.close();
+    throw error;
   }
 }
 
-/** Read a Run's canonical record, or `DAMAGED` when the store is unreadable, or
- *  `undefined` when no `run.db` is present. Holds no handle on return. */
-function readRunStore(dir: string): RunRecord | typeof DAMAGED | undefined {
-  const path = join(dir, "run.db");
-  if (!existsSync(path)) return undefined;
-  let database: Database | undefined;
-  try {
-    database = new Database(path);
-    // Wait briefly for a concurrent writer rather than misreading a live Run's
-    // write lock as a damaged store (which would drop it from `run list`), like
-    // every other open in this Module.
-    database.exec("PRAGMA busy_timeout = 5000");
-    const row = database
-      .query(
-        "SELECT run_id, workspace_path, bundle_snapshot_digest, launch, state, " +
-          "created_at FROM run_record LIMIT 1",
-      )
-      .get();
-    if (row == null) return DAMAGED;
-    const parsed = runRecordRow.safeParse(row);
-    return parsed.success ? toRunRecord(parsed.data) : DAMAGED;
-  } catch {
-    // A corrupt file (not a database, wrong schema) is damaged for this Run only.
-    return DAMAGED;
-  } finally {
-    database?.close();
-  }
+function openRunDatabase(path: string): StoreDatabase {
+  return openDatabase(path, runMigrations);
 }
 
-/**
- * Reconcile a dead owner's Run by its stored state (ADR 0031). A record still
- * `running`/`created` — a state only a process actively driving the Run leaves
- * behind — is rested `halted` with the interrupted Attempt marked `indeterminate`
- * (ADR 0019, ADR 0023, #86). Every other stored state is already at rest and is
- * left untouched: a `blocked` Run in particular stays `blocked` (its process was
- * only waiting on a checkpoint, so nothing was cut off and the pending checkpoint
- * is still true — the caller just releases its ownership). Returns true when it
- * halted, false otherwise. Runs no Step work and holds no handle on return.
- */
-function reconcileRunStore(dir: string, at: Date): boolean {
-  const path = join(dir, "run.db");
-  if (!existsSync(path)) return false;
-  let database: Database | undefined;
-  try {
-    database = new Database(path);
-    database.exec("PRAGMA busy_timeout = 5000");
-    const raw = database
-      .query("SELECT run_id, state FROM run_record LIMIT 1")
-      .get();
-    if (raw == null) return false;
-    const parsed = reconcileRow.safeParse(raw);
-    if (!parsed.success) return false; // a damaged row is left for readRun to surface
-    const row = parsed.data;
-    if (row.state !== "running" && row.state !== "created") {
-      return false;
-    }
-    const isoAt = at.toISOString();
-    // Append the indeterminate marker and rest `halted` together, so recovery is
-    // atomic: a crash mid-reconcile leaves the Run still `running` to reconcile
-    // again, never half-reconciled. The marker is recovery evidence appended to
-    // the log (ADR 0023), not a settled `attempt` row — so the resume skip cursor
-    // (succeeded Attempts) is unchanged and the interrupted Step re-runs.
-    const reconcile = database.transaction(() => {
-      database!
-        .query(
-          "INSERT INTO attempt_log (attempt_id, outcome, at) VALUES (?, ?, ?)",
-        )
-        .run(randomUUID(), "indeterminate", isoAt);
-      database!
-        .query("UPDATE run_record SET state = 'halted' WHERE run_id = ?")
-        .run(row.run_id);
-    });
-    reconcile();
-    return true;
-  } catch {
-    // A damaged run.db is left untouched; readRun surfaces it as a Problem later.
-    return false;
-  } finally {
-    database?.close();
-  }
+function stageStoredRun(dir: string, record: RunRecord): void {
+  stageRunStore({ dir, record, openDatabase: openRunDatabase });
+}
+
+function readStoredRun(dir: string): RunRecord | typeof DAMAGED | undefined {
+  return readRunStore({ dir, openDatabase: openRunDatabase });
+}
+
+function reconcileStoredRun(dir: string, at: Date): boolean {
+  return reconcileRunStore({ dir, at, openDatabase: openRunDatabase });
 }
 
 /** The Run directories in a group, excluding the coordination DB and quarantines. */
@@ -690,28 +485,28 @@ function cleanQuarantine(groupDir: string): void {
 function openCoordination(
   coordinationPath: string,
   groupDir: string,
-): { database: Database; rebuilt: boolean } {
+): StoreDatabase & { readonly rebuilt: boolean } {
   try {
-    const database = new Database(coordinationPath);
+    const database = openDatabase(coordinationPath, coordinationMigrations);
     try {
-      prepareCoordination(database);
-      database.query("SELECT COUNT(*) AS n FROM runs").get();
-      database.query("SELECT COUNT(*) AS n FROM operations").get();
+      database.db.select({ value: count() }).from(runs).get();
+      database.db.select({ value: count() }).from(operations).get();
     } catch (error) {
       // Close the handle before the file is deleted below: on Windows an open
       // handle to the corrupt file locks it, so `rmSync` would fail with EBUSY.
-      database.close();
+      database.sqlite.close();
       throw error;
     }
-    return { database, rebuilt: false };
+    return {
+      db: database.db,
+      sqlite: database.sqlite,
+      close: database.close,
+      rebuilt: false,
+    };
   } catch {
     rmSync(coordinationPath, { force: true });
   }
-  const database = new Database(coordinationPath);
-  prepareCoordination(database);
-  const insert = database.query(
-    "INSERT INTO runs (run_id, owner_epoch, owner_pid, created_at) VALUES (?, 0, NULL, ?)",
-  );
+  const database = openDatabase(coordinationPath, coordinationMigrations);
   // Register each readable Run unowned (`owner_pid` NULL); a Run with a damaged
   // run.db is left unregistered but its bytes stay untouched (canonical truth
   // survives until an explicit delete).
@@ -722,12 +517,25 @@ function openCoordination(
   // operation id retried) and yields a duplicate, not data loss; persist the
   // create operation id in run.db and re-seed from it here if it ever bites.
   for (const name of runDirNames(groupDir)) {
-    const record = readRunStore(join(groupDir, name));
+    const record = readStoredRun(join(groupDir, name));
     if (record !== undefined && record !== DAMAGED) {
-      insert.run(record.runId, record.createdAt);
+      database.db
+        .insert(runs)
+        .values({
+          run_id: record.runId,
+          owner_epoch: 0,
+          owner_pid: null,
+          created_at: record.createdAt,
+        })
+        .run();
     }
   }
-  return { database, rebuilt: true };
+  return {
+    db: database.db,
+    sqlite: database.sqlite,
+    close: database.close,
+    rebuilt: true,
+  };
 }
 
 /**
@@ -756,7 +564,7 @@ export function openRunGroup(
   const isOwnerAlive = options.isOwnerAlive ?? processIsAlive;
   const groupDir = join(secantHome, "runs", groupDirName(workspacePath));
   mkdirSync(groupDir, { recursive: true });
-  const { database, rebuilt } = openCoordination(
+  const { db, sqlite, rebuilt } = openCoordination(
     join(groupDir, "coordination.db"),
     groupDir,
   );
@@ -771,11 +579,11 @@ export function openRunGroup(
   // registrations were just re-seeded from these same directories.
   if (!rebuilt) {
     const registered = new Set(
-      (
-        database.query("SELECT run_id FROM runs").all() as {
-          run_id: string;
-        }[]
-      ).map((row) => row.run_id),
+      db
+        .select({ run_id: runs.run_id })
+        .from(runs)
+        .all()
+        .map((row) => row.run_id),
     );
     for (const name of runDirNames(groupDir)) {
       if (!registered.has(name)) {
@@ -784,65 +592,10 @@ export function openRunGroup(
     }
   }
 
-  // `.query()` (not `.prepare()`) so the Database owns and finalises these
-  // statements on close, releasing the file handle immediately (Windows cleanup).
-  // Replay is keyed by (operation id, kind): a create retry never matches a delete
-  // receipt, and vice versa, so a reused id cannot be silently mistaken for a
-  // completed operation of the other kind.
-  const findOperation = database.query(
-    "SELECT run_id FROM operations WHERE operation_id = ? AND kind = ?",
-  );
-  const findRegistration = database.query(
-    "SELECT run_id, owner_epoch, owner_pid, created_at FROM runs WHERE run_id = ?",
-  );
-  const listRegistrations = database.query(
-    "SELECT run_id, owner_epoch, owner_pid, created_at FROM runs",
-  );
-  // A fresh Run is registered owned by its creating process (ADR 0031): a second
-  // instance sees it live-elsewhere until it rests, exactly as one it drives.
-  const insertRun = database.query(
-    "INSERT INTO runs (run_id, owner_epoch, owner_pid, created_at) " +
-      "VALUES (?, 0, ?, ?)",
-  );
-  const deleteRun = database.query("DELETE FROM runs WHERE run_id = ?");
-  // Ending a Run releases its ownership (clears `owner_pid`), so a later reopen
-  // never mistakes a rested Run's stale pid for a live owner (ADR 0031).
-  const endRun = database.query(
-    "UPDATE runs SET owner_pid = NULL WHERE run_id = ?",
-  );
-  const releaseOwnedRun = database.query(
-    "UPDATE runs SET owner_pid = NULL WHERE run_id = ? AND owner_epoch = ? RETURNING run_id",
-  );
-  const claimRun = database.query(
-    "UPDATE runs SET owner_pid = ? WHERE run_id = ?",
-  );
-  const recordOperation = database.query(
-    "INSERT INTO operations (operation_id, kind, run_id, recorded_at) VALUES (?, ?, ?, ?)",
-  );
-  const clearRunOperations = database.query(
-    "DELETE FROM operations WHERE run_id = ?",
-  );
-  // Acquiring a Run bumps its fencing epoch (a returned crashed owner is refused);
-  // ownership (`owner_pid`) is the create/resume claim, not touched by a plain
-  // acquire — so a short-lived read-acquire never marks a rested Run live.
-  const bumpEpoch = database.query(
-    "UPDATE runs SET owner_epoch = owner_epoch + 1 WHERE run_id = ? RETURNING owner_epoch",
-  );
-  // A takeover bumps the epoch and claims ownership in one write, so the recorded
-  // `owner_pid` and the fencing epoch never disagree even under a concurrent
-  // takeover of the same Run — the last committed write wins both (ADR 0031).
-  const bumpEpochAndClaim = database.query(
-    "UPDATE runs SET owner_epoch = owner_epoch + 1, owner_pid = ? " +
-      "WHERE run_id = ? RETURNING owner_epoch",
-  );
-  const readEpoch = database.query(
-    "SELECT owner_epoch FROM runs WHERE run_id = ?",
-  );
-
   // Every acquired Run's run.db handles, keyed by Run id, so the group can close
   // them all — and, before a delete reclaims a Run's directory, close exactly that
   // Run's handles so the rename never trips over an open file (Windows cleanup).
-  const runHandles = new Map<string, Set<Database>>();
+  const runHandles = new Map<string, Set<TRunDatabaseHandle>>();
   function closeRunHandles(runId: string): void {
     const handles = runHandles.get(runId);
     if (handles === undefined) return;
@@ -853,50 +606,82 @@ export function openRunGroup(
     runHandles.delete(runId);
   }
 
+  function trackRunHandle(
+    runId: string,
+    database: TRunDatabaseHandle,
+  ): () => void {
+    const handles = runHandles.get(runId) ?? new Set<TRunDatabaseHandle>();
+    handles.add(database);
+    runHandles.set(runId, handles);
+    return () => {
+      if (handles.delete(database)) database.close();
+      if (handles.size === 0) runHandles.delete(runId);
+    };
+  }
+
   // Admit a create under BEGIN IMMEDIATE, so registration and the operation receipt
   // commit under the write lock even across processes (the named Windows risk), and
   // two concurrent creates in one group both succeed (ADR 0031: no Workspace claim
   // to contend). Ordering: stage the store, register + record the operation, then
   // publish (rename) last — any failure before the rename leaves only the
   // `.creating` quarantine, which the next open removes.
-  const admitCreate = database.transaction(
-    (request: CreateRunRequest): CreateRunResult => {
-      const replay = findOperation.get(request.operationId, "create") as {
-        run_id: string;
-      } | null;
-      if (replay != null) {
-        const record = readRunStore(join(groupDir, replay.run_id));
-        if (record === undefined || record === DAMAGED) {
-          // A create receipt whose Run vanished without a delete (a delete frees
-          // its own create receipt) is a broken invariant — external tampering —
-          // not an ordinary outcome, so it throws rather than fabricate a Run.
-          throw new Error(
-            `Run Store: admitted Run ${replay.run_id} has no readable record.`,
-          );
+  function admitCreate(request: CreateRunRequest): CreateRunResult {
+    return db.transaction(
+      (tx): CreateRunResult => {
+        const replay = tx
+          .select({ run_id: operations.run_id })
+          .from(operations)
+          .where(
+            and(
+              eq(operations.operation_id, request.operationId),
+              eq(operations.kind, "create"),
+            ),
+          )
+          .get();
+        if (replay !== undefined) {
+          const record = readStoredRun(join(groupDir, replay.run_id));
+          if (record === undefined || record === DAMAGED) {
+            // A create receipt whose Run vanished without a delete (a delete frees
+            // its own create receipt) is a broken invariant — external tampering —
+            // not an ordinary outcome, so it throws rather than fabricate a Run.
+            throw new Error(
+              `Run Store: admitted Run ${replay.run_id} has no readable record.`,
+            );
+          }
+          return { outcome: "already-created", runId: replay.run_id, record };
         }
-        return { outcome: "already-created", runId: replay.run_id, record };
-      }
-      const runId = randomUUID();
-      const record: RunRecord = {
-        runId,
-        workspacePath,
-        bundleSnapshotDigest: request.bundleSnapshotDigest,
-        launch: request.launch,
-        state: "created",
-        createdAt: request.at.toISOString(),
-      };
-      stageRunStore(join(groupDir, `${runId}.creating`), record);
-      insertRun.run(runId, selfPid, record.createdAt);
-      recordOperation.run(
-        request.operationId,
-        "create",
-        runId,
-        record.createdAt,
-      );
-      renameSync(join(groupDir, `${runId}.creating`), join(groupDir, runId));
-      return { outcome: "created", runId, record };
-    },
-  );
+        const runId = randomUUID();
+        const record: RunRecord = {
+          runId,
+          workspacePath,
+          bundleSnapshotDigest: request.bundleSnapshotDigest,
+          launch: request.launch,
+          state: "created",
+          createdAt: request.at.toISOString(),
+        };
+        stageStoredRun(join(groupDir, `${runId}.creating`), record);
+        tx.insert(runs)
+          .values({
+            run_id: runId,
+            owner_epoch: 0,
+            owner_pid: selfPid,
+            created_at: record.createdAt,
+          })
+          .run();
+        tx.insert(operations)
+          .values({
+            operation_id: request.operationId,
+            kind: "create",
+            run_id: runId,
+            recorded_at: record.createdAt,
+          })
+          .run();
+        renameSync(join(groupDir, `${runId}.creating`), join(groupDir, runId));
+        return { outcome: "created", runId, record };
+      },
+      { behavior: "immediate" },
+    );
+  }
 
   // Admit a delete under BEGIN IMMEDIATE: drop the registration and record the
   // operation first (ownership is released the moment this commits), then reclaim
@@ -905,43 +690,66 @@ export function openRunGroup(
   // is never left half-registered. Clearing the Run's operation rows retires its
   // create receipt, so a much-delayed create retry after the delete starts a
   // fresh Run rather than replaying a mapping to bytes that are gone.
-  const admitDelete = database.transaction(
-    (operationId: string, runId: string): DeleteRunResult => {
-      const replay = findOperation.get(operationId, "delete") as {
-        run_id: string;
-      } | null;
-      if (replay != null) {
-        return { outcome: "already-deleted", runId: replay.run_id };
-      }
-      deleteRun.run(runId);
-      clearRunOperations.run(runId);
-      recordOperation.run(
-        operationId,
-        "delete",
-        runId,
-        new Date().toISOString(),
-      );
-      return { outcome: "deleted", runId };
-    },
-  );
+  function admitDelete(operationId: string, runId: string): DeleteRunResult {
+    return db.transaction(
+      (tx): DeleteRunResult => {
+        const replay = tx
+          .select({ run_id: operations.run_id })
+          .from(operations)
+          .where(
+            and(
+              eq(operations.operation_id, operationId),
+              eq(operations.kind, "delete"),
+            ),
+          )
+          .get();
+        if (replay !== undefined) {
+          return { outcome: "already-deleted", runId: replay.run_id };
+        }
+        tx.delete(runs).where(eq(runs.run_id, runId)).run();
+        tx.delete(operations).where(eq(operations.run_id, runId)).run();
+        tx.insert(operations)
+          .values({
+            operation_id: operationId,
+            kind: "delete",
+            run_id: runId,
+            recorded_at: new Date().toISOString(),
+          })
+          .run();
+        return { outcome: "deleted", runId };
+      },
+      { behavior: "immediate" },
+    );
+  }
 
   // Take ownership of an existing Run under BEGIN IMMEDIATE, so the ownership check
   // is decided under the write lock (ADR 0031). Already owned by this process is an
   // idempotent `resumed`; a Run owned by a live *other* process refuses (the probe
   // is a courtesy — a takeover fences it regardless); otherwise claim it.
-  const admitResume = database.transaction((runId: string): ResumeRunResult => {
-    const registration = findRegistration.get(runId) as {
-      owner_pid: number | null;
-    } | null;
-    if (registration == null) return { outcome: "unknown-run", runId };
-    const ownerPid = registration.owner_pid;
-    if (ownerPid === selfPid) return { outcome: "resumed", runId };
-    if (ownerPid != null && isOwnerAlive(ownerPid)) {
-      return { outcome: "run-live-elsewhere", runId, ownerPid };
-    }
-    claimRun.run(selfPid, runId);
-    return { outcome: "resumed", runId };
-  });
+  function admitResume(runId: string): ResumeRunResult {
+    return db.transaction(
+      (tx): ResumeRunResult => {
+        const registration = tx
+          .select({ owner_pid: runs.owner_pid })
+          .from(runs)
+          .where(eq(runs.run_id, runId))
+          .get();
+        if (registration === undefined)
+          return { outcome: "unknown-run", runId };
+        const ownerPid = registration.owner_pid;
+        if (ownerPid === selfPid) return { outcome: "resumed", runId };
+        if (ownerPid != null && isOwnerAlive(ownerPid)) {
+          return { outcome: "run-live-elsewhere", runId, ownerPid };
+        }
+        tx.update(runs)
+          .set({ owner_pid: selfPid })
+          .where(eq(runs.run_id, runId))
+          .run();
+        return { outcome: "resumed", runId };
+      },
+      { behavior: "immediate" },
+    );
+  }
 
   function reclaimRunDir(runId: string): void {
     const finalDir = join(groupDir, runId);
@@ -963,22 +771,29 @@ export function openRunGroup(
   // holds. Either way its ownership is released, running no Step work, so a reopened
   // home never silently resumes execution (ADR 0019). An unowned Run is already at
   // rest and skipped. A missing pid on a rebuilt coordination file reads as unowned.
-  for (const row of listRegistrations.all() as Record<string, unknown>[]) {
+  for (const row of db
+    .select()
+    .from(runs)
+    .where(isNotNull(runs.owner_pid))
+    .all()) {
     const parsed = registrationRow.safeParse(row);
     if (!parsed.success) continue;
     const pid = parsed.data.owner_pid;
     if (pid == null) continue;
     if (pid !== selfPid && isOwnerAlive(pid)) continue;
-    reconcileRunStore(join(groupDir, parsed.data.run_id), new Date());
-    endRun.run(parsed.data.run_id);
+    reconcileStoredRun(join(groupDir, parsed.data.run_id), new Date());
+    db.update(runs)
+      .set({ owner_pid: null })
+      .where(eq(runs.run_id, parsed.data.run_id))
+      .run();
   }
 
   return {
     createRun(request) {
-      return admitCreate.immediate(request);
+      return admitCreate(request);
     },
     deleteRun({ operationId, runId }) {
-      const result = admitDelete.immediate(operationId, runId);
+      const result = admitDelete(operationId, runId);
       // Reclaim the bytes after the registration is gone; a fault here only leaks
       // a directory the next open sweeps, never a half-deleted registration. Close
       // any owner's handle first so the rename is not blocked by an open file.
@@ -991,339 +806,39 @@ export function openRunGroup(
     endRun(runId) {
       // ponytail: releasing ownership is not owner-fenced here; no caller needs a
       // stale owner blocked from ending yet. Guard with the epoch if one ever does.
-      endRun.run(runId);
+      db.update(runs)
+        .set({ owner_pid: null })
+        .where(eq(runs.run_id, runId))
+        .run();
     },
     resumeRun(runId) {
-      return admitResume.immediate(runId);
+      return admitResume(runId);
     },
     acquireRun(runId, options = {}) {
-      const record = readRunStore(join(groupDir, runId));
-      if (record === undefined || record === DAMAGED) return undefined;
       // Probe ownership before fencing (ADR 0031): without `takeover`, decline a Run
       // owned by a live *other* process, so the caller confirms the takeover before
       // fencing the instance driving it. A dead, absent, or self owner is fenced
       // without asking; `takeover` fences regardless of the probe and claims the Run.
-      const takeover = options.takeover === true;
-      if (!takeover) {
-        const reg = findRegistration.get(runId) as {
-          owner_pid: number | null;
-        } | null;
-        const pid = reg?.owner_pid;
-        if (pid != null && pid !== selfPid && isOwnerAlive(pid))
-          return undefined;
-      }
       // A takeover claims ownership and bumps the epoch atomically; a plain acquire
       // bumps only, leaving the create/resume claim as-is (so a read-only acquire
       // never marks a resting Run live). Fencing is the epoch bump either way.
-      const bumped = (
-        takeover ? bumpEpochAndClaim.get(selfPid, runId) : bumpEpoch.get(runId)
-      ) as { owner_epoch: number } | null;
-      if (bumped == null) return undefined;
-      const epoch = bumped.owner_epoch;
-      const runDir = join(groupDir, runId);
-      const runDatabase = new Database(join(runDir, "run.db"));
-      runDatabase.exec("PRAGMA busy_timeout = 5000");
-      const handles = runHandles.get(runId) ?? new Set<Database>();
-      handles.add(runDatabase);
-      runHandles.set(runId, handles);
-      const repo = openArtifactRepo(runDir);
-      const updateState = runDatabase.query(
-        "UPDATE run_record SET state = ? WHERE run_id = ?",
-      );
-      const findAttempt = runDatabase.query(
-        "SELECT outcome, version_id FROM attempt WHERE attempt_id = ?",
-      );
-      const findBinding = runDatabase.query(
-        "SELECT version_id FROM artifact_binding WHERE artifact_name = ?",
-      );
-      const listLog = runDatabase.query(
-        "SELECT attempt_id, outcome, at FROM attempt_log ORDER BY seq",
-      );
-      const insertVersion = runDatabase.query(
-        "INSERT INTO artifact_version (version_id, artifact_name, artifact_type, " +
-          "attempt_id, created_at) VALUES (?, ?, ?, ?, ?)",
-      );
-      const upsertBinding = runDatabase.query(
-        "INSERT INTO artifact_binding (artifact_name, version_id, updated_at) " +
-          "VALUES (?, ?, ?) ON CONFLICT (artifact_name) DO UPDATE SET " +
-          "version_id = excluded.version_id, updated_at = excluded.updated_at",
-      );
-      const insertAttempt = runDatabase.query(
-        "INSERT INTO attempt (attempt_id, outcome, version_id, settled_at) " +
-          "VALUES (?, ?, ?, ?)",
-      );
-      const insertLog = runDatabase.query(
-        "INSERT INTO attempt_log (attempt_id, outcome, at) VALUES (?, ?, ?)",
-      );
-      const insertConflict = runDatabase.query(
-        "INSERT INTO materialization_conflict (diagnostic_id, artifact_name, " +
-          "artifact_path, version_id, at) VALUES (?, ?, ?, ?, ?)",
-      );
-      const listConflicts = runDatabase.query(
-        "SELECT diagnostic_id, artifact_name, artifact_path, version_id, at " +
-          "FROM materialization_conflict ORDER BY seq",
-      );
-      const findGateAnswer = runDatabase.query(
-        "SELECT answer_id, version_id FROM gate_answer WHERE operation_id = ?",
-      );
-      const insertGateAnswer = runDatabase.query(
-        "INSERT INTO gate_answer (answer_id, operation_id, gate_attempt_id, " +
-          "answer, iterations_at_grant, version_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      );
-      const listGateAnswers = runDatabase.query(
-        "SELECT answer_id, operation_id, gate_attempt_id, answer, " +
-          "iterations_at_grant, version_id, at FROM gate_answer ORDER BY seq",
-      );
-
-      // The single publication transaction: record every version, move every
-      // binding, settle the Attempt, and advance the Run — all or nothing. A
-      // succeeded Attempt carries its staged version id; the others carry none.
-      const publishTransaction = runDatabase.transaction(
-        (request: PublishAttemptRequest, versionId: string | undefined) => {
-          const at = request.at.toISOString();
-          if (versionId !== undefined) {
-            for (const output of request.outputs) {
-              insertVersion.run(
-                versionId,
-                output.name,
-                output.type,
-                request.attemptId,
-                at,
-              );
-              upsertBinding.run(output.name, versionId, at);
-            }
-          }
-          insertAttempt.run(
-            request.attemptId,
-            request.outcome,
-            versionId ?? null,
-            at,
-          );
-          insertLog.run(request.attemptId, request.outcome, at);
-          if (request.advanceState !== undefined) {
-            updateState.run(request.advanceState, runId);
-          }
-        },
-      );
-
-      // Record the conflict and rest `halted` together: the conflict is the
-      // immutable transition that rests the Run, so a crash never leaves it
-      // recorded-but-still-running (the same ordering publishAttempt uses).
-      const conflictTransaction = runDatabase.transaction(
-        (request: RecordConflictRequest, diagnosticId: string) => {
-          insertConflict.run(
-            diagnosticId,
-            request.artifactName,
-            request.path,
-            request.versionId,
-            request.at.toISOString(),
-          );
-          updateState.run("halted", runId);
-        },
-      );
-
-      // Record the gate answer and (for a `stop`) rest the Run together: the
-      // version and binding move, the answer is appended, and the optional state
-      // advance commits atomically — the same all-or-nothing ordering as a
-      // publication, but without touching the attempt log.
-      const gateAnswerTransaction = runDatabase.transaction(
-        (
-          request: RecordGateAnswerRequest,
-          answerId: string,
-          versionId: string,
-        ) => {
-          const at = request.at.toISOString();
-          insertVersion.run(
-            versionId,
-            request.artifactName,
-            "text",
-            answerId,
-            at,
-          );
-          upsertBinding.run(request.artifactName, versionId, at);
-          insertGateAnswer.run(
-            answerId,
-            request.operationId,
-            request.gateAttemptId,
-            request.answer,
-            request.iterationsAtGrant,
-            versionId,
-            at,
-          );
-          if (request.advanceState !== undefined) {
-            updateState.run(request.advanceState, runId);
-          }
-        },
-      );
-
-      const diagnosticsDir = join(runDir, "diagnostics");
-
-      function fenced(): boolean {
-        const current = readEpoch.get(runId) as {
-          owner_epoch: number;
-        } | null;
-        return current == null || current.owner_epoch !== epoch;
-      }
-
-      return {
+      return acquireRunOwner({
+        coordinationDb: db,
+        groupDir,
         runId,
-        record,
-        writeState(state) {
-          if (fenced()) return { ok: false, reason: "fenced" };
-          updateState.run(state, runId);
-          return { ok: true };
-        },
-        publishAttempt(request) {
-          if (fenced()) return { ok: false, reason: "fenced" };
-          // Idempotent: a settled Attempt replays its recorded outcome without
-          // staging a second commit.
-          const settled = findAttempt.get(request.attemptId);
-          if (settled != null) {
-            const parsed = attemptRow.parse(settled);
-            return { ok: true, versionId: parsed.version_id ?? undefined };
-          }
-          if (request.outcome === "succeeded") {
-            // Stage the commit (invisible candidate storage) before the
-            // transaction; a missing output or an absent `git` is a Problem here,
-            // with no `run.db` change.
-            const staged = repo.stageCommit(
-              request.attemptId,
-              request.required,
-              request.outputs,
-              request.at,
-            );
-            if (!staged.ok) return { ok: false, problem: staged.problem };
-            // Re-check the epoch after the (subprocess-slow) staging: a fresh
-            // owner may have fenced this one meanwhile, and the publication is a
-            // canonical write, so a stale owner must be refused.
-            if (fenced()) return { ok: false, reason: "fenced" };
-            publishTransaction(request, staged.versionId);
-            return { ok: true, versionId: staged.versionId };
-          }
-          // A failed/cancelled/indeterminate Attempt moves no binding.
-          publishTransaction(request, undefined);
-          return { ok: true };
-        },
-        currentVersion(name) {
-          const row = findBinding.get(name);
-          return row == null ? undefined : bindingRow.parse(row).version_id;
-        },
-        readArtifact(versionId, name) {
-          return repo.read(versionId, name);
-        },
-        attemptLog() {
-          return (listLog.all() as Record<string, unknown>[]).map((row) => {
-            const parsed = attemptLogRow.parse(row);
-            return {
-              attemptId: parsed.attempt_id,
-              outcome: parsed.outcome,
-              at: parsed.at,
-            };
-          });
-        },
-        recordMaterializationConflict(request) {
-          if (fenced()) return { ok: false, reason: "fenced" };
-          const diagnosticId = randomUUID();
-          // Write the diagnostic file first (invisible candidate storage, like a
-          // staged commit); the transaction that appends the conflict and rests
-          // `halted` is the publication point. A crash between the two leaves an
-          // orphan diagnostic file the Run's deletion sweeps — no binding moves,
-          // and the Workspace is never touched here.
-          mkdirSync(diagnosticsDir, { recursive: true });
-          writeFileSync(join(diagnosticsDir, diagnosticId), request.diagnostic);
-          if (fenced()) return { ok: false, reason: "fenced" };
-          conflictTransaction(request, diagnosticId);
-          return { ok: true, diagnosticId };
-        },
-        materializationConflicts() {
-          return (listConflicts.all() as Record<string, unknown>[]).map(
-            (row) => {
-              const parsed = conflictRow.parse(row);
-              return {
-                diagnosticId: parsed.diagnostic_id,
-                artifactName: parsed.artifact_name,
-                path: parsed.artifact_path,
-                versionId: parsed.version_id,
-                at: parsed.at,
-              };
-            },
-          );
-        },
-        readDiagnostic(diagnosticId) {
-          // A diagnostic id is a UUID this owner generated; guard the join anyway
-          // so a crafted id can never escape the diagnostics directory.
-          if (!/^[A-Za-z0-9-]+$/.test(diagnosticId)) return undefined;
-          const path = join(diagnosticsDir, diagnosticId);
-          try {
-            return existsSync(path) ? readFileSync(path) : undefined;
-          } catch {
-            return undefined;
-          }
-        },
-        recordGateAnswer(request) {
-          if (fenced()) return { ok: false, reason: "fenced" };
-          // Idempotent per operation id: a replayed answer returns its recorded
-          // version without staging a second commit or a second row.
-          const existing = findGateAnswer.get(request.operationId) as {
-            answer_id: string;
-            version_id: string;
-          } | null;
-          if (existing != null) {
-            return { ok: true, versionId: existing.version_id, replayed: true };
-          }
-          const answerId = randomUUID();
-          // Stage the answer bytes (invisible candidate storage) before the
-          // transaction; an absent `git` is a Problem here, with no `run.db` change.
-          const staged = repo.stageCommit(
-            answerId,
-            [],
-            [
-              {
-                name: request.artifactName,
-                type: "text",
-                content: new TextEncoder().encode(request.answer),
-              },
-            ],
-            request.at,
-          );
-          if (!staged.ok) return { ok: false, problem: staged.problem };
-          // Re-check the epoch after the (subprocess-slow) staging: recording is a
-          // canonical write, so a stale owner must be refused.
-          if (fenced()) return { ok: false, reason: "fenced" };
-          gateAnswerTransaction(request, answerId, staged.versionId);
-          return { ok: true, versionId: staged.versionId, replayed: false };
-        },
-        gateAnswers() {
-          return (listGateAnswers.all() as Record<string, unknown>[]).map(
-            (row) => {
-              const parsed = gateAnswerRow.parse(row);
-              return {
-                answerId: parsed.answer_id,
-                operationId: parsed.operation_id,
-                gateAttemptId: parsed.gate_attempt_id,
-                answer: parsed.answer,
-                iterationsAtGrant: parsed.iterations_at_grant,
-                versionId: parsed.version_id,
-                at: parsed.at,
-              };
-            },
-          );
-        },
-        release() {
-          const released = releaseOwnedRun.get(runId, epoch);
-          return released == null
-            ? { ok: false, reason: "fenced" }
-            : { ok: true };
-        },
-        close() {
-          if (handles.delete(runDatabase)) runDatabase.close();
-          if (handles.size === 0) runHandles.delete(runId);
-        },
-      };
+        takeover: options.takeover === true,
+        selfPid,
+        isOwnerAlive,
+        openDatabase: openRunDatabase,
+        trackHandle: (database) => trackRunHandle(runId, database),
+      });
     },
     listRuns() {
-      return (listRegistrations.all() as Record<string, unknown>[]).map(
-        (row) => {
+      return db
+        .select()
+        .from(runs)
+        .all()
+        .map((row) => {
           const parsed = registrationRow.safeParse(row);
           if (!parsed.success) {
             throw new Error("Run Store: a runs row is malformed.");
@@ -1332,23 +847,35 @@ export function openRunGroup(
           // name the owner and whether it is this instance (ADR 0031, #98 S2).
           const ownerPid = parsed.data.owner_pid;
           const live = ownerPid != null;
+          if (ownerPid === null) {
+            return {
+              runId: parsed.data.run_id,
+              live: false,
+              ownedByThisProcess: false,
+            };
+          }
           return {
             runId: parsed.data.run_id,
             live,
-            ownedByThisProcess: live && ownerPid === selfPid,
-            ...(live ? { ownerPid } : {}),
+            ownerPid,
+            ownedByThisProcess: ownerPid === selfPid,
           };
-        },
-      );
+        });
     },
     readRun(runId) {
       // Registration is authoritative, so readRun agrees with listRuns: a Run the
       // coordination DB does not list is unknown even if a directory lingers
       // mid-reclaim, and a listed Run whose run.db will not read is damaged.
-      if (findRegistration.get(runId) == null) {
+      if (
+        db
+          .select({ run_id: runs.run_id })
+          .from(runs)
+          .where(eq(runs.run_id, runId))
+          .get() === undefined
+      ) {
         return { ok: false, problem: { kind: "unknown-run", runId } };
       }
-      const record = readRunStore(join(groupDir, runId));
+      const record = readStoredRun(join(groupDir, runId));
       if (record === undefined || record === DAMAGED) {
         return { ok: false, problem: { kind: "run-store-damaged", runId } };
       }
@@ -1360,7 +887,7 @@ export function openRunGroup(
         handles.clear();
       }
       runHandles.clear();
-      database.close();
+      sqlite.close();
     },
   };
 }

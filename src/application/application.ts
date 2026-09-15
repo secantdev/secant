@@ -816,7 +816,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
       at: new Date(),
     });
     if (created.outcome === "workspace-busy") {
-      // Refused before any grant is written: nothing to undo.
+      // Unreachable since ADR 0031 (#103): createRun never refuses for the Workspace
+      // — any number of Runs may be live at once. The branch stays only to narrow the
+      // still-present union variant; it and the `workspace-busy` Problem are removed
+      // with the rest of the Workspace-claim refusal in #104.
       return { admitted: false, problem: workspaceBusy(created.liveRunId) };
     }
     if (needsGrant) {
@@ -1300,7 +1303,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
         return { status: "applied" };
       });
     }
-    // Live elsewhere (or not tracked here): fence the stale owner and rest it.
+    // Live elsewhere (or not tracked here): fence the stale owner and rest it. This
+    // is a deliberate takeover — cancel force-rests a Run whichever process owns it —
+    // so acquire with `takeover` to fence a live owner rather than be declined.
     try {
       const listing = runGroup.listRuns().find((run) => run.runId === runId);
       if (listing === undefined) {
@@ -1309,7 +1314,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       if (!listing.live) {
         return { status: "not-applied", problem: runNotLive(runId) };
       }
-      const owner = runGroup.acquireRun(runId);
+      const owner = runGroup.acquireRun(runId, { takeover: true });
       if (owner === undefined) {
         return { status: "not-applied", problem: runStoreDamaged(runId) };
       }

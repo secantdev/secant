@@ -88,18 +88,21 @@ test("creating a Run produces the grouped directory and its store", async (t) =>
   assert.deepEqual(read.run, result.record);
 });
 
-test("a second create while a Run is live is refused with a Problem", async (t) => {
+test("two Runs live in one Workspace at once — create never refuses (ADR 0031)", async (t) => {
   const home = makeTempDir("secant-store-");
   const group = openRunGroup(home, WORKSPACE);
   t.after(() => group.close());
 
+  // No Workspace claim to contend: a second create while the first is live succeeds
+  // and makes a distinct Run, each owned separately by this process.
   const first = create(group, "op-1");
   assert.ok(first.outcome === "created");
   const second = create(group, "op-2");
-  assert.equal(second.outcome, "workspace-busy");
-  assert.ok(second.outcome === "workspace-busy");
-  assert.equal(second.liveRunId, first.runId);
-  assert.equal(group.listRuns().length, 1);
+  assert.ok(second.outcome === "created");
+  assert.notEqual(first.runId, second.runId);
+  const listed = group.listRuns();
+  assert.equal(listed.length, 2);
+  assert.ok(listed.every((run) => run.live && run.ownedByThisProcess));
 });
 
 test("create is idempotent per operation id", async (t) => {
@@ -192,11 +195,8 @@ test("a crash after staging leaves only a .creating quarantine the next open rem
   mkdirSync(groupDir, { recursive: true });
   const raw = new Database(join(groupDir, "coordination.db"));
   raw.exec(
-    "CREATE TABLE runs (run_id TEXT PRIMARY KEY, state TEXT NOT NULL, " +
-      "owner_epoch INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT",
-  );
-  raw.exec(
-    "CREATE UNIQUE INDEX one_live_run ON runs(state) WHERE state = 'live'",
+    "CREATE TABLE runs (run_id TEXT PRIMARY KEY, owner_epoch INTEGER NOT NULL, " +
+      "owner_pid INTEGER, created_at TEXT NOT NULL) STRICT",
   );
   raw.exec(
     "CREATE TABLE operations (operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL, " +
@@ -376,43 +376,50 @@ test("startup reconciles a stale-claimed running Run to halted with an indetermi
   const read = reopened.readRun(created.runId);
   assert.ok(read.ok);
   assert.equal(read.run.state, "halted");
+  // Ownership was released by the reconcile: the Run is unowned before anyone
+  // re-acquires it (acquiring would itself take ownership, ADR 0031).
+  assert.equal(
+    reopened.listRuns().find((run) => run.runId === created.runId)?.live,
+    false,
+  );
   // The interrupted Attempt is recorded indeterminate — nothing succeeded was
   // fabricated, so a resume re-runs from the interrupted Step.
   const owner2 = reopened.acquireRun(created.runId);
   assert.ok(owner2);
   t.after(() => owner2.close());
-  const log = owner2.attemptLog();
-  assert.equal(log.at(-1)?.outcome, "indeterminate");
-  // The stale claim was released: the Workspace is free again.
-  assert.equal(
-    reopened.listRuns().find((run) => run.runId === created.runId)?.live,
-    false,
-  );
+  assert.equal(owner2.attemptLog().at(-1)?.outcome, "indeterminate");
 });
 
-test("startup leaves a Run whose claim was cleanly released untouched (#86)", (t) => {
-  // A derived-`blocked` Run is stored `running` but has released its claim, so it
-  // must not be reconciled: the claim, not the stored state, marks a killed Run.
+test("startup leaves a dead owner's blocked Run blocked and unowned (ADR 0031)", (t) => {
+  // Ownership is held through `blocked` now, so a killed instance leaves a `blocked`
+  // Run owned. Reconciliation splits by stored state: a `blocked` record is not a
+  // cut-off Step (the process was only waiting on the checkpoint), so it stays
+  // `blocked` — no indeterminate marker, no halt — with only its ownership released.
   const home = makeTempDir("secant-store-");
   const group = openRunGroup(home, WORKSPACE);
   const created = create(group, "op-1");
   assert.ok(created.outcome === "created");
   const owner = group.acquireRun(created.runId);
   assert.ok(owner);
-  assert.deepEqual(owner.writeState("running"), { ok: true });
+  assert.deepEqual(owner.writeState("blocked"), { ok: true });
   owner.close();
-  group.endRun(created.runId); // a clean rest releases the claim
+  // The instance dies without ending the Run: ownership stays, the record `blocked`.
   group.close();
 
   const reopened = openRunGroup(home, WORKSPACE);
   t.after(() => reopened.close());
   const read = reopened.readRun(created.runId);
   assert.ok(read.ok);
-  assert.equal(read.run.state, "running"); // untouched: no indeterminate, no halt
+  assert.equal(read.run.state, "blocked"); // untouched: still blocked
+  // Its ownership was released, so it is answerable/resumable again, not left live.
+  assert.equal(
+    reopened.listRuns().find((run) => run.runId === created.runId)?.live,
+    false,
+  );
   const owner2 = reopened.acquireRun(created.runId);
   assert.ok(owner2);
   t.after(() => owner2.close());
-  assert.equal(owner2.attemptLog().length, 0);
+  assert.equal(owner2.attemptLog().length, 0); // no indeterminate marker appended
 });
 
 test("startup leaves a Run whose owner process is still alive live and unaltered (#98 S2)", (t) => {
@@ -441,11 +448,56 @@ test("startup leaves a Run whose owner process is still alive live and unaltered
   const listing = second.listRuns().find((run) => run.runId === created.runId);
   assert.equal(listing?.live, true);
   assert.equal(listing?.ownerPid, 1000); // the owner is named for a live-elsewhere refusal
-  // No indeterminate marker was appended — the Run was never reconciled.
-  const owner2 = second.acquireRun(created.runId);
+  assert.equal(listing?.ownedByThisProcess, false); // owned by pid 1000, not us
+  // A live-elsewhere Run cannot be opened without taking over: a plain acquire is
+  // declined (ADR 0031). Taking over reads the same store and confirms nothing was
+  // reconciled — no indeterminate marker was appended.
+  assert.equal(second.acquireRun(created.runId), undefined);
+  const takenOver = second.acquireRun(created.runId, { takeover: true });
+  assert.ok(takenOver);
+  t.after(() => takenOver.close());
+  assert.equal(takenOver.attemptLog().length, 0);
+});
+
+test("a live-owned Run refuses resume and a plain acquire, but takeover fences the owner (ADR 0031)", (t) => {
+  // pid 1000 drives a Run; pid 2000 opens the same group with pid 1000 still alive.
+  const home = makeTempDir("secant-store-");
+  const first = openRunGroup(home, WORKSPACE, { selfPid: 1000 });
+  t.after(() => first.close());
+  const created = create(first, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner1 = first.acquireRun(created.runId);
+  assert.ok(owner1);
+  t.after(() => owner1.close());
+  assert.deepEqual(owner1.writeState("running"), { ok: true });
+
+  const second = openRunGroup(home, WORKSPACE, {
+    selfPid: 2000,
+    isOwnerAlive: (pid) => pid === 1000,
+  });
+  t.after(() => second.close());
+
+  // The courtesy probe refuses both resume and a plain acquire while pid 1000 lives.
+  assert.deepEqual(second.resumeRun(created.runId), {
+    outcome: "workspace-busy",
+    liveRunId: created.runId,
+  });
+  assert.equal(second.acquireRun(created.runId), undefined);
+
+  // A takeover fences pid 1000 regardless of the probe: owner1's next canonical
+  // write is refused, owner2's succeeds.
+  const owner2 = second.acquireRun(created.runId, { takeover: true });
   assert.ok(owner2);
   t.after(() => owner2.close());
-  assert.equal(owner2.attemptLog().length, 0);
+  assert.deepEqual(owner1.writeState("cancelled"), {
+    ok: false,
+    reason: "fenced",
+  });
+  assert.deepEqual(owner2.writeState("cancelled"), { ok: true });
+  // Ownership moved to pid 2000.
+  const listing = second.listRuns().find((run) => run.runId === created.runId);
+  assert.equal(listing?.ownerPid, 2000);
+  assert.equal(listing?.ownedByThisProcess, true);
 });
 
 test("startup reconciles a Run whose owner process is dead to halted (#98 S2)", (t) => {

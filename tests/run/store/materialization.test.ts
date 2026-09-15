@@ -6,8 +6,7 @@ import { makeTempDir } from "../../helpers/tempDir.js";
 // #88 at the Run Store Interface: recording a Materialization conflict rests the
 // Run `halted`, moves no binding, and never adopts Workspace bytes (the store has
 // no Workspace access, so the invariant holds by construction); the diagnostic is
-// retained and readable; and resume re-claims the Workspace under the one-live-Run
-// rule.
+// retained and readable; and resume takes per-Run ownership (ADR 0031).
 
 const AT = new Date("2026-09-13T12:00:00.000Z");
 const enc = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -113,25 +112,24 @@ test("a fenced owner cannot record a conflict", (t) => {
   assert.notEqual(read.run.state, "halted");
 });
 
-test("resumeRun re-claims an ended Run and refuses a busy Workspace", (t) => {
+test("resumeRun re-claims an unowned Run; another live Run does not block it (ADR 0031)", (t) => {
   const g = group(t);
   const runId = freshRun(g);
-  // Already live: an idempotent no-op claim.
+  // Already owned by this process (create owns it): an idempotent no-op claim.
   assert.deepEqual(g.resumeRun(runId), { outcome: "resumed", runId });
 
-  // End the Run (release the claim), then resume re-claims it.
+  // Release ownership, then resume re-claims it.
   g.endRun(runId);
   assert.ok(g.listRuns().every((run) => !run.live));
   assert.deepEqual(g.resumeRun(runId), { outcome: "resumed", runId });
   assert.ok(g.listRuns().some((run) => run.runId === runId && run.live));
 
-  // A different live Run holds the claim: resume of the ended one is refused.
+  // Another live Run in the same Workspace does not block resuming this one:
+  // ownership is per Run, not per Workspace.
   g.endRun(runId);
-  const other = freshRun(g); // claims the Workspace
-  assert.deepEqual(g.resumeRun(runId), {
-    outcome: "workspace-busy",
-    liveRunId: other,
-  });
+  freshRun(g); // a second live Run — no Workspace claim to contend
+  assert.deepEqual(g.resumeRun(runId), { outcome: "resumed", runId });
+  assert.equal(g.listRuns().filter((run) => run.live).length, 2);
 
   assert.deepEqual(g.resumeRun("no-such-run"), {
     outcome: "unknown-run",

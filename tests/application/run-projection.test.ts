@@ -347,8 +347,8 @@ test("a re-submitted launch operation id replays with the same Run; different in
   assert.equal(f.runGroup.listRuns().length, 1);
 });
 
-test("a launch refused workspace-busy grants no trust (the grant follows Run creation)", async (t) => {
-  // Hold settlement so the first Run stays live and holds the Workspace claim.
+test("a launch refused before creation grants no trust, and a second live Run is admitted (ADR 0031)", async (t) => {
+  // Hold settlement so the first Run stays live (owned, unsettled).
   const held: (() => void)[] = [];
   const f = fixture(t, { scheduleSettlement: (settle) => held.push(settle) });
   const first = installCommandBundle(f, { id: "dev.secant.first" });
@@ -358,7 +358,7 @@ test("a launch refused workspace-busy grants no trust (the grant follows Run cre
     .listEntries()
     .find((e) => e.id === "dev.secant.second")!;
 
-  // Launch the first Bundle; it creates a live Run and holds the claim (unsettled).
+  // Launch the first Bundle; it creates a live Run (unsettled).
   const a = f.app.projectionPort.submit({
     operationId: "op-a",
     operation: "launch-run",
@@ -370,8 +370,31 @@ test("a launch refused workspace-busy grants no trust (the grant follows Run cre
   });
   assert.ok(a.admitted);
 
-  // Launch the (untrusted) second Bundle while the first holds the claim: it is
-  // refused workspace-busy, and — crucially — no trust grant is left behind.
+  // A launch refused *before* the Run is created leaves no trust grant behind — the
+  // grant is only recorded after creation. A mismatching trust acknowledgement is
+  // one such pre-creation refusal (a Workspace claim is no longer another: any number
+  // of Runs may be live, ADR 0031).
+  const bad = f.app.projectionPort.submit({
+    operationId: "op-bad",
+    operation: "launch-run",
+    input: {
+      bundle: { id: second.id },
+      launchInputs: {},
+      trustDigest: "sha256:not-the-digest",
+    },
+  });
+  assert.equal(bad.admitted, false);
+  if (!bad.admitted) assert.equal(bad.problem.code, "trust-digest-mismatch");
+  assert.equal(
+    f.catalog.getTrustGrant(
+      secondEntry.digest,
+      secondEntry.installationGeneration,
+    ),
+    undefined,
+  );
+
+  // With a matching acknowledgement, the second Bundle launches while the first is
+  // still live — two Runs live in one Workspace, no busy refusal (ADR 0031).
   const b = f.app.projectionPort.submit({
     operationId: "op-b",
     operation: "launch-run",
@@ -381,15 +404,8 @@ test("a launch refused workspace-busy grants no trust (the grant follows Run cre
       trustDigest: second.digest,
     },
   });
-  assert.equal(b.admitted, false);
-  if (!b.admitted) assert.equal(b.problem.code, "workspace-busy");
-  assert.equal(
-    f.catalog.getTrustGrant(
-      secondEntry.digest,
-      secondEntry.installationGeneration,
-    ),
-    undefined,
-  );
+  assert.ok(b.admitted);
+  assert.equal(f.runGroup.listRuns().filter((run) => run.live).length, 2);
 });
 
 test("reading a live Run's projection does not fence the owner executing it", async (t) => {

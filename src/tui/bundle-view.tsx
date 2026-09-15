@@ -1,7 +1,5 @@
 import {
   createContext,
-  createSignal,
-  onCleanup,
   useContext,
   type Accessor,
   type ParentProps,
@@ -10,10 +8,9 @@ import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
   BundleFocusSnapshot,
-  OpenedProjection,
   ProjectionPort,
-  ProjectionSnapshot,
 } from "../application/projection-port.js";
+import { followProjection } from "./follow.js";
 
 // The view-state the Bundle screens render, mirroring workspace-view.tsx: each
 // screen opens exactly one `bundle-catalog` Projection (the list, or one focus)
@@ -55,33 +52,15 @@ export function useBundleCatalogView(): BundleCatalogView {
 export function createLiveBundleCatalogView(
   port: ProjectionPort,
 ): BundleCatalogView {
-  // One subscription block for both screens: seed a signal from the opened
-  // Projection's snapshot, follow durable updates, and close on cleanup. The
-  // Projection is opened by the caller so `openProjection`'s selector-typed
-  // overload fixes `S`, and the snapshot and each update read at that type with
-  // no cast (#74 A8). The `closed` flag stops the loop the moment cleanup runs so
-  // a late update can't set a signal after the owner is disposed.
-  function open<S extends ProjectionSnapshot>(
-    opened: OpenedProjection<S>,
-  ): Accessor<S> {
-    const [snapshot, setSnapshot] = createSignal(opened.snapshot);
-    let closed = false;
-    void (async () => {
-      for await (const update of opened.updates) {
-        if (closed) break;
-        if (update.kind === "durable") setSnapshot(() => update.snapshot);
-      }
-    })();
-    onCleanup(() => {
-      closed = true;
-      opened.close();
-    });
-    return snapshot;
-  }
-
+  // Both screens follow their opened Projection through the shared follow-snapshot
+  // helper (A22): a concurrent install refreshes the screen. The Projection is
+  // opened by the caller so its selector-typed overload fixes the snapshot type.
   return {
-    openList: () => open(port.openProjection({ family: "bundle-catalog" })),
+    openList: () =>
+      followProjection(port.openProjection({ family: "bundle-catalog" })),
     openFocus: (selector) =>
-      open(port.openProjection({ family: "bundle-catalog", focus: selector })),
+      followProjection(
+        port.openProjection({ family: "bundle-catalog", focus: selector }),
+      ),
   };
 }

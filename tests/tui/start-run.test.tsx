@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App, createLiveRunLaunchView } from "../../src/tui/tui.js";
+import { inertRunActionsView, inertRunListView } from "./inert.js";
 import type {
   BundleCatalogView,
   LaunchOutcome,
@@ -237,6 +238,8 @@ async function mountFlow(
         bundles={bundlesView}
         launch={launchView}
         run={runView}
+        runList={inertRunListView()}
+        actions={inertRunActionsView()}
         renderer={flowRenderer(width, height)}
         exit={(reason) => exits.push(reason)}
       />
@@ -689,29 +692,10 @@ test("live seam: a not-admitted submission is a refusal", () => {
   assert.deepEqual(outcome, { kind: "refused", problem });
 });
 
-test("live seam: a not-applied operation outcome is a refusal", () => {
-  const problem: Problem = {
-    code: "launch-input-invalid",
-    explanation: "bad",
-    remediation: "fix",
-    possibleEffects: "none",
-  };
-  const port = fakePort({
-    admission: { admitted: true, operationId: "op-1", runId: "run-9" },
-    operation: {
-      family: "operation",
-      operationId: "op-1",
-      outcome: { status: "not-applied", problem },
-    },
-  });
-  const outcome = createLiveRunLaunchView(port).launch({
-    bundle: { id: "x" },
-    launchInputs: {},
-  })();
-  assert.deepEqual(outcome, { kind: "refused", problem });
-});
-
-test("live seam: a still-pending operation outcome is refused, not read as a Run", () => {
+test("live seam: launch resolves at admission from the running Run, without reading the operation outcome", () => {
+  // The operation is still `pending` (settlement is deferred now, #98). The launch
+  // must resolve at admission from the live `run` snapshot — never blocking on the
+  // operation outcome — so the flow reaches the Workbench before the Run rests (S1).
   const port = fakePort({
     admission: { admitted: true, operationId: "op-1", runId: "run-9" },
     operation: {
@@ -719,17 +703,53 @@ test("live seam: a still-pending operation outcome is refused, not read as a Run
       operationId: "op-1",
       outcome: { status: "pending" },
     },
-    // no `run` snapshot: reading one here would throw, proving we never do.
+    run: {
+      family: "run",
+      runId: "run-9",
+      result: {
+        found: true,
+        run: {
+          runId: "run-9",
+          bundle: { id: "x", version: "1.0.0", name: "X", digest: "d" },
+          workspacePath: WORKSPACE,
+          launchedAt: "2026-01-01T00:00:00.000Z",
+          state: "running",
+          progress: [],
+          position: 0,
+          timeline: [],
+          outputs: [],
+          actionOffers: [],
+        },
+      },
+    },
   });
   const outcome = createLiveRunLaunchView(port).launch({
     bundle: { id: "x" },
     launchInputs: {},
   })();
-  assert.equal(outcome.kind, "refused");
-  assert.equal(
-    outcome.kind === "refused" ? outcome.problem.code : "",
-    "launch-not-settled",
-  );
+  assert.deepEqual(outcome, {
+    kind: "launched",
+    runId: "run-9",
+    state: "running",
+  });
+});
+
+test("live seam: an admitted launch whose Run cannot be read is a refusal", () => {
+  const problem: Problem = {
+    code: "run-store-damaged",
+    explanation: "bad",
+    remediation: "fix",
+    possibleEffects: "none",
+  };
+  const port = fakePort({
+    admission: { admitted: true, operationId: "op-1", runId: "run-9" },
+    run: { family: "run", runId: "run-9", result: { found: false, problem } },
+  });
+  const outcome = createLiveRunLaunchView(port).launch({
+    bundle: { id: "x" },
+    launchInputs: {},
+  })();
+  assert.deepEqual(outcome, { kind: "refused", problem });
 });
 
 test("live seam: an admitted launch with no Run id is a contract-breach refusal", () => {

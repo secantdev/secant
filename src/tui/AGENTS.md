@@ -24,7 +24,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   bindings fire under the dialog.
 - `clip()` (`clip.ts`) is not the horizontal-overflow guard — a container's `overflow="hidden"` already clips at width. It is the ellipsis affordance:
   call it only on a row that should _advertise_ its truncation with a trailing `…` (a name, path, or status that can exceed the inner width), not on
-  every row.
+  every row. It measures **display columns** with `string-width`, not `.length` (D5): a wide glyph is two columns, so a code-unit count would overflow.
+- A launch resolves at **admission** (`run-launch-view.tsx`): the Run id is known and the Run is observable `running` at once (#98 A7), so the flow reaches
+  the Workbench before the Run rests and the Workbench follows the live `run` Projection. Every _other_ write (answer, resume, cancel, delete) follows the
+  operation stream to settlement through `submit-and-settle.ts`, because a Run — and a cancel-as-abort of a live Run — settles asynchronously now (#98).
+  Captured command output is stripped of ANSI escapes with `strip-ansi` and split on `/\r?\n/` in the inspection read path (D4).
 - Sanctioned Seam leak (A29): `createProductionRenderer` (`renderer/renderer.ts`) returns an `@opentui/core` `CliRenderer` that composition
   (`composition/tui-runtime.ts`) binds and hands to `mountTui`, so an inferred `@opentui/core` type crosses into composition where the boundary suite —
   which reads only import specifiers — cannot see it. Deliberate and ADR 0018-sanctioned: Solid's `render(node, renderer)` mounts onto that object while
@@ -45,7 +49,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Each screen reads the Projection Port through a per-screen view seam (`workspace-view.tsx`, `bundle-view.tsx`, `run-view.tsx` — the reactive `run` read +
   reference resolution the Workbench uses; `run-list-view.tsx` — the Previous Runs read seam that pages older rows by cursor and appends them, the only
   seam that re-opens its Projection to grow a page); a write goes through a per-screen submit seam (`run-actions-view.tsx` — resume/cancel/delete, mirroring
-  `run-launch-view.tsx`). The Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`.
+  `run-launch-view.tsx`). The Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`, and declares its key
+  value (`{ name?, ctrl? }`, A16) so the Workbench needs no cast.
+- Two private helpers back those seams: `follow.ts` (`followProjection`) is the one follow-snapshot loop the read seams share (A22); `submit-and-settle.ts`
+  (`submitAndSettle`) is the one submit-then-follow-the-operation-stream loop the write seams share (A23). `run-inspection.tsx` holds the Workbench's
+  reference-inspection overlay — its state, key loop, and view — split out of `run-workbench.tsx` (A26).
 - `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; reuses the single-active-index selection model of `bundle-list.tsx`).
 - `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-screen status wording — keep it matching `headless/render.ts` so
   the TUI and headless surfaces say the same thing about the same fact.

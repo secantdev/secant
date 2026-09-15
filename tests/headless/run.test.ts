@@ -237,18 +237,19 @@ test("run read of an unknown output exits non-zero", async (t) => {
 
 // --- Repeat groups (#84, ADR 0020) -----------------------------------------
 
-test("run launch on a blocking Repeat group names the Run and blocked, and exits non-zero", async (t) => {
+test("run launch on a blocking Repeat group names the Run and blocked, and exits 2 at the checkpoint", async (t) => {
   const h = await harness(t);
   const { id, digest } = await h.installRepeat({ interval: 3 });
   h.approve();
 
+  // A Run resting `blocked` at its Human Gate exits 2, distinct from a failure (A36).
   assert.equal(
     await runHeadless(
       h.clients,
       ["run", "launch", id, "--trust", digest],
       h.io,
     ),
-    1,
+    2,
   );
   assert.match(h.stdout(), /^Run /m);
   assert.match(h.stdout(), /^State: blocked$/m);
@@ -352,7 +353,7 @@ test("run answer --continue that keeps failing blocks again with a fresh interva
 
   assert.equal(
     await runHeadless(h.clients, ["run", "answer", runId, "--continue"], h.io),
-    1, // blocked again, so non-zero
+    2, // blocked again at the checkpoint (A36)
   );
   assert.match(h.stdout(), /^State: blocked$/m);
   h.reset();
@@ -495,7 +496,7 @@ test("two invocations: block under one instance, continue under a fresh instance
       ["run", "launch", bundle.id, "--trust", entry.digest],
       launch.io,
     ),
-    1,
+    2, // blocked at the checkpoint (A36)
   );
   const runId = /^Run (\S+)$/m.exec(launch.text())![1]!;
   assert.match(launch.text(), /^State: blocked$/m);
@@ -535,8 +536,8 @@ test("run resume of a Run rested failed by a checkpoint stop resets bounds and b
   h.reset();
 
   // Resume the failed Run: its Iteration bounds reset, so it runs another full
-  // interval and blocks again (non-zero exit), rather than staying failed.
-  assert.equal(await runHeadless(h.clients, ["run", "resume", runId], h.io), 1);
+  // interval and blocks again (exit 2 at the checkpoint, A36), rather than failed.
+  assert.equal(await runHeadless(h.clients, ["run", "resume", runId], h.io), 2);
   assert.match(h.stdout(), /^State: blocked$/m);
   h.reset();
 

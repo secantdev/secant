@@ -48,16 +48,20 @@ if (!existsSync(source)) {
 }
 
 function run(command, args, options = {}) {
+  // `expect` is the required exit code (default 0). A Run resting blocked at its
+  // checkpoint exits 2 (A36) — a known, deliberate code — so the gate scenarios
+  // assert it through this helper instead of dropping to raw spawnSync.
+  const { expect = 0, ...spawnOptions } = options;
   const result = spawnSync(command, args, {
     cwd: projectRoot,
     encoding: "utf8",
-    ...options,
+    ...spawnOptions,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) {
+  if (result.status !== expect) {
     throw new Error(
       [
-        `${command} ${args.join(" ")} exited with status ${result.status}.`,
+        `${command} ${args.join(" ")} exited with status ${result.status} (expected ${expect}).`,
         result.stdout,
         result.stderr,
       ]
@@ -595,34 +599,29 @@ try {
       throw new Error(`Answer Bundle was not installed: ${listJson}`);
     }
 
-    // First invocation: launch, which blocks at the checkpoint.
-    const launched = spawnSync(
+    // First invocation: launch, which blocks at the checkpoint and exits 2 (A36).
+    const launched = run(
       binary,
       ["run", "launch", id, "--trust", installed.digest, "--json"],
-      { cwd: workspaceDirectory, encoding: "utf8", env: workspaceEnv },
+      { cwd: workspaceDirectory, env: workspaceEnv, expect: 2 },
     );
-    if (launched.error) throw launched.error;
-    const launchSnapshot = JSON.parse(launched.stdout);
+    const launchSnapshot = JSON.parse(launched);
     const runId = launchSnapshot.runId;
     if (launchSnapshot.result.run.state !== "blocked") {
       throw new Error(
-        `Expected the Run to rest blocked at the checkpoint: ${launched.stdout}`,
+        `Expected the Run to rest blocked at the checkpoint: ${launched}`,
       );
     }
 
-    // Second, separate invocation: answer the durable Gate `--continue`.
-    const answered = spawnSync(binary, ["run", "answer", runId, "--continue"], {
+    // Second, separate invocation: answer the durable Gate `--continue`; it runs
+    // to succeeded and exits 0.
+    const answered = run(binary, ["run", "answer", runId, "--continue"], {
       cwd: workspaceDirectory,
-      encoding: "utf8",
       env: workspaceEnv,
     });
-    if (answered.error) throw answered.error;
-    if (
-      answered.status !== 0 ||
-      !`${answered.stdout}`.includes("State: succeeded")
-    ) {
+    if (!answered.includes("State: succeeded")) {
       throw new Error(
-        `Answering --continue in a fresh invocation did not resolve the Run: ${answered.stdout}${answered.stderr}`,
+        `Answering --continue in a fresh invocation did not resolve the Run: ${answered}`,
       );
     }
   }
@@ -937,41 +936,35 @@ try {
     }
 
     // Launch with the exact digest acknowledged: the loop runs and rests `blocked`
-    // at the checkpoint with the expected completed-iteration count (the interval).
-    const launched = spawnSync(
+    // at the checkpoint (exit 2, A36) with the expected completed-iteration count.
+    const launched = run(
       binary,
       ["run", "launch", gateId, "--trust", gate.digest, "--json"],
-      { cwd: gateWorkspace, encoding: "utf8", env: workspaceEnv },
+      { cwd: gateWorkspace, env: workspaceEnv, expect: 2 },
     );
-    if (launched.error) throw launched.error;
-    const gateSnapshot = JSON.parse(launched.stdout);
+    const gateSnapshot = JSON.parse(launched);
     const gateRunId = gateSnapshot.runId;
     const gateRun = gateSnapshot.result.run;
     if (gateRun.state !== "blocked") {
       throw new Error(
-        `Expected the gate Run to rest blocked at the checkpoint: ${launched.stdout}`,
+        `Expected the gate Run to rest blocked at the checkpoint: ${launched}`,
       );
     }
     if (gateRun.checkpoint?.completedIterations !== 2) {
       throw new Error(
-        `Expected the gate Run to block after 2 completed iterations: ${launched.stdout}`,
+        `Expected the gate Run to block after 2 completed iterations: ${launched}`,
       );
     }
 
     // A second, separate invocation answers the durable Gate --continue, granting
     // one more interval that reaches the pass and rests the Run `succeeded`.
-    const answered = spawnSync(
-      binary,
-      ["run", "answer", gateRunId, "--continue"],
-      { cwd: gateWorkspace, encoding: "utf8", env: workspaceEnv },
-    );
-    if (answered.error) throw answered.error;
-    if (
-      answered.status !== 0 ||
-      !`${answered.stdout}`.includes("State: succeeded")
-    ) {
+    const answered = run(binary, ["run", "answer", gateRunId, "--continue"], {
+      cwd: gateWorkspace,
+      env: workspaceEnv,
+    });
+    if (!answered.includes("State: succeeded")) {
       throw new Error(
-        `Answering the gate Run --continue did not resolve it: ${answered.stdout}${answered.stderr}`,
+        `Answering the gate Run --continue did not resolve it: ${answered}`,
       );
     }
 

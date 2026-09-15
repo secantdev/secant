@@ -277,6 +277,18 @@ test("bundle build installs by default and the Home count reads back one", async
   assert.equal(snapshot.installedBundleCount, 1);
 });
 
+test("bundle build prints the advisory findings in plain text on the success path (A12)", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    await runHeadless(h.clients, ["bundle", "build", proofBundle], h.io),
+    0,
+  );
+  // The derived-engine finding is always present on a successful build; it was
+  // dropped from the plain-text report before A12 (only `--json` carried it).
+  assert.match(h.stdout(), /^Findings:$/m);
+  assert.match(h.stdout(), /Derived requires\.engine/);
+});
+
 test("bundle list shows the installed row and --json carries the snapshot", async (t) => {
   const h = await harness(t);
   assert.equal(

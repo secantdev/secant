@@ -20,11 +20,21 @@ export {
 // its keep by making teardown ordering exercisable against a fake with no
 // terminal and no native library.
 
+/** The narrow key value the Port hands its one consumer (the Run Workbench). It
+ *  declares only the two fields that drive the Workbench's raw-key pipeline, so no
+ *  OpenTUI key type crosses the Port and the consumer needs no cast (A16). The
+ *  production Adapter's richer key event (OpenTUI's `ParsedKey`) is assignable to
+ *  it; the fields are optional because a Port consumer must not assume more. */
+export interface RendererKeyEvent {
+  readonly name?: string;
+  readonly ctrl?: boolean;
+}
+
 export interface RendererPort {
   /** Current terminal cell dimensions. */
   size(): { readonly width: number; readonly height: number };
   /** Subscribe to raw key events; returns an unsubscribe. */
-  onKey(handler: (event: unknown) => void): () => void;
+  onKey(handler: (event: RendererKeyEvent) => void): () => void;
   /** Subscribe to resize events; returns an unsubscribe. */
   onResize(handler: (width: number, height: number) => void): () => void;
   /** Release the terminal. Idempotent. */

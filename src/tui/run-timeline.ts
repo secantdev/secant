@@ -35,6 +35,19 @@ export interface TimelineWindow {
 export type TimelineAction =
   "up" | "down" | "pageUp" | "pageDown" | "top" | "latest";
 
+/** Key name → scroll action, shared by the timeline and the inspection overlay
+ *  (both window over this same reducer): arrows step one row, the page keys jump a
+ *  page, `home`/`g` reach the top, `end` jumps to the live edge / bottom. */
+export const SCROLL_KEYS: Record<string, TimelineAction> = {
+  up: "up",
+  down: "down",
+  pageup: "pageUp",
+  pagedown: "pageDown",
+  home: "top",
+  end: "latest",
+  g: "top",
+};
+
 /** The visible window for a scroll state over `total` events in a `viewport`-tall
  *  area. `live` shows the newest `viewport` events; `paused` shows `viewport`
  *  events from its pinned `top`, clamped so it never scrolls past the ends. */

@@ -12,7 +12,10 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import type { RendererPort } from "../../src/tui/renderer/renderer.js";
+import type {
+  RendererKeyEvent,
+  RendererPort,
+} from "../../src/tui/renderer/renderer.js";
 import type {
   BundleCatalogSnapshot,
   RunListRow,
@@ -36,7 +39,7 @@ const WORKSPACE = "/tmp/secant-previous-runs";
 function makeRenderer(width: number, height: number) {
   let w = width;
   let h = height;
-  const keys = new Set<(event: unknown) => void>();
+  const keys = new Set<(event: RendererKeyEvent) => void>();
   const resizes = new Set<(width: number, height: number) => void>();
   const port: RendererPort = {
     size: () => ({ width: w, height: h }),
@@ -120,11 +123,11 @@ function runViewOf(run: RunView): RunWorkbenchView {
 
 function okActions(onRemove?: (runId: string) => void): RunActionsView {
   return {
-    resume: () => ({ kind: "ok" }),
-    cancel: () => ({ kind: "ok" }),
+    resume: () => () => ({ kind: "ok" }),
+    cancel: () => () => ({ kind: "ok" }),
     remove: (runId) => {
       onRemove?.(runId);
-      return { kind: "ok" };
+      return () => ({ kind: "ok" });
     },
   };
 }

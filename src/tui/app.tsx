@@ -187,17 +187,16 @@ export function App(props: {
   bundles: BundleCatalogView;
   launch: RunLaunchView;
   run: RunWorkbenchView;
-  /** The Previous Runs read seam and the Run Actions submit seam (#92). Optional
-   *  so tests that never reach those screens (e.g. the Bundle screens) need not
-   *  wire them; production (`mount.tsx`) always passes the live seams. */
-  runList?: RunListView;
-  actions?: RunActionsView;
+  /** The Previous Runs read seam and the Run Actions submit seam (#92). Required:
+   *  production (`mount.tsx`) always passes the live seams and a test that never
+   *  reaches those screens passes an inert fake (A28) — a shallow production stub
+   *  reachable only from tests no longer earns its keep. */
+  runList: RunListView;
+  actions: RunActionsView;
   renderer: RendererPort;
   exit: Exit;
 }) {
   const keymap = createTuiKeymap();
-  const runList = props.runList ?? stubRunListView();
-  const actions = props.actions ?? stubRunActionsView();
   return (
     <ExitProvider exit={props.exit}>
       <ThemeProvider>
@@ -206,8 +205,8 @@ export function App(props: {
             <BundleCatalogViewProvider view={props.bundles}>
               <RunLaunchViewProvider view={props.launch}>
                 <RunWorkbenchViewProvider view={props.run}>
-                  <RunListViewProvider view={runList}>
-                    <RunActionsViewProvider view={actions}>
+                  <RunListViewProvider view={props.runList}>
+                    <RunActionsViewProvider view={props.actions}>
                       <DialogProvider>
                         <ErrorBoundary
                           fallback={(error) => (
@@ -227,35 +226,4 @@ export function App(props: {
       </ThemeProvider>
     </ExitProvider>
   );
-}
-
-// Inert defaults for the screens a given render never opens: an empty Previous
-// Runs list and a Run Actions seam that refuses. A screen that actually reaches
-// these is always wired with a real seam (production or a test fake).
-function stubRunListView(): RunListView {
-  return {
-    openRunList: () => ({
-      state: () => ({
-        rows: [],
-        filter: "all",
-        beginningOfHistory: true,
-        hasMore: false,
-      }),
-      setResumable() {},
-      loadMore() {},
-    }),
-  };
-}
-function stubRunActionsView(): RunActionsView {
-  const refused = () =>
-    ({
-      kind: "refused",
-      problem: {
-        code: "run-actions-unavailable",
-        explanation: "Run Actions are not wired in this context.",
-        remediation: "Open the Run from Previous Runs.",
-        possibleEffects: "none",
-      },
-    }) as const;
-  return { resume: refused, cancel: refused, remove: refused };
 }

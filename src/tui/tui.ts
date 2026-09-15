@@ -35,3 +35,6 @@ export {
   TIMELINE_PAGE,
 } from "./run-timeline.js";
 export type { TimelineScroll } from "./run-timeline.js";
+// The display-column truncation helper, exposed for its unit test across the
+// boundary (D5), like the timeline model above.
+export { clip } from "./clip.js";

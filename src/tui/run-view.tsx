@@ -1,21 +1,20 @@
 import { randomUUID } from "node:crypto";
 import {
   createContext,
-  createSignal,
-  onCleanup,
   useContext,
   type Accessor,
   type ParentProps,
 } from "solid-js";
 import type {
   DiagnosticReference,
-  Problem,
   ProjectionPort,
   ResourceRead,
   ResourceReference,
   RunGateReference,
   RunSnapshot,
 } from "../application/projection-port.js";
+import { followProjection } from "./follow.js";
+import { submitAndSettle, type SettleOutcome } from "./submit-and-settle.js";
 
 // The view-state the Run Workbench renders, mirroring bundle-view.tsx: it opens
 // the existing `run` Projection as a *reactive* accessor and follows its durable
@@ -32,11 +31,8 @@ import type {
 
 /** An answer as the Workbench observes it: `pending` until it settles, then
  *  `applied` (the open snapshot then drops the checkpoint and its offer) or a
- *  refusal Problem. */
-export type AnswerOutcome =
-  | { readonly kind: "pending" }
-  | { readonly kind: "refused"; readonly problem: Problem }
-  | { readonly kind: "applied" };
+ *  refusal Problem. This is the shared submit-and-settle outcome (A23). */
+export type AnswerOutcome = SettleOutcome;
 
 export interface RunWorkbenchView {
   /** Opens the `run` Projection for one Run id; closes it on cleanup of the
@@ -84,73 +80,22 @@ export function createLiveRunWorkbenchView(
   port: ProjectionPort,
 ): RunWorkbenchView {
   return {
-    openRun(runId) {
-      const opened = port.openProjection({ family: "run", runId });
-      const [snapshot, setSnapshot] = createSignal(opened.snapshot);
-      let closed = false;
-      void (async () => {
-        for await (const update of opened.updates) {
-          if (closed) break;
-          // A `closed` update (observer-lagged, subject-gone, …) ends the follow;
-          // the Workbench keeps the last snapshot rather than re-opening. Matches
-          // workspace-view/bundle-view — re-open on loss is a later slice, not M2.
-          if (update.kind === "durable") setSnapshot(() => update.snapshot);
-        }
-      })();
-      onCleanup(() => {
-        closed = true;
-        opened.close();
-      });
-      return snapshot;
-    },
+    // Follow the `run` Projection through the shared helper (A22) so the timeline
+    // advances as Attempts settle on the live edge.
+    openRun: (runId) =>
+      followProjection(port.openProjection({ family: "run", runId })),
     readResource: (reference) => port.readResource(reference),
-    // The one Workbench write: the exact sequence headless `run answer` runs
-    // (headless.ts answerRun) minus the read-back — submit against the snapshot's
-    // Gate, surface a not-admitted or not-applied refusal, else `applied`; the
-    // open `run` snapshot already follows the Run leaving `blocked`, so this seam
-    // never re-opens it. Settlement is inline in production (like the launch seam),
-    // so the accessor resolves before the first read; the `pending` state is
-    // exercised by the renderer test's fake seam.
-    answer(gate, answer) {
-      const [outcome, setOutcome] = createSignal<AnswerOutcome>({
-        kind: "pending",
-      });
-      const admission = port.submit({
+    // The one Workbench write: the same submit-and-settle protocol headless `run
+    // answer` runs (A23), minus the read-back — submit against the snapshot's Gate
+    // and follow the Operation to settlement. A `continue` answer drives execution
+    // asynchronously now, so this awaits the operation stream rather than reading an
+    // inline outcome (#98). The open `run` snapshot already follows the Run leaving
+    // `blocked`, so this seam never re-opens it.
+    answer: (gate, answer) =>
+      submitAndSettle(port, {
         operationId: randomUUID(),
         operation: "answer-human-gate",
         input: { runId: gate.runId, gate, answer },
-      });
-      if (!admission.admitted) {
-        setOutcome({ kind: "refused", problem: admission.problem });
-        return outcome;
-      }
-      const operation = port.openProjection({
-        family: "operation",
-        operationId: admission.operationId,
-      });
-      const settled = operation.snapshot.outcome;
-      operation.close();
-      setOutcome(
-        settled.status === "applied"
-          ? { kind: "applied" }
-          : {
-              kind: "refused",
-              problem:
-                settled.status === "not-applied"
-                  ? settled.problem
-                  : answerNotSettled(),
-            },
-      );
-      return outcome;
-    },
-  };
-}
-
-function answerNotSettled(): Problem {
-  return {
-    code: "answer-not-settled",
-    explanation: "The answer had not settled when its outcome was read.",
-    remediation: "Retry the answer; if it persists, report it.",
-    possibleEffects: "unknown",
+      }),
   };
 }

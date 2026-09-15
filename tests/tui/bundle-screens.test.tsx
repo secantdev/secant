@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
+import { inertRunActionsView, inertRunListView } from "./inert.js";
 import type {
   BundleCatalogView,
   RunLaunchView,
@@ -197,6 +198,8 @@ async function mount(rows = ROWS, width = 80, height = 40) {
         bundles={bundles(rows)}
         launch={noLaunch()}
         run={noRunView()}
+        runList={inertRunListView()}
+        actions={inertRunActionsView()}
         renderer={fakeRenderer()}
         exit={(reason) => exits.push(reason)}
       />
@@ -291,6 +294,8 @@ test("a trusted Bundle reads as trusted in the list and inspection", async () =>
         bundles={view}
         launch={noLaunch()}
         run={noRunView()}
+        runList={inertRunListView()}
+        actions={inertRunActionsView()}
         renderer={fakeRenderer()}
         exit={() => {}}
       />
@@ -344,6 +349,8 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
         bundles={view}
         launch={noLaunch()}
         run={noRunView()}
+        runList={inertRunListView()}
+        actions={inertRunActionsView()}
         renderer={fakeRenderer()}
         exit={() => {}}
       />

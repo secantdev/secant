@@ -6,11 +6,11 @@ import type {
   BundleResult,
 } from "../application/bundle-management.js";
 import type {
-  OperationOutcome,
   Problem,
   ProjectionPort,
 } from "../application/projection-port.js";
-import { renderFocus, renderRow, renderRun, renderRunList } from "./render.js";
+import { renderFocus, renderRow } from "./render.js";
+import { registerRunCommands, splitSelector } from "./run-commands.js";
 
 // The headless client speaks the Application Interfaces and nothing else: the
 // Projection Port for the Workspace and Bundle-management for `bundle build`.
@@ -47,6 +47,13 @@ export interface HeadlessIO {
 export type CommandExecutor = (
   run: (clients: HeadlessClients) => number | Promise<number>,
 ) => number | Promise<number>;
+
+/** Wraps a command's result so `parseAsync` awaits an async Run command while a
+ *  synchronous command sets the exit code at once (see `settle` in `buildProgram`).
+ *  Shared with the `run` command group (run-commands.ts). */
+export type SettleAction = (
+  result: number | Promise<number>,
+) => void | Promise<void>;
 
 /** Runs one headless invocation with clients in hand. `args` is everything after
  *  `secant`. Async because a Run command (launch, resume, answer) drives
@@ -286,252 +293,9 @@ function buildProgram(
       );
     });
 
-  // No `run` action: like `bundle`, a bare `run` or an unknown token is a usage
-  // error exiting non-zero. `run launch` executes; `run show`/`run read` observe.
-  const run = program
-    .command("run")
-    .description(
-      "launch, list, show, read, answer, resume, cancel, and delete Runs",
-    );
-  run
-    .command("launch")
-    .description("launch an installed Command-only Bundle")
-    .argument("[id@version]", "Bundle id, optionally with @version")
-    .option(
-      "--trust <digest>",
-      "acknowledge and trust this exact installed digest",
-    )
-    .option(
-      "--input <name=value>",
-      "a Launch input (repeatable)",
-      (pair: string, prev: string[]) => [...prev, pair],
-      [],
-    )
-    .option("--json", "print the Run snapshot as JSON")
-    .action(
-      (
-        selector: string | undefined,
-        options: { trust?: string; input: string[]; json?: boolean },
-      ) => {
-        const json = options.json ?? false;
-        if (selector === undefined) {
-          return settle(
-            fail(io, json, {
-              code: "missing-bundle-id",
-              explanation: "run launch needs a Bundle id.",
-              remediation: "Run `secant run launch <id>[@<version>]`.",
-              possibleEffects: "none",
-            }),
-          );
-        }
-        const inputs = parseInputs(options.input);
-        if ("problem" in inputs) return settle(fail(io, json, inputs.problem));
-        return settle(
-          execute((clients) =>
-            launchRun(
-              clients.projectionPort,
-              io,
-              json,
-              selector,
-              options.trust,
-              inputs.values,
-            ),
-          ),
-        );
-      },
-    );
-  run
-    .command("show")
-    .description("show a Run's snapshot")
-    .argument("[run-id]", "the Run id printed at launch")
-    .option("--json", "print the Run snapshot as JSON")
-    .action((runId: string | undefined, options: { json?: boolean }) => {
-      const json = options.json ?? false;
-      if (runId === undefined) {
-        return settle(
-          fail(io, json, {
-            code: "missing-run-id",
-            explanation: "run show needs a Run id.",
-            remediation: "Run `secant run show <run-id>`.",
-            possibleEffects: "none",
-          }),
-        );
-      }
-      return settle(
-        execute((clients) => showRun(clients.projectionPort, io, json, runId)),
-      );
-    });
-  run
-    .command("resume")
-    .description(
-      "resume a halted or failed Run, running it until it rests again",
-    )
-    .argument("[run-id]", "the Run id printed at launch")
-    .option("--json", "print the Run snapshot as JSON")
-    .action((runId: string | undefined, options: { json?: boolean }) => {
-      const json = options.json ?? false;
-      if (runId === undefined) {
-        return settle(
-          fail(io, json, {
-            code: "missing-run-id",
-            explanation: "run resume needs a Run id.",
-            remediation: "Run `secant run resume <run-id>`.",
-            possibleEffects: "none",
-          }),
-        );
-      }
-      return settle(
-        execute((clients) =>
-          resumeRun(clients.projectionPort, io, json, runId),
-        ),
-      );
-    });
-  run
-    .command("answer")
-    .description("answer the Human Gate a blocked Run rests at")
-    .argument("[run-id]", "the Run id printed at launch")
-    .option("--continue", "grant one more review interval and resume the Run")
-    .option("--stop", "end the Run failed, keeping history and Artifacts")
-    .option("--json", "print the Run snapshot as JSON")
-    .action(
-      (
-        runId: string | undefined,
-        options: { continue?: boolean; stop?: boolean; json?: boolean },
-      ) => {
-        const json = options.json ?? false;
-        if (runId === undefined) {
-          return settle(
-            fail(io, json, {
-              code: "missing-run-id",
-              explanation: "run answer needs a Run id.",
-              remediation:
-                "Run `secant run answer <run-id> --continue` or `--stop`.",
-              possibleEffects: "none",
-            }),
-          );
-        }
-        const chosen = [options.continue, options.stop].filter(Boolean).length;
-        if (chosen !== 1) {
-          return settle(
-            fail(io, json, {
-              code: "invalid-answer",
-              explanation:
-                "run answer needs exactly one of --continue or --stop.",
-              remediation:
-                "Run `secant run answer <run-id> --continue` to grant another interval, or `--stop` to end the Run.",
-              possibleEffects: "none",
-            }),
-          );
-        }
-        const answer = options.continue ? "continue" : "stop";
-        return settle(
-          execute((clients) =>
-            answerRun(clients.projectionPort, io, json, runId, answer),
-          ),
-        );
-      },
-    );
-  run
-    .command("read")
-    .description("read one Run output by reference (<run-id>/<name>)")
-    .argument("[reference]", "a Run output reference, <run-id>/<name>")
-    .option("--json", "print the resolved output as JSON")
-    .action((reference: string | undefined, options: { json?: boolean }) => {
-      const json = options.json ?? false;
-      if (reference === undefined) {
-        return settle(
-          fail(io, json, {
-            code: "missing-reference",
-            explanation: "run read needs an output reference.",
-            remediation: "Run `secant run read <run-id>/<name>`.",
-            possibleEffects: "none",
-          }),
-        );
-      }
-      return settle(
-        execute((clients) =>
-          readRun(clients.projectionPort, io, json, reference),
-        ),
-      );
-    });
-  run
-    .command("list")
-    .description("list this Workspace's Previous Runs, newest first")
-    .option("--resumable", "show only resumable (halted or failed) Runs")
-    .option("--before <cursor>", "page to the next older Runs from this cursor")
-    .option("--json", "print the Projection snapshot as JSON")
-    .action(
-      (options: { resumable?: boolean; before?: string; json?: boolean }) =>
-        settle(
-          execute((clients) =>
-            listRuns(
-              clients.projectionPort,
-              io,
-              options.json ?? false,
-              options.resumable ?? false,
-              options.before,
-            ),
-          ),
-        ),
-    );
-  run
-    .command("cancel")
-    .description("cancel a live Run, ending it cancelled")
-    .argument("[run-id]", "the Run id printed at launch")
-    .option("--json", "print the Operation result as JSON")
-    .action((runId: string | undefined, options: { json?: boolean }) => {
-      const json = options.json ?? false;
-      if (runId === undefined) {
-        return settle(
-          fail(io, json, {
-            code: "missing-run-id",
-            explanation: "run cancel needs a Run id.",
-            remediation: "Run `secant run cancel <run-id>`.",
-            possibleEffects: "none",
-          }),
-        );
-      }
-      return settle(
-        execute((clients) =>
-          endRunOperation(
-            clients.projectionPort,
-            io,
-            json,
-            "cancel-run",
-            runId,
-          ),
-        ),
-      );
-    });
-  run
-    .command("delete")
-    .description("delete a resting or terminal Run's store from disk")
-    .argument("[run-id]", "the Run id printed at launch")
-    .option("--json", "print the Operation result as JSON")
-    .action((runId: string | undefined, options: { json?: boolean }) => {
-      const json = options.json ?? false;
-      if (runId === undefined) {
-        return settle(
-          fail(io, json, {
-            code: "missing-run-id",
-            explanation: "run delete needs a Run id.",
-            remediation: "Run `secant run delete <run-id>`.",
-            possibleEffects: "none",
-          }),
-        );
-      }
-      return settle(
-        execute((clients) =>
-          endRunOperation(
-            clients.projectionPort,
-            io,
-            json,
-            "delete-run",
-            runId,
-          ),
-        ),
-      );
-    });
+  // The `run` command group lives in a private file that registers onto this
+  // program (A25); it touches only io/execute/fail/settle, which the entry owns.
+  registerRunCommands(program, { io, execute, settle, fail });
 
   return { program, state };
 }
@@ -678,11 +442,8 @@ function inspectBundle(
   selector: string,
 ): number {
   // The id is lowercase reverse-domain (no `@`); the optional version follows an
-  // `@`, so the first `@` splits them.
-  const at = selector.indexOf("@");
-  const id = at === -1 ? selector : selector.slice(0, at);
-  const version = at === -1 ? undefined : selector.slice(at + 1);
-
+  // `@` — the same split `run launch` uses (A24).
+  const { id, version } = splitSelector(selector);
   const opened = port.openProjection({
     family: "bundle-catalog",
     focus: { id, ...(version !== undefined ? { version } : {}) },
@@ -704,373 +465,13 @@ function inspectBundle(
   }
 }
 
-/** Parse repeated `--input name=value` pairs into a record, or a Problem when a
- *  pair has no `=`. A later pair for the same name wins. */
-function parseInputs(
-  pairs: readonly string[],
-): { values: Record<string, string> } | { problem: Problem } {
-  const values: Record<string, string> = {};
-  for (const pair of pairs) {
-    const eq = pair.indexOf("=");
-    if (eq <= 0) {
-      return {
-        problem: {
-          code: "invalid-input",
-          explanation: `Launch input "${pair}" is not in name=value form.`,
-          remediation: "Pass each input as `--input <name>=<value>`.",
-          possibleEffects: "none",
-        },
-      };
-    }
-    values[pair.slice(0, eq)] = pair.slice(eq + 1);
-  }
-  return { values };
-}
-
-/** Split `<id>[@<version>]`; the first `@` divides them. */
-function splitSelector(selector: string): {
-  id: string;
-  version?: string;
-} {
-  const at = selector.indexOf("@");
-  return at === -1
-    ? { id: selector }
-    : { id: selector.slice(0, at), version: selector.slice(at + 1) };
-}
-
-/** Await a submitted Operation's settled outcome. A Run settles asynchronously
- *  now (execution spawns), so the outcome may still be `pending` on the opened
- *  snapshot; when it is, the settled outcome arrives as the operation stream's
- *  first durable update (no sleep, no poll). A synchronous Operation is already
- *  settled and returns at once. */
-async function settledOutcome(
-  port: ProjectionPort,
-  operationId: string,
-): Promise<OperationOutcome> {
-  const view = port.openProjection({ family: "operation", operationId });
-  try {
-    if (view.snapshot.outcome.status !== "pending")
-      return view.snapshot.outcome;
-    for await (const update of view.updates) {
-      if (
-        update.kind === "durable" &&
-        update.snapshot.outcome.status !== "pending"
-      ) {
-        return update.snapshot.outcome;
-      }
-    }
-    return view.snapshot.outcome;
-  } finally {
-    view.close();
-  }
-}
-
-async function launchRun(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  json: boolean,
-  selector: string,
-  trust: string | undefined,
-  inputs: Record<string, string>,
-): Promise<number> {
-  const { id, version } = splitSelector(selector);
-  const admission = port.submit({
-    operationId: randomUUID(),
-    operation: "launch-run",
-    input: {
-      bundle: { id, ...(version !== undefined ? { version } : {}) },
-      launchInputs: inputs,
-      ...(trust !== undefined ? { trustDigest: trust } : {}),
-    },
-  });
-  if (!admission.admitted) return fail(io, json, admission.problem);
-  const runId = admission.runId;
-  if (runId === undefined) {
-    // A launch always identifies its Run; a missing id is a contract violation.
-    return fail(io, json, {
-      code: "run-not-identified",
-      explanation: "The launch was admitted without identifying a Run.",
-      remediation: "Retry the launch; if it persists, report it.",
-      possibleEffects: "unknown",
-    });
-  }
-
-  // The launch drives execution (async now); await its settled outcome and
-  // surface a settlement Problem before reading the Run.
-  const outcome = await settledOutcome(port, admission.operationId);
-  if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
-
-  const opened = port.openProjection({ family: "run", runId });
-  try {
-    const snapshot = opened.snapshot;
-    if (json) {
-      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
-      return snapshot.result.found && snapshot.result.run.state === "succeeded"
-        ? 0
-        : 1;
-    }
-    if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
-    const run = snapshot.result.run;
-    io.out(`Run ${run.runId}\n`);
-    io.out(`State: ${run.state}\n`);
-    return run.state === "succeeded" ? 0 : 1;
-  } finally {
-    opened.close();
-  }
-}
-
-function showRun(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  json: boolean,
-  runId: string,
-): number {
-  const opened = port.openProjection({ family: "run", runId });
-  try {
-    const snapshot = opened.snapshot;
-    if (json) {
-      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
-      return snapshot.result.found ? 0 : 1;
-    }
-    if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
-    const run = snapshot.result.run;
-    io.out(renderRun(run));
-    // The conflict diagnostic is reached by reference, never inlined in the
-    // snapshot (AC5); resolve and print it so `run show` is self-contained.
-    if (run.conflict !== undefined) {
-      const read = port.readResource(run.conflict.reference);
-      if (read.found) io.out(`\nDiagnostic:\n${read.content}`);
-    }
-    return 0;
-  } finally {
-    opened.close();
-  }
-}
-
-async function resumeRun(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  json: boolean,
-  runId: string,
-): Promise<number> {
-  const admission = port.submit({
-    operationId: randomUUID(),
-    operation: "resume-run",
-    input: { runId },
-  });
-  if (!admission.admitted) return fail(io, json, admission.problem);
-
-  // The resume drives execution (async now); await its settled outcome and
-  // surface a settlement Problem before reading the Run, like `run launch`.
-  const outcome = await settledOutcome(port, admission.operationId);
-  if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
-
-  const opened = port.openProjection({ family: "run", runId });
-  try {
-    const snapshot = opened.snapshot;
-    if (json) {
-      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
-      return snapshot.result.found && snapshot.result.run.state === "succeeded"
-        ? 0
-        : 1;
-    }
-    if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
-    const run = snapshot.result.run;
-    io.out(`Run ${run.runId}\n`);
-    io.out(`State: ${run.state}\n`);
-    return run.state === "succeeded" ? 0 : 1;
-  } finally {
-    opened.close();
-  }
-}
-
-async function answerRun(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  json: boolean,
-  runId: string,
-  answer: "continue" | "stop",
-): Promise<number> {
-  // Read the Run's current Gate reference and submit against it, so a Gate that
-  // moved between the read and the submit is caught as stale by the Application.
-  const opened = port.openProjection({ family: "run", runId });
-  let gate;
-  try {
-    const snapshot = opened.snapshot;
-    if (!snapshot.result.found) return fail(io, json, snapshot.result.problem);
-    const run = snapshot.result.run;
-    if (run.checkpoint === undefined) {
-      return fail(io, json, {
-        code: "run-not-blocked",
-        explanation: `Run ${runId} is ${run.state}, not blocked; there is no Human Gate to answer.`,
-        remediation:
-          "Run `secant run show <run-id>` to see the Run's state; only a blocked Run can be answered.",
-        possibleEffects: "none",
-        details: { runId, state: run.state },
-      });
-    }
-    gate = run.checkpoint.gate;
-  } finally {
-    opened.close();
-  }
-
-  const admission = port.submit({
-    operationId: randomUUID(),
-    operation: "answer-human-gate",
-    input: { runId, gate, answer },
-  });
-  if (!admission.admitted) return fail(io, json, admission.problem);
-
-  // A `continue` answer drives execution (async now); await its settled outcome
-  // and surface a settlement Problem before reading the Run, like `run launch`.
-  const outcome = await settledOutcome(port, admission.operationId);
-  if (outcome.status === "not-applied") return fail(io, json, outcome.problem);
-
-  const after = port.openProjection({ family: "run", runId });
-  try {
-    const snapshot = after.snapshot;
-    if (json) {
-      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
-      return snapshot.result.found && snapshot.result.run.state === "succeeded"
-        ? 0
-        : 1;
-    }
-    if (!snapshot.result.found) return fail(io, false, snapshot.result.problem);
-    const run = snapshot.result.run;
-    io.out(`Run ${run.runId}\n`);
-    io.out(
-      answer === "continue"
-        ? "Answered: continue (granted one more review interval)\n"
-        : "Answered: stop (ended the Run failed, history and Artifacts kept)\n",
-    );
-    io.out(`State: ${run.state}\n`);
-    return run.state === "succeeded" ? 0 : 1;
-  } finally {
-    after.close();
-  }
-}
-
-function readRun(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  json: boolean,
-  reference: string,
-): number {
-  const slash = reference.indexOf("/");
-  if (slash <= 0 || slash === reference.length - 1) {
-    return fail(io, json, {
-      code: "invalid-reference",
-      explanation: `Reference "${reference}" is not in <run-id>/<name> form.`,
-      remediation: "Run `secant run read <run-id>/<name>`.",
-      possibleEffects: "none",
-    });
-  }
-  const runId = reference.slice(0, slash);
-  const name = reference.slice(slash + 1);
-
-  const opened = port.openProjection({ family: "run", runId });
-  let outputRef;
-  try {
-    const snapshot = opened.snapshot;
-    if (!snapshot.result.found) return fail(io, json, snapshot.result.problem);
-    const output = snapshot.result.run.outputs.find((o) => o.name === name);
-    if (output === undefined) {
-      return fail(io, json, {
-        code: "run-output-not-found",
-        explanation: `Run ${runId} has no bound output named ${name}.`,
-        remediation:
-          "Run `secant run show <run-id>` to see the Run's current outputs.",
-        possibleEffects: "none",
-        details: { runId, name },
-      });
-    }
-    outputRef = output.reference;
-  } finally {
-    opened.close();
-  }
-
-  const read = port.readResource(outputRef);
-  if (!read.found) return fail(io, json, read.problem);
-  if (json) {
-    io.out(`${JSON.stringify(read, null, 2)}\n`);
-    return 0;
-  }
-  io.out(read.content.endsWith("\n") ? read.content : `${read.content}\n`);
-  return 0;
-}
-
-function listRuns(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  json: boolean,
-  resumable: boolean,
-  before: string | undefined,
-): number {
-  const opened = port.openProjection({
-    family: "run-list",
-    ...(resumable ? { resumable: true } : {}),
-    ...(before !== undefined ? { before } : {}),
-  });
-  try {
-    const snapshot = opened.snapshot;
-    if (json) {
-      io.out(`${JSON.stringify(snapshot, null, 2)}\n`);
-      return 0;
-    }
-    io.out(renderRunList(snapshot));
-    return 0;
-  } finally {
-    opened.close();
-  }
-}
-
-/** Submit a cancel-run/delete-run Operation and report its settled outcome. Both
- *  settle inline (headless default), so the Operation is already applied here. */
-function endRunOperation(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  json: boolean,
-  operation: "cancel-run" | "delete-run",
-  runId: string,
-): number {
-  const admission = port.submit({
-    operationId: randomUUID(),
-    operation,
-    input: { runId },
-  });
-  if (!admission.admitted) return fail(io, json, admission.problem);
-
-  const opened = port.openProjection({
-    family: "operation",
-    operationId: admission.operationId,
-  });
-  try {
-    const outcome = opened.snapshot.outcome;
-    if (json) {
-      io.out(`${JSON.stringify(opened.snapshot, null, 2)}\n`);
-      return outcome.status === "applied" ? 0 : 1;
-    }
-    if (outcome.status === "not-applied") {
-      return fail(io, false, outcome.problem);
-    }
-    io.out(
-      operation === "cancel-run"
-        ? `Cancelled run ${runId}\n`
-        : `Deleted run ${runId}\n`,
-    );
-    return 0;
-  } finally {
-    opened.close();
-  }
-}
-
 function report(io: HeadlessIO, json: boolean, result: BundleResult): number {
   if (!result.ok) return fail(io, json, result.problem);
   if (json) {
     io.out(`${JSON.stringify(result.report, null, 2)}\n`);
     return 0;
   }
-  const { identity, digest, outputPath, installed } = result.report;
+  const { identity, digest, outputPath, installed, findings } = result.report;
   io.out(`Bundle: ${identity.id}@${identity.version}\n`);
   io.out(`Digest: sha256:${digest}\n`);
   if (outputPath !== undefined) io.out(`Wrote ${outputPath}\n`);
@@ -1078,6 +479,13 @@ function report(io: HeadlessIO, json: boolean, result: BundleResult): number {
     io.out("Installed.\n");
   } else if (installed?.status === "already-installed") {
     io.out("Already installed.\n");
+  }
+  // The advisory build notes the report carries (the derived engine range, the
+  // inserted build-host platform) are printed in plain text too, not only under
+  // `--json` (A12) — the field exists to be seen.
+  if (findings.length > 0) {
+    io.out("Findings:\n");
+    for (const finding of findings) io.out(`  ${finding}\n`);
   }
   return 0;
 }

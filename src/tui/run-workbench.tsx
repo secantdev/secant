@@ -14,9 +14,7 @@ import type {
   AnswerHumanGateOffer,
   CancelRunOffer,
   DeleteRunOffer,
-  DiagnosticReference,
   Problem,
-  ResourceReference,
   ResumeRunOffer,
   RunCheckpointView,
   RunStateName,
@@ -24,12 +22,21 @@ import type {
   RunStepStatus,
   RunView,
 } from "../application/projection-port.js";
-import type { RendererPort } from "./renderer/renderer.js";
+import type { RendererKeyEvent, RendererPort } from "./renderer/renderer.js";
 import { clip } from "./clip.js";
-import { useRunActionsView } from "./run-actions-view.js";
+import {
+  useRunActionsView,
+  type RunActionOutcome,
+} from "./run-actions-view.js";
 import { useRunWorkbenchView, type AnswerOutcome } from "./run-view.js";
 import {
+  createInspection,
+  InspectionView,
+  type Openable,
+} from "./run-inspection.js";
+import {
   AT_LIVE,
+  SCROLL_KEYS,
   scrollTimeline,
   timelineWindow,
   type TimelineAction,
@@ -67,10 +74,6 @@ const DETAILS_HEIGHT = 8;
  *  their consequence, and a status/hint line. Fixed so the timeline viewport
  *  shrinks to fit and nothing overflows. */
 const CHECKPOINT_HEIGHT = 8;
-/** Large content is bounded: at most this many lines are inspected, with an
- *  explicit truncation marker past it (#91 AC4); the bytes are never inlined into
- *  the snapshot, only fetched on open through the reference. */
-const MAX_INSPECT_LINES = 500;
 
 const STEP_GLYPH: Record<RunStepStatus, string> = {
   pending: "·",
@@ -81,26 +84,6 @@ const STEP_GLYPH: Record<RunStepStatus, string> = {
 };
 
 type Focus = "timeline" | "details" | "checkpoint";
-
-/** One openable piece of Run evidence, reached through its reference (#91 AC4):
- *  a bound output, the blocked checkpoint's latest Verdict, or the halt
- *  diagnostic. Timeline links exist only where they open real evidence. */
-interface Openable {
-  readonly label: string;
-  readonly reference: ResourceReference | DiagnosticReference;
-}
-
-interface Inspection {
-  readonly title: string;
-  readonly lines: readonly string[];
-  readonly truncated: boolean;
-  readonly problem?: Problem;
-}
-
-interface KeyLike {
-  readonly name?: string;
-  readonly ctrl?: boolean;
-}
 
 export function RunWorkbench(props: {
   runId: string;
@@ -145,11 +128,6 @@ export function RunWorkbench(props: {
   const [focus, setFocus] = createSignal<Focus>("timeline");
   const [detailsOpen, setDetailsOpen] = createSignal(false);
   const [selected, setSelected] = createSignal(0);
-  const [inspecting, setInspecting] = createSignal<Inspection | undefined>();
-  const [inspectScroll, setInspectScroll] = createSignal<TimelineScroll>({
-    mode: "paused",
-    top: 0,
-  });
   const [control, setControl] = createSignal<"continue" | "stop">("continue");
   const [answerOutcome, setAnswerOutcome] =
     createSignal<Accessor<AnswerOutcome>>();
@@ -177,27 +155,39 @@ export function RunWorkbench(props: {
   });
   const [actionRefusal, setActionRefusal] = createSignal<Problem | undefined>();
   const [pending, setPending] = createSignal<"cancel" | "delete" | undefined>();
+  // A dispatched Run Action followed to settlement: resume drives execution and a
+  // cancel-as-abort aborts a live Run, both asynchronous now (#98), so the outcome
+  // starts `pending` and the effect below reports it. A second dispatch while one
+  // is in flight is ignored.
+  const [actionFlight, setActionFlight] = createSignal<{
+    readonly op: "resume" | "cancel" | "delete";
+    readonly outcome: Accessor<RunActionOutcome>;
+  }>();
+  const actionInFlight = () => {
+    const flight = actionFlight();
+    return flight !== undefined && flight.outcome().kind === "pending";
+  };
 
   const dispatchResume = () => {
     const offer = offers().resume;
-    if (offer === undefined) return;
-    const outcome = actions.resume(offer.runId);
-    setActionRefusal(outcome.kind === "refused" ? outcome.problem : undefined);
+    if (offer === undefined || actionInFlight()) return;
+    setActionRefusal(undefined);
+    setActionFlight({ op: "resume", outcome: actions.resume(offer.runId) });
   };
   // Called on the confirming keypress. Cancel keeps the Run's history; delete
-  // removes it and leaves the Workbench for the list, since the Run is now gone.
+  // removes it and leaves the Workbench for the list once it settles, since the
+  // Run is then gone.
   const confirmCancel = () => {
     const offer = offers().cancel;
-    if (offer === undefined) return;
-    const outcome = actions.cancel(offer.runId);
-    setActionRefusal(outcome.kind === "refused" ? outcome.problem : undefined);
+    if (offer === undefined || actionInFlight()) return;
+    setActionRefusal(undefined);
+    setActionFlight({ op: "cancel", outcome: actions.cancel(offer.runId) });
   };
   const confirmDelete = () => {
     const offer = offers().remove;
-    if (offer === undefined) return;
-    const outcome = actions.remove(offer.runId);
-    if (outcome.kind === "refused") setActionRefusal(outcome.problem);
-    else props.onDeleted();
+    if (offer === undefined || actionInFlight()) return;
+    setActionRefusal(undefined);
+    setActionFlight({ op: "delete", outcome: actions.remove(offer.runId) });
   };
   const anyActionOffer = () => {
     const current = offers();
@@ -256,10 +246,18 @@ export function RunWorkbench(props: {
 
   const interiorH = () => Math.max(1, dims().height - 2);
   const innerW = () => Math.max(1, dims().width - 2);
+  // The reference-inspection overlay (A26): its state, key loop, and view live in
+  // run-inspection; the Workbench selects which evidence to open and hands it here.
+  const inspection = createInspection({
+    readResource: view.readResource,
+    interiorH,
+  });
+  const hasConflict = () => run()?.conflict !== undefined;
   const compactHeader = () => dims().width < HEADER_COMPACT_WIDTH;
   const chrome = () =>
     (compactHeader() ? 1 : 2) +
     (isBlocked() ? 1 : 0) +
+    (hasConflict() ? 1 : 0) /*top-level conflict line (A13)*/ +
     1 /*progress*/ +
     actionLines() +
     1 /*timeline label*/ +
@@ -316,6 +314,24 @@ export function RunWorkbench(props: {
     setAnswerOutcome(undefined);
   });
 
+  // Follow a dispatched Run Action to settlement. A refusal surfaces in the
+  // Actions section; an applied delete leaves the Workbench for the list (the Run
+  // is gone), while resume/cancel just let the live `run` snapshot carry the new
+  // state in.
+  createEffect(() => {
+    const flight = actionFlight();
+    if (flight === undefined) return;
+    const settled = flight.outcome();
+    if (settled.kind === "pending") return;
+    if (settled.kind === "refused") {
+      setActionRefusal(settled.problem);
+      setActionFlight(undefined);
+    } else {
+      setActionFlight(undefined);
+      if (flight.op === "delete") props.onDeleted();
+    }
+  });
+
   // Focus lands on the interaction as each new checkpoint appears and returns to
   // the timeline when it leaves (#92 AC5), without yanking focus back while the
   // user has tabbed away during a still-blocked Run. Keyed on the Gate's Attempt,
@@ -370,84 +386,18 @@ export function RunWorkbench(props: {
 
   const openSelected = () => {
     const target = openables()[selectedRef()];
-    if (target === undefined) return;
-    const read = view.readResource(target.reference);
-    if (!read.found) {
-      setInspecting({
-        title: target.label,
-        lines: [],
-        truncated: false,
-        problem: read.problem,
-      });
-    } else {
-      const all = read.content.split("\n");
-      const truncated = all.length > MAX_INSPECT_LINES;
-      setInspecting({
-        title: target.label,
-        lines: truncated ? all.slice(0, MAX_INSPECT_LINES) : all,
-        truncated,
-      });
-    }
-    setInspectScroll({ mode: "paused", top: 0 });
+    if (target !== undefined) inspection.open(target);
   };
 
-  // Display lines include an explicit truncation marker as the final row when the
-  // resource was capped, so it scrolls into view like any other line (#91 AC4).
-  const inspectLines = (): readonly string[] => {
-    const current = inspecting();
-    if (current === undefined) return [];
-    if (current.problem !== undefined) {
-      return [
-        `Error [${current.problem.code}]: ${current.problem.explanation}`,
-        current.problem.remediation,
-      ];
-    }
-    return current.truncated
-      ? [
-          ...current.lines,
-          `… output truncated (first ${MAX_INSPECT_LINES} lines)`,
-        ]
-      : current.lines;
-  };
-  const inspectViewportH = () => Math.max(1, interiorH() - 2); // title + footer
-  const inspectWin = () =>
-    timelineWindow(inspectScroll(), inspectLines().length, inspectViewportH());
-
-  const KEY_ACTIONS: Record<string, TimelineAction> = {
-    up: "up",
-    down: "down",
-    pageup: "pageUp",
-    pagedown: "pageDown",
-    home: "top",
-    end: "latest",
-    g: "top",
-  };
-
-  const handleKey = (raw: unknown) => {
-    const key = raw as KeyLike;
+  const handleKey = (key: RendererKeyEvent) => {
     const name = key.name ?? "";
     if (name === "q" || (name === "c" && key.ctrl)) {
       exit();
       return;
     }
-    // Inspection overlay: scroll it, Escape closes and restores the panel focus.
-    if (inspecting() !== undefined) {
-      if (name === "escape") {
-        setInspecting(undefined);
-        return;
-      }
-      const action = KEY_ACTIONS[name];
-      if (action !== undefined)
-        setInspectScroll((prev) =>
-          scrollTimeline(
-            prev,
-            action,
-            inspectLines().length,
-            inspectViewportH(),
-          ),
-        );
-      return;
-    }
+    // Inspection overlay owns its own key loop while open (A26): it consumes the
+    // key (scroll or Escape-to-close) and reports that it did.
+    if (inspection.handleKey(name)) return;
     if (run() === undefined) {
       if (name === "escape") props.onLeave();
       return;
@@ -554,7 +504,7 @@ export function RunWorkbench(props: {
         props.onLeave();
         return;
       default: {
-        const action = KEY_ACTIONS[name];
+        const action = SCROLL_KEYS[name];
         if (action !== undefined) scrollBy(action);
       }
     }
@@ -571,12 +521,12 @@ export function RunWorkbench(props: {
       backgroundColor={theme.background}
     >
       <Switch>
-        <Match when={inspecting()}>
+        <Match when={inspection.inspecting()}>
           {(current) => (
             <InspectionView
               inspection={current()}
-              lines={inspectLines}
-              window={inspectWin}
+              lines={inspection.lines}
+              window={inspection.window}
               width={innerW}
               theme={theme}
             />
@@ -726,6 +676,17 @@ function Workbench(props: {
         {(checkpoint) => (
           <text fg={theme.warning} flexShrink={0}>
             {clip(`⏸ waiting for review — ${checkpoint().message}`, w())}
+          </text>
+        )}
+      </Show>
+
+      {/* A Run halted on a Materialization conflict names the Workspace path to
+          restore at the top level, beside the checkpoint line (A13) — the detail
+          diagnostic stays behind its reference in the Details panel. */}
+      <Show when={run().conflict}>
+        {(conflict) => (
+          <text fg={theme.warning} flexShrink={0}>
+            {clip(`✗ conflict — restore ${conflict().path}`, w())}
           </text>
         )}
       </Show>
@@ -1034,40 +995,6 @@ function DetailsPanel(props: {
           )}
         </For>
       </Show>
-    </box>
-  );
-}
-
-function InspectionView(props: {
-  inspection: Inspection;
-  lines: Accessor<readonly string[]>;
-  window: Accessor<ReturnType<typeof timelineWindow>>;
-  width: Accessor<number>;
-  theme: Theme;
-}) {
-  const { theme } = props;
-  const w = () => props.width();
-  const visible = () => {
-    const win = props.window();
-    return props.lines().slice(win.top, win.top + win.visible);
-  };
-  return (
-    <box flexDirection="column" flexGrow={1} overflow="hidden">
-      <text fg={theme.text} attributes={TextAttributes.BOLD} flexShrink={0}>
-        {clip(props.inspection.title, w())}
-      </text>
-      <box flexDirection="column" flexGrow={1} overflow="hidden">
-        <For each={visible()}>
-          {(line) => (
-            <text fg={theme.text} flexShrink={0}>
-              {clip(line, w())}
-            </text>
-          )}
-        </For>
-      </box>
-      <text fg={theme.textMuted} flexShrink={0}>
-        {clip("↑/↓ scroll · esc close · q quit", w())}
-      </text>
     </box>
   );
 }

@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
   createContext,
-  createSignal,
-  onCleanup,
   useContext,
   type Accessor,
   type ParentProps,
@@ -11,6 +9,7 @@ import type {
   ProjectionPort,
   WorkspaceSnapshot,
 } from "../application/projection-port.js";
+import { followProjection } from "./follow.js";
 
 // The view-state the shell renders: the current `workspace` snapshot as a
 // reactive accessor, plus `approve` which submits the `approve-workspace`
@@ -45,23 +44,11 @@ export function useWorkspaceView(): WorkspaceView {
  * flips the screen from the dialog to Home. Call inside a reactive owner.
  */
 export function createLiveWorkspaceView(port: ProjectionPort): WorkspaceView {
-  const opened = port.openProjection({ family: "workspace" });
-  const [snapshot, setSnapshot] = createSignal(opened.snapshot);
-
-  let closed = false;
-  void (async () => {
-    for await (const update of opened.updates) {
-      if (closed) break;
-      if (update.kind === "durable") {
-        setSnapshot(update.snapshot);
-      }
-    }
-  })();
-
-  onCleanup(() => {
-    closed = true;
-    opened.close();
-  });
+  // Follow the one `workspace` Projection through the shared helper (A22) so
+  // approval flips the screen from the dialog to Home.
+  const snapshot = followProjection(
+    port.openProjection({ family: "workspace" }),
+  );
 
   return {
     snapshot,

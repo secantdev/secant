@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
+import { inertRunActionsView, inertRunListView } from "./inert.js";
 import type {
   AnswerOutcome,
   BundleCatalogView,
@@ -11,7 +12,10 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import type { RendererPort } from "../../src/tui/renderer/renderer.js";
+import type {
+  RendererKeyEvent,
+  RendererPort,
+} from "../../src/tui/renderer/renderer.js";
 import type {
   AnswerHumanGateOffer,
   BundleCatalogSnapshot,
@@ -44,7 +48,7 @@ const WORKSPACE = "/tmp/secant-workbench-ws";
 function makeRenderer(width: number, height: number) {
   let w = width;
   let h = height;
-  const keys = new Set<(event: unknown) => void>();
+  const keys = new Set<(event: RendererKeyEvent) => void>();
   const resizes = new Set<(width: number, height: number) => void>();
   const port: RendererPort = {
     size: () => ({ width: w, height: h }),
@@ -299,7 +303,8 @@ async function mountApp(
         bundles={oneBundle()}
         launch={launchTo(launchRunId)}
         run={control.view}
-        actions={actions}
+        runList={inertRunListView()}
+        actions={actions ?? inertRunActionsView()}
         renderer={renderer.port}
         exit={(reason) => exits.push(reason)}
       />
@@ -461,6 +466,41 @@ test("a blocked Run shows a waiting-for-review note and the checkpoint facts", a
 
 // --- live updates + timeline mechanics (AC2, AC3) --------------------------
 
+test("launching transitions to the Workbench before the Run rests, and progress rows appear while a Step runs", async () => {
+  // Launch resolves at admission (S1): the App walks Start a Run → launch and lands
+  // on the Workbench with the Run still running and no activity yet — before it
+  // rests. The read seam is a deferred fake: a durable update then appends timeline
+  // rows while a Step runs, and they appear live without leaving the Workbench.
+  const control = makeRunView(
+    snapshotOf(
+      runOf({
+        state: "running",
+        progress: PROGRESS,
+        position: 1,
+        timeline: [],
+      }),
+    ),
+  );
+  const renderer = makeRenderer(100, 20);
+  const { t } = await mountApp(control, renderer, "run-1", 100, 20);
+  await t.waitForFrame((f) => f.includes("Timeline"));
+  assert.match(t.captureCharFrame(), /RUNNING/); // reached the Workbench, still live
+  assert.match(t.captureCharFrame(), /no activity yet/); // the Run has not rested
+  // A Step runs: durable progress lands and follows the live edge into view.
+  control.setRun(
+    runOf({
+      state: "running",
+      progress: PROGRESS,
+      position: 1,
+      timeline: events(3),
+    }),
+  );
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, / e2/); // the newest row appeared while running
+  assert.match(frame, /\(live\)/);
+});
+
 test("the timeline follows the live edge as durable updates append events", async () => {
   const { t, control } = await mountWorkbench(
     runOf({ timeline: events(6) }),
@@ -589,6 +629,37 @@ test("opening a large text output shows bounded content with a truncation marker
   assert.match(t.captureCharFrame(), /Details/);
 });
 
+test("captured output with colour escapes and carriage returns renders without them", async () => {
+  const run = runOf({
+    outputs: [
+      {
+        name: "log",
+        type: "text",
+        reference: {
+          runId: "run-1",
+          artifactName: "log",
+          versionId: "v1",
+          type: "text",
+        },
+      },
+    ],
+  });
+  const { t, control, renderer } = await mountWorkbench(run, 100, 30);
+  // A command forcing colour with CRLF line endings: SGR escapes plus `\r\n` (D4).
+  const raw = "[31mred line[0m\r\nplain line\r\n[1mbold line[0m";
+  control.setRead("log", { found: true, type: "text", content: raw });
+
+  await press(t, renderer, "d"); // focus details
+  await press(t, renderer, "return"); // open the log reference
+  const frame = t.captureCharFrame();
+  assert.ok(!frame.includes("["), "no escape sequences survive");
+  assert.ok(!frame.includes("\r"), "no carriage returns survive");
+  // Split on /\r?\n/: each CRLF started a fresh row, so all three read cleanly.
+  assert.match(frame, /red line/);
+  assert.match(frame, /plain line/);
+  assert.match(frame, /bold line/);
+});
+
 test("a Verdict and a diagnostic open through their references", async () => {
   const run = runOf({
     state: "halted",
@@ -628,6 +699,26 @@ test("a Verdict and a diagnostic open through their references", async () => {
   await press(t, renderer, "return");
   assert.match(t.captureCharFrame(), /halt diagnostic: out\.txt/);
   assert.match(t.captureCharFrame(), /went missing/);
+});
+
+test("a halted Run shows the materialization conflict path as a top-level line, at 40 columns", async () => {
+  const run = runOf({
+    state: "halted",
+    conflict: {
+      artifactName: "out.txt",
+      path: "sub/out.txt",
+      reference: { runId: "run-1", diagnosticId: "d1", type: "diagnostic" },
+    },
+  });
+  const { t, renderer } = await mountWorkbench(run, 100, 30);
+  // The Workspace path to restore is a top-level line, not only a details-panel
+  // row reachable at width ≥ 60 (A13).
+  assert.match(t.captureCharFrame(), /restore sub\/out\.txt/);
+  renderer.resize(40, 24);
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /restore sub\/out\.txt/); // still shown at 40 columns
+  noOverflow(frame, 40);
 });
 
 test("a missing reference surfaces its Problem rather than throwing", async () => {
@@ -1004,9 +1095,9 @@ const DELETE_OFFER = {
 
 function okActions(over: Partial<RunActionsView> = {}): RunActionsView {
   return {
-    resume: () => ({ kind: "ok" }),
-    cancel: () => ({ kind: "ok" }),
-    remove: () => ({ kind: "ok" }),
+    resume: () => () => ({ kind: "ok" }),
+    cancel: () => () => ({ kind: "ok" }),
+    remove: () => () => ({ kind: "ok" }),
     ...over,
   };
 }
@@ -1036,9 +1127,10 @@ test("resume dispatches and the Workbench follows into the running Run", async (
   const renderer = makeRenderer(100, 40);
   const actions = okActions({
     resume: () => {
-      // Production drives the Run and the read seam observes it; model that here.
+      // Production drives the Run and the read seam observes it; model that here:
+      // the dispatch settles at once and the snapshot advances to running.
       control.setRun(runOf({ state: "running", actionOffers: [CANCEL_OFFER] }));
-      return { kind: "ok" };
+      return () => ({ kind: "ok" });
     },
   });
   const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
@@ -1061,7 +1153,7 @@ test("delete confirms then dispatches and leaves the Workbench", async () => {
   const actions = okActions({
     remove: () => {
       removed += 1;
-      return { kind: "ok" };
+      return () => ({ kind: "ok" });
     },
   });
   const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
@@ -1085,7 +1177,7 @@ test("Escape backs out of an armed delete without dispatching or leaving", async
   const actions = okActions({
     remove: () => {
       removed += 1;
-      return { kind: "ok" };
+      return () => ({ kind: "ok" });
     },
   });
   const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
@@ -1110,7 +1202,7 @@ test("cancel arms a confirmation and dispatches on y", async () => {
       control.setRun(
         runOf({ state: "cancelled", actionOffers: [DELETE_OFFER] }),
       );
-      return { kind: "ok" };
+      return () => ({ kind: "ok" });
     },
   });
   const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
@@ -1128,7 +1220,7 @@ test("cancel arms a confirmation and dispatches on y", async () => {
 
 test("a refused action surfaces the reason without leaving", async () => {
   const actions = okActions({
-    resume: () => ({
+    resume: () => () => ({
       kind: "refused",
       problem: {
         code: "run-live-elsewhere",

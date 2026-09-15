@@ -631,9 +631,11 @@ test("reopening the Run Store shows a blocked Run still blocked with the same Ga
   attemptsAfter.close();
 });
 
-test("a created Run (execution not started) shows every Step pending", async (t) => {
-  // Hold settlement so the Run is created but never executed: its state is
-  // `created` and no Attempt has settled.
+test("a launched Run before its first Attempt reads running with every Step pending", async (t) => {
+  // Hold settlement so the Run is admitted but never executed: the Run Store still
+  // records its pre-start `created` state, but the client vocabulary has no
+  // `created` — a launched Run reads `running` from the moment it is admitted
+  // (#98 A7) — and no Attempt has settled, so every Step is still pending.
   const held: (() => void)[] = [];
   const f = fixture(t, { scheduleSettlement: (settle) => held.push(settle) });
   const { id, digest } = installCommandBundle(f);
@@ -648,7 +650,61 @@ test("a created Run (execution not started) shows every Step pending", async (t)
   const result = runResult(f.app, admission.runId!);
   assert.ok(result.found);
   if (!result.found) throw new Error("unreachable");
-  assert.equal(result.run.state, "created");
+  assert.equal(result.run.state, "running");
   // A Step that has not started is pending, not running.
   assert.ok(result.run.progress.every((s) => s.status === "pending"));
+});
+
+test("the timeline is ordered by time, so a later event never precedes an earlier Attempt (#98 A2)", (t) => {
+  const f = fixture(t);
+  const { digest } = installCommandBundle(f);
+  const t0 = "2026-09-15T10:00:00.000Z"; // run created
+  const t1 = "2026-09-15T10:00:01.000Z"; // Attempt settled
+  const t2 = "2026-09-15T10:00:02.000Z"; // trust granted (later)
+  const created = f.runGroup.createRun({
+    operationId: "op-tl",
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date(t0),
+  });
+  assert.ok(created.outcome === "created");
+  if (created.outcome !== "created") throw new Error("unreachable");
+  const owner = f.runGroup.acquireRun(created.runId)!;
+  // An Attempt at t1, then a trust grant at t2 (later). Emitted category by category
+  // the grant — an earlier category — would precede the Attempt; ordered by `at` it
+  // must not, so a later event never moves an earlier Attempt.
+  const published = owner.publishAttempt({
+    attemptId: "a1",
+    outcome: "failed",
+    required: [],
+    outputs: [],
+    at: new Date(t1),
+    advanceState: "failed",
+  });
+  assert.ok(published.ok);
+  owner.close();
+  f.runGroup.endRun(created.runId);
+  f.catalog.grantTrust({
+    operationId: "grant-late",
+    digest,
+    installationGeneration: 1,
+    grantedAt: new Date(t2),
+  });
+
+  const result = runResult(f.app, created.runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  const timeline = result.run.timeline;
+  // Non-decreasing by `at`.
+  for (let i = 1; i < timeline.length; i++) {
+    assert.ok(
+      timeline[i - 1]!.at <= timeline[i]!.at,
+      `timeline out of order at ${i}`,
+    );
+  }
+  // The later trust grant sorts after the earlier Attempt, not before it.
+  const attemptIdx = timeline.findIndex((e) => e.event === "attempt-settled");
+  const trustIdx = timeline.findIndex((e) => e.event === "trust-granted");
+  assert.ok(attemptIdx !== -1 && trustIdx !== -1);
+  assert.ok(attemptIdx < trustIdx);
 });

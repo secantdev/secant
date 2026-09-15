@@ -63,7 +63,12 @@ export async function runTuiApp(): Promise<number> {
     process.env.WT_SESSION !== undefined,
   );
 
-  const { catalog, runGroup, projectionPort } = wireApplication();
+  const {
+    catalog,
+    runGroup,
+    projectionPort,
+    shutdown: drainLiveRuns,
+  } = wireApplication();
   try {
     const { port, renderer } = await createProductionRenderer();
     // The diagnostic records the single teardown from createTeardown's own
@@ -79,14 +84,20 @@ export async function runTuiApp(): Promise<number> {
     });
     // Resolving a settled Promise is a no-op, so no extra guard is needed; the
     // teardown itself is the once-only gate.
+    // Abort every Run live in this process and await its rest before teardown (#98),
+    // so a killed or quit shell never leaves a child running; each Run's Workspace
+    // claim stays live for the next open to reconcile `halted` (ADR 0019). Draining
+    // is idempotent, so every exit path can call `finish` freely.
     const finish = (reason?: unknown) => {
       if (reason instanceof Error && failure === undefined) failure = reason;
-      teardown();
-      resolveShutdown();
+      void drainLiveRuns().finally(() => {
+        teardown();
+        resolveShutdown();
+      });
     };
 
     // The composition root owns every OS-signal exit path (the renderer's own
-    // handlers are disabled). Each runs the teardown in the required order.
+    // handlers are disabled). Each drains live Runs, then runs the teardown.
     const signals: NodeJS.Signals[] = ["SIGINT", "SIGHUP", "SIGTERM"];
     const onSignal = () => finish();
     for (const signal of signals) process.on(signal, onSignal);
@@ -102,7 +113,11 @@ export async function runTuiApp(): Promise<number> {
       recordTerminalEvent("ready");
       await shutdown;
     } catch (error) {
+      // A render crash while a Run is live: drain the live Runs (finish resolves
+      // `shutdown` only after the drain), and await it so the outer finally never
+      // closes the Run Store out from under a still-aborting Run (#98).
       finish(error instanceof Error ? error : new Error(String(error)));
+      await shutdown;
     } finally {
       for (const signal of signals) process.off(signal, onSignal);
       teardown();

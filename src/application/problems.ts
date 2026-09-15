@@ -130,14 +130,18 @@ export function runExecutionFault(runId: string, error: unknown): Problem {
   };
 }
 
-export function runLiveElsewhere(runId: string): Problem {
+export function runLiveElsewhere(runId: string, ownerPid?: number): Problem {
+  const owner = ownerPid !== undefined ? ` (process ${ownerPid})` : "";
   return {
     code: "run-live-elsewhere",
-    explanation: `Run ${runId} is live in another process; its outputs cannot be read until it reaches rest.`,
+    explanation: `Run ${runId} is live in another process${owner}; it cannot be read, resumed, or reconciled until it reaches rest.`,
     remediation:
-      "Wait for the Run to reach rest (its launch process prints the final state), then read the output.",
+      "Wait for the Run to reach rest (its launch process prints the final state), then try again.",
     possibleEffects: "none",
-    details: { runId },
+    details:
+      ownerPid !== undefined
+        ? { runId, ownerPid: String(ownerPid) }
+        : { runId },
   };
 }
 

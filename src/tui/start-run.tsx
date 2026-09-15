@@ -171,9 +171,11 @@ export function StartRun(props: {
   // Follow the launch to its settlement: a successful launch transitions
   // straight into that Run's Workbench (#91), replacing #90's receipt; a refusal
   // returns to the step that owns the correction with the finding, leaving every
-  // other draft choice intact (AC4). Only `launch-input-invalid` is an
-  // inputs-screen fault; every other refusal (Workspace prerequisite, corrupted
-  // Bundle, trust, Workspace state) belongs to Bundle selection.
+  // other draft choice intact (AC4). The Port itself says which surface owns the
+  // correction (#98 A15): a Problem carrying field violations is an inputs-screen
+  // fault, so the screen reads that presence rather than re-matching a Problem code
+  // string; every other refusal (Workspace prerequisite, corrupted Bundle, trust,
+  // Workspace state) belongs to Bundle selection.
   createEffect(() => {
     const accessor = outcome();
     if (accessor === undefined) return;
@@ -185,8 +187,8 @@ export function StartRun(props: {
     }
     const problem = settled.problem;
     setOutcome(undefined);
-    if (problem.code === "launch-input-invalid") {
-      setFieldFindings(problem.fieldViolations ?? []);
+    if (problem.fieldViolations !== undefined) {
+      setFieldFindings(problem.fieldViolations);
       setStep("inputs");
     } else {
       setChooserProblem(problem);

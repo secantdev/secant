@@ -10,13 +10,19 @@ import type { OperationOutcome } from "../../src/application/projection-port.js"
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
 import { openRunGroup, type RunGroup } from "../../src/run/store/store.js";
-import { hostPlatform, writeCommandBundle } from "../helpers/commandBundle.js";
+import {
+  ensureRuntimeOnPath,
+  hostPlatform,
+  writeCommandBundle,
+} from "../helpers/commandBundle.js";
+import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 interface Fixture {
   readonly app: Application;
   readonly runGroup: RunGroup;
   readonly catalog: Catalog;
+  readonly workspace: string;
   readonly digest: string;
 }
 
@@ -31,18 +37,21 @@ function fixture(t: TestContext): Fixture {
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,
-    runExecution: ({ routing, owner }) =>
+    runExecution: ({ routing, owner, cancelSignal }) =>
       executeRouting(routing, {
         owner,
         platform: hostPlatform(),
         resolveAsset: () => undefined,
+        // Thread the Application's cancel Seam, as production wiring does, so a
+        // cancel of a Run live in this process actually aborts its execution (#98).
+        ...(cancelSignal !== undefined ? { cancelSignal } : {}),
       }),
   });
   const cmd = writeCommandBundle();
   const built = app.bundleManagement.build(cmd.folder, { noInstall: false });
   assert.ok(built.ok, JSON.stringify(built));
   const entry = catalog.listEntries().find((e) => e.id === cmd.id)!;
-  return { app, runGroup, catalog, digest: entry.digest };
+  return { app, runGroup, catalog, workspace, digest: entry.digest };
 }
 
 /** Seed a Run and drive it to `state`; `live` leaves the Workspace claim held. */
@@ -113,6 +122,123 @@ test("cancel-run rests a live Run cancelled, keeps its store, and flips the offe
   assert.deepEqual(offers(f.app, runId), ["delete-run"]);
 });
 
+test("cancel-run aborts a Run live in this process, rests it cancelled, and pushes the cancelled snapshot (#98 AC2)", async (t) => {
+  ensureRuntimeOnPath();
+  const f = fixture(t);
+  f.catalog.approveWorkspace(f.workspace, new Date());
+  // A Bundle whose command blocks until killed, so the Run stays genuinely live in
+  // this process (its child spawned and running) while we cancel it.
+  const blocking = writeCommandBundle({
+    id: "dev.secant.block",
+    script: "setInterval(() => {}, 1_000_000)",
+  });
+  const built = f.app.bundleManagement.build(blocking.folder, {
+    noInstall: false,
+  });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = f.catalog.listEntries().find((e) => e.id === blocking.id)!;
+
+  const launch = f.app.projectionPort.submit({
+    operationId: "op-launch-block",
+    operation: "launch-run",
+    input: {
+      bundle: { id: blocking.id },
+      launchInputs: {},
+      trustDigest: entry.digest,
+    },
+  });
+  assert.ok(launch.admitted);
+  const runId = launch.runId!;
+
+  // Open the run Projection before cancelling and collect its durable updates, so
+  // we can assert an open observer receives the `cancelled` snapshot (AC2).
+  const view = f.app.projectionPort.openProjection({ family: "run", runId });
+  const seenStates: string[] = [];
+  const draining = (async () => {
+    for await (const update of view.updates) {
+      if (update.kind === "durable" && update.snapshot.result.found) {
+        seenStates.push(update.snapshot.result.run.state);
+        if (update.snapshot.result.run.state === "cancelled") return;
+      }
+      if (update.kind === "closed") return;
+    }
+  })();
+
+  // The launch Operation is pending while the Run blocks.
+  const pending = f.app.projectionPort.openProjection({
+    family: "operation",
+    operationId: "op-launch-block",
+  });
+  assert.equal(pending.snapshot.outcome.status, "pending");
+  pending.close();
+
+  const cancel = f.app.projectionPort.submit({
+    operationId: "op-cancel-block",
+    operation: "cancel-run",
+    input: { runId },
+  });
+  assert.ok(cancel.admitted);
+  const cancelOutcome = await awaitSettled(
+    f.app.projectionPort,
+    "op-cancel-block",
+  );
+  assert.equal(cancelOutcome.status, "applied");
+
+  await draining;
+  view.close();
+
+  // The Run rests cancelled — its child was killed and its store kept.
+  const read = f.runGroup.readRun(runId);
+  assert.ok(read.ok);
+  if (read.ok) assert.equal(read.run.state, "cancelled");
+  // The claim is released, and an open observer saw the cancelled snapshot.
+  assert.equal(
+    f.runGroup.listRuns().some((r) => r.runId === runId && r.live),
+    false,
+  );
+  assert.ok(seenStates.includes("cancelled"));
+});
+
+test("shutdown aborts a live Run and leaves its claim live for reconciliation (#98 signals)", async (t) => {
+  ensureRuntimeOnPath();
+  const f = fixture(t);
+  f.catalog.approveWorkspace(f.workspace, new Date());
+  const blocking = writeCommandBundle({
+    id: "dev.secant.block-sig",
+    script: "setInterval(() => {}, 1_000_000)",
+  });
+  const built = f.app.bundleManagement.build(blocking.folder, {
+    noInstall: false,
+  });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = f.catalog.listEntries().find((e) => e.id === blocking.id)!;
+
+  const launch = f.app.projectionPort.submit({
+    operationId: "op-launch-sig",
+    operation: "launch-run",
+    input: {
+      bundle: { id: blocking.id },
+      launchInputs: {},
+      trustDigest: entry.digest,
+    },
+  });
+  assert.ok(launch.admitted);
+  const runId = launch.runId!;
+
+  // Shutdown aborts the live Run and awaits its rest — it resolves only once the
+  // child is dead — and leaves the Workspace claim live so the next open reconciles
+  // the Run `halted` (it does not rest it `cancelled`, which is cancel-run's job).
+  await f.app.shutdown();
+
+  assert.ok(
+    f.runGroup.listRuns().some((r) => r.runId === runId && r.live),
+    "the claim is left live for the next open to reconcile",
+  );
+  const read = f.runGroup.readRun(runId);
+  assert.ok(read.ok);
+  if (read.ok) assert.notEqual(read.run.state, "cancelled");
+});
+
 test("cancel-run on a resting Run is refused and offers no cancel", async (t) => {
   const f = fixture(t);
   const runId = seedRun(f, "succeeded", false);
@@ -161,4 +287,35 @@ test("delete-run on a live Run is refused, leaving it present", async (t) => {
     assert.equal(outcome.problem.code, "run-is-live");
   }
   assert.equal(f.runGroup.readRun(runId).ok, true);
+});
+
+test("a malformed coordination row settles cancel and delete not-applied, never throwing out of submit (#98 A4)", (t) => {
+  const catalog = openCatalog(makeTempDir("secant-cd-home-"));
+  t.after(() => catalog.close());
+  const workspace = realpathSync.native(makeTempDir("secant-cd-ws-"));
+  const real = openRunGroup(makeTempDir("secant-cd-store-"), workspace);
+  t.after(() => real.close());
+  // A group whose listing throws, as a malformed coordination row makes the real
+  // store's listRuns throw. cancel and delete must settle it through their catch —
+  // the way run and answer route an execution fault — never throw out of submit.
+  const runGroup = {
+    ...real,
+    listRuns() {
+      throw new Error("Run Store: a runs row is malformed.");
+    },
+  } as unknown as RunGroup;
+  const app = createApplication({
+    catalog,
+    launchWorkspacePath: workspace,
+    hostPlatform: hostPlatform(),
+    runGroup,
+  });
+
+  for (const operation of ["cancel-run", "delete-run"] as const) {
+    const outcome = submit(app, operation, "run-x", `op-${operation}`);
+    assert.equal(outcome.status, "not-applied");
+    if (outcome.status === "not-applied") {
+      assert.equal(outcome.problem.code, "run-store-damaged");
+    }
+  }
 });

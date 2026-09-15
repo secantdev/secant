@@ -1,6 +1,6 @@
-import semver from "semver";
 import type { Catalog, CatalogEntry } from "../catalog/catalog.js";
 import { inspectBundle, type Budgets } from "../bundle/bundle.js";
+import { selectInstalledEntry } from "./entry-selection.js";
 import {
   flattenSteps,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
@@ -25,18 +25,17 @@ import type {
   RunOutputView,
   RunResult,
   RunSnapshot,
+  RunStateName,
   RunStepProgress,
   RunStepStatus,
   RunTimelineEvent,
+  RunTimelineKind,
 } from "./projection-port.js";
 import {
   bundleBytesCorrupt,
   bundleBytesMissing,
-  bundleNotInstalled,
-  noStableVersion,
   runNotFound,
   runStoreDamaged,
-  versionNotInstalled,
 } from "./problems.js";
 
 /** The bound Artifact name a Human Gate answer publishes to (#85), so the answer
@@ -173,10 +172,16 @@ function runResult(
         ...(derivedRun.checkpoint !== undefined
           ? { checkpoint: derivedRun.checkpoint }
           : {}),
-        // Typed Action Offers, legality decided inside Secant (#85, #86, #87): the
-        // answer-human-gate offer appears only while blocked; resume-run only while
-        // resting halted or failed; cancel is offered only while live, delete only
-        // while not live (mutually exclusive).
+        // Typed Action Offers, legality decided inside Secant (#85, #86, #87, #98):
+        // the answer-human-gate offer appears only while blocked; resume-run only
+        // while resting halted or failed; cancel is offered while the Run is live or
+        // `blocked` (a blocked Run has resumable work, so it is cancelled rather than
+        // deleted — A6), delete only otherwise (mutually exclusive).
+        // ponytail: a `blocked` Run has released its Workspace claim (blocked is
+        // stored `running`, claim released), so acting on this cancel offer refuses
+        // `run-not-live` until #103 (ADR 0031) holds ownership through `blocked` and
+        // makes the cancel executable. The offer is placed now (A6, cancel-vs-delete
+        // half); its busy-check and the executable cancel-of-blocked land with #103.
         actionOffers: [
           ...(derivedRun.checkpoint !== undefined
             ? [answerHumanGateOffer(derivedRun.checkpoint.gate)]
@@ -184,7 +189,9 @@ function runResult(
           ...(derivedRun.state === "halted" || derivedRun.state === "failed"
             ? [resumeRunOffer(runId, derivedRun.state)]
             : []),
-          isLive ? cancelRunOffer(runId) : deleteRunOffer(runId),
+          isLive || derivedRun.state === "blocked"
+            ? cancelRunOffer(runId)
+            : deleteRunOffer(runId),
         ],
         ...(active !== undefined
           ? { conflict: conflictView(runId, active) }
@@ -305,7 +312,7 @@ function collectOutputs(
 
 /** The `resume-run` offer for a resting Run: names what resume does from the
  *  current state so a client presents it without re-deriving the model (#86). */
-function resumeRunOffer(runId: string, state: string): ActionOffer {
+function resumeRunOffer(runId: string, state: RunStateName): ActionOffer {
   return {
     action: "resume-run",
     runId,
@@ -349,9 +356,26 @@ function deleteRunOffer(runId: string): ActionOffer {
   };
 }
 
+/** Map a stored/tracked canonical state to the client vocabulary (#98 A7). The
+ *  retired `created` reads as `running` — a launched Run is observed running from
+ *  the moment it is admitted — and every other stored state is already one of
+ *  RunStateName. `blocked` is never an input (it is derived below). */
+export function toRunState(state: string): RunStateName {
+  switch (state) {
+    case "running":
+    case "succeeded":
+    case "failed":
+    case "halted":
+    case "cancelled":
+      return state;
+    default:
+      return "running";
+  }
+}
+
 export interface DerivedRun {
   /** The effective state, which may be the derived `blocked` (never stored). */
-  readonly state: string;
+  readonly state: RunStateName;
   readonly statuses: RunStepProgress[];
   readonly position: number;
   /** One event per completed Repeat-group iteration, for the timeline. */
@@ -411,7 +435,7 @@ export function deriveRun(
   if (state === "succeeded") {
     for (const step of steps) mark(step, "succeeded");
     return {
-      state,
+      state: toRunState(state),
       statuses,
       position: steps.length,
       iterationEvents: trailingGroupIterations(routing, log),
@@ -439,7 +463,7 @@ export function deriveRun(
       if (!result.complete) {
         mark(node, stalledStatus);
         return {
-          state,
+          state: toRunState(state),
           statuses,
           position: flatIndex.get(node)!,
           iterationEvents,
@@ -459,7 +483,7 @@ export function deriveRun(
         markSpanBefore(span, iteration.stalled, mark);
         mark(iteration.stalled, stalledStatus);
         return {
-          state,
+          state: toRunState(state),
           statuses,
           position: flatIndex.get(iteration.stalled)!,
           iterationEvents,
@@ -499,8 +523,13 @@ export function deriveRun(
     }
   }
   // Every node consumed cleanly with the log exhausted at a boundary: the Run is
-  // between Steps (a transient running/created snapshot).
-  return { state, statuses, position: steps.length, iterationEvents };
+  // between Steps (a transient running snapshot).
+  return {
+    state: toRunState(state),
+    statuses,
+    position: steps.length,
+    iterationEvents,
+  };
 }
 
 /** Consume one Step's Attempts from `cursor`: skip its `failed` retries, then its
@@ -635,7 +664,7 @@ function finishTerminalGroup(
   // Not blocked: the loop is still short of its cadence (a live mid-loop snapshot),
   // or the Run failed on the last span Step.
   mark(current, state === "failed" ? "failed" : "running");
-  return { state, statuses, position, iterationEvents };
+  return { state: toRunState(state), statuses, position, iterationEvents };
 }
 
 /** Iteration events for a trailing Repeat group in a rested `succeeded` Run: every
@@ -741,8 +770,7 @@ function buildTimeline(
       detail: answer.answer,
     });
   }
-  // Each conflict names its declared Workspace path (AC5). Appended after the
-  // Attempt events — a conflict follows the Steps that completed before it.
+  // Each conflict names its declared Workspace path (AC5).
   for (const conflict of conflicts) {
     events.push({
       at: conflict.at,
@@ -750,31 +778,41 @@ function buildTimeline(
       detail: conflict.path,
     });
   }
-  return events;
+  // Order the timeline by `at` (ISO 8601 sorts lexicographically), category as the
+  // tiebreak so events at the same instant keep a stable, meaningful order (#98 A2).
+  // Sorting by time — rather than emitting category by category — means a later
+  // Attempt never reorders the events that preceded it.
+  return events.sort((a, b) =>
+    a.at < b.at
+      ? -1
+      : a.at > b.at
+        ? 1
+        : TIMELINE_CATEGORY_RANK[a.event] - TIMELINE_CATEGORY_RANK[b.event],
+  );
 }
+
+/** The tiebreak order for timeline events sharing an `at` (#98 A2): the same
+ *  category order `buildTimeline` emits in, so equal-instant events read run-created
+ *  → trust → attempt → iteration → checkpoint → gate-answer → conflict. */
+const TIMELINE_CATEGORY_RANK: Record<RunTimelineKind, number> = {
+  "run-created": 0,
+  "trust-granted": 1,
+  "attempt-settled": 2,
+  iteration: 3,
+  "checkpoint-blocked": 4,
+  "gate-answered": 5,
+  "materialization-conflict": 6,
+};
 
 // --- entry selection -------------------------------------------------------
 
-/** Select the installed Entry a launch names, mirroring `bundle-catalog`'s rule:
- *  an omitted version is the highest stable installed version; a prerelease must
- *  be named (#9, #49). */
+/** Select the installed Entry a launch names, through the one selector shared with
+ *  the Bundle-catalog focus join (#98 A18): an omitted version is the highest stable
+ *  installed version; a prerelease must be named (#9, #49). */
 export function selectRunEntry(
   catalog: Catalog,
   id: string,
   version: string | undefined,
 ): { entry: CatalogEntry } | { problem: Problem } {
-  const matching = catalog.listEntries().filter((entry) => entry.id === id);
-  if (matching.length === 0) return { problem: bundleNotInstalled(id) };
-  if (version !== undefined) {
-    const exact = matching.find((entry) => entry.version === version);
-    return exact
-      ? { entry: exact }
-      : { problem: versionNotInstalled(id, version) };
-  }
-  const stable = matching
-    .filter((entry) => semver.prerelease(entry.version) === null)
-    .sort((a, b) => semver.rcompare(a.version, b.version));
-  return stable.length > 0
-    ? { entry: stable[0]! }
-    : { problem: noStableVersion(id) };
+  return selectInstalledEntry(catalog.listEntries(), id, version);
 }

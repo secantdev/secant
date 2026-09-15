@@ -49,10 +49,13 @@ export interface RunRecord {
   readonly createdAt: string; // ISO 8601
 }
 
-/** One registered Run and whether it currently holds the Workspace claim. */
+/** One registered Run and whether it currently holds the Workspace claim. When
+ *  live, `ownerPid` names the process that holds it, so a caller can name the owner
+ *  of a Run live in another process (#98 S2). */
 export interface RunListing {
   readonly runId: string;
   readonly live: boolean;
+  readonly ownerPid?: number;
 }
 
 /** Why a Run could not be read: its store is damaged, or no such Run exists. */
@@ -315,6 +318,7 @@ const registrationRow = z.object({
   run_id: z.string(),
   state: z.string(),
   owner_epoch: z.number(),
+  owner_pid: z.number().nullable(),
   created_at: z.string(),
 });
 const bindingRow = z.object({ version_id: z.string() });
@@ -362,6 +366,21 @@ const gateAnswerRow = z.object({
 
 const DAMAGED = Symbol("run-store-damaged");
 
+/** Whether the process holding a live claim is still running (#98 S2). Signal 0
+ *  performs the permission/existence check without delivering a signal: it returns
+ *  for a live process, throws `ESRCH` for a dead one, and throws `EPERM` for a
+ *  process alive but owned by another user — which still counts as alive. Any other
+ *  probe failure is treated as alive, so the group never reconciles (and so kills a
+ *  Run's recovery point) on an ambiguous answer. */
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 /** A readable `<slug>--<path-digest>` for the resolved absolute Workspace path. */
 function groupDirName(workspacePath: string): string {
   const slug =
@@ -382,8 +401,22 @@ function prepareCoordination(database: Database): void {
   database.exec(
     "CREATE TABLE IF NOT EXISTS runs (" +
       "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, " +
-      "owner_epoch INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT",
+      "owner_epoch INTEGER NOT NULL, owner_pid INTEGER, " +
+      "created_at TEXT NOT NULL) STRICT",
   );
+  // Owner liveness (#98 S2): the process id holding the live claim, so a reopened
+  // group can tell a Run genuinely executing in another process from a dead owner's
+  // stale claim. Nullable and added to a pre-#98 coordination DB in place; a NULL
+  // (an old or rebuilt row) reads as no known owner and reconciles as before. Guard
+  // the ALTER with a column-existence check rather than a catch-all, so a genuine
+  // migration fault (a locked or corrupt DB) fails fast at open with its real cause
+  // instead of a confusing "no such column" deep in a later query.
+  const hasOwnerPid = (
+    database.query("PRAGMA table_info(runs)").all() as { name: string }[]
+  ).some((column) => column.name === "owner_pid");
+  if (!hasOwnerPid) {
+    database.exec("ALTER TABLE runs ADD COLUMN owner_pid INTEGER");
+  }
   // At most one live Run per Workspace: the DB itself rejects a second claim, so
   // the one-live-Run invariant survives even a bug in the check above.
   database.exec(
@@ -677,8 +710,20 @@ function openCoordination(
 export function openRunGroup(
   secantHome: string,
   workspacePath: string,
-  options: { readonly now?: () => Date } = {},
+  options: {
+    readonly now?: () => Date;
+    /** Whether the process holding a live claim is still alive (#98 S2). Defaults
+     *  to a real probe (`process.kill(pid, 0)`); a test injects a fixed answer to
+     *  simulate a dead owner (reconcile `halted`) or a live one (leave it live). */
+    readonly isOwnerAlive?: (pid: number) => boolean;
+    /** The process id this group records on the claims it opens (#98 S2). Defaults
+     *  to the real pid; a test overrides it so two `openRunGroup`s on one home stand
+     *  in for two processes with distinct pids. */
+    readonly selfPid?: number;
+  } = {},
 ): RunGroup {
+  const selfPid = options.selfPid ?? process.pid;
+  const isOwnerAlive = options.isOwnerAlive ?? processIsAlive;
   const groupDir = join(secantHome, "runs", groupDirName(workspacePath));
   mkdirSync(groupDir, { recursive: true });
   const { database, rebuilt } = openCoordination(
@@ -721,20 +766,23 @@ export function openRunGroup(
     "SELECT run_id FROM runs WHERE state = 'live' LIMIT 1",
   );
   const findRegistration = database.query(
-    "SELECT run_id, state, owner_epoch, created_at FROM runs WHERE run_id = ?",
+    "SELECT run_id, state, owner_epoch, owner_pid, created_at FROM runs WHERE run_id = ?",
   );
   const listRegistrations = database.query(
-    "SELECT run_id, state, owner_epoch, created_at FROM runs",
+    "SELECT run_id, state, owner_epoch, owner_pid, created_at FROM runs",
   );
   const insertRun = database.query(
-    "INSERT INTO runs (run_id, state, owner_epoch, created_at) VALUES (?, 'live', 0, ?)",
+    "INSERT INTO runs (run_id, state, owner_epoch, owner_pid, created_at) " +
+      "VALUES (?, 'live', 0, ?, ?)",
   );
   const deleteRun = database.query("DELETE FROM runs WHERE run_id = ?");
+  // Ending a Run releases the claim and clears the owner pid, so a later reopen
+  // never mistakes a cleanly-ended Run's stale pid for a live owner.
   const endRun = database.query(
-    "UPDATE runs SET state = 'ended' WHERE run_id = ?",
+    "UPDATE runs SET state = 'ended', owner_pid = NULL WHERE run_id = ?",
   );
   const claimRun = database.query(
-    "UPDATE runs SET state = 'live' WHERE run_id = ?",
+    "UPDATE runs SET state = 'live', owner_pid = ? WHERE run_id = ?",
   );
   const recordOperation = database.query(
     "INSERT INTO operations (operation_id, kind, run_id, recorded_at) VALUES (?, ?, ?, ?)",
@@ -799,7 +847,7 @@ export function openRunGroup(
         createdAt: request.at.toISOString(),
       };
       stageRunStore(join(groupDir, `${runId}.creating`), record);
-      insertRun.run(runId, record.createdAt);
+      insertRun.run(runId, selfPid, record.createdAt);
       recordOperation.run(
         request.operationId,
         "create",
@@ -852,7 +900,7 @@ export function openRunGroup(
     if (live != null && live.run_id !== runId) {
       return { outcome: "workspace-busy", liveRunId: live.run_id };
     }
-    claimRun.run(runId);
+    claimRun.run(selfPid, runId);
     return { outcome: "resumed", runId };
   });
 
@@ -864,23 +912,27 @@ export function openRunGroup(
     rmSync(deletingDir, { recursive: true, force: true });
   }
 
-  // Startup reconciliation (ADR 0023, #86): a live Workspace claim found at open
-  // is stale — a clean exit releases it via endRun, so its owner died mid-Run
-  // (Ctrl+C, a termination signal, a crash). A rested Run (succeeded, failed,
-  // halted, or a derived-`blocked` Run stored `running`) has already released its
-  // claim, so the claim — not the stored state — is what distinguishes a killed
-  // Run from a resting one. Rest each stale-claimed Run `halted` with the
-  // interrupted Attempt `indeterminate` and release the claim, running no Step
-  // work, so a reopened home never silently resumes execution (ADR 0019).
-  // ponytail: a live claim on open is taken to mean a dead owner — M2 runs one
-  // Secant process per home per invocation (execution is synchronous; a clean exit
-  // releases the claim). A reader opening a fresh group while another process
-  // legitimately drives a Run would wrongly reconcile it; record the owner PID on
-  // the claim and probe it here before reconciling if concurrent processes on one
-  // home ever matter.
+  // Startup reconciliation (ADR 0023, #86, #98 S2): a live Workspace claim found at
+  // open whose owner process is gone is stale — a clean exit releases it via endRun,
+  // so a dead owner died mid-Run (Ctrl+C, a termination signal, a crash). A rested
+  // Run (succeeded, failed, halted, or a derived-`blocked` Run stored `running`) has
+  // already released its claim, so the claim — not the stored state — is what
+  // distinguishes a killed Run from a resting one. Rest each dead-owner Run `halted`
+  // with the interrupted Attempt `indeterminate` and release the claim, running no
+  // Step work, so a reopened home never silently resumes execution (ADR 0019).
+  //
+  // Owner liveness (#98 S2): a live claim whose owner process is still alive is a Run
+  // genuinely executing in another process — leave it live and unaltered (it stays
+  // listed live-elsewhere, and opening or resuming it is refused). A missing pid (a
+  // pre-#98 DB or a rebuilt coordination file) is treated as a dead owner, so the
+  // prior single-process behavior is preserved. The recorded pid is never our own at
+  // open (this process registers nothing until after open), so an alive foreign pid
+  // is always another process.
   for (const row of listRegistrations.all() as Record<string, unknown>[]) {
     const parsed = registrationRow.safeParse(row);
     if (!parsed.success || parsed.data.state !== "live") continue;
+    const pid = parsed.data.owner_pid;
+    if (pid != null && pid !== selfPid && isOwnerAlive(pid)) continue;
     reconcileRunStore(join(groupDir, parsed.data.run_id), new Date());
     endRun.run(parsed.data.run_id);
   }
@@ -1216,9 +1268,14 @@ export function openRunGroup(
           if (!parsed.success) {
             throw new Error("Run Store: a runs row is malformed.");
           }
+          const live = parsed.data.state === "live";
           return {
             runId: parsed.data.run_id,
-            live: parsed.data.state === "live",
+            live,
+            // Name the owning process only while the claim is live (#98 S2).
+            ...(live && parsed.data.owner_pid != null
+              ? { ownerPid: parsed.data.owner_pid }
+              : {}),
           };
         },
       );

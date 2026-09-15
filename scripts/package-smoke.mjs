@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   existsSync,
@@ -66,6 +66,18 @@ function run(command, args, options = {}) {
     );
   }
   return result.stdout;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Poll for a file to appear, up to a deadline. */
+async function waitForFile(path, deadlineMs) {
+  const start = Date.now();
+  while (Date.now() - start < deadlineMs) {
+    if (existsSync(path)) return true;
+    await sleep(50);
+  }
+  return false;
 }
 
 const smokeRoot = await mkdtemp(join(tmpdir(), "secant-binary-smoke-"));
@@ -677,6 +689,177 @@ try {
       throw new Error(
         `Cancelling a resting Run was not refused: ${cancel.stdout}${cancel.stderr}`,
       );
+    }
+  }
+
+  // A headless process interrupted by SIGINT mid-Run rests the Run `halted` and a
+  // later `run resume` continues it, on each gated OS (issue #98, AC3). A dedicated
+  // home and Workspace isolate the one Run, so the reopen lists exactly it. The
+  // Bundle's middle Step writes a `started` marker (and its own pid) then sleeps
+  // until killed — unless a `proceed` marker exists, when it exits at once, so the
+  // resume completes without sleeping. On POSIX the binary's signal handler aborts
+  // the live Run (killing the child's group) and leaves the claim live; on Windows
+  // SIGINT is uncatchable and terminates the process, leaving the same live claim —
+  // either way the next open reconciles the Run `halted`.
+  {
+    const sigintHome = join(smokeRoot, "sigint-home");
+    const sigintWorkspace = join(smokeRoot, "sigint-workspace");
+    await mkdir(sigintWorkspace, { recursive: true });
+    const sigintEnv = {
+      ...process.env,
+      SECANT_HOME: sigintHome,
+      PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
+    };
+    const runtime = basename(process.execPath);
+    const markerDir = join(smokeRoot, "sigint-markers");
+    await mkdir(markerDir, { recursive: true });
+    const startedMarker = join(markerDir, "started");
+    const proceedMarker = join(markerDir, "proceed");
+    const lastMarker = join(markerDir, "last");
+    const q = (value) => JSON.stringify(value);
+    const id = "dev.secant.sigint-smoke";
+    const manifest = {
+      formatVersion: 1,
+      bundle: {
+        id,
+        version: "1.0.0",
+        name: "SIGINT Smoke",
+        description: "A SIGINT-recovery smoke Bundle.",
+      },
+      platforms: ["windows", "macos", "linux"],
+      inputs: {},
+      assets: [],
+      routing: [
+        {
+          id: "block",
+          kind: "command",
+          produces: [{ name: "t1", type: "text" }],
+          command: {
+            executable: runtime,
+            arguments: [
+              "-e",
+              `const fs=require('node:fs');` +
+                `fs.writeFileSync(${q(startedMarker)}, String(process.pid));` +
+                `if(fs.existsSync(${q(proceedMarker)}))process.exit(0);` +
+                `setTimeout(()=>process.exit(0), 30000);`,
+            ],
+          },
+        },
+        {
+          id: "last",
+          kind: "command",
+          produces: [{ name: "t2", type: "text" }],
+          command: {
+            executable: runtime,
+            arguments: [
+              "-e",
+              `require('node:fs').writeFileSync(${q(lastMarker)}, 'ran')`,
+            ],
+          },
+        },
+      ],
+    };
+    const folder = join(smokeRoot, "sigint-bundle");
+    await mkdir(folder, { recursive: true });
+    await writeFile(
+      join(folder, "manifest.json"),
+      JSON.stringify(manifest, null, 2),
+    );
+    run(binary, ["workspace", "approve"], {
+      cwd: sigintWorkspace,
+      env: sigintEnv,
+    });
+    run(binary, ["bundle", "build", folder], {
+      cwd: sigintWorkspace,
+      env: sigintEnv,
+    });
+    const installed = JSON.parse(
+      run(binary, ["bundle", "list", "--json"], {
+        cwd: sigintWorkspace,
+        env: sigintEnv,
+      }),
+    ).result.bundles.find((bundle) => bundle.id === id);
+    if (installed === undefined) {
+      throw new Error("SIGINT smoke Bundle was not installed.");
+    }
+
+    // A real child launches the Run and blocks in the `block` Step's sleep.
+    const child = spawn(
+      binary,
+      ["run", "launch", id, "--trust", installed.digest],
+      { cwd: sigintWorkspace, env: sigintEnv },
+    );
+    const childErr = [];
+    child.stderr.on("data", (d) => childErr.push(d.toString()));
+    child.stdout.on("data", () => {});
+    const exited = new Promise((resolve) => child.on("exit", () => resolve()));
+
+    const started = await waitForFile(startedMarker, 20000);
+    if (!started) {
+      child.kill("SIGKILL");
+      throw new Error(
+        `SIGINT smoke child never reached the block Step: ${childErr.join("")}`,
+      );
+    }
+
+    // Interrupt the live Run with SIGINT, then wait for the process to exit.
+    child.kill("SIGINT");
+    await exited;
+    // Defensively kill the block grandchild by the pid it wrote, so no orphan
+    // lingers if the platform did not deliver the abort to its group (e.g. Windows).
+    const blockPid = Number(readFileSync(startedMarker, "utf8").trim());
+    if (Number.isInteger(blockPid) && blockPid > 0) {
+      try {
+        process.kill(blockPid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+
+    // Reopen the home: `run list` reconciles the interrupted Run to `halted`.
+    const listed = JSON.parse(
+      run(binary, ["run", "list", "--json"], {
+        cwd: sigintWorkspace,
+        env: sigintEnv,
+      }),
+    );
+    if (!Array.isArray(listed.rows) || listed.rows.length !== 1) {
+      throw new Error(
+        `SIGINT smoke expected exactly one Run after the interrupt: ${JSON.stringify(listed)}`,
+      );
+    }
+    const runId = listed.rows[0].runId;
+    const shown = run(binary, ["run", "show", runId], {
+      cwd: sigintWorkspace,
+      env: sigintEnv,
+    });
+    if (!/State: halted/.test(shown)) {
+      throw new Error(
+        `SIGINT smoke Run did not rest halted after the interrupt: ${shown}`,
+      );
+    }
+    if (existsSync(lastMarker)) {
+      throw new Error("SIGINT smoke ran the final Step before the resume.");
+    }
+
+    // Let the interrupted Step complete at once on resume, then resume: it continues.
+    await writeFile(proceedMarker, "go");
+    const resumed = spawnSync(binary, ["run", "resume", runId], {
+      cwd: sigintWorkspace,
+      encoding: "utf8",
+      env: sigintEnv,
+    });
+    if (resumed.error) throw resumed.error;
+    if (
+      resumed.status !== 0 ||
+      !`${resumed.stdout}`.includes("State: succeeded")
+    ) {
+      throw new Error(
+        `Resuming a SIGINT-interrupted Run did not continue it: ${resumed.stdout}${resumed.stderr}`,
+      );
+    }
+    if (!existsSync(lastMarker)) {
+      throw new Error("SIGINT smoke resume did not run the final Step.");
     }
   }
 

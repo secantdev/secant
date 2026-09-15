@@ -28,7 +28,13 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   appended `indeterminate` attempt-log marker and the claim released — running no Step work. The claim, not the stored state, distinguishes a killed Run from a
   derived-`blocked` Run (also stored `running` but with its claim released). The marker lands in `attempt_log` (not as an `attempt` row); the resume skip
   cursor reads that log, so it is the marker's `indeterminate` outcome — not any absence from the log — that keeps the succeeded-attempt cursor unchanged
-  and re-runs the interrupted Step. Assumes one process per home; a PID/lock probe on the claim would be needed for concurrent processes.
+  and re-runs the interrupted Step.
+- Owner liveness (#98 S2): the coordination `runs` row carries `owner_pid`, set when a claim goes live (`createRun`/resume claim) and cleared on `endRun`. At open, a
+  live claim whose owner process is still alive (probed by `process.kill(pid, 0)`, injectable as `isOwnerAlive`) is left live and unaltered — a Run genuinely executing
+  elsewhere, listed with its `ownerPid` so the Application can refuse `run-live-elsewhere`; only a dead owner (or a NULL pid from a pre-#98 or rebuilt DB) is reconciled
+  `halted`. The `pid !== selfPid` guard makes a claim owned by our own pid always reconcile, which both handles pid reuse and lets a same-process reopen (the
+  reconciliation tests) still reconcile; `selfPid` is injectable so two `openRunGroup`s on one home stand in for two processes. `owner_pid` is `ALTER TABLE ADD COLUMN`-ed
+  onto an existing coordination DB (nullable).
 - Reconciliation's one accepted micro-window: reaching a derived-`blocked` rest and releasing the claim is not atomic (execution returns `blocked`, then the
   caller's `finally` runs `endRun`), so a kill in that synchronous gap leaves the Run `running` with a live claim and reconciliation mislabels it `halted` — a
   resume then runs a fresh interval instead of an answer. Narrow, no data loss, same class as the create rename/commit window; persist a rested marker if it bites.

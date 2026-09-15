@@ -372,9 +372,12 @@ export type BundleFocusResult =
  *  Application derives it from the current Step Attempt, so a reopened home
  *  re-derives it with no new Attempt. `halted` is a persisted rest state a
  *  Materialization conflict leaves the Run in until the user restores the file
- *  and resumes (#88, ADR 0023). */
+ *  and resumes (#88, ADR 0023). `cancelled` is the terminal rest a `cancel-run`
+ *  leaves a live Run in (#87, #98). There is no `created`: a launched Run is
+ *  observed `running` from the moment it is admitted (#98 A7); the Run Store's own
+ *  pre-start bookkeeping never crosses this Port. */
 export type RunStateName =
-  "created" | "running" | "succeeded" | "failed" | "blocked" | "halted";
+  "running" | "succeeded" | "failed" | "blocked" | "halted" | "cancelled";
 
 /** One Step's status within a Run's ordered progress. `blocked` is the Step a
  *  Repeat group is paused at (its Review checkpoint), or the Step a Materialization
@@ -464,7 +467,7 @@ export interface RunView {
   };
   readonly workspacePath: string;
   readonly launchedAt: string; // ISO 8601
-  readonly state: string;
+  readonly state: RunStateName;
   readonly progress: readonly RunStepProgress[];
   /** Index of the current Step; `progress.length` once the Run is at rest. */
   readonly position: number;

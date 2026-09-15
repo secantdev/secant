@@ -415,6 +415,70 @@ test("startup leaves a Run whose claim was cleanly released untouched (#86)", (t
   assert.equal(owner2.attemptLog().length, 0);
 });
 
+test("startup leaves a Run whose owner process is still alive live and unaltered (#98 S2)", (t) => {
+  // A first process (pid 1000) launches a Run and leaves it live, then a second
+  // process (pid 2000) opens the same group while pid 1000 is still alive. The live
+  // claim is a Run genuinely executing elsewhere, so it is left live and unaltered —
+  // never reconciled — and is listed live, naming its owner.
+  const home = makeTempDir("secant-store-");
+  const first = openRunGroup(home, WORKSPACE, { selfPid: 1000 });
+  const created = create(first, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = first.acquireRun(created.runId);
+  assert.ok(owner);
+  assert.deepEqual(owner.writeState("running"), { ok: true });
+  owner.close();
+  first.close(); // the first process's handle closes, but its claim stays live
+
+  const second = openRunGroup(home, WORKSPACE, {
+    selfPid: 2000,
+    isOwnerAlive: (pid) => pid === 1000, // pid 1000 is still running
+  });
+  t.after(() => second.close());
+  const read = second.readRun(created.runId);
+  assert.ok(read.ok);
+  assert.equal(read.run.state, "running"); // untouched: not reconciled to halted
+  const listing = second.listRuns().find((run) => run.runId === created.runId);
+  assert.equal(listing?.live, true);
+  assert.equal(listing?.ownerPid, 1000); // the owner is named for a live-elsewhere refusal
+  // No indeterminate marker was appended — the Run was never reconciled.
+  const owner2 = second.acquireRun(created.runId);
+  assert.ok(owner2);
+  t.after(() => owner2.close());
+  assert.equal(owner2.attemptLog().length, 0);
+});
+
+test("startup reconciles a Run whose owner process is dead to halted (#98 S2)", (t) => {
+  // The same setup, but pid 1000 is gone when the second process opens: a dead owner
+  // is reconciled `halted` with the indeterminate marker, exactly as before.
+  const home = makeTempDir("secant-store-");
+  const first = openRunGroup(home, WORKSPACE, { selfPid: 1000 });
+  const created = create(first, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = first.acquireRun(created.runId);
+  assert.ok(owner);
+  assert.deepEqual(owner.writeState("running"), { ok: true });
+  owner.close();
+  first.close();
+
+  const second = openRunGroup(home, WORKSPACE, {
+    selfPid: 2000,
+    isOwnerAlive: () => false, // pid 1000 is dead
+  });
+  t.after(() => second.close());
+  const read = second.readRun(created.runId);
+  assert.ok(read.ok);
+  assert.equal(read.run.state, "halted");
+  assert.equal(
+    second.listRuns().find((run) => run.runId === created.runId)?.live,
+    false,
+  );
+  const owner2 = second.acquireRun(created.runId);
+  assert.ok(owner2);
+  t.after(() => owner2.close());
+  assert.equal(owner2.attemptLog().at(-1)?.outcome, "indeterminate");
+});
+
 test("canonical truth survives reopening the same home", async (t) => {
   const home = makeTempDir("secant-store-");
   const first = openRunGroup(home, WORKSPACE);

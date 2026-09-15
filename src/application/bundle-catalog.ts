@@ -32,13 +32,8 @@ import type {
   RoutingNodeView,
   RoutingStepView,
 } from "./projection-port.js";
-import {
-  bundleBytesCorrupt,
-  bundleBytesMissing,
-  bundleNotInstalled,
-  noStableVersion,
-  versionNotInstalled,
-} from "./problems.js";
+import { bundleBytesCorrupt, bundleBytesMissing } from "./problems.js";
+import { selectInstalledEntry } from "./entry-selection.js";
 
 // The `bundle-catalog` Projection join (#54). It reads Catalog Entries and their
 // managed bytes through the Catalog Interface, asks the Bundle Module to inspect
@@ -132,24 +127,9 @@ function selectEntry(
   entries: readonly CatalogEntry[],
   selection: BundleFocusSelector,
 ): { entry: CatalogEntry } | { problem: Problem } {
-  const matching = entries.filter((entry) => entry.id === selection.id);
-  if (matching.length === 0) {
-    return { problem: bundleNotInstalled(selection.id) };
-  }
-  if (selection.version !== undefined) {
-    const exact = matching.find((entry) => entry.version === selection.version);
-    return exact
-      ? { entry: exact }
-      : { problem: versionNotInstalled(selection.id, selection.version) };
-  }
-  // Version omitted: the highest stable installed version; a prerelease must be
-  // named (#9, #49). With no stable version installed, there is nothing to pick.
-  const stable = matching
-    .filter((entry) => semver.prerelease(entry.version) === null)
-    .sort((a, b) => semver.rcompare(a.version, b.version));
-  return stable.length > 0
-    ? { entry: stable[0] }
-    : { problem: noStableVersion(selection.id) };
+  // Through the one selector shared with the Run join (#98 A18): an omitted version
+  // is the highest stable installed version; a prerelease must be named (#9, #49).
+  return selectInstalledEntry(entries, selection.id, selection.version);
 }
 
 // Read and inspect one Installed Bundle's stored bytes. A missing or unreadable

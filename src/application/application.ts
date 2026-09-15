@@ -24,7 +24,6 @@ import {
   deriveRun,
   deriveRunFacts,
   GATE_ANSWER_ARTIFACT,
-  isLiveElsewhere,
   runSnapshot,
   selectRunEntry,
   type RunProjectionDependencies,
@@ -88,7 +87,21 @@ export type RunExecution = (context: {
   readonly routing: readonly RoutingNode[];
   readonly digest: string;
   readonly owner: RunOwner;
+  /** The cancel Seam a live Run is driven under (#98): when it aborts mid-command
+   *  the child's process group is killed and execution unwinds. The Application owns
+   *  one AbortController per live Run and passes its signal here; the execution
+   *  Interface stays agnostic to why it aborted. */
+  readonly cancelSignal?: AbortSignal;
 }) => Promise<RunReport>;
+
+// Why a live Run's execution was aborted (#98). A `cancel-run` rests the Run
+// `cancelled`; a process signal (SIGINT/SIGHUP/SIGTERM) leaves the Workspace claim
+// live so the next open reconciles the Run `halted` via the indeterminate path
+// (ADR 0019). The Application reads its own AbortController's reason to tell them
+// apart, so it never needs to import the execution `RunCancelledError` — an aborted
+// signal is proof enough that our cancel fired.
+const CANCEL_ABORT = "secant:cancel-run";
+const SIGNAL_ABORT = "secant:process-signal";
 
 // Application owns the Workspace-approval use case behind the Projection Port.
 // The Port is in-memory: it resolves paths, records approvals through the
@@ -137,6 +150,12 @@ export interface ApplicationDependencies {
 export interface Application {
   readonly projectionPort: ProjectionPort;
   readonly bundleManagement: BundleManagement;
+  /** Abort every Run live in this process and await its settlement, leaving each
+   *  Workspace claim live so the next open reconciles the Run `halted` via the
+   *  indeterminate path (ADR 0019, #98). Composition calls this from its OS-signal
+   *  handler before teardown, so a killed process never leaves a child running and
+   *  the Run recovers on resume. Idempotent and safe when no Run is live. */
+  shutdown(): Promise<void>;
 }
 
 // Launch inputs are a name→value string map (LaunchInput values are opaque
@@ -171,7 +190,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
   >();
   // A launched Run tracked in this process: its routing and Bundle facts, the
   // owner while it is live (so a snapshot read never fences the executing owner),
-  // the in-memory latest state, and the streams watching it.
+  // the in-memory latest state, the AbortController that stops its execution
+  // (cancel-run and process signals abort it), the settlement promise a cancel
+  // awaits, and the streams watching it (#98).
   const runs = new Map<
     string,
     {
@@ -183,6 +204,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
       state: string;
       owner?: RunOwner;
       done: boolean;
+      readonly abort: AbortController;
+      promise?: Promise<OperationOutcome>;
       readonly observers: Set<UpdateStream>;
     }
   >();
@@ -263,10 +286,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
         observer.push({ kind: "durable", snapshot });
       }
     };
-    // A synchronous settler (approve-workspace, cancel, delete) settles inline so an
-    // `operation` Projection opened right after `submit` is already settled; only a
-    // Run settler (launch, resume, answer) is a Promise, which settles on the stream's
-    // first durable update. Keeping the sync path sync preserves every non-Run
+    // A synchronous settler (approve-workspace, delete, and a cancel of a Run not
+    // live in this process) settles inline so an `operation` Projection opened right
+    // after `submit` is already settled; a Run settler (launch, resume, answer) and a
+    // cancel-as-abort of an in-process live Run return a Promise, which settles on the
+    // stream's first durable update. Keeping the sync path sync preserves every such
     // Operation's synchronous observation.
     const settled = entry.settle();
     if (settled instanceof Promise) return settled.then(record);
@@ -292,6 +316,37 @@ export function createApplication(deps: ApplicationDependencies): Application {
     });
     for (const observer of tracking.observers) {
       observer.push({ kind: "durable", snapshot });
+    }
+  }
+
+  // The registration of a Run live in ANOTHER process, or undefined when the Run is
+  // not live, is live in THIS process, or its listing cannot be read (#98 S2). A Run
+  // whose owner process is still alive is left live at group open (Run Store owner
+  // liveness), so resuming or answering it would fence — and abort — the process
+  // driving it; the caller refuses `run-live-elsewhere` instead.
+  function liveElsewhere(runId: string): { ownerPid?: number } | undefined {
+    if (runGroup === undefined) return undefined;
+    const tracked = runs.get(runId);
+    if (tracked !== undefined && !tracked.done && tracked.owner !== undefined) {
+      return undefined; // live in this process
+    }
+    try {
+      return runGroup.listRuns().find((run) => run.runId === runId && run.live);
+    } catch {
+      // A malformed coordination row never throws out of submit (A4); the caller's
+      // own store reads then surface it as a typed Problem.
+      return undefined;
+    }
+  }
+
+  // Tell every observer watching this Run that its subject is gone (#98): a delete
+  // removes the store, so any open `run` Projection is closed rather than left to
+  // read a Run that no longer exists. Pushed before the tracking entry is dropped.
+  function pushRunClosed(runId: string): void {
+    const tracking = runs.get(runId);
+    if (tracking === undefined) return;
+    for (const observer of tracking.observers) {
+      observer.push({ kind: "closed", reason: "subject-gone" });
     }
   }
 
@@ -365,14 +420,34 @@ export function createApplication(deps: ApplicationDependencies): Application {
       return { status: "not-applied", problem: runStoreDamaged(runId) };
     }
     tracking.owner = owner;
+    const observed = observedOwner(owner, runId);
+    // A signal-abort leaves the claim live so the next open reconciles the Run
+    // `halted` (ADR 0019); every other exit releases the claim in the finally.
+    let leaveClaimLive = false;
     try {
       await runExecution({
         routing: tracking.routing,
         digest: tracking.digest,
-        owner: observedOwner(owner, runId),
+        owner: observed,
+        cancelSignal: tracking.abort.signal,
       });
       return { status: "applied" };
     } catch (error) {
+      // Our own AbortController firing is the only cause of an execution abort, so
+      // an aborted signal — not the error's type — tells apart a cancel/signal from
+      // a genuine coordination/environment fault (which keeps the Application
+      // execution-agnostic; see RunExecution).
+      if (tracking.abort.signal.aborted) {
+        if (tracking.abort.signal.reason === CANCEL_ABORT) {
+          // cancel-run: rest the Run `cancelled` through the owner still held here,
+          // which pushes the terminal snapshot to every open `run` Projection.
+          observed.writeState("cancelled");
+          return { status: "applied" };
+        }
+        // A process signal: leave the claim live for reconciliation.
+        leaveClaimLive = true;
+        return { status: "applied" };
+      }
       return {
         status: "not-applied",
         problem: runExecutionFault(runId, error),
@@ -381,8 +456,20 @@ export function createApplication(deps: ApplicationDependencies): Application {
       tracking.owner = undefined;
       tracking.done = true;
       owner.close();
-      runGroup.endRun(runId);
+      if (!leaveClaimLive) runGroup.endRun(runId);
     }
+  }
+
+  // Start a Run's execution promise and record it on the tracking entry so a
+  // concurrent cancel-run (or a process signal) can abort it and await its rest
+  // (#98). Called as the launch/resume Operation's settler: invoking `runAndSettle`
+  // runs its synchronous prefix (which acquires the owner) before the first await,
+  // so the promise captured here already has the owner in hand.
+  function startRun(runId: string): Promise<OperationOutcome> {
+    const promise = runAndSettle(runId);
+    const tracking = runs.get(runId);
+    if (tracking !== undefined) tracking.promise = promise;
+    return promise;
   }
 
   // Selector-typed per the Port overloads (#74 A8); the implementation signature
@@ -749,6 +836,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       version: manifest.bundle.version,
       state: created.record.state,
       done: false,
+      abort: new AbortController(),
       observers: new Set<UpdateStream>(),
     });
     operations.set(operationId, {
@@ -756,7 +844,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       outcome: { status: "pending" },
       observers: new Set<UpdateStream>(),
       runId,
-      settle: () => runAndSettle(runId),
+      settle: () => startRun(runId),
     });
     scheduleSettlement(() => settleOperation(operationId));
     return { admitted: true, operationId, runId };
@@ -847,6 +935,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
       };
     }
     const record = read.run;
+    // A Run whose owner process is still alive elsewhere is refused before anything
+    // is claimed (#98 S2): resuming it would fence — and abort — the process driving
+    // it. Named ahead of the resting-state check so a live-elsewhere Run reports the
+    // precise reason, not `run-not-resumable`.
+    const foreign = liveElsewhere(input.runId);
+    if (foreign !== undefined) {
+      return {
+        admitted: false,
+        problem: runLiveElsewhere(input.runId, foreign.ownerPid),
+      };
+    }
     // Resume applies only to a Run resting `halted` or `failed` (ADR 0019). A
     // `running` record means the Run is live (here or elsewhere); resuming it would
     // fence the process driving it. A `succeeded`/`cancelled` Run is terminal.
@@ -892,6 +991,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       version: manifest.bundle.version,
       state: record.state,
       done: false,
+      abort: new AbortController(),
       observers: new Set<UpdateStream>(),
     });
     operations.set(operationId, {
@@ -899,7 +999,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       outcome: { status: "pending" },
       observers: new Set<UpdateStream>(),
       runId: input.runId,
-      settle: () => runAndSettle(input.runId),
+      settle: () => startRun(input.runId),
     });
     scheduleSettlement(() => settleOperation(operationId));
     return { admitted: true, operationId, runId: input.runId };
@@ -932,10 +1032,23 @@ export function createApplication(deps: ApplicationDependencies): Application {
       outcome: { status: "pending" },
       observers: new Set<UpdateStream>(),
       runId: input.runId,
-      settle: () => answerAndSettle(operationId, input),
+      settle: () => startAnswer(operationId, input),
     });
     scheduleSettlement(() => settleOperation(operationId));
     return { admitted: true, operationId, runId: input.runId };
+  }
+
+  // Start an answer's settlement and record its promise on the tracking entry the
+  // continue branch creates, so a concurrent cancel-run (or a process signal) can
+  // abort the granted interval and await its rest (#98), mirroring `startRun`.
+  function startAnswer(
+    operationId: string,
+    input: AnswerHumanGateInput,
+  ): Promise<OperationOutcome> {
+    const promise = answerAndSettle(operationId, input);
+    const tracking = runs.get(input.runId);
+    if (tracking !== undefined) tracking.promise = promise;
+    return promise;
   }
 
   // Validate the answer against the live Gate, record it durably, then either end
@@ -964,6 +1077,15 @@ export function createApplication(deps: ApplicationDependencies): Application {
       };
     }
     const record = read.run;
+    // A Run live in another process is refused before anything is claimed (#98 S2):
+    // re-claiming and acquiring it would fence the process driving it.
+    const foreign = liveElsewhere(input.runId);
+    if (foreign !== undefined) {
+      return {
+        status: "not-applied",
+        problem: runLiveElsewhere(input.runId, foreign.ownerPid),
+      };
+    }
     const derivedFacts = deriveRunFacts(
       runProjection,
       record.bundleSnapshotDigest,
@@ -1009,9 +1131,13 @@ export function createApplication(deps: ApplicationDependencies): Application {
       state: record.state,
       owner,
       done: false,
+      abort: new AbortController(),
       observers: new Set<UpdateStream>(),
     });
     const tracking = runs.get(input.runId)!;
+    // A signal-abort of the granted interval leaves the claim live for the next
+    // open to reconcile `halted`; every other exit releases the claim (#98).
+    let leaveClaimLive = false;
     try {
       const observed = observedOwner(owner, input.runId);
       // Idempotent across process death: an answer already recorded for this
@@ -1086,9 +1212,20 @@ export function createApplication(deps: ApplicationDependencies): Application {
         routing: facts.routing,
         digest: record.bundleSnapshotDigest,
         owner: observed,
+        cancelSignal: tracking.abort.signal,
       });
       return { status: "applied" };
     } catch (error) {
+      // As in runAndSettle: our own abort — not the error's type — distinguishes a
+      // cancel/signal from a genuine fault.
+      if (tracking.abort.signal.aborted) {
+        if (tracking.abort.signal.reason === CANCEL_ABORT) {
+          observedOwner(owner, input.runId).writeState("cancelled");
+          return { status: "applied" };
+        }
+        leaveClaimLive = true;
+        return { status: "applied" };
+      }
       return {
         status: "not-applied",
         problem: runExecutionFault(input.runId, error),
@@ -1097,7 +1234,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       tracking.owner = undefined;
       tracking.done = true;
       owner.close();
-      runGroup.endRun(input.runId);
+      if (!leaveClaimLive) runGroup.endRun(input.runId);
     }
   }
 
@@ -1129,37 +1266,69 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { admitted: true, operationId, runId };
   }
 
-  // Rest a live Run `cancelled` — the only route to that terminal state. Acquiring
-  // the owner bumps the fencing epoch, so a stale owner executing the Run in
-  // another process is fenced and its next canonical write is refused (execution
-  // stops); then we record `cancelled` and release the claim, every Artifact
-  // intact. A Run that is not live has no cancel to make.
-  function cancelAndSettle(runId: string): OperationOutcome {
+  // Rest a live Run `cancelled` — the only route to that terminal state (#87, #98).
+  // A Run live in THIS process is cancelled as an abort: stop its execution, then
+  // await the `cancelled` rest the execution promise writes through the owner it
+  // still holds. A Run live in ANOTHER process is cancelled by the fresh-owner
+  // epoch-bump trick, which fences the stale owner so its next canonical write is
+  // refused (execution stops), then records `cancelled` and releases the claim,
+  // every Artifact intact. A Run that is not live has no cancel to make.
+  function cancelAndSettle(
+    runId: string,
+  ): OperationOutcome | Promise<OperationOutcome> {
     if (runGroup === undefined) {
       return { status: "not-applied", problem: runSupportUnavailable() };
     }
-    const listing = runGroup.listRuns().find((run) => run.runId === runId);
-    if (listing === undefined) {
-      return { status: "not-applied", problem: runNotFound(runId) };
+    const tracking = runs.get(runId);
+    if (
+      tracking !== undefined &&
+      !tracking.done &&
+      tracking.owner !== undefined &&
+      tracking.promise !== undefined
+    ) {
+      // Live in this process: abort execution (killing its child) and await the
+      // `cancelled` rest runAndSettle writes and pushes. runAndSettle owns the owner
+      // close and claim release, so nothing here fences its owner. `owner` and
+      // `promise` are set inside the same synchronous prefix (see startRun), so
+      // requiring both never drops a genuine in-process cancel to the fence path; it
+      // only keeps the abort from resolving `applied` against a Run whose settlement
+      // promise is not yet captured.
+      const promise = tracking.promise;
+      tracking.abort.abort(CANCEL_ABORT);
+      return promise.then(() => {
+        runs.delete(runId);
+        return { status: "applied" };
+      });
     }
-    if (!listing.live) {
-      return { status: "not-applied", problem: runNotLive(runId) };
-    }
-    const owner = runGroup.acquireRun(runId);
-    if (owner === undefined) {
+    // Live elsewhere (or not tracked here): fence the stale owner and rest it.
+    try {
+      const listing = runGroup.listRuns().find((run) => run.runId === runId);
+      if (listing === undefined) {
+        return { status: "not-applied", problem: runNotFound(runId) };
+      }
+      if (!listing.live) {
+        return { status: "not-applied", problem: runNotLive(runId) };
+      }
+      const owner = runGroup.acquireRun(runId);
+      if (owner === undefined) {
+        return { status: "not-applied", problem: runStoreDamaged(runId) };
+      }
+      try {
+        // Our epoch is the freshest, so this write is not fenced. A concurrent
+        // second cancel is the only actor that could fence it, and it is resting the
+        // same Run cancelled too, so the outcome is unchanged either way.
+        owner.writeState("cancelled");
+      } finally {
+        owner.close();
+      }
+      runGroup.endRun(runId);
+      runs.delete(runId);
+      return { status: "applied" };
+    } catch {
+      // A malformed coordination row (listRuns) or a store fault settles here, the
+      // way run/answer route an execution fault, so nothing throws out of submit (A4).
       return { status: "not-applied", problem: runStoreDamaged(runId) };
     }
-    try {
-      // Our epoch is the freshest, so this write is not fenced. A concurrent second
-      // cancel is the only actor that could fence it, and it is resting the same
-      // Run cancelled too, so the outcome is unchanged either way.
-      owner.writeState("cancelled");
-    } finally {
-      owner.close();
-    }
-    runGroup.endRun(runId);
-    runs.delete(runId);
-    return { status: "applied" };
   }
 
   // Delete a resting or terminal Run (#87). Admitted at once; applied at settle
@@ -1197,6 +1366,20 @@ export function createApplication(deps: ApplicationDependencies): Application {
     if (runGroup === undefined) {
       return { status: "not-applied", problem: runSupportUnavailable() };
     }
+    try {
+      return applyDelete(runGroup, operationId, runId);
+    } catch {
+      // A malformed coordination row (listRuns) or a store fault settles here, so
+      // nothing throws out of submit (A4).
+      return { status: "not-applied", problem: runStoreDamaged(runId) };
+    }
+  }
+
+  function applyDelete(
+    runGroup: RunGroup,
+    operationId: string,
+    runId: string,
+  ): OperationOutcome {
     // A live Run cannot be deleted (its store is in use); cancel it first.
     // ponytail: this liveness check is not transactional with the store delete,
     // and the Run Store's admitted delete deliberately does not re-check the claim
@@ -1214,6 +1397,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // `.deleting` quarantine; idempotent per operation id, and re-deleting a Run
     // already gone still settles applied.
     runGroup.deleteRun({ operationId, runId });
+    // Tell any observer its subject is gone before the tracking entry is dropped (#98).
+    pushRunClosed(runId);
     runs.delete(runId);
     return { status: "applied" };
   }
@@ -1251,8 +1436,13 @@ export function createApplication(deps: ApplicationDependencies): Application {
       // acquiring bumps the fencing epoch and would abort the process running it,
       // so refuse the read until the Run rests instead.
       const live = runs.get(reference.runId)?.owner;
-      if (live === undefined && isLiveElsewhere(runGroup, reference.runId)) {
-        return { found: false, problem: runLiveElsewhere(reference.runId) };
+      const foreign =
+        live === undefined ? liveElsewhere(reference.runId) : undefined;
+      if (foreign !== undefined) {
+        return {
+          found: false,
+          problem: runLiveElsewhere(reference.runId, foreign.ownerPid),
+        };
       }
       const owner = live ?? runGroup.acquireRun(reference.runId);
       if (owner === undefined) {
@@ -1283,8 +1473,25 @@ export function createApplication(deps: ApplicationDependencies): Application {
     },
   };
 
+  async function shutdown(): Promise<void> {
+    // Abort every Run live in this process, then await each settlement so its child
+    // is dead and its store is consistent before teardown. Each aborts with the
+    // signal reason, so runAndSettle leaves the claim live for the next open to
+    // reconcile `halted` (ADR 0019, #98). Filter on `promise` (set in the same
+    // synchronous prefix that sets `owner`), so the set aborted is exactly the set
+    // awaited — shutdown never resolves before a live Run's settlement it aborted.
+    const live = [...runs.values()].filter(
+      (tracking) => !tracking.done && tracking.promise !== undefined,
+    );
+    for (const tracking of live) tracking.abort.abort(SIGNAL_ABORT);
+    await Promise.all(
+      live.map((tracking) => tracking.promise!.catch(() => undefined)),
+    );
+  }
+
   return {
     projectionPort,
+    shutdown,
     bundleManagement: createBundleManagement({
       catalog,
       budgets: bundleCatalog.budgets,
@@ -1300,13 +1507,15 @@ export function createApplication(deps: ApplicationDependencies): Application {
   };
 }
 
-// The one site that canonicalizes a Workspace path (#74 A6). `.native` fully
-// resolves the path — on Windows it expands 8.3 short names — so equal
+// The one site that canonicalizes a Workspace path (#74 A6, #98 A20). `.native`
+// fully resolves the path — on Windows it expands 8.3 short names — so equal
 // directories reached by different spellings compare equal for the exact-string
 // comparison Workspace approval relies on. Both the launch path (once, at
-// construction) and every approve input pass through here; it throws only when
-// the path does not resolve, which `applyApproval` translates to a Problem.
-function canonicalizeWorkspacePath(rawPath: string): string {
+// construction) and every approve input pass through here, and composition wires
+// the Run group's group directory through the same canonicaliser rather than a
+// second `realpathSync.native` site (A20); it throws only when the path does not
+// resolve, which `applyApproval` translates to a Problem.
+export function canonicalizeWorkspacePath(rawPath: string): string {
   return realpathSync.native(rawPath);
 }
 

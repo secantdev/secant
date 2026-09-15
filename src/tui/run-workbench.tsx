@@ -19,6 +19,7 @@ import type {
   ResourceReference,
   ResumeRunOffer,
   RunCheckpointView,
+  RunStateName,
   RunStepProgress,
   RunStepStatus,
   RunView,
@@ -626,19 +627,21 @@ export function RunWorkbench(props: {
 
 type Theme = ReturnType<typeof useTheme>["theme"];
 
-function stateColor(theme: Theme, state: string) {
+function stateColor(theme: Theme, state: RunStateName) {
+  // Typed over RunStateName so the compiler rejects a state string outside the
+  // vocabulary (#98 AC6): a new state must be given a colour here to compile.
   switch (state) {
     case "succeeded":
       return theme.success;
     case "failed":
       return theme.error;
+    case "cancelled":
+      return theme.textMuted;
     case "blocked":
     case "halted":
       return theme.warning;
     case "running":
       return theme.accent;
-    default:
-      return theme.textMuted;
   }
 }
 

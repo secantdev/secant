@@ -192,10 +192,12 @@ test("resume of a Run that is not halted is refused", async (t) => {
   assert.equal(admission.problem.code, "run-not-resumable");
 });
 
-test("resume of a live (running) Run is refused, not thrown (#86)", (t) => {
+test("resume of a live (running) Run is refused as live-elsewhere (#86, #98 S2)", (t) => {
   const f = fixture(t);
-  // A record left `running` (a live Run, here or elsewhere) is not resumable:
-  // resuming would fence the process driving it.
+  // A Run left `running` with its Workspace claim still live is a Run genuinely
+  // executing (here or in another process): resuming it would fence the process
+  // driving it, so it is refused `run-live-elsewhere` (naming the owner) before any
+  // resting-state check, not reconciled or resumed.
   const created = f.runGroup.createRun({
     operationId: "live-1",
     bundleSnapshotDigest: "sha256:deadbeef",
@@ -214,7 +216,7 @@ test("resume of a live (running) Run is refused, not thrown (#86)", (t) => {
     input: { runId: created.runId },
   });
   assert.ok(!admission.admitted);
-  assert.equal(admission.problem.code, "run-not-resumable");
+  assert.equal(admission.problem.code, "run-live-elsewhere");
 });
 
 test("resume of a Run whose stored launch payload is not a string map is refused before Preflight (A10)", (t) => {
@@ -235,6 +237,9 @@ test("resume of a Run whose stored launch payload is not a string map is refused
   assert.ok(owner);
   assert.deepEqual(owner.writeState("failed"), { ok: true });
   owner.close();
+  // A genuinely `failed` (resting) Run has released its Workspace claim, so the
+  // resume reaches the launch-payload read rather than the live-elsewhere refusal.
+  f.runGroup.endRun(created.runId);
 
   const admission = f.app.projectionPort.submit({
     operationId: "resume-bad-launch",

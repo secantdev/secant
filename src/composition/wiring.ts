@@ -1,7 +1,8 @@
-import { existsSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
+  canonicalizeWorkspacePath,
   createApplication,
   type Application,
   type RunExecution,
@@ -81,11 +82,13 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
   rmSync(join(secantHome, "run-assets"), { recursive: true, force: true });
   try {
     // The Run Store groups Runs by the resolved absolute Workspace path; open it
-    // against the same canonicalisation the Application applies (A6), so a fresh
-    // `run show` process reaches the same group directory as the launch.
+    // against the same canonicalisation the Application applies (A6, A20), through
+    // the one exported canonicaliser rather than a second `realpathSync.native`
+    // site, so a fresh `run show` process reaches the same group directory as the
+    // launch.
     const runGroup = openRunGroup(
       secantHome,
-      realpathSync.native(launchWorkspacePath),
+      canonicalizeWorkspacePath(launchWorkspacePath),
     );
     try {
       const application = createApplication({
@@ -116,11 +119,14 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
 // `text`/`verdict` in M2 (execution's file-materialization gap is a documented
 // `ponytail:`).
 function makeRunExecution(catalog: Catalog, platform: Platform): RunExecution {
-  return ({ routing, digest, owner }) =>
+  return ({ routing, digest, owner, cancelSignal }) =>
     executeRouting(routing, {
       owner,
       platform,
       resolveAsset: treeResolver(catalog, digest),
+      // The Application's per-Run cancel Seam (#98): an abort kills the child's
+      // process group and unwinds execution, and the Application decides the rest.
+      ...(cancelSignal !== undefined ? { cancelSignal } : {}),
     });
 }
 

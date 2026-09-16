@@ -4,6 +4,12 @@
 // Windows it is an npm-style `.cmd` shim naming the Bun runtime plus a colocated
 // `claude.mjs`, exactly the shape the process Module's shim resolver parses, so
 // the shim resolves to the runtime and script and is spawned directly.
+//
+// The case directory it plays back is a real recorded fixture from #115 under
+// tests/harness/fixtures/claude-code/<case>/ (byte-faithful stdout, stdin/bridge
+// ordering) — no longer a hand-authored case. A recorded Turn may carry a
+// `workspacePatch` the replayer git-applies in its launch cwd at the Turn's
+// result, so a Test Repair replay leaves the Workspace fixed as the recording did.
 
 import {
   appendFileSync,

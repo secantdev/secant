@@ -1,0 +1,27 @@
+{
+  "exitCode": 0,
+  "turns": [
+    {
+      "steps": [
+        {
+          "emit": "stdout-0.stdout"
+        },
+        {
+          "bridge": {
+            "tool_name": "Edit",
+            "input": {
+              "file_path": "«WORKSPACE»/sum.mjs",
+              "old_string": "a - b",
+              "new_string": "a + b",
+              "replace_all": false
+            }
+          }
+        },
+        {
+          "emit": "stdout-final.stdout"
+        }
+      ],
+      "workspacePatch": "workspace.patch"
+    }
+  ]
+}

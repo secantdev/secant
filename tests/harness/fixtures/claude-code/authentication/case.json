@@ -1,0 +1,9 @@
+{
+  "exitCode": 1,
+  "turns": [
+    {
+      "stdout": "turn-1.stdout",
+      "exitAfter": true
+    }
+  ]
+}

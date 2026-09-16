@@ -1,0 +1,8 @@
+{
+  "harness": "claude-code",
+  "executableVersion": "2.1.234 (Claude Code)",
+  "protocolVersion": "2.1.234",
+  "recordedAt": "synthetic",
+  "redactions": [],
+  "refreshCommand": "synthetic -- hand-authored; swallows SIGTERM then force-killed -- a real claude honours SIGTERM; see tests/harness/fixtures/README.md"
+}

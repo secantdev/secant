@@ -9,10 +9,14 @@
 // stdout/stderr bytes. This preserves the real process and backpressure seam.
 //
 // It records argv, cwd, and each intact stdin line to the log named in its
-// runtime configuration. The protocol case itself is a directory outside the
-// recorded-fixture tree; #115 replaces these hand-authored cases with recordings.
+// runtime configuration. From #115 the case directory is a real recorded fixture
+// under tests/harness/fixtures/claude-code/<case>/, and a Turn may carry a
+// `workspacePatch` — a git diff the replayer applies in its launch cwd as the
+// Turn concludes, so a replayed Test Repair Turn leaves the Workspace fixed
+// exactly as the real recording did.
 
 import { appendFileSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -244,6 +248,24 @@ for await (const line of lines) {
         process.stderr,
         readFileSync(join(caseDirectory, turn.stderr)),
       );
+    }
+  }
+  // The Workspace patch is applied at the Turn's result — after this Turn's bytes
+  // and before we await the next stdin frame — so a replayed Test Repair Turn
+  // leaves the launch cwd's git Workspace changed exactly as the recording did.
+  if (typeof turn.workspacePatch === "string") {
+    const patchPath = join(caseDirectory, turn.workspacePatch);
+    try {
+      execFileSync("git", ["apply", "--whitespace=nowarn", patchPath], {
+        cwd: process.cwd(),
+      });
+    } catch (error) {
+      process.stderr.write(
+        `secant replayer: git apply ${turn.workspacePatch} failed: ${
+          error?.message ?? error
+        }\n`,
+      );
+      process.exit(3);
     }
   }
   // A Turn that models "process exits without a result" (a lost or corrupt case)

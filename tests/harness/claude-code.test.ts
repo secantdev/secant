@@ -7,7 +7,14 @@
 // cache reuse versus requalification on drift.
 
 import assert from "node:assert/strict";
-import { chmodSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -35,19 +42,20 @@ import {
 import { installReplayer } from "./replayer.js";
 
 const VERSION = "2.1.234 (Claude Code)";
-const COMPLETED_CASE = join(
-  fileURLToPath(new URL(".", import.meta.url)),
-  "protocol-cases",
-  "claude-code",
-  "completed",
-);
-const protocolCase = (name: string) =>
+// Recorded and synthetic case directories both live under the committed fixtures
+// tree (#115); the hand-authored `protocol-cases/` tree it replaced is gone.
+const fixtureCase = (name: string) =>
   join(
     fileURLToPath(new URL(".", import.meta.url)),
-    "protocol-cases",
+    "fixtures",
     "claude-code",
     name,
   );
+// The rich completed-Turn case stays synthetic: it exercises tool activity,
+// thinking/telemetry exclusion, preview coalescing, and unknown-frame tolerance a
+// real plain Turn does not. The real plain recording is exercised separately below.
+const COMPLETED_CASE = fixtureCase("completed");
+const protocolCase = fixtureCase;
 const FORBIDDEN_FLAGS = [
   "--bare",
   "--strict-mcp-config",
@@ -367,7 +375,6 @@ test(
 // process cannot ignore the graceful signal for the escalation to be observable.
 const AUTHENTICATION_REQUIRED =
   "Authentication required for Claude Code. Log in separately through Claude Code, then retry.";
-const LEAKED_TOKEN = "sk-ant-oops-secret-token";
 
 const caseScenario =
   (name: string, id: string) => (): HarnessAdapterFactory => {
@@ -383,7 +390,7 @@ const caseScenario =
 const interruptScenarios: InterruptRecoveryScenarios = {
   ...turnScenarios,
   blockingTurn: caseScenario(
-    "blocking",
+    "interrupt",
     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   ),
   unresponsiveInterrupt: caseScenario(
@@ -395,7 +402,7 @@ const interruptScenarios: InterruptRecoveryScenarios = {
     "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
   ),
   resumeAcknowledged: caseScenario(
-    "resume-acknowledged",
+    "resume",
     "55555555-5555-4555-8555-555555555555",
   ),
   resumeUnacknowledged: caseScenario(
@@ -435,6 +442,9 @@ async function runProtocolTurn(caseName: string, id: string) {
 }
 
 test("a not-logged-in result yields the exact authentication failure and leaks no credential", async () => {
+  // The recorded signal (#115): a not-logged-in run returns `subtype:"success"`
+  // with `result:"Not logged in · Please run /login"`, so the Adapter classifies
+  // it as an authentication failure before the success branch.
   const { harness, result } = await runProtocolTurn(
     "authentication",
     "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
@@ -444,12 +454,32 @@ test("a not-logged-in result yields the exact authentication failure and leaks n
   assert.equal(result.detail.failure.category, "authentication");
   assert.equal(result.detail.failure.phase, "turn");
   assert.equal(result.detail.failure.diagnostics, AUTHENTICATION_REQUIRED);
-  // The raw result quoted a token; nothing but the fixed message crosses the Seam.
-  assert.equal(JSON.stringify(result).includes(LEAKED_TOKEN), false);
+  // The raw remediation never crosses the Seam — only the fixed message does.
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("Not logged in"), false);
+  assert.equal(serialized.includes("/login"), false);
   await harness.close();
 });
 
-test("a malformed JSON-looking line ends the Turn lost with protocol-corruption", async () => {
+test("a success result that quotes a login phrase but is not an error stays completed", async () => {
+  // The auth check runs before the success branch, so it must not swallow a real
+  // answer whose text merely quotes "please run /login": that result settles with
+  // is_error:false, so it stays completed, not authentication-failed. Only a
+  // success result flagged is_error:true is the real not-logged-in signal.
+  const { harness, result } = await runProtocolTurn(
+    "completed-quotes-login",
+    "88888888-8888-4888-8888-888888888888",
+  );
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") throw new Error("unreachable");
+  assert.match(result.detail.finalContent ?? "", /please run \/login/);
+  await harness.close();
+});
+
+test("a truncated JSON frame ends the Turn lost with protocol-corruption", async () => {
+  // The recorded corruption case (#115): a real stream whose trailing frame was
+  // left incomplete by a mid-write kill — the Adapter's end-of-stream check treats
+  // the truncated frame as protocol corruption.
   const { harness, result } = await runProtocolTurn(
     "protocol-corruption",
     "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -475,8 +505,99 @@ test("exit without a result loses the Turn with completion-unknown, the exit cod
   await harness.close();
 });
 
+// --- Real recorded Turns (#115) ----------------------------------------------
+
+test("the recorded plain Turn completes with its assistant text, model, and usage", async () => {
+  // The real recording of a no-tools Turn: byte-faithful init, partial stream,
+  // assistant text, and success result captured from the installed Claude Code.
+  const { harness, events, result } = await runProtocolTurn(
+    "plain",
+    "11111111-1111-4111-8111-111111111111",
+  );
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") throw new Error("unreachable");
+  assert.equal(result.detail.finalContent, "hello");
+  assert.equal(result.detail.effectiveModel.known, true);
+  if (!result.detail.effectiveModel.known) throw new Error("unreachable");
+  assert.match(result.detail.effectiveModel.model, /^claude-/);
+
+  const sessionEvent = events.find((event) => event.kind === "session");
+  assert.equal(sessionEvent?.kind, "session");
+  if (sessionEvent?.kind !== "session") throw new Error("unreachable");
+  // The init frame's real facts crossed the Seam: version and the live bridge.
+  assert.match(sessionEvent.facts?.executableVersion ?? "", /^\d+\.\d+\.\d+/);
+  assert.ok(
+    sessionEvent.facts?.mcp.some(
+      (server) =>
+        server.name === "secant-permissions" && server.status === "connected",
+    ),
+    "the recorded init reports the permission bridge connected",
+  );
+  assert.ok(events.some((event) => event.kind === "usage"));
+  assert.ok(
+    events.some(
+      (event) =>
+        event.kind === "assistant-content" && event.content === "hello",
+    ),
+  );
+  await harness.close();
+});
+
+test("the recorded Test Repair Turn approves an Edit and its patch makes the failing test pass", async () => {
+  // A real Turn that edited a file through the permission bridge. The recording
+  // carries the Workspace patch; the replayer applies it to a temporary git repo
+  // so the once-failing test passes — the AC for the Test Repair case.
+  const workspace = makeTempDir("secant-claude-repair-");
+  execFileSync("git", ["init", "-q"], { cwd: workspace });
+  // The failing baseline the patch was recorded against: sum() must add, not subtract.
+  writeFileSync(
+    join(workspace, "sum.mjs"),
+    "export const sum = (a, b) => a - b;\n",
+  );
+  writeFileSync(
+    join(workspace, "sum.test.mjs"),
+    [
+      "import assert from 'node:assert';",
+      "import { sum } from './sum.mjs';",
+      "assert.equal(sum(2, 3), 5);",
+    ].join("\n") + "\n",
+  );
+
+  const replayer = installReplayer(VERSION, protocolCase("test-repair"));
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => "77777777-7777-4777-8777-777777777777",
+  }).prepare({ workspace });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+
+  const turn = prepared.harness.startTurn(bridgeTurn("repair"));
+  const { events, raised } = firstRequest(turn);
+  const request = await raised;
+  assert.equal(request.shape.kind, "approval");
+  if (request.shape.kind !== "approval") throw new Error("unreachable");
+  assert.equal(request.shape.tool, "Edit");
+  await turn.answerRequest({
+    requestId: request.requestId,
+    kind: "approval",
+    decision: "allow",
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "completed");
+  assert.ok(events.some((event) => event.kind === "request-answered"));
+  const [bridge] = replayer.bridges();
+  assert.equal(bridge.behavior, "allow");
+  await prepared.harness.close();
+
+  // The replayer applied the recorded Workspace patch at the Turn's result: the
+  // failing test now passes over the patched file.
+  assert.match(readFileSync(join(workspace, "sum.mjs"), "utf8"), /a \+ b/);
+  execFileSync(process.execPath, ["sum.test.mjs"], { cwd: workspace });
+});
+
 test("interrupting a live Turn spawns no resume and settles interrupted with a detached Session", async () => {
-  const replayer = installReplayer(VERSION, protocolCase("blocking"));
+  const replayer = installReplayer(VERSION, protocolCase("interrupt"));
   const prepared = await createClaudeCodeAdapter({
     path: replayer.path,
     env: {},
@@ -527,10 +648,7 @@ test("interrupting a live Turn spawns no resume and settles interrupted with a d
 });
 
 test("a resumed Turn spawns with --resume and not --session-id", async () => {
-  const replayer = installReplayer(
-    VERSION,
-    protocolCase("resume-acknowledged"),
-  );
+  const replayer = installReplayer(VERSION, protocolCase("resume"));
   const prepared = await createClaudeCodeAdapter({
     path: replayer.path,
     env: {},
@@ -590,10 +708,7 @@ test("resuming a coordinate on an untracked Session passes that coordinate, not 
   // No prior Turn on this Prepared Harness minted the id, so the coordinate must
   // come from the caller's `resume` — a fresh mint would name a Session Claude
   // Code never saw and the acknowledging init would be rejected.
-  const replayer = installReplayer(
-    VERSION,
-    protocolCase("resume-acknowledged"),
-  );
+  const replayer = installReplayer(VERSION, protocolCase("resume"));
   const prepared = await createClaudeCodeAdapter({
     path: replayer.path,
     env: {},

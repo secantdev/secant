@@ -1,0 +1,8 @@
+{
+  "harness": "claude-code",
+  "executableVersion": "2.1.234 (Claude Code)",
+  "protocolVersion": "2.1.234",
+  "recordedAt": "synthetic",
+  "redactions": [],
+  "refreshCommand": "synthetic -- hand-authored; two coexisting approvals -- real runs raise one prompt at a time; see tests/harness/fixtures/README.md"
+}

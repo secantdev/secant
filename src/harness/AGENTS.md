@@ -33,13 +33,14 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `--session-id`). Init state is per process. A resumed init that does not echo the coordinate is a `recovery`-phase failure that marks the Session
   `unusable`; recovery never silently starts a fresh conversation.
 - Authentication is recognized from the stdout result (no typed auth field exists in the print-mode contract) and surfaced as the fixed
-  `AUTHENTICATION_REQUIRED` message only — the raw result never crosses the Seam, since it may quote a key. #115's recordings will pin the signal.
+  `AUTHENTICATION_REQUIRED` message only — the raw result never crosses the Seam, since it may quote a key. #115's recording pinned the signal: a
+  not-logged-in run returns `subtype:"success"` with `result:"Not logged in · Please run /login"`, so the auth check runs before the success branch.
 
 ## Tests
 
 - The `tests/harness` domain owns the deterministic fake Adapter, the shared conformance suite, and the `claude` replayer. Its argv parser and recorded
-  `--version` landed in #111; #112 added per-Turn protocol replay from hand-authored `tests/harness/protocol-cases/`. #115 owns the recording tool and
-  `tests/harness/fixtures/<harness>/<case>/` tree with its `recording.json` sidecar.
+  `--version` landed in #111; #112 added per-Turn protocol replay. #115 replaced the hand-authored `protocol-cases/` tree with the recorded (and residual
+  synthetic) `tests/harness/fixtures/<harness>/<case>/` tree, its `recording.json` sidecar, and the opt-in `record.ts` tool.
 - The conformance suite is the Seam's executable specification, parameterized by an Adapter factory. `runPrepareProfileCases` and `runTurnLifecycleCases`
   and `runInterruptRecoveryCases` (interrupt, unresponsive-interrupt, lost-completion, resume ack/no-ack, close-mid-Turn) run against both the fake and
   the Claude Code Adapter over the replayer; the request/steer/clarification cases stay fake-only. The fake must exhibit behaviours a real Harness never

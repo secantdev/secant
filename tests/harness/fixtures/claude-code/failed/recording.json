@@ -1,0 +1,8 @@
+{
+  "harness": "claude-code",
+  "executableVersion": "2.1.234 (Claude Code)",
+  "protocolVersion": "2.1.234",
+  "recordedAt": "synthetic",
+  "redactions": [],
+  "refreshCommand": "synthetic -- hand-authored; terminal error_during_execution result -- no on-demand way to force a task error result; see tests/harness/fixtures/README.md"
+}

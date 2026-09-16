@@ -1219,20 +1219,17 @@ class ClaudeCodeTurn implements HarnessTurn {
     const usage = usageObservation(frame);
     if (usage !== undefined) this.emit({ kind: "usage", observation: usage });
     const subtype = stringField(frame, "subtype") ?? "unknown-result";
-    if (subtype === "success") {
-      const finalContent = stringField(frame, "result");
-      this.settle({
-        kind: "completed",
-        detail: {
-          ...(finalContent !== undefined ? { finalContent } : {}),
-          effectiveModel: this.session.model(),
-          session: { state: "open" },
-          ...(usage !== undefined ? { usage } : {}),
-        },
-      });
-      return;
-    }
-    if (isAuthenticationResult(frame)) {
+    // Authentication is recognized before the success branch: #115's recording
+    // pinned the real signal — the not-logged-in result arrives as
+    // `subtype:"success"` but with `is_error:true`, zero cost, and empty usage, and
+    // `result:"Not logged in · Please run /login"`. Guard the success case on that
+    // `is_error` flag: a real answer whose text merely quotes a login phrase settles
+    // with `is_error:false`, so it stays a completed Turn. A non-`success` result
+    // matching the pattern is an auth failure regardless, as before.
+    if (
+      isAuthenticationResult(frame) &&
+      (subtype !== "success" || frame.is_error === true)
+    ) {
       // Never carry the raw result across the Seam: it may quote a key or token.
       // Only the fixed remediation message reaches the caller.
       this.settle({
@@ -1246,6 +1243,19 @@ class ClaudeCodeTurn implements HarnessTurn {
           },
           effectiveModel: this.session.model(),
           session: { state: "open" },
+        },
+      });
+      return;
+    }
+    if (subtype === "success") {
+      const finalContent = stringField(frame, "result");
+      this.settle({
+        kind: "completed",
+        detail: {
+          ...(finalContent !== undefined ? { finalContent } : {}),
+          effectiveModel: this.session.model(),
+          session: { state: "open" },
+          ...(usage !== undefined ? { usage } : {}),
         },
       });
       return;
@@ -1427,8 +1437,9 @@ function processCode(result: OwnedProcessClose): { nativeCode?: string } {
  *  not-logged-in remediation phrasings only — bare words like "unauthorized" or
  *  "credential" are deliberately excluded so a task result that merely mentions
  *  them keeps its real diagnostics rather than being masked by the login message.
- *  #115 pins this to a recorded fixture; the matched text is never surfaced — only
- *  `AUTHENTICATION_REQUIRED` is. */
+ *  #115's recording pinned the signal: a not-logged-in run returns `subtype:"success"`
+ *  with `result:"Not logged in · Please run /login"`, so this is checked before the
+ *  success branch. The matched text is never surfaced — only `AUTHENTICATION_REQUIRED`. */
 function isAuthenticationResult(frame: Record<string, unknown>): boolean {
   const text = [
     stringField(frame, "subtype") ?? "",

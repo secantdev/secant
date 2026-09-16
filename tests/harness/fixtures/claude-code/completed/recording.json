@@ -1,0 +1,8 @@
+{
+  "harness": "claude-code",
+  "executableVersion": "2.1.234 (Claude Code)",
+  "protocolVersion": "2.1.234",
+  "recordedAt": "synthetic",
+  "redactions": [],
+  "refreshCommand": "synthetic -- hand-authored; exercises tool activity, thinking/telemetry exclusion, preview coalescing, and unknown-frame tolerance a real plain Turn does not; see tests/harness/fixtures/README.md"
+}

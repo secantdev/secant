@@ -52,10 +52,14 @@ test("test temp directories are allocated through the shared helper", async () =
 
   // The shared helper registers a `node:test` `after` cleanup hook, so it can
   // only be used from files the `bun test` runner drives. The helper itself is
-  // exempt, and so is the real-terminal lifecycle suite (#56): a standalone
-  // script run under `bun`, not `bun test`, which cannot import the helper and
-  // removes its own temp directories in a `finally`.
-  const exempt = new Set(["helpers/tempDir.ts", "terminal/lifecycle.ts"]);
+  // exempt, and so are standalone scripts run under `bun`, not `bun test`, which
+  // cannot import the helper and remove their own temp directories in a `finally`:
+  // the real-terminal lifecycle suite (#56) and the opt-in Claude Code recorder (#115).
+  const exempt = new Set([
+    "helpers/tempDir.ts",
+    "terminal/lifecycle.ts",
+    "harness/record.ts",
+  ]);
 
   for (const sourceFile of sourceFiles) {
     const relativeToTests = relative(testsDirectory, sourceFile)

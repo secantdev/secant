@@ -1,0 +1,13 @@
+{
+  "harness": "claude-code",
+  "executableVersion": "2.1.273 (Claude Code)",
+  "protocolVersion": "2.1.273",
+  "recordedAt": "2026-09-16T10:32:46.768Z",
+  "redactions": [
+    {
+      "placeholder": "«WORKSPACE»",
+      "reason": "recording workspace path"
+    }
+  ],
+  "refreshCommand": "bun tests/harness/record.ts authentication"
+}

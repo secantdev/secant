@@ -1,0 +1,8 @@
+{
+  "harness": "claude-code",
+  "executableVersion": "2.1.234 (Claude Code)",
+  "protocolVersion": "2.1.234",
+  "recordedAt": "synthetic",
+  "redactions": [],
+  "refreshCommand": "synthetic -- hand-authored; a success result with is_error:false whose text quotes a login phrase must stay completed, not be misread as the is_error:true not-logged-in signal; see tests/harness/fixtures/README.md"
+}

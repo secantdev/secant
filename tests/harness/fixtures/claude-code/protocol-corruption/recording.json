@@ -1,0 +1,17 @@
+{
+  "harness": "claude-code",
+  "executableVersion": "2.1.273 (Claude Code)",
+  "protocolVersion": "2.1.273",
+  "recordedAt": "2026-09-16T10:32:48.696Z",
+  "redactions": [
+    {
+      "placeholder": "«TRUNCATED»",
+      "reason": "trailing frame left incomplete by a mid-write SIGKILL (a real transport truncation)"
+    },
+    {
+      "placeholder": "«WORKSPACE»",
+      "reason": "recording workspace path"
+    }
+  ],
+  "refreshCommand": "bun tests/harness/record.ts protocol-corruption"
+}

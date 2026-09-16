@@ -55,6 +55,7 @@
     "Rohan Garg <gargrohan831@gmail.com> (https://rgdev.xyz)"
   ],
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@opentui/core": "0.4.5",
     "@opentui/keymap": "0.4.5",
     "@opentui/solid": "0.4.5",

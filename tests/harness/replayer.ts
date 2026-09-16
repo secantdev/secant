@@ -21,6 +21,23 @@ const replayerSource = join(
   "replayer.mjs",
 );
 
+// Resolved here, where the test process's node_modules is visible, and passed to
+// the replayer through recording.json so it can import the MCP client SDK from
+// its own temp directory (which has no node_modules).
+const MCP_CLIENT_MODULE = import.meta
+  .resolve("@modelcontextprotocol/sdk/client/index.js");
+const MCP_TRANSPORT_MODULE = import.meta
+  .resolve("@modelcontextprotocol/sdk/client/streamableHttp.js");
+
+/** One recorded permission-bridge call the replayer made. */
+export interface BridgeRecord {
+  id: string;
+  tool_name: string;
+  behavior: string;
+  message: string | null;
+  updatedInput: unknown;
+}
+
 export interface InstalledReplayer {
   /** The directory the replayer lives in. */
   readonly dir: string;
@@ -47,6 +64,8 @@ export interface InstalledReplayer {
     stdinBytes: number;
     stdinLines: string[];
   }[];
+  /** Every permission-bridge call the replayer made and the verdict it got. */
+  bridges(): BridgeRecord[];
   /** Drift the install: change the identity file's bytes and the reported
    *  version, so the next `prepare` requalifies instead of reusing the cache. */
   drift(newVersion: string): void;
@@ -113,6 +132,11 @@ export function installReplayer(
           version: current,
           log: logPath,
           protocolCaseDirectory,
+          // Absolute module URLs so the temp-PATH replayer, which has no
+          // node_modules of its own, can import the MCP client SDK to make a real
+          // loopback round-trip against the permission bridge.
+          mcpClientModule: MCP_CLIENT_MODULE,
+          mcpTransportModule: MCP_TRANSPORT_MODULE,
           recordedAt: "1970-01-01T00:00:00Z",
           redactions: [],
           refreshCommand: "n/a — synthesised by tests/harness/replayer.ts",
@@ -163,6 +187,21 @@ export function installReplayer(
         invocation.stdinBytes += Buffer.byteLength(`${entry.line}\n`);
       }
       return [...invocations.values()];
+    },
+    bridges() {
+      const text = readFileSync(logPath, "utf8").trim();
+      if (text.length === 0) return [];
+      return text
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .filter((entry) => entry.type === "bridge")
+        .map((entry) => ({
+          id: entry.id,
+          tool_name: entry.tool_name,
+          behavior: entry.behavior,
+          message: entry.message,
+          updatedInput: entry.updatedInput ?? null,
+        }));
     },
     drift(newVersion: string) {
       current = newVersion;

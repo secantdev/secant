@@ -1,0 +1,17 @@
+{
+  "exitCode": 0,
+  "turns": [
+    {
+      "steps": [
+        { "emit": "init.stdout" },
+        {
+          "bridge": {
+            "tool_name": "Bash",
+            "input": { "command": "ls -la", "description": "list files" }
+          }
+        },
+        { "emit": "result.stdout" }
+      ]
+    }
+  ]
+}

@@ -44,20 +44,35 @@ export interface TurnLifecycleScenarios extends PrepareProfileScenarios {
 }
 
 /**
+ * The approval-request subset every Adapter that can raise tool approvals must
+ * exhibit: several coexisting requests, exact-id answering with its races, and
+ * expiry on interruption. Run against the fake here and against the Claude Code
+ * Adapter over its MCP permission bridge, so the same executable specification
+ * holds for the in-process double and the real loopback round-trip.
+ */
+export interface ApprovalRequestScenarios {
+  readonly label: string;
+  /** How many requests `concurrentRequests` raises at once. */
+  readonly concurrentCount: number;
+  /** A Turn that raises `concurrentCount` requests at once, settling once all
+   *  are answered. */
+  concurrentRequests(): HarnessAdapterFactory;
+  /** A Turn that raises one approval request and awaits its answer. */
+  awaitedApproval(): HarnessAdapterFactory;
+  /** A Turn that raises one awaited request and can be interrupted. */
+  interruptible(): HarnessAdapterFactory;
+}
+
+/**
  * The full set of scenario factories. Each returns an Adapter factory set up to
  * exhibit one behaviour when the suite drives it through the Interface. The fake
  * implements all of these; a prepare-only provider implements just the inherited
  * prepare/profile subset.
  */
-export interface ConformanceScenarios extends TurnLifecycleScenarios {
-  /** A Turn that raises three requests at once, settling once all are answered. */
-  concurrentRequests(): HarnessAdapterFactory;
-  /** A Turn that raises one approval request and awaits its answer. */
-  awaitedApproval(): HarnessAdapterFactory;
+export interface ConformanceScenarios
+  extends TurnLifecycleScenarios, ApprovalRequestScenarios {
   /** A Turn that raises one request it does not await, expiring it at terminal. */
   expiringRequest(): HarnessAdapterFactory;
-  /** A Turn that raises one awaited request and can be interrupted. */
-  interruptible(): HarnessAdapterFactory;
   /** A Turn that ends `lost` with the given unknown. */
   lost(unknown: LostUnknown): HarnessAdapterFactory;
   /** Two Turns: the first detaches, the second resumes and completes. */
@@ -176,12 +191,12 @@ export function runPrepareProfileCases(
   });
 }
 
-/** Run the whole suite against one provider. */
-export function runConformanceSuite(scenarios: ConformanceScenarios): void {
+/** Run the approval request/answer/expiry cases against one provider. Both the
+ *  full suite (for the fake) and the Claude Code Adapter over the bridge call it. */
+export function runApprovalRequestCases(
+  scenarios: ApprovalRequestScenarios,
+): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
-
-  runPrepareProfileCases(scenarios);
-  runTurnLifecycleCases(scenarios);
 
   test(
     name("several requests are outstanding at once and each is answered"),
@@ -189,14 +204,14 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
       const prepared = await prepare(scenarios.concurrentRequests());
       const turn = prepared.startTurn(request(recorder().recorder));
       const events = observe(turn);
-      await events.waitForRequests(3);
+      await events.waitForRequests(scenarios.concurrentCount);
       const raised = events.requests();
-      assert.equal(raised.length, 3);
+      assert.equal(raised.length, scenarios.concurrentCount);
       for (const request of raised) await answer(turn, request);
       const result = await turn.result();
       assert.equal(result.kind, "completed");
       const answered = events.all.filter((e) => e.kind === "request-answered");
-      assert.equal(answered.length, 3);
+      assert.equal(answered.length, scenarios.concurrentCount);
       await prepared.close();
     },
   );
@@ -245,34 +260,6 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
     },
   );
 
-  test(name("answering after the Turn ends is rejected expired"), async () => {
-    const prepared = await prepare(scenarios.expiringRequest());
-    const turn = prepared.startTurn(request(recorder().recorder));
-    const events = observe(turn);
-    const result = await turn.result();
-    assert.equal(result.kind, "completed");
-    const [raised] = events.requests();
-    const expiredEvents = events.all.filter(
-      (e) => e.kind === "request-expired",
-    );
-    assert.equal(expiredEvents.length, 1, "the outstanding request expired");
-    const late = await answer(turn, raised);
-    assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
-    await prepared.close();
-  });
-
-  test(
-    name("steer is rejected unsupported when the profile lacks it"),
-    async () => {
-      const prepared = await prepare(scenarios.baseline());
-      const turn = prepared.startTurn(request(recorder().recorder));
-      const receipt = await turn.steer({ text: "guidance" });
-      assert.deepEqual(receipt, { outcome: "rejected", reason: "unsupported" });
-      await turn.result();
-      await prepared.close();
-    },
-  );
-
   test(
     name("interrupt is confirmed and the result is interrupted"),
     async () => {
@@ -301,9 +288,48 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
       const events = observe(turn);
       await events.waitForRequests(1);
       await turn.interrupt();
-      await turn.result();
+      const result = await turn.result();
+      // The expiry event precedes the result: it is in the buffer already.
       const expired = events.all.filter((e) => e.kind === "request-expired");
       assert.equal(expired.length, 1);
+      assert.equal(result.kind, "interrupted");
+      await prepared.close();
+    },
+  );
+}
+
+/** Run the whole suite against one provider. */
+export function runConformanceSuite(scenarios: ConformanceScenarios): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+
+  runPrepareProfileCases(scenarios);
+  runTurnLifecycleCases(scenarios);
+  runApprovalRequestCases(scenarios);
+
+  test(name("answering after the Turn ends is rejected expired"), async () => {
+    const prepared = await prepare(scenarios.expiringRequest());
+    const turn = prepared.startTurn(request(recorder().recorder));
+    const events = observe(turn);
+    const result = await turn.result();
+    assert.equal(result.kind, "completed");
+    const [raised] = events.requests();
+    const expiredEvents = events.all.filter(
+      (e) => e.kind === "request-expired",
+    );
+    assert.equal(expiredEvents.length, 1, "the outstanding request expired");
+    const late = await answer(turn, raised);
+    assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
+    await prepared.close();
+  });
+
+  test(
+    name("steer is rejected unsupported when the profile lacks it"),
+    async () => {
+      const prepared = await prepare(scenarios.baseline());
+      const turn = prepared.startTurn(request(recorder().recorder));
+      const receipt = await turn.steer({ text: "guidance" });
+      assert.deepEqual(receipt, { outcome: "rejected", reason: "unsupported" });
+      await turn.result();
       await prepared.close();
     },
   );

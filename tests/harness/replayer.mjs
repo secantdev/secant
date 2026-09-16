@@ -50,6 +50,99 @@ const valueAfter = (flag) => {
   const index = args.indexOf(flag);
   return index < 0 ? undefined : args[index + 1];
 };
+
+// The MCP permission bridge Secant launched us against: its loopback URL and
+// bearer come from the `--mcp-config` argv, the tool name from
+// `--permission-prompt-tool`. Connected lazily; only bridge steps need it.
+const permissionTool = valueAfter("--permission-prompt-tool");
+const bridge = parseBridge(valueAfter("--mcp-config"));
+// Claude addresses the tool as `mcp__<server>__<tool>` via --permission-prompt-tool,
+// but over the MCP protocol the server exposes it under its bare registered name.
+// Strip the `mcp__<server>__` prefix (the server name is the mcp-config key).
+const bridgeTool =
+  bridge && permissionTool
+    ? permissionTool.replace(`mcp__${bridge.name}__`, "")
+    : permissionTool;
+
+function parseBridge(raw) {
+  if (typeof raw !== "string") return undefined;
+  try {
+    const config = JSON.parse(raw);
+    const [name, entry] = Object.entries(config.mcpServers ?? {})[0] ?? [];
+    if (!entry || typeof entry.url !== "string") return undefined;
+    return {
+      name,
+      url: entry.url,
+      authorization: entry.headers?.Authorization,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+let mcpClient;
+let connecting;
+// One shared client/session for the whole invocation. Memoize the connect
+// promise, not the resolved client, so concurrent bridge steps await the same
+// connection instead of racing to open a second session the transport can't hold.
+function connectBridge() {
+  if (!connecting) {
+    connecting = (async () => {
+      const { Client } = await import(recording.mcpClientModule);
+      const { StreamableHTTPClientTransport } = await import(
+        recording.mcpTransportModule
+      );
+      const client = new Client({ name: "secant-replayer", version: "1.0.0" });
+      const transport = new StreamableHTTPClientTransport(new URL(bridge.url), {
+        requestInit: bridge.authorization
+          ? { headers: { Authorization: bridge.authorization } }
+          : undefined,
+      });
+      await client.connect(transport);
+      mcpClient = client;
+      return client;
+    })();
+  }
+  return connecting;
+}
+
+// Perform one recorded permission call: invoke the bridge tool with the recorded
+// tool name and input, block until Secant answers, then record and return the
+// verdict. A deny "request expired" means the Turn was torn down under us — stop
+// as Claude Code would when its permission call is refused.
+async function bridgeCall(spec) {
+  let payload;
+  try {
+    const client = await connectBridge();
+    const result = await client.callTool({
+      name: bridgeTool,
+      arguments: { tool_name: spec.tool_name, input: spec.input },
+    });
+    const text = result?.content?.[0]?.text;
+    payload = text ? JSON.parse(text) : { behavior: "unknown" };
+  } catch (error) {
+    payload = { behavior: "error", message: String(error) };
+  }
+  if (recording.log) {
+    appendFileSync(
+      recording.log,
+      JSON.stringify({
+        type: "bridge",
+        id: invocationId,
+        tool_name: spec.tool_name,
+        behavior: payload.behavior,
+        message: payload.message ?? null,
+        updatedInput: payload.updatedInput ?? null,
+      }) + "\n",
+    );
+  }
+  if (payload.behavior === "deny" && payload.message === "request expired") {
+    await mcpClient?.close().catch(() => {});
+    process.exit(0);
+  }
+  return payload;
+}
+
 const required = [
   ["--input-format", "stream-json"],
   ["--output-format", "stream-json"],
@@ -102,10 +195,32 @@ for await (const line of lines) {
     );
     process.exit(2);
   }
-  await write(process.stdout, readFileSync(join(caseDirectory, turn.stdout)));
-  if (turn.stderr) {
-    await write(process.stderr, readFileSync(join(caseDirectory, turn.stderr)));
+  if (Array.isArray(turn.steps)) {
+    // Ordered mix of stdout emissions and permission-bridge calls. A bridge step
+    // blocks until Secant answers it, so the recorded stdout after it emits only
+    // once the permission verdict is in — the "recorded point in the Turn".
+    for (const step of turn.steps) {
+      if (step.emit) {
+        await write(
+          process.stdout,
+          readFileSync(join(caseDirectory, step.emit)),
+        );
+      } else if (step.bridge) {
+        await bridgeCall(step.bridge);
+      } else if (Array.isArray(step.bridgeAll)) {
+        await Promise.all(step.bridgeAll.map(bridgeCall));
+      }
+    }
+  } else {
+    await write(process.stdout, readFileSync(join(caseDirectory, turn.stdout)));
+    if (turn.stderr) {
+      await write(
+        process.stderr,
+        readFileSync(join(caseDirectory, turn.stderr)),
+      );
+    }
   }
 }
 
+await mcpClient?.close().catch(() => {});
 process.exitCode = protocolCase.exitCode;

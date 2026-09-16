@@ -14,13 +14,18 @@ import { fileURLToPath } from "node:url";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
   createClaudeCodeAdapter,
+  type HarnessRequest,
+  type HarnessTurn,
   type TurnAdmission,
   type TurnEvent,
+  type TurnRequest,
 } from "../../src/harness/harness.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import {
+  runApprovalRequestCases,
   runPrepareProfileCases,
   runTurnLifecycleCases,
+  type ApprovalRequestScenarios,
   type PrepareProfileScenarios,
   type TurnLifecycleScenarios,
 } from "./conformance.js";
@@ -88,6 +93,267 @@ const turnScenarios: TurnLifecycleScenarios = {
   },
 };
 runTurnLifecycleCases(turnScenarios);
+
+// --- Approval requests over the real MCP permission bridge -------------------
+
+const APPROVAL_SESSION = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const CONCURRENT_SESSION = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const OUTSTANDING_SESSION = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+const claudeApprovalAdapter = (session: string, caseName: string) => {
+  const replayer = installReplayer(VERSION, protocolCase(caseName));
+  return () =>
+    createClaudeCodeAdapter({
+      path: replayer.path,
+      env: {},
+      sessionId: () => session,
+    });
+};
+
+// The shared concurrent-request, race, and interrupt-expiry cases, driven
+// against the Claude Code Adapter over a real loopback MCP round-trip.
+const approvalScenarios: ApprovalRequestScenarios = {
+  label: "claude-code",
+  concurrentCount: 2,
+  concurrentRequests: () =>
+    claudeApprovalAdapter(CONCURRENT_SESSION, "approval-concurrent"),
+  awaitedApproval: () => claudeApprovalAdapter(APPROVAL_SESSION, "approval"),
+  interruptible: () =>
+    claudeApprovalAdapter(OUTSTANDING_SESSION, "approval-outstanding"),
+};
+runApprovalRequestCases(approvalScenarios);
+
+/** A managed Turn with a trivial always-admitting recorder. */
+function bridgeTurn(session: string): TurnRequest {
+  return {
+    session,
+    origin: "managed",
+    correlationKey: { opaque: session },
+    input: { text: "do the thing" },
+    recorder: {
+      admit: () => Promise.resolve({ recorded: true }),
+      checkpoint: () => Promise.resolve({ recorded: true }),
+    },
+  };
+}
+
+/** Collect events and resolve with the first approval request raised. */
+function firstRequest(turn: HarnessTurn): {
+  events: TurnEvent[];
+  raised: Promise<HarnessRequest>;
+} {
+  const events: TurnEvent[] = [];
+  let resolve!: (request: HarnessRequest) => void;
+  const raised = new Promise<HarnessRequest>((r) => {
+    resolve = r;
+  });
+  turn.subscribe((event) => {
+    events.push(event);
+    if (event.kind === "request-raised") resolve(event.request);
+  });
+  return { events, raised };
+}
+
+test("an approved tool use raises the exact prompt and returns the unchanged input", async () => {
+  const replayer = installReplayer(VERSION, protocolCase("approval"));
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => APPROVAL_SESSION,
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+
+  const turn = prepared.harness.startTurn(bridgeTurn("approve"));
+  const { events, raised } = firstRequest(turn);
+  const request = await raised;
+  assert.equal(request.shape.kind, "approval");
+  if (request.shape.kind !== "approval") throw new Error("unreachable");
+  assert.equal(request.shape.tool, "Bash");
+  assert.match(request.shape.input, /ls -la/);
+  assert.deepEqual(request.shape.decisions, ["allow", "deny"]);
+
+  const receipt = await turn.answerRequest({
+    requestId: request.requestId,
+    kind: "approval",
+    decision: "allow",
+  });
+  assert.deepEqual(receipt, { outcome: "accepted" });
+  const result = await turn.result();
+  assert.equal(result.kind, "completed");
+  await prepared.harness.close();
+
+  assert.ok(events.some((event) => event.kind === "request-answered"));
+  const bridges = replayer.bridges();
+  assert.equal(bridges.length, 1);
+  assert.equal(bridges[0].behavior, "allow");
+  assert.deepEqual(bridges[0].updatedInput, {
+    command: "ls -la",
+    description: "list files",
+  });
+});
+
+test("a second named Session raises its own approval on the shared bridge", async () => {
+  // One prepared Harness, two named Sessions: the first Claude process stays
+  // alive (retained idle) while the second launches against the same bridge, so
+  // the bridge must host two live MCP sessions, not latch onto the first.
+  const replayer = installReplayer(VERSION, protocolCase("approval"));
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => APPROVAL_SESSION,
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+
+  const runSession = async (name: string) => {
+    const turn = prepared.harness.startTurn(bridgeTurn(name));
+    const { raised } = firstRequest(turn);
+    const request = await raised;
+    await turn.answerRequest({
+      requestId: request.requestId,
+      kind: "approval",
+      decision: "allow",
+    });
+    assert.equal((await turn.result()).kind, "completed");
+  };
+
+  await runSession("session-a");
+  await runSession("session-b");
+  await prepared.harness.close();
+
+  const bridges = replayer.bridges();
+  assert.equal(
+    bridges.length,
+    2,
+    "both Sessions completed a bridge round-trip",
+  );
+  assert.ok(bridges.every((entry) => entry.behavior === "allow"));
+});
+
+test("a denied tool use returns the deny shape with a message", async () => {
+  const replayer = installReplayer(VERSION, protocolCase("approval"));
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => APPROVAL_SESSION,
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+
+  const turn = prepared.harness.startTurn(bridgeTurn("deny"));
+  const { raised } = firstRequest(turn);
+  const request = await raised;
+  const receipt = await turn.answerRequest({
+    requestId: request.requestId,
+    kind: "approval",
+    decision: "deny",
+  });
+  assert.deepEqual(receipt, { outcome: "accepted" });
+  assert.equal((await turn.result()).kind, "completed");
+  await prepared.harness.close();
+
+  const [bridge] = replayer.bridges();
+  assert.equal(bridge.behavior, "deny");
+  assert.ok(typeof bridge.message === "string" && bridge.message.length > 0);
+  assert.notEqual(bridge.message, "request expired");
+});
+
+test("closing while a permission request is outstanding denies the bridge caller 'request expired'", async () => {
+  const replayer = installReplayer(
+    VERSION,
+    protocolCase("approval-outstanding"),
+  );
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => OUTSTANDING_SESSION,
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+
+  const turn = prepared.harness.startTurn(bridgeTurn("closing"));
+  const { events, raised } = firstRequest(turn);
+  await raised;
+
+  const cleanup = await prepared.harness.close();
+  await turn.result();
+
+  assert.equal(cleanup.clean, true);
+  assert.ok(
+    events.some((event) => event.kind === "request-expired"),
+    "the outstanding request expired before the result",
+  );
+  const [bridge] = replayer.bridges();
+  assert.equal(bridge.behavior, "deny");
+  assert.equal(bridge.message, "request expired");
+});
+
+test("the bearer token never appears in the Turn's events or result", async () => {
+  const replayer = installReplayer(VERSION, protocolCase("approval"));
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => APPROVAL_SESSION,
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+
+  const turn = prepared.harness.startTurn(bridgeTurn("approve"));
+  const { events, raised } = firstRequest(turn);
+  const request = await raised;
+  await turn.answerRequest({
+    requestId: request.requestId,
+    kind: "approval",
+    decision: "allow",
+  });
+  const result = await turn.result();
+  await prepared.harness.close();
+
+  // The token exists only in the launch argv; recover it there as ground truth,
+  // then prove it appears nowhere a caller can observe.
+  const invocation = replayer
+    .invocations()
+    .find((entry) => entry.args.includes("--mcp-config"));
+  assert.ok(invocation);
+  const config = JSON.parse(
+    invocation.args[invocation.args.indexOf("--mcp-config") + 1],
+  );
+  const token = config.mcpServers[
+    "secant-permissions"
+  ].headers.Authorization.replace("Bearer ", "");
+  assert.ok(token.length >= 32);
+  assert.equal(JSON.stringify(events).includes(token), false);
+  assert.equal(JSON.stringify(result).includes(token), false);
+});
+
+test(
+  "a spawn failure redacts the bearer token from the typed failure",
+  { skip: process.platform === "win32" },
+  async () => {
+    const replayer = installReplayer(VERSION, protocolCase("approval"));
+    const prepared = await createClaudeCodeAdapter({
+      path: replayer.path,
+      env: {},
+      sessionId: () => APPROVAL_SESSION,
+    }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+    assert.equal(prepared.ok, true);
+    if (!prepared.ok) throw new Error("unreachable");
+
+    // Make the qualified executable unspawnable after prepare (the cache holds,
+    // since mode changes leave size and mtime intact). The launch spawn then
+    // errors EACCES, and Node's error carries the full argv — bearer token and
+    // all — as `spawnargs`.
+    chmodSync(replayer.executablePath, 0o000);
+    const turn = prepared.harness.startTurn(bridgeTurn("approve"));
+    const result = await turn.result();
+    await prepared.harness.close();
+
+    assert.equal(result.kind, "not-started");
+    // The launch argv rode into the failure cause, but not the token.
+    assert.doesNotMatch(JSON.stringify(result), /Bearer [0-9a-f]{32,}/);
+  },
+);
 
 test("one stream-json Turn yields normalized events and an authoritative completed result", async () => {
   const replayer = installReplayer(VERSION, COMPLETED_CASE);

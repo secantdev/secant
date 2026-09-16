@@ -15,6 +15,7 @@ import {
   type OwnedProcess,
   type OwnedProcessClose,
 } from "../process/process.js";
+import { APPROVAL_DECISIONS } from "./harness.js";
 import type {
   CleanupReport,
   ControlReceipt,
@@ -22,6 +23,7 @@ import type {
   HarnessFailure,
   HarnessPlatform,
   HarnessProfile,
+  HarnessRequest,
   HarnessTurn,
   ModelObservation,
   PrepareOptions,
@@ -29,6 +31,7 @@ import type {
   PreparedHarness,
   RecoveryCoordinate,
   RequestAnswer,
+  RequestId,
   SessionAvailability,
   SessionFacts,
   SteerInput,
@@ -39,6 +42,17 @@ import type {
   TurnSubscription,
   UsageObservation,
 } from "./harness.js";
+import {
+  EXPIRED_MESSAGE,
+  startPermissionBridge,
+  type ApprovalOutcome,
+  type ApprovalRequest,
+  type PermissionBridge,
+} from "./permission-bridge.js";
+
+/** The message a denied approval returns to the bridge caller. Claude sees it
+ *  and adjusts its approach. */
+const DENY_MESSAGE = "The tool use was denied.";
 
 /** The one M3 environment variable naming an explicit Claude Code executable
  *  path or command, tried before the canonical PATH name (#107). */
@@ -284,6 +298,10 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
   private active: ClaudeCodeTurn | undefined;
   private closed = false;
   private closePromise: Promise<CleanupReport> | undefined;
+  /** One MCP permission bridge per prepared Harness, created lazily on the first
+   *  launch that could prompt for permission, so a Harness that never runs a
+   *  Turn pays nothing. #117 decides which Runs launch a Turn at all. */
+  private bridgePromise: Promise<PermissionBridge> | undefined;
 
   constructor(
     readonly profile: HarnessProfile,
@@ -291,6 +309,33 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
     private readonly workspace: string,
     private readonly createSessionId: () => string,
   ) {}
+
+  /** Memoized bridge start. Its router raises each permission prompt on whatever
+   *  Turn is active when Claude calls it. A failed start is not latched: the
+   *  memo is cleared so a later Turn re-attempts rather than failing forever on a
+   *  transient cause (e.g. a momentary loopback bind clash). */
+  private ensureBridge(): Promise<PermissionBridge> {
+    if (this.bridgePromise === undefined) {
+      const started = startPermissionBridge((request) =>
+        this.routeApproval(request),
+      ).catch((error) => {
+        if (this.bridgePromise === started) this.bridgePromise = undefined;
+        throw error;
+      });
+      this.bridgePromise = started;
+    }
+    return this.bridgePromise;
+  }
+
+  /** Relay one bridge call to the active Turn. With no live Turn to raise it on,
+   *  the prompt is denied as expired rather than left hanging. */
+  private routeApproval(request: ApprovalRequest): Promise<ApprovalOutcome> {
+    const turn = this.active;
+    if (turn === undefined || turn.settled) {
+      return Promise.resolve({ decision: "deny", message: EXPIRED_MESSAGE });
+    }
+    return turn.raiseApproval(request.tool, request.input);
+  }
 
   startTurn(request: TurnRequest): HarnessTurn {
     if (this.closed) {
@@ -307,6 +352,7 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
         this.target,
         this.workspace,
         this.createSessionId(),
+        () => this.ensureBridge(),
       );
       this.sessions.set(request.session, session);
     }
@@ -321,6 +367,9 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
   close(): Promise<CleanupReport> {
     if (this.closePromise !== undefined) return this.closePromise;
     this.closed = true;
+    // Expire any prompt the active Turn is waiting on, so a blocked bridge caller
+    // is answered `expired` before its transport is torn down under it.
+    this.active?.expireForShutdown();
     this.closePromise = this.closeSessions();
     return this.closePromise;
   }
@@ -329,6 +378,10 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
     const outcomes = await Promise.all(
       [...this.sessions.values()].map((session) => session.close()),
     );
+    if (this.bridgePromise !== undefined) {
+      const bridge = await this.bridgePromise.catch(() => undefined);
+      await bridge?.close();
+    }
     const failed = outcomes.find(
       (
         outcome,
@@ -389,6 +442,7 @@ class ClaudeCodeSession {
     private readonly target: DiscoveredTarget,
     private readonly workspace: string,
     sessionId: string,
+    private readonly ensureBridge: () => Promise<PermissionBridge>,
   ) {
     this.coordinate = { opaque: sessionId };
   }
@@ -547,6 +601,15 @@ class ClaudeCodeSession {
         readonly cause: unknown;
       }
   > {
+    let bridge: PermissionBridge;
+    try {
+      bridge = await this.ensureBridge();
+    } catch (error) {
+      return { ok: false, category: "permission-bridge", cause: error };
+    }
+    if (this.closed) {
+      return { ok: false, category: "closed-before-launch", cause: undefined };
+    }
     const launched = await spawnOwnedProcess({
       executable: this.target.executable,
       args: [
@@ -560,16 +623,25 @@ class ClaudeCodeSession {
         "--include-partial-messages",
         "--session-id",
         this.coordinate.opaque,
+        // The MCP permission bridge: Claude relays every permission prompt to
+        // this loopback tool and waits on it. The inline config carries the
+        // per-Run bearer token; it is the only place the token appears.
+        "--mcp-config",
+        bridge.mcpConfigArg,
+        "--permission-prompt-tool",
+        bridge.toolName,
       ],
       cwd: this.workspace,
       env: process.env,
       launchTimeoutMs: DEFAULT_LAUNCH_TIMEOUT_MS,
     });
     if (!launched.ok) {
+      // A spawn error carries the launch argv (Node's `spawnargs`), which
+      // includes the bearer token; scrub it before it becomes a failure cause.
       return {
         ok: false,
         category: launched.failure.kind,
-        cause: launched.failure.cause,
+        cause: bridge.redactSecret(launched.failure.cause),
       };
     }
 
@@ -670,6 +742,13 @@ class ClaudeCodeSession {
   }
 }
 
+/** One outstanding approval prompt awaiting an answer, expiry, or shutdown. */
+interface PendingApproval {
+  readonly request: HarnessRequest;
+  status: "outstanding" | "settled";
+  readonly resolve: (outcome: ApprovalOutcome) => void;
+}
+
 class ClaudeCodeTurn implements HarnessTurn {
   settled = false;
   interrupting = false;
@@ -682,6 +761,10 @@ class ClaudeCodeTurn implements HarnessTurn {
   private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   private preview = "";
   private previewIndex: number | undefined;
+  /** Outstanding approval prompts, keyed by their exact request id. Several may
+   *  coexist; each expires when the Turn ends, is interrupted, or is lost. */
+  private readonly approvals = new Map<string, PendingApproval>();
+  private approvalSeq = 0;
 
   constructor(
     request: TurnRequest,
@@ -718,16 +801,92 @@ class ClaudeCodeTurn implements HarnessTurn {
       return { outcome: "rejected", reason: "already-settled" };
     }
     this.interrupting = true;
+    // Expire prompts up front so the live bridge caller receives `expired`
+    // before the process is terminated under it.
+    this.expireOutstanding();
     await this.session.interrupt(this);
     return { outcome: "accepted" };
   }
 
-  answerRequest(_answer: RequestAnswer): Promise<ControlReceipt> {
-    return Promise.resolve(
-      this.settled || this.interrupting
-        ? { outcome: "rejected", reason: "expired" }
-        : { outcome: "rejected", reason: "unsupported" },
+  /** Raise one permission prompt on this Turn and resolve when it is answered or
+   *  expired. Called only by the prepared Harness's bridge router. */
+  raiseApproval(tool: string, input: string): Promise<ApprovalOutcome> {
+    if (this.settled || this.interrupting) {
+      return Promise.resolve({ decision: "deny", message: EXPIRED_MESSAGE });
+    }
+    const requestId: RequestId = { opaque: `approval-${this.approvalSeq++}` };
+    const request: HarnessRequest = {
+      requestId,
+      shape: {
+        kind: "approval",
+        tool,
+        input,
+        decisions: [...APPROVAL_DECISIONS],
+      },
+    };
+    return new Promise<ApprovalOutcome>((resolve) => {
+      this.approvals.set(requestId.opaque, {
+        request,
+        status: "outstanding",
+        resolve,
+      });
+      this.emit({ kind: "request-raised", request });
+    });
+  }
+
+  answerRequest(answer: RequestAnswer): Promise<ControlReceipt> {
+    if (this.settled || this.interrupting) {
+      return Promise.resolve({ outcome: "rejected", reason: "expired" });
+    }
+    const pending = this.approvals.get(answer.requestId.opaque);
+    if (pending === undefined) {
+      return Promise.resolve({ outcome: "rejected", reason: "expired" });
+    }
+    if (pending.status === "settled") {
+      return Promise.resolve({
+        outcome: "rejected",
+        reason: "already-settled",
+      });
+    }
+    if (answer.kind !== pending.request.shape.kind) {
+      // The request stays outstanding; a correctly shaped answer can still land.
+      return Promise.resolve({ outcome: "rejected", reason: "shape-mismatch" });
+    }
+    pending.status = "settled";
+    this.emit({
+      kind: "request-answered",
+      requestId: answer.requestId,
+      by: "human",
+      answer,
+    });
+    pending.resolve(
+      answer.kind === "approval" && answer.decision === "allow"
+        ? { decision: "allow" }
+        : { decision: "deny", message: DENY_MESSAGE },
     );
+    return Promise.resolve({ outcome: "accepted" });
+  }
+
+  /** Expire every still-outstanding prompt: emit its `request-expired` event and
+   *  resolve its bridge call as a deny. Idempotent per request. Callers ensure
+   *  this runs while the Turn is not yet settled so the events are observable. */
+  private expireOutstanding(): void {
+    for (const pending of this.approvals.values()) {
+      if (pending.status !== "outstanding") continue;
+      pending.status = "settled";
+      this.emit({
+        kind: "request-expired",
+        requestId: pending.request.requestId,
+      });
+      pending.resolve({ decision: "deny", message: EXPIRED_MESSAGE });
+    }
+  }
+
+  /** Expire outstanding prompts during `close`, before the process is reaped, so
+   *  a blocked bridge caller is answered rather than severed. */
+  expireForShutdown(): void {
+    if (this.settled) return;
+    this.expireOutstanding();
   }
 
   async admit(coordinate: RecoveryCoordinate): Promise<
@@ -1008,6 +1167,9 @@ class ClaudeCodeTurn implements HarnessTurn {
     if (this.settled) return;
     this.clearHandshake();
     this.clearPreview();
+    // Terminal ordering: expire every outstanding prompt (its events publish
+    // here) before the producer closes and the one result settles.
+    this.expireOutstanding();
     this.settled = true;
     this.onSettled();
     this.resolveResult(result);

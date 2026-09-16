@@ -79,6 +79,7 @@ function fake(...turns: FakeTurnScript[]): FakeScript {
 
 const scenarios: ConformanceScenarios = {
   label: "fake",
+  concurrentCount: 3,
   baseline: () =>
     createFake(
       fake({

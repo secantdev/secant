@@ -1,0 +1,1 @@
+{"type":"system","subtype":"init","session_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","model":"claude-sonnet-4-5","claude_code_version":"2.1.234","tools":["Bash"],"mcp_servers":[{"name":"secant-permissions","status":"connected"}]}

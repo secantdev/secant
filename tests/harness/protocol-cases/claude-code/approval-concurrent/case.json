@@ -1,0 +1,17 @@
+{
+  "exitCode": 0,
+  "turns": [
+    {
+      "steps": [
+        { "emit": "init.stdout" },
+        {
+          "bridgeAll": [
+            { "tool_name": "Bash", "input": { "command": "first" } },
+            { "tool_name": "Edit", "input": { "file_path": "second.txt" } }
+          ]
+        },
+        { "emit": "result.stdout" }
+      ]
+    }
+  ]
+}

@@ -410,7 +410,13 @@ export type RunTimelineKind =
   | "iteration"
   | "checkpoint-blocked"
   | "gate-answered"
-  | "materialization-conflict";
+  | "materialization-conflict"
+  // Harness Turn events (#116): a Turn admitted, its authoritative assistant
+  // content and tool activity, and its settled result.
+  | "turn-started"
+  | "assistant-content"
+  | "tool-activity"
+  | "turn-settled";
 export interface RunTimelineEvent {
   readonly at: string; // ISO 8601
   readonly event: RunTimelineKind;
@@ -477,6 +483,20 @@ export interface RunPendingGateView {
   readonly outputArtifactName?: string; // free-text's declared output artifact
 }
 
+/** One named Harness Session's last observed availability (#116). */
+export interface RunSessionView {
+  readonly session: string;
+  readonly availability: "open" | "detached" | "unusable";
+}
+
+/** One readable transcript entry (#116): the exact Turn input (`user`) or the
+ *  authoritative assistant content (`assistant`) of a Session. */
+export interface RunTranscriptEntryView {
+  readonly session: string;
+  readonly role: "user" | "assistant";
+  readonly content: string;
+}
+
 /** A Run's bounded snapshot. Outputs carry references, not bytes. */
 export interface RunView {
   readonly runId: string;
@@ -510,6 +530,17 @@ export interface RunView {
   readonly actionOffers: readonly ActionOffer[];
   /** Present only while the Run rests `halted` on a Materialization conflict. */
   readonly conflict?: RunConflictView;
+  /** The named Harness Sessions this Run opened and their last availability (#116).
+   *  Additive to the frozen `--json`; absent for a Command-only Run. */
+  readonly sessions?: readonly RunSessionView[];
+  /** The effective model the latest Agent-step Attempt ran under (#116). */
+  readonly effectiveModel?: string;
+  /** The number of Harness Turns admitted so far — the current Turn position
+   *  (#116). Absent for a Command-only Run. */
+  readonly turnPosition?: number;
+  /** The readable Session transcript (exact Turn inputs and authoritative
+   *  assistant content, #116). Additive; absent for a Command-only Run. */
+  readonly transcript?: readonly RunTranscriptEntryView[];
 }
 
 export interface RunSnapshot {

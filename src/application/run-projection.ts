@@ -12,11 +12,15 @@ import {
 import type {
   AttemptLogEntry,
   GateAnswerRecord,
+  HarnessSessionRecord,
   MaterializationConflict,
   PendingGateRecord,
   RunGroup,
   RunListing,
   RunOwner,
+  TranscriptEntryRecord,
+  TurnEventRecord,
+  TurnRecord,
 } from "../run/store/store.js";
 import type {
   ActionOffer,
@@ -27,12 +31,14 @@ import type {
   RunOutputView,
   RunPendingGateView,
   RunResult,
+  RunSessionView,
   RunSnapshot,
   RunStateName,
   RunStepProgress,
   RunStepStatus,
   RunTimelineEvent,
   RunTimelineKind,
+  RunTranscriptEntryView,
   RunView,
 } from "./projection-port.js";
 import {
@@ -148,6 +154,15 @@ function runResult(
       derivedRun.state === "halted"
         ? conflicts[conflicts.length - 1]
         : undefined;
+    // Harness Turn records (#116): the durable view of every Turn this Run ran —
+    // its timeline entries, per-Session availability, effective model, and readable
+    // transcript. Empty for a Command-only Run (and for a Run live elsewhere, read
+    // without an owner), so the frozen `--json` stays unchanged for those.
+    const turns = owner?.turns() ?? [];
+    const turnEvents = owner?.turnEvents() ?? [];
+    const sessions = owner?.harnessSessions() ?? [];
+    const transcript = owner?.transcript() ?? [];
+    const effectiveModel = owner?.effectiveModel();
     return {
       found: true,
       run: {
@@ -173,6 +188,8 @@ function runResult(
           derivedRun.checkpoint,
           conflicts,
           gateAnswers,
+          turns,
+          turnEvents,
         ),
         outputs,
         ...(derivedRun.checkpoint !== undefined
@@ -207,6 +224,12 @@ function runResult(
         ],
         ...(active !== undefined
           ? { conflict: conflictView(runId, active) }
+          : {}),
+        ...(sessions.length > 0 ? { sessions: sessions.map(sessionView) } : {}),
+        ...(effectiveModel !== undefined ? { effectiveModel } : {}),
+        ...(turns.length > 0 ? { turnPosition: turns.length } : {}),
+        ...(transcript.length > 0
+          ? { transcript: transcript.map(transcriptView) }
           : {}),
       },
     };
@@ -822,6 +845,70 @@ function readVerdict(
   return bytes === undefined ? undefined : new TextDecoder().decode(bytes);
 }
 
+/** Narrow a stored Session availability to the client union, defaulting an
+ *  unrecognized value to `unusable` (the safe read at the ingress, D7). */
+function sessionView(record: HarnessSessionRecord): RunSessionView {
+  const availability =
+    record.availability === "open" ||
+    record.availability === "detached" ||
+    record.availability === "unusable"
+      ? record.availability
+      : "unusable";
+  return { session: record.session, availability };
+}
+
+/** Narrow a stored transcript entry to the client view. */
+function transcriptView(record: TranscriptEntryRecord): RunTranscriptEntryView {
+  return {
+    session: record.session,
+    role: record.role === "assistant" ? "assistant" : "user",
+    content: record.content,
+  };
+}
+
+/** A one-line, capped detail for a timeline entry drawn from possibly-multiline
+ *  content, so `run show`'s per-line timeline stays legible. */
+function timelineDetail(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > 160 ? `${flat.slice(0, 157)}…` : flat;
+}
+
+/** The turn-event timeline entries for one Turn's normalized durable events. */
+function turnEventEntry(event: TurnEventRecord): RunTimelineEvent | undefined {
+  if (event.kind === "assistant-content") {
+    const content = safeField(event.payload, "content");
+    return {
+      at: event.at,
+      event: "assistant-content",
+      detail: timelineDetail(content ?? ""),
+    };
+  }
+  if (event.kind === "tool-activity") {
+    const tool = safeField(event.payload, "tool") ?? "tool";
+    const phase = safeField(event.payload, "phase") ?? "";
+    return {
+      at: event.at,
+      event: "tool-activity",
+      detail: `${tool} ${phase}`.trim(),
+    };
+  }
+  return undefined;
+}
+
+/** Read one string field from a JSON payload, or undefined on any parse fault. */
+function safeField(payload: string, field: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (parsed !== null && typeof parsed === "object") {
+      const value = (parsed as Record<string, unknown>)[field];
+      if (typeof value === "string") return value;
+    }
+  } catch {
+    // A malformed payload contributes no detail rather than throwing the read.
+  }
+  return undefined;
+}
+
 function buildTimeline(
   deps: RunProjectionDependencies,
   createdAt: string,
@@ -831,6 +918,8 @@ function buildTimeline(
   checkpoint: RunCheckpointView | undefined,
   conflicts: readonly MaterializationConflict[],
   gateAnswers: readonly GateAnswerRecord[],
+  turns: readonly TurnRecord[],
+  turnEvents: readonly TurnEventRecord[],
 ): RunTimelineEvent[] {
   const events: RunTimelineEvent[] = [{ at: createdAt, event: "run-created" }];
   const entry = deps.catalog.listEntries().find((e) => e.digest === digest);
@@ -883,6 +972,27 @@ function buildTimeline(
       detail: conflict.path,
     });
   }
+  // Each Harness Turn (#116): admitted (naming its Session), then — once settled —
+  // its result kind. The authoritative assistant content and tool activity in
+  // between come from the normalized durable events.
+  for (const turn of turns) {
+    events.push({
+      at: turn.admittedAt,
+      event: "turn-started",
+      detail: turn.session,
+    });
+    if (turn.settledAt !== undefined && turn.resultKind !== undefined) {
+      events.push({
+        at: turn.settledAt,
+        event: "turn-settled",
+        detail: turn.resultKind,
+      });
+    }
+  }
+  for (const turnEvent of turnEvents) {
+    const entry = turnEventEntry(turnEvent);
+    if (entry !== undefined) events.push(entry);
+  }
   // Order the timeline by `at` (ISO 8601 sorts lexicographically), category as the
   // tiebreak so events at the same instant keep a stable, meaningful order (#98 A2).
   // Sorting by time — rather than emitting category by category — means a later
@@ -902,11 +1012,17 @@ function buildTimeline(
 const TIMELINE_CATEGORY_RANK: Record<RunTimelineKind, number> = {
   "run-created": 0,
   "trust-granted": 1,
-  "attempt-settled": 2,
-  iteration: 3,
-  "checkpoint-blocked": 4,
-  "gate-answered": 5,
-  "materialization-conflict": 6,
+  // A Turn's own events sort before the Attempt that settles after it, so an
+  // equal-instant ordering reads start → content → tool → settled → attempt.
+  "turn-started": 2,
+  "assistant-content": 3,
+  "tool-activity": 4,
+  "turn-settled": 5,
+  "attempt-settled": 6,
+  iteration: 7,
+  "checkpoint-blocked": 8,
+  "gate-answered": 9,
+  "materialization-conflict": 10,
 };
 
 // --- entry selection -------------------------------------------------------

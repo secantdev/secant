@@ -8,13 +8,27 @@ import {
   type RunExecution,
 } from "../application/application.js";
 import { openCatalog, type Catalog } from "../catalog/catalog.js";
-import { DEFAULT_BUDGETS, readBundleAssets } from "../bundle/bundle.js";
+import {
+  DEFAULT_BUDGETS,
+  inspectBundle,
+  readBundleAssets,
+} from "../bundle/bundle.js";
 import {
   executeRouting,
   type AssetResolver,
+  type HarnessExecutionDeps,
 } from "../run/execution/execution.js";
 import { openRunGroup, type RunGroup } from "../run/store/store.js";
-import type { Platform } from "../workflow/workflow.js";
+import {
+  createClaudeCodeAdapter,
+  type HarnessAdapter,
+} from "../harness/harness.js";
+import {
+  type ArtifactType,
+  type AssetKind,
+  type Platform,
+  type RoutingNode,
+} from "../workflow/workflow.js";
 
 // The one wiring path both composition roots take (#74 A1, A2, A6). Before this,
 // the headless root and the TUI root each resolved the Secant home, opened the
@@ -53,6 +67,10 @@ export interface WiringOverrides {
   readonly launchCwd?: string;
   readonly engineVersion?: string;
   readonly hostPlatform?: Platform;
+  /** The Harness Adapter the Run execution drives an Agent Step through (#116).
+   *  Production constructs the Claude Code Adapter here; a test injects one wired
+   *  over the replayer (a fixed session id, a temp-PATH executable). */
+  readonly harnessAdapter?: HarnessAdapter;
 }
 
 export interface Wiring extends Application {
@@ -97,7 +115,14 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
         engineVersion: overrides.engineVersion ?? engineVersion,
         ...(host !== undefined ? { hostPlatform: host } : {}),
         runGroup,
-        runExecution: makeRunExecution(catalog, host ?? "linux"),
+        // The headless client cannot relay human turn-taking; an interactive-agent
+        // Bundle is refused at Preflight (#116). The TUI root sets this true later.
+        supportsInteractiveTurns: false,
+        runExecution: makeRunExecution(
+          catalog,
+          host ?? "linux",
+          overrides.harnessAdapter ?? createClaudeCodeAdapter(),
+        ),
       });
       return { catalog, runGroup, ...application };
     } catch (error) {
@@ -118,16 +143,95 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
 // Catalog when missing (#100, A8). A Run copies nothing. `run read` returns only
 // `text`/`verdict` in M2 (execution's file-materialization gap is a documented
 // `ponytail:`).
-function makeRunExecution(catalog: Catalog, platform: Platform): RunExecution {
-  return ({ routing, digest, owner, cancelSignal }) =>
-    executeRouting(routing, {
+function makeRunExecution(
+  catalog: Catalog,
+  platform: Platform,
+  adapter: HarnessAdapter,
+): RunExecution {
+  return async ({ routing, digest, owner, cancelSignal }) => {
+    const deps = {
       owner,
       platform,
       resolveAsset: treeResolver(catalog, digest),
       // The Application's per-Run cancel Seam (#98): an abort kills the child's
       // process group and unwinds execution, and the Application decides the rest.
       ...(cancelSignal !== undefined ? { cancelSignal } : {}),
+    };
+    // A Command-only Run needs no Harness. A Bundle carrying an Agent Step prepares
+    // one once, reused across every Agent Step of the Run, and closes it when the
+    // Run rests — the ownership ADR 0022 requires to transfer exactly once to the
+    // Run (#116). Preflight already proved the executable resolves, so a prepare
+    // failure here is an environment fault that surfaces as a run-execution fault.
+    if (!routing.some(needsHarness)) return executeRouting(routing, deps);
+    const facts = harnessFacts(catalog, digest);
+    const prepared = await adapter.prepare({
+      workspace: owner.record.workspacePath,
     });
+    if (!prepared.ok) {
+      throw new Error(
+        `composition: could not prepare the Harness: ${prepared.failure.category}.`,
+      );
+    }
+    const harness: HarnessExecutionDeps = {
+      prepared: prepared.harness,
+      inputTypes: facts.inputTypes,
+      assetKinds: facts.assetKinds,
+    };
+    try {
+      return await executeRouting(routing, { ...deps, harness });
+    } finally {
+      await prepared.harness.close();
+    }
+  };
+}
+
+/** Whether a Routing node carries a Step kind that needs a Harness (an Agent or
+ *  interactive-agent Step, top-level or inside a Repeat group). */
+function needsHarness(node: RoutingNode): boolean {
+  const steps = "repeat" in node ? node.repeat.steps : [node];
+  return steps.some(
+    (step) => step.kind === "agent" || step.kind === "interactive-agent",
+  );
+}
+
+/** The manifest facts Agent-prompt rendering resolves against (#116): each Launch
+ *  input's declared type and each declared asset's kind, re-derived from the pinned
+ *  Snapshot's stored bytes by digest. A read/inspect failure here is an environment
+ *  fault (the bytes Preflight just validated are gone or corrupt) — it throws rather
+ *  than return empty maps, which would silently render a `file` slot as plain text.
+ *  ponytail: these facts are re-derived here rather than threaded from Preflight's
+ *  composition re-check, to keep the Harness plumbing out of the Application/
+ *  RunExecution seam; the cost is one extra inspect per Agent-bearing Run. Thread
+ *  them through if that inspect ever shows up. */
+function harnessFacts(
+  catalog: Catalog,
+  digest: string,
+): {
+  inputTypes: Record<string, ArtifactType>;
+  assetKinds: Record<string, AssetKind>;
+} {
+  const inputTypes: Record<string, ArtifactType> = {};
+  const assetKinds: Record<string, AssetKind> = {};
+  const bytes = catalog.readManagedBytes(digest);
+  if (bytes === undefined) {
+    throw new Error(
+      `composition: the pinned Bundle (digest ${digest}) has no stored bytes at execution.`,
+    );
+  }
+  const inspected = inspectBundle(bytes, DEFAULT_BUDGETS, false);
+  if (!inspected.ok) {
+    throw new Error(
+      `composition: the pinned Bundle (digest ${digest}) no longer inspects: ${inspected.finding.code}.`,
+    );
+  }
+  const { manifest } = inspected.inspection;
+  for (const [name, input] of Object.entries(manifest.inputs)) {
+    inputTypes[name] = input.type;
+  }
+  for (const asset of manifest.assets) {
+    assetKinds[asset.path] = asset.kind;
+  }
+  return { inputTypes, assetKinds };
 }
 
 /** A resolver mapping a declared asset path to its file in the digest's asset

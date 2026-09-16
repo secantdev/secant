@@ -2,6 +2,7 @@ import catalogInitial from "./catalog/20260915095848_chubby_vanisher/migration.s
 import coordinationInitial from "./coordination/20260915095850_yellow_forge/migration.sql" with { type: "text" };
 import runInitial from "./run/20260915095853_hesitant_silverclaw/migration.sql" with { type: "text" };
 import runPendingGate from "./run/20260916030347_mighty_vivisector/migration.sql" with { type: "text" };
+import runHarnessTurns from "./run/20260916112916_cooing_squadron_supreme/migration.sql" with { type: "text" };
 import type { MigrationsJournal } from "drizzle-orm/migrator";
 
 // These first drizzle-kit migrations establish the complete schemas. Their
@@ -35,5 +36,10 @@ export const runMigrations: MigrationsJournal = [
     name: "mighty_vivisector",
     timestamp: 1_789_527_827_000,
     sql: runPendingGate,
+  },
+  {
+    name: "cooing_squadron_supreme",
+    timestamp: 1_789_557_356_000,
+    sql: runHarnessTurns,
   },
 ];

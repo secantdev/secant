@@ -37,6 +37,9 @@ export const attempts = sqliteTable("attempt", {
   outcome: text("outcome").notNull(),
   version_id: text("version_id"),
   settled_at: text("settled_at").notNull(),
+  // The effective model an Agent-step Attempt ran under, reported by the Harness
+  // init message (#116). Null for a Command/Gate Attempt, which runs no Harness.
+  effective_model: text("effective_model"),
 });
 
 export const attemptLog = sqliteTable("attempt_log", {
@@ -82,4 +85,64 @@ export const pendingGates = sqliteTable("pending_gate", {
   message: text("message").notNull(),
   output_artifact_name: text("output_artifact_name"),
   raised_at: text("raised_at").notNull(),
+});
+
+// One named Harness Session a Run opens (#116). `session_key` is the Bundle's
+// named `session` (or a per-Attempt `fresh-<attempt>` key for `fresh`); the native
+// conversation id crosses the Seam only as the opaque recovery coordinate stored
+// here. `availability` is the last observed Session state (`open`/`detached`/
+// `unusable`); `availability_detail` carries a detached coordinate or an unusable
+// reason. Upserted as Turns admit and settle. `profile_digest` is declared surface
+// awaiting its caller: a later slice (Session recovery/requalification) will record
+// the Harness profile a Session was prepared under here to detect drift across a
+// resume; M3 has no recovery, so it is written null.
+export const harnessSessions = sqliteTable("harness_session", {
+  session_key: text("session_key").primaryKey(),
+  native_session_id: text("native_session_id"),
+  availability: text("availability").notNull(),
+  availability_detail: text("availability_detail"),
+  harness: text("harness").notNull(),
+  profile_digest: text("profile_digest"),
+  created_at: text("created_at").notNull(),
+  updated_at: text("updated_at").notNull(),
+});
+
+// One Turn admitted in a Session (#116). The row is written before the stdin frame
+// is sent (durable admission the Adapter awaits): a write failure proves the Turn
+// `not-started`. `input` is the exact rendered transcript input. `result_kind` and
+// `result_detail` stay null until the Turn settles, and a settled result is
+// immutable (settle only writes when `result_kind` is still null).
+export const turns = sqliteTable("turn", {
+  turn_id: text("turn_id").primaryKey(),
+  attempt_id: text("attempt_id").notNull(),
+  session_key: text("session_key").notNull(),
+  origin: text("origin").notNull(),
+  sequence: integer("sequence").notNull(),
+  input: text("input").notNull(),
+  admitted_at: text("admitted_at").notNull(),
+  result_kind: text("result_kind"),
+  result_detail: text("result_detail"),
+  settled_at: text("settled_at"),
+});
+
+// One normalized durable Turn event (#116), append-only. `kind` is a Crucible Turn
+// event kind (`assistant-content`, `tool-activity`, `session`, `model`, …) and
+// `payload` its JSON detail. Ephemeral Harness Requests are not stored here.
+export const turnEvents = sqliteTable("turn_event", {
+  seq: integer("seq").primaryKey(),
+  turn_id: text("turn_id").notNull(),
+  kind: text("kind").notNull(),
+  payload: text("payload").notNull(),
+  at: text("at").notNull(),
+});
+
+// One readable Session transcript entry (#116): the exact Turn input (`user`) and
+// the authoritative assistant content (`assistant`), append-only.
+export const transcriptEntries = sqliteTable("transcript_entry", {
+  seq: integer("seq").primaryKey(),
+  session_key: text("session_key").notNull(),
+  turn_id: text("turn_id").notNull(),
+  role: text("role").notNull(),
+  content: text("content").notNull(),
+  at: text("at").notNull(),
 });

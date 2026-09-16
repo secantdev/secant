@@ -41,6 +41,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   refuses it too; `listRuns` throwing on a malformed row is caught in cancel/delete so nothing throws out of `submit` (A4).
 - The client `RunStateName` has no `created` and gains `cancelled` (A7); the Run Store still records `created` internally, and `toRunState` maps it to `running` for the
   Projection — a launched Run reads `running` from admission.
+- The prepared Harness lives in composition, not the Application (#116): `makeRunExecution` (composition/wiring) prepares one when a routing carries an Agent Step, hands it to
+  execution, and closes it when the Run rests (ownership transferred exactly once, ADR 0022). Preflight does the _synchronous_ Harness discovery (configured command then the
+  `claude` PATH name, via the `process` resolver) and the capability-need union, so a `not-found`/`unsupported-shim`/`interactive-step-needs-tui` refusal lands before a Run
+  exists; the async `prepare` (spawning `claude --version`) runs only at execution. `supportsInteractiveTurns` is a client fact the Application forwards to Preflight.
+- The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no live snapshot;
+  the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`).
 - `deriveRun`'s walk assumes `attempt_log` holds only per-Step Attempts, but the Run Store already appends the reconciliation `indeterminate` marker row
   there (see `store/AGENTS.md`). The marker is harmless only because its outcome is not `succeeded`, not because the walk excludes it — keep that true if
   you add marker rows.

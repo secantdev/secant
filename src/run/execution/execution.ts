@@ -1,8 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import {
   flattenSteps,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
+  type AgentStep,
+  type ArtifactType,
+  type AssetKind,
   type AttemptOutcome,
   type CommandInvocation,
   type CommandParams,
@@ -21,6 +24,12 @@ import type {
   CandidateOutput,
   RunOwner,
 } from "../store/store.js";
+import type {
+  DurableTurnRecorder,
+  PreparedHarness,
+  TurnEvent,
+  TurnResult,
+} from "../../harness/harness.js";
 import { resolveExecutable, spawnCommand } from "../../process/process.js";
 
 // The Run execution Module owns the Run lifecycle policy: it walks a Routing
@@ -28,15 +37,16 @@ import { resolveExecutable, spawnCommand } from "../../process/process.js";
 // retries an Attempt that could not execute within its bound, loops a Repeat
 // group on its Verdict, and rests the Run `succeeded`, `failed`, or `blocked`. It
 // imports Workflow (the authored vocabulary and the Routing walk order), the Run
-// Store (the canonical record every Attempt lands through), and the process Module
+// Store (the canonical record every Attempt lands through), the process Module
 // (executable resolution, which it shares with Preflight, plus the owned
-// child-process spawn/kill it drives here); the Harness edge stays empty until an
-// agent Step kind lands.
+// child-process spawn/kill it drives here), and the Harness Module (the prepared
+// Harness an `agent` Step drives one autonomous Turn through, #116). It never
+// constructs a Harness Adapter — composition prepares one and hands it in.
 //
 // The scheduler learns nothing per Step kind — it looks a kind up in the closed
-// table (#13) and never branches on Bundle identity (id, name, asset path). M2
-// registers exactly one executable kind, `command`; adding a kind means adding a
-// row here, never a new branch.
+// table (#13) and never branches on Bundle identity (id, name, asset path). Adding
+// a kind means adding a row here, never a new branch; the table holds `command`,
+// `human-gate`, and `agent`.
 //
 // The deterministic-Verdict split (ADR 0020) is the load-bearing invariant: a
 // Command step's exit status is a *value* (exit 0 -> `pass`, non-zero -> `fail`),
@@ -61,6 +71,18 @@ import { resolveExecutable, spawnCommand } from "../../process/process.js";
  */
 export type AssetResolver = (assetPath: string) => string | undefined;
 
+/** What an Agent Step needs from composition (#116): the prepared Harness the Run
+ *  owns (started once, reused across every Agent Step naming the same Session, and
+ *  closed by composition when the Run rests), plus the manifest facts prompt
+ *  rendering resolves against — the declared type of each Launch input (so a `file`
+ *  slot renders as a path and a `file-set` as one path per line) and the kind of
+ *  each declared asset (so only a `skill` in `uses` appends a `SKILL.md` line). */
+export interface HarnessExecutionDeps {
+  readonly prepared: PreparedHarness;
+  readonly inputTypes: Readonly<Record<string, ArtifactType>>;
+  readonly assetKinds: Readonly<Record<string, AssetKind>>;
+}
+
 /** Everything the scheduler needs to drive one acquired Run to rest. */
 export interface ExecutionDeps {
   /** The acquired Run Store owner every Attempt publishes through. */
@@ -78,6 +100,9 @@ export interface ExecutionDeps {
    *  — no Attempt is published, so `cancel-run` owns the `cancelled` rest. Absent
    *  for a normal Run, which only ever aborts on its own timeout. */
   readonly cancelSignal?: AbortSignal;
+  /** The prepared Harness and manifest facts an Agent Step runs against (#116).
+   *  Absent for a Command-only Run, which needs no Harness. */
+  readonly harness?: HarnessExecutionDeps;
   /** Injectable clock so Attempt timestamps are deterministic in tests. */
   readonly now?: () => Date;
 }
@@ -126,6 +151,9 @@ export const TRUNCATION_MARKER = `\n[secant: output truncated at ${MAX_CAPTURE_B
 interface StepAttempt {
   readonly outcome: AttemptOutcome;
   readonly outputs: readonly CandidateOutput[];
+  /** The effective model an Agent Step's Turn ran under (#116), recorded on the
+   *  Attempt. Absent for a Command/Gate Attempt. */
+  readonly effectiveModel?: string;
 }
 
 /** A durable pause an executor returns instead of an Attempt (#108): the Step did
@@ -146,18 +174,22 @@ interface StepContext {
   readonly resolveAsset: AssetResolver;
   readonly commandTimeoutMs: number;
   readonly cancelSignal?: AbortSignal;
+  /** The prepared Harness and manifest facts an Agent Step runs against (#116). */
+  readonly harness?: HarnessExecutionDeps;
 }
 
 type StepExecutor = (
   step: Step,
   context: StepContext,
+  attemptId: string,
 ) => Promise<StepAttempt | StepPause>;
 
 // The closed executable Step-kind dispatch table (#13). A `command` runs to an
 // Attempt; a `human-gate` returns a durable pause the scheduler records as a
-// pending gate and rests `blocked` at (#108). The scheduler learns nothing per
-// kind — it branches only on `command`'s Attempt vs the pause shape. Repeat groups
-// land in #84 and Agent kinds later, so neither has a row yet.
+// pending gate and rests `blocked` at (#108); an `agent` runs one autonomous
+// Harness Turn to an Attempt (#116). The scheduler learns nothing per kind — it
+// branches only on an Attempt vs the pause shape. `interactive-agent` has no row
+// yet (its human-driven turns land in a later slice).
 const STEP_EXECUTORS: Readonly<Partial<Record<StepKindName, StepExecutor>>> = {
   command: (step, context) => {
     // The table key guarantees the kind; narrow for the type system.
@@ -175,6 +207,12 @@ const STEP_EXECUTORS: Readonly<Partial<Record<StepKindName, StepExecutor>>> = {
       );
     }
     return runHumanGate(step, context);
+  },
+  agent: (step, context, attemptId) => {
+    if (step.kind !== "agent") {
+      throw new Error("execution: agent executor received a non-agent Step.");
+    }
+    return runAgent(step, context, attemptId);
   },
 };
 
@@ -222,6 +260,7 @@ export async function executeRouting(
       ...(deps.cancelSignal !== undefined
         ? { cancelSignal: deps.cancelSignal }
         : {}),
+      ...(deps.harness !== undefined ? { harness: deps.harness } : {}),
     },
     budget: deps.defaultRetryBudget ?? DEFAULT_RETRY_BUDGET,
     now: deps.now ?? (() => new Date()),
@@ -440,7 +479,7 @@ async function runStepAttempts(
   if (executor === undefined) {
     throw new Error(
       `execution: Step kind "${step.kind}" is not dispatchable ` +
-        "(Command runs and Human Gate pauses; agent kinds land later).",
+        "(Command runs, Human Gate pauses, Agent runs a Turn; interactive-agent lands later).",
     );
   }
   // Clamp a bad budget to zero so a typo (e.g. -1) still runs the Step once
@@ -458,7 +497,7 @@ async function runStepAttempts(
     );
     // A cancel abort throws RunCancelledError out of the executor: it unwinds the
     // walk here without publishing this Attempt, so `cancel-run` (T4) owns the rest.
-    const result = await executor(step, context.step);
+    const result = await executor(step, context.step, attemptId);
     // A durable pause (a Human Gate): record the pending gate with this minted
     // Attempt id and rest the Run `blocked` — no Attempt is published, no retry
     // (#108). Recording is idempotent on the Attempt id, so a resume that
@@ -485,12 +524,29 @@ async function runStepAttempts(
     outcome = result.outcome;
     // An interrupted Attempt (a termination signal, never our timeout) has no
     // result: it is settled `indeterminate`, never retried, and rests the Run
-    // `halted` in the same transaction for human resume (ADR 0019, #86).
+    // `halted` in the same transaction for human resume (ADR 0019, #86). A `lost`
+    // Agent Turn maps to `indeterminate` too (#116): terminal truth is unknown.
     if (result.outcome === "indeterminate") {
       publishOrThrow(
         context.step.owner.publishAttempt({
           attemptId,
           outcome: "indeterminate",
+          required: [],
+          outputs: [],
+          at: context.now(),
+          advanceState: "halted",
+        }),
+      );
+      return "halted";
+    }
+    // A `cancelled` Attempt is an interrupted Agent Turn (#116): the Turn's native
+    // work stopped, so the Attempt ends `cancelled` and the Run rests `halted` for
+    // human resume, never retried — the same resumable rest an interrupt leaves.
+    if (result.outcome === "cancelled") {
+      publishOrThrow(
+        context.step.owner.publishAttempt({
+          attemptId,
+          outcome: "cancelled",
           required: [],
           outputs: [],
           at: context.now(),
@@ -515,6 +571,9 @@ async function runStepAttempts(
         outputs: result.outputs,
         at: context.now(),
         advanceState,
+        ...(result.effectiveModel !== undefined
+          ? { effectiveModel: result.effectiveModel }
+          : {}),
       }),
     );
     // A succeeded Attempt's `home: workspace` outputs are now canonical in the
@@ -850,6 +909,322 @@ function renderGateMessage(step: HumanGateStep, context: StepContext): string {
     );
   }
   return new TextDecoder().decode(bytes);
+}
+
+// --- Agent step (a Harness Turn dispatch entry, #116) ----------------------
+
+/** The Prompt slot grammar, matching `promptSlotReferences` in the Workflow
+ *  Module: substitution only, `{{artifact:name}}`. */
+const PROMPT_SLOT = /\{\{artifact:([a-zA-Z0-9._-]+)\}\}/g;
+
+/**
+ * Run one autonomous Turn in the Step's named Session and map its result to an
+ * Attempt outcome (#116). The rendered prompt is admitted as the Turn's transcript
+ * input before the stdin frame is sent (the durable recorder the Adapter awaits: a
+ * write failure proves the Turn `not-started`), events drain into the Store as they
+ * arrive, and the settled result maps: `completed` → `succeeded`; `failed` and
+ * `not-started` → `failed` (retryable within budget); `interrupted` → `cancelled`
+ * (Run `halted`); `lost` → `indeterminate` (Run `halted`). The Agent Step produces
+ * no Artifacts in M3, so a succeeded Attempt publishes an empty output set.
+ */
+async function runAgent(
+  step: AgentStep,
+  context: StepContext,
+  attemptId: string,
+): Promise<StepAttempt> {
+  const harness = context.harness;
+  if (harness === undefined) {
+    // Preflight guarantees a prepared Harness for a Bundle carrying an Agent Step;
+    // reaching here without one is a wiring fault composition owns.
+    throw new Error("execution: an Agent Step ran without a prepared Harness.");
+  }
+  const owner = context.owner;
+  const prompt = renderAgentPrompt(step, context, harness);
+  // `fresh` isolates a new Session per Attempt (per Iteration inside a Repeat
+  // group, since the Attempt id encodes both); any other name is reused, so
+  // successive Agent Steps naming it share one live process.
+  const session =
+    step.session === "fresh" ? `fresh-${attemptId}` : step.session;
+  // One Turn per Agent Step Attempt in M3. The id keys the durable Turn record.
+  const turnId = `${attemptId}#turn`;
+  const harnessName = harness.prepared.profile.harness;
+
+  const recorder: DurableTurnRecorder = {
+    admit(admission) {
+      const result = owner.admitTurn({
+        turnId,
+        attemptId,
+        session,
+        origin: admission.origin,
+        input: admission.input.text,
+        recoveryCoordinate: admission.recoveryCoordinate.opaque,
+        harness: harnessName,
+        at: new Date(),
+      });
+      return Promise.resolve(
+        result.ok
+          ? { recorded: true }
+          : { recorded: false, reason: result.reason },
+      );
+    },
+    // M3 records the recovery coordinate at admission (Claude Code reveals it before
+    // submission), so a later checkpoint is a no-op success.
+    checkpoint() {
+      return Promise.resolve({ recorded: true });
+    },
+  };
+
+  const turn = harness.prepared.startTurn({
+    session,
+    origin: "managed",
+    correlationKey: { opaque: turnId },
+    recorder,
+    input: { text: prompt },
+  });
+  turn.subscribe((event) => recordTurnEvent(owner, turnId, event));
+  // ponytail: an in-flight cancel/interrupt of a live Agent Turn (Ctrl+C, story 38)
+  // is not wired here — the plain autonomous Turn runs to its own boundary. Wire
+  // `context.cancelSignal` to `turn.interrupt()` with the interrupt slice.
+  const result = await turn.result();
+  settleTurnResult(owner, turnId, session, result);
+  return mapTurnResult(result);
+}
+
+/** Render the Agent prompt (#116): fill each `{{artifact:name}}` slot from the
+ *  Run's bindings and Launch inputs, then append one line per `skill` in `uses`
+ *  telling the agent to read its `SKILL.md`. No `@` or other Harness syntax is
+ *  baked in — the file path is a plain absolute path. */
+function renderAgentPrompt(
+  step: AgentStep,
+  context: StepContext,
+  harness: HarnessExecutionDeps,
+): string {
+  const base = readPromptText(step.prompt, context);
+  const filled = base.replace(PROMPT_SLOT, (_match, name: string) =>
+    resolvePromptSlot(name, context, harness),
+  );
+  const skillLines: string[] = [];
+  for (const use of step.uses ?? []) {
+    if (!("asset" in use)) continue;
+    if (harness.assetKinds[use.asset] !== "skill") continue;
+    const dir = context.resolveAsset(use.asset);
+    if (dir === undefined) {
+      throw new Error(
+        `execution: skill asset "${use.asset}" is not in the pinned Bundle Snapshot.`,
+      );
+    }
+    skillLines.push(
+      `Read the skill instructions at ${join(dir, "SKILL.md")} before you begin.`,
+    );
+  }
+  return skillLines.length === 0
+    ? filled
+    : `${filled}\n\n${skillLines.join("\n")}`;
+}
+
+/** The prompt asset's or bound artifact's text. */
+function readPromptText(prompt: Reference, context: StepContext): string {
+  if ("asset" in prompt) {
+    const path = context.resolveAsset(prompt.asset);
+    if (path === undefined) {
+      throw new Error(
+        `execution: agent prompt asset "${prompt.asset}" is not in the pinned Bundle Snapshot.`,
+      );
+    }
+    return readFileSync(path, "utf8");
+  }
+  const versionId = context.owner.currentVersion(prompt.artifact);
+  if (versionId === undefined) {
+    throw new Error(
+      `execution: agent prompt artifact "${prompt.artifact}" is not bound at this Step.`,
+    );
+  }
+  const bytes = context.owner.readArtifact(versionId, prompt.artifact);
+  if (bytes === undefined) {
+    throw new Error(
+      `execution: agent prompt artifact "${prompt.artifact}" has no bytes at its bound version.`,
+    );
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/** Resolve one `{{artifact:name}}` slot: a bound store artifact substitutes as its
+ *  canonical text; a Launch input substitutes by its declared type — `file` as an
+ *  absolute path (Workspace-relative resolved against the Workspace), `file-set` as
+ *  one absolute path per line, everything else as its text. */
+function resolvePromptSlot(
+  name: string,
+  context: StepContext,
+  harness: HarnessExecutionDeps,
+): string {
+  const versionId = context.owner.currentVersion(name);
+  if (versionId !== undefined) {
+    const bytes = context.owner.readArtifact(versionId, name);
+    if (bytes === undefined) {
+      throw new Error(
+        `execution: agent prompt slot "${name}" has no bytes at its bound version.`,
+      );
+    }
+    return new TextDecoder().decode(bytes);
+  }
+  const launch = launchInputs(context.owner);
+  const value = launch[name];
+  if (value === undefined) {
+    // The Composition check already proved every slot names a required, bound
+    // artifact; reaching here is a broken invariant.
+    throw new Error(
+      `execution: agent prompt slot "${name}" names an artifact that is neither bound nor a Launch input.`,
+    );
+  }
+  const type = harness.inputTypes[name];
+  const workspacePath = context.owner.record.workspacePath;
+  if (type === "file") {
+    return absoluteWorkspacePath(workspacePath, value);
+  }
+  if (type === "file-set") {
+    return value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => absoluteWorkspacePath(workspacePath, line))
+      .join("\n");
+  }
+  return value;
+}
+
+/** A file input's absolute path: an absolute value passes through, a
+ *  Workspace-relative one resolves against the Workspace root (#116). Host
+ *  `node:path.isAbsolute` is correct here (unlike a portable Bundle path, which
+ *  needs `bundle/relative-path`): a `file` Launch input is validated to exist on
+ *  the executing host at Preflight, so it is always a host-native path. */
+function absoluteWorkspacePath(workspacePath: string, value: string): string {
+  return isAbsolute(value) ? value : resolvePath(workspacePath, value);
+}
+
+/** The Run's Launch inputs, read back from the canonical record as a string map
+ *  (validated to that shape at launch and resume). */
+function launchInputs(owner: RunOwner): Readonly<Record<string, string>> {
+  const launch = owner.record.launch;
+  if (launch === null || typeof launch !== "object") return {};
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(
+    launch as Record<string, unknown>,
+  )) {
+    if (typeof value === "string") result[key] = value;
+  }
+  return result;
+}
+
+/** Drain the meaningful Turn events into the Store as durable timeline entries
+ *  (#116): authoritative assistant content and tool activity. Session facts and the
+ *  effective model reach the durable view through the settled result; previews,
+ *  usage, and context are live-only in M3. Best-effort: `appendTurnEvent` (and
+ *  `settleTurn` below) no-op on a fenced owner rather than throw — a fenced owner
+ *  means another process took over the Run, and that is surfaced authoritatively
+ *  when this Attempt's `publishAttempt` is refused and the walk unwinds. */
+function recordTurnEvent(
+  owner: RunOwner,
+  turnId: string,
+  event: TurnEvent,
+): void {
+  if (event.kind === "assistant-content") {
+    owner.appendTurnEvent({
+      turnId,
+      kind: "assistant-content",
+      payload: JSON.stringify({ content: event.content }),
+      at: new Date(),
+    });
+  } else if (event.kind === "tool-activity") {
+    owner.appendTurnEvent({
+      turnId,
+      kind: "tool-activity",
+      payload: JSON.stringify({
+        tool: event.activity.tool,
+        phase: event.activity.phase,
+        summary: event.activity.summary,
+      }),
+      at: new Date(),
+    });
+  }
+}
+
+/** Settle the durable Turn record from the authoritative result (#116): the result
+ *  kind, the post-Turn Session availability, and any authoritative assistant
+ *  content. Immutable in the Store; a fenced write is ignored (the walk unwinds). */
+function settleTurnResult(
+  owner: RunOwner,
+  turnId: string,
+  session: string,
+  result: TurnResult,
+): void {
+  const availability = resultAvailability(result);
+  owner.settleTurn({
+    turnId,
+    session,
+    resultKind: result.kind,
+    resultDetail: JSON.stringify({ kind: result.kind }),
+    availability: availability.state,
+    ...(availability.detail !== undefined
+      ? { availabilityDetail: availability.detail }
+      : {}),
+    ...(result.kind === "completed" && result.detail.finalContent !== undefined
+      ? { assistantContent: result.detail.finalContent }
+      : {}),
+    at: new Date(),
+  });
+}
+
+/** The post-Turn Session availability a result carries, flattened for the Store. */
+function resultAvailability(result: TurnResult): {
+  state: string;
+  detail?: string;
+} {
+  if (result.kind === "not-started") {
+    return { state: "unusable", detail: result.detail.failure.category };
+  }
+  const session = result.detail.session;
+  if (session.state === "detached") {
+    return { state: "detached", detail: session.coordinate.opaque };
+  }
+  if (session.state === "unusable") {
+    return { state: "unusable", detail: session.reason };
+  }
+  return { state: "open" };
+}
+
+/** Map a Turn result to an Attempt outcome and its effective model (#116). */
+function mapTurnResult(result: TurnResult): StepAttempt {
+  const model = resultEffectiveModel(result);
+  const base = { outputs: [] as readonly CandidateOutput[] };
+  switch (result.kind) {
+    case "completed":
+      return {
+        outcome: "succeeded",
+        ...base,
+        ...(model !== undefined ? { effectiveModel: model } : {}),
+      };
+    case "failed":
+    case "not-started":
+      return {
+        outcome: "failed",
+        ...base,
+        ...(model !== undefined ? { effectiveModel: model } : {}),
+      };
+    case "interrupted":
+      return { outcome: "cancelled", ...base };
+    case "lost":
+      return { outcome: "indeterminate", ...base };
+  }
+}
+
+/** The effective model a settled result reports, or undefined when unknown or when
+ *  the result never reached a model observation. */
+function resultEffectiveModel(result: TurnResult): string | undefined {
+  if (result.kind === "completed" || result.kind === "failed") {
+    const model = result.detail.effectiveModel;
+    return model.known ? model.model : undefined;
+  }
+  return undefined;
 }
 
 // --- Command step (an executable dispatch entry) ---------------------------

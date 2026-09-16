@@ -193,6 +193,22 @@ export function checkComposition(
       }
     }
 
+    // An Agent step (autonomous or interactive) produces no Artifacts in this
+    // release: the Run reads the world through its Command steps, and Agent-step
+    // publication is deferred to a later spec (#116, spec story: "Declared
+    // `produces` on an Agent step is a Composition error until a later spec
+    // defines publication"). Declaring any output fails composition.
+    if (
+      (step.kind === "agent" || step.kind === "interactive-agent") &&
+      (step.produces?.length ?? 0) > 0
+    ) {
+      error(
+        "agent-produces-unsupported",
+        step.id,
+        `Step "${step.id}" is a ${step.kind} Step that declares produces, but an Agent Step produces no Artifacts in this release.`,
+      );
+    }
+
     // A Step kind with a fixed `produces` (Command: verdict + text) may only
     // author outputs of those types, so execution's deterministic-Verdict mapping
     // (exit status -> verdict, captured output -> text) covers every output. A

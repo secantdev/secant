@@ -1013,6 +1013,92 @@ test("group open prunes diagnostics older than 90 days and keeps newer ones", as
   assert.equal(existsSync(fresh), true);
 });
 
+test("a Turn is admitted, events append, and the result settles immutably (#116)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner !== undefined);
+  t.after(() => owner.close());
+
+  const admitted = owner.admitTurn({
+    turnId: "turn-1",
+    attemptId: "0.0:write",
+    session: "s",
+    origin: "managed",
+    input: "do the thing at /abs/path.md",
+    recoveryCoordinate: "native-abc",
+    harness: "claude-code",
+    at: AT,
+  });
+  assert.ok(admitted.ok);
+
+  // The Turn row is admitted before any result, the Session reads `open`, and the
+  // input is a `user` transcript entry.
+  assert.equal(owner.turns().length, 1);
+  assert.equal(owner.turns()[0]?.resultKind, undefined);
+  assert.equal(owner.turns()[0]?.input, "do the thing at /abs/path.md");
+  assert.deepEqual(owner.harnessSessions(), [
+    { session: "s", availability: "open" },
+  ]);
+  assert.equal(owner.transcript()[0]?.role, "user");
+
+  owner.appendTurnEvent({
+    turnId: "turn-1",
+    kind: "assistant-content",
+    payload: JSON.stringify({ content: "hello" }),
+    at: AT,
+  });
+  owner.appendTurnEvent({
+    turnId: "turn-1",
+    kind: "tool-activity",
+    payload: JSON.stringify({ tool: "Edit", phase: "started" }),
+    at: AT,
+  });
+  assert.equal(owner.turnEvents().length, 2);
+
+  const settled = owner.settleTurn({
+    turnId: "turn-1",
+    session: "s",
+    resultKind: "completed",
+    resultDetail: JSON.stringify({ finalContent: "hello" }),
+    availability: "open",
+    assistantContent: "hello",
+    at: AT,
+  });
+  assert.ok(settled.ok);
+  assert.equal(owner.turns()[0]?.resultKind, "completed");
+  assert.equal(
+    owner.transcript().filter((entry) => entry.role === "assistant").length,
+    1,
+  );
+
+  // A settled result is immutable: a second settle changes nothing.
+  owner.settleTurn({
+    turnId: "turn-1",
+    session: "s",
+    resultKind: "failed",
+    resultDetail: "{}",
+    availability: "unusable",
+    at: AT,
+  });
+  assert.equal(owner.turns()[0]?.resultKind, "completed");
+  assert.equal(owner.harnessSessions()[0]?.availability, "open");
+
+  // The Attempt's effective model is readable once published.
+  const published = owner.publishAttempt({
+    attemptId: "0.0:write",
+    outcome: "succeeded",
+    required: [],
+    outputs: [],
+    at: AT,
+    effectiveModel: "claude-opus-5",
+  });
+  assert.ok(published.ok);
+  assert.equal(owner.effectiveModel(), "claude-opus-5");
+});
+
 /** The `<slug>--<digest>` directory openRunGroup derives for WORKSPACE, recomputed
  *  here so the poisoned-coordination test can pre-seed it. */
 function exampleGroupName(): string {

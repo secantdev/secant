@@ -156,6 +156,9 @@ export interface PublishAttemptRequest {
   readonly at: Date;
   /** Optional canonical Run state to advance to in the same transaction. */
   readonly advanceState?: string;
+  /** The effective model an Agent-step Attempt ran under (#116), recorded on the
+   *  Attempt. Absent for a Command/Gate Attempt. */
+  readonly effectiveModel?: string;
 }
 
 /** The outcome of a publication attempt. A fenced owner or an unstageable set
@@ -261,6 +264,85 @@ export interface RecordPendingGateRequest {
   readonly at: Date;
 }
 
+// --- Harness Turns (#116) --------------------------------------------------
+
+/** Admit one Turn before its stdin frame is sent: the durable admission the
+ *  Harness Adapter awaits. A refusal (or a fenced owner) proves the Turn
+ *  `not-started`. Records the `turn` row, upserts the named Session `open`, and
+ *  appends the rendered input as a `user` transcript entry, all in one boundary. */
+export interface AdmitTurnRequest {
+  readonly turnId: string;
+  readonly attemptId: string;
+  readonly session: string;
+  readonly origin: "managed" | "human";
+  /** The exact rendered transcript input admitted before native submission. */
+  readonly input: string;
+  /** The opaque native recovery coordinate (native session id) observed. */
+  readonly recoveryCoordinate: string;
+  readonly harness: string;
+  readonly at: Date;
+}
+
+/** Append one normalized durable Turn event (append-only). */
+export interface AppendTurnEventRequest {
+  readonly turnId: string;
+  readonly kind: string;
+  readonly payload: string; // JSON
+  readonly at: Date;
+}
+
+/** Settle a Turn authoritatively (#116). Immutable: a settle after a settled
+ *  result is a no-op. Updates the `turn` row, the Session availability, and (when
+ *  present) appends the authoritative assistant content as a transcript entry. */
+export interface SettleTurnRequest {
+  readonly turnId: string;
+  readonly session: string;
+  readonly resultKind: string; // not-started/completed/failed/interrupted/lost
+  readonly resultDetail: string; // JSON
+  readonly availability: string; // open/detached/unusable
+  readonly availabilityDetail?: string;
+  readonly assistantContent?: string;
+  readonly at: Date;
+}
+
+/** One admitted Turn, read back for the run Projection. */
+export interface TurnRecord {
+  readonly turnId: string;
+  readonly attemptId: string;
+  readonly session: string;
+  readonly origin: string;
+  readonly sequence: number;
+  readonly input: string;
+  readonly admittedAt: string; // ISO 8601
+  readonly resultKind?: string;
+  readonly settledAt?: string;
+}
+
+/** One normalized durable Turn event, read back in append order. */
+export interface TurnEventRecord {
+  readonly turnId: string;
+  readonly kind: string;
+  readonly payload: string;
+  readonly at: string; // ISO 8601
+}
+
+/** One named Session's last observed availability, read back for the Projection. */
+export interface HarnessSessionRecord {
+  readonly session: string;
+  readonly availability: string;
+  readonly availabilityDetail?: string;
+}
+
+/** One readable transcript entry (exact Turn input or authoritative assistant
+ *  content), read back in append order. */
+export interface TranscriptEntryRecord {
+  readonly session: string;
+  readonly turnId: string;
+  readonly role: string;
+  readonly content: string;
+  readonly at: string; // ISO 8601
+}
+
 /**
  * Ownership of one Run's canonical store. Acquiring bumps a fencing epoch, so a
  * stale owner (a crashed process that comes back) is fenced: its canonical
@@ -320,6 +402,27 @@ export interface RunOwner {
    *  producing Attempt has not yet settled, or undefined if none is pending (a
    *  derived Review checkpoint records nothing here). */
   pendingGate(): PendingGateRecord | undefined;
+  /** Admit a Turn before its stdin frame is sent (#116): the durable admission the
+   *  Harness Adapter awaits. A fenced owner refuses (proving the Turn
+   *  `not-started`); otherwise the `turn` row, the Session, and the input
+   *  transcript entry are written in one transaction. */
+  admitTurn(request: AdmitTurnRequest): WriteResult;
+  /** Append one normalized durable Turn event (append-only). Refused if fenced. */
+  appendTurnEvent(request: AppendTurnEventRequest): WriteResult;
+  /** Settle a Turn authoritatively (#116); immutable once settled. Refused if
+   *  fenced. */
+  settleTurn(request: SettleTurnRequest): WriteResult;
+  /** Every admitted Turn, in sequence order. */
+  turns(): readonly TurnRecord[];
+  /** Every normalized durable Turn event, in append order. */
+  turnEvents(): readonly TurnEventRecord[];
+  /** Every named Session's last observed availability. */
+  harnessSessions(): readonly HarnessSessionRecord[];
+  /** Every readable transcript entry, in append order. */
+  transcript(): readonly TranscriptEntryRecord[];
+  /** The most recent Attempt's effective model, or undefined when none ran a
+   *  Harness Turn. */
+  effectiveModel(): string | undefined;
   /** Release this Run only if this owner still holds the fencing epoch. A stale
    *  owner cannot clear ownership acquired by a takeover. */
   release(): WriteResult;

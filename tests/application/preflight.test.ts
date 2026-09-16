@@ -10,6 +10,7 @@ import {
   type RunExecution,
 } from "../../src/application/application.js";
 import { buildBundle, writeZip } from "../../src/bundle/bundle.js";
+import { CLAUDE_CODE_EXECUTABLE_ENV } from "../../src/harness/harness.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
 import { openRunGroup, type RunGroup } from "../../src/run/store/store.js";
@@ -314,7 +315,7 @@ test("a Snapshot failing the Composition re-check is refused as corrupted, no Ru
 
 // --- intrinsic Step-kind precondition (the Proof Bundle) -------------------
 
-test("the Proof Bundle (Agent Step) is refused with the Step-kind Problem, no Run", (t) => {
+test("the Proof Bundle's Agent Step is dispatchable and refused at Preflight when no Harness is found (#116)", (t) => {
   const f = fixture(t, plainDirectory());
   const proofFolder = join(
     dirname(fileURLToPath(import.meta.url)),
@@ -329,16 +330,73 @@ test("the Proof Bundle (Agent Step) is refused with the Step-kind Problem, no Ru
     .listEntries()
     .find((e) => e.id === "dev.secant.test-repair")!;
 
-  // Even without the Bundle's required `failing-test` input, the Step-kind
-  // failure is reported first — the Routing cannot run at all in this release.
+  // The Agent Step is now executable (#116), so the Routing is no longer refused
+  // for its kind; instead, with no Claude Code discoverable, the launch is refused
+  // at Preflight before a Run exists. Point discovery at a directory with no
+  // `claude` so the refusal is deterministic regardless of the dev environment.
+  const savedPath = process.env.PATH;
+  const savedClaude = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
+  process.env.PATH = makeTempDir("secant-no-claude-");
+  delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
+  try {
+    const admission = launch(f, entry.id, { trustDigest: entry.digest });
+    assert.equal(admission.admitted, false);
+    if (admission.admitted) throw new Error("unreachable");
+    assert.equal(admission.problem.code, "harness-not-found");
+    assert.match(admission.problem.remediation, /claude code/i);
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedClaude === undefined)
+      delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
+    else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedClaude;
+  }
+  assert.deepEqual(f.runGroup.listRuns(), []);
+});
+
+test("a headless launch refuses an interactive-agent Bundle with interactive-step-needs-tui (#116)", (t) => {
+  const f = fixture(t, plainDirectory());
+  // An interactive-agent Bundle authored directly (no command-bundle helper covers
+  // it): the headless client cannot relay human turn-taking, so Preflight refuses
+  // it with the TUI remedy before the generic not-executable check and before any
+  // Harness discovery.
+  const folder = makeTempDir("secant-interactive-bundle-");
+  writeFileSync(join(folder, "grill.md"), "Grill me.\n");
+  const manifest = {
+    formatVersion: 1,
+    bundle: {
+      id: "dev.secant.interactive",
+      version: "1.0.0",
+      name: "Interactive",
+      description: "An interactive-agent Bundle refused headlessly.",
+    },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [{ path: "grill.md", kind: "prompt" }],
+    routing: [
+      {
+        id: "grill",
+        kind: "interactive-agent",
+        session: "s",
+        prompt: { asset: "grill.md" },
+      },
+    ],
+  };
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  const built = f.app.bundleManagement.build(folder, { noInstall: false });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = f.catalog
+    .listEntries()
+    .find((e) => e.id === "dev.secant.interactive")!;
+
   const admission = launch(f, entry.id, { trustDigest: entry.digest });
   assert.equal(admission.admitted, false);
   if (admission.admitted) throw new Error("unreachable");
-  assert.equal(admission.problem.code, "step-kind-not-executable");
-  // The first non-executable Step in routing order is the Agent step `fix`.
-  assert.equal(admission.problem.details?.step, "fix");
-  assert.equal(admission.problem.details?.kind, "agent");
-  assert.match(admission.problem.remediation, /interactive|terminal/i);
+  assert.equal(admission.problem.code, "interactive-step-needs-tui");
+  assert.equal(admission.problem.details?.step, "grill");
+  assert.match(admission.problem.remediation, /TUI/i);
   assert.deepEqual(f.runGroup.listRuns(), []);
 });
 

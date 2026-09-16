@@ -315,6 +315,30 @@ const cases: ReadonlyArray<{
     code: "human-gate-in-repeat",
     target: "routing[1].repeat.steps",
   },
+  {
+    title: "an agent Step that declares produces",
+    manifest: manifest({
+      routing: [
+        {
+          id: "seed",
+          kind: "command",
+          requires: ["doc"],
+          produces: [{ name: "v", type: "verdict" }],
+          command: { executable: "bash", arguments: [{ asset: "run.sh" }] },
+        },
+        {
+          id: "write",
+          kind: "agent",
+          session: "s",
+          requires: ["doc"],
+          prompt: { asset: "p.md" },
+          produces: [{ name: "out", type: "text" }],
+        },
+      ],
+    }),
+    code: "agent-produces-unsupported",
+    target: "write",
+  },
 ];
 
 for (const testCase of cases) {
@@ -334,8 +358,9 @@ for (const testCase of cases) {
 
 test("every composition rule owns a distinct stable code", () => {
   const codes = new Set(cases.map((testCase) => testCase.code));
-  // Eleven rules; the missing/wrong-kind asset rule carries two codes, so twelve.
-  assert.equal(codes.size, 12);
+  // Eleven rules; the missing/wrong-kind asset rule carries two codes (twelve),
+  // plus the Agent-produces rule (#116) makes thirteen.
+  assert.equal(codes.size, 13);
 });
 
 test("flags a duplicate Step id", () => {

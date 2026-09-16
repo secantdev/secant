@@ -232,8 +232,10 @@ try {
     }
     assertMigrated(join(legacyHome, "catalog.db"), "Catalog");
     assertMigrated(join(groupDir, "coordination.db"), "coordination");
-    // The Run Store carries two migrations since #108 added the `pending_gate` table.
-    assertMigrated(join(groupDir, runId, "run.db"), "Run Store", 2);
+    // The Run Store carries three migrations: #108 added `pending_gate`, and #116
+    // added the Harness Turn records (`harness_session`/`turn`/`turn_event`/
+    // `transcript_entry`) and Attempt `effective_model`.
+    assertMigrated(join(groupDir, runId, "run.db"), "Run Store", 3);
   }
 
   run(binary, ["workspace", "approve"], {
@@ -428,12 +430,57 @@ try {
     }
   }
 
-  // Preflight refusals from the compiled binary (issue #83, AC7), each before any
-  // Run exists. The Proof Bundle carries an Agent step, so launching it is refused
-  // with the intrinsic Step-kind Problem; a Command-only Bundle that requires a
-  // Git worktree root is refused with the git-worktree-root Problem when launched
-  // from the non-repository workspace. Neither needs a trust acknowledgement:
-  // Preflight runs ahead of the Trust gate.
+  // Preflight refusals from the compiled binary (issue #83, AC7; #116), each before
+  // any Run exists. An interactive-agent Bundle is refused headlessly with
+  // interactive-step-needs-tui (the headless client cannot relay human turn-taking,
+  // checked before Harness discovery so it is deterministic without Claude Code); a
+  // Command-only Bundle that requires a Git worktree root is refused with the
+  // git-worktree-root Problem when launched from the non-repository workspace.
+  // Neither needs a trust acknowledgement: Preflight runs ahead of the Trust gate.
+  const interactiveFolder = join(smokeRoot, "interactive-bundle");
+  await mkdir(interactiveFolder, { recursive: true });
+  await writeFile(join(interactiveFolder, "grill.md"), "Grill me.\n");
+  await writeFile(
+    join(interactiveFolder, "manifest.json"),
+    JSON.stringify({
+      formatVersion: 1,
+      bundle: {
+        id: "dev.secant.smoke-interactive",
+        version: "1.0.0",
+        name: "Smoke Interactive",
+        description: "An interactive-agent Bundle refused headlessly (#116).",
+      },
+      platforms: ["windows", "macos", "linux"],
+      inputs: {},
+      assets: [{ path: "grill.md", kind: "prompt" }],
+      routing: [
+        {
+          id: "grill",
+          kind: "interactive-agent",
+          session: "s",
+          prompt: { asset: "grill.md" },
+        },
+      ],
+    }),
+  );
+  const interactiveWfb = join(smokeRoot, "interactive.wfb");
+  run(
+    binary,
+    [
+      "bundle",
+      "build",
+      interactiveFolder,
+      "--no-install",
+      "--output",
+      interactiveWfb,
+    ],
+    { cwd: smokeRoot, env: workspaceEnv },
+  );
+  run(binary, ["bundle", "install", interactiveWfb], {
+    cwd: smokeRoot,
+    env: workspaceEnv,
+  });
+
   const gitGuardFolder = join(projectRoot, "bundles", "git-guard-command");
   const gitGuardWfb = join(smokeRoot, "git-guard.wfb");
   run(
@@ -454,7 +501,10 @@ try {
   });
 
   for (const [args, needle] of [
-    [["run", "launch", "dev.secant.test-repair"], "step-kind-not-executable"],
+    [
+      ["run", "launch", "dev.secant.smoke-interactive"],
+      "interactive-step-needs-tui",
+    ],
     [["run", "launch", "dev.secant.git-guard"], "git-worktree-root"],
   ]) {
     const result = spawnSync(binary, args, {

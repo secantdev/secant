@@ -422,15 +422,15 @@ test("asset and artifact references in arguments resolve to the Snapshot asset a
   assert.equal(dec(readBound(owner, "echoed")), "echo:from-asset\n");
 });
 
-test("a Step kind with no executor row is refused (command and human-gate dispatch; agent kinds do not yet)", async (t) => {
+test("a Step kind with no executor row is refused (command, human-gate, and agent dispatch; interactive-agent does not yet)", async (t) => {
   const { owner } = ownerForFreshRun(t);
-  const agent = {
-    id: "agent",
-    kind: "agent",
+  const interactive = {
+    id: "grill",
+    kind: "interactive-agent",
     prompt: { asset: "prompt.md" },
     session: "s",
   } as unknown as RoutingNode;
-  await assert.rejects(run([agent], owner), /not dispatchable/);
+  await assert.rejects(run([interactive], owner), /not dispatchable/);
 });
 
 // --- Repeat groups (#84, ADR 0020) -----------------------------------------

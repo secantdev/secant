@@ -145,6 +145,10 @@ export interface ApplicationDependencies {
   /** The clock the `run-list` Projection groups rows by (Today / Yesterday /
    *  Older). Defaults to the wall clock; a test injects a fixed instant (#87). */
   readonly now?: () => Date;
+  /** Whether the launching client can relay human turn-taking (#116). Headless
+   *  cannot, so it refuses an `interactive-agent` Bundle at Preflight; the TUI sets
+   *  this true. Defaults to false. */
+  readonly supportsInteractiveTurns?: boolean;
 }
 
 export interface Application {
@@ -842,6 +846,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       launchInputs: input.launchInputs,
       hostPlatform: deps.hostPlatform,
       digest: entry.digest,
+      supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
     });
     if ("problem" in pre) {
       return { admitted: false, problem: pre.problem };
@@ -948,6 +953,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       launchInputs,
       hostPlatform: deps.hostPlatform,
       digest,
+      supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
     });
     if ("problem" in pre) return { problem: pre.problem };
     const grant = catalog.getTrustGrant(digest, entry.installationGeneration);

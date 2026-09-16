@@ -60,4 +60,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `free-text` publishes the `text` answer as the declared output and advances `running`; approve settles succeeded with no output; reject settles failed and rests
   `failed`. The `pending_gate.shape` column is a closed enum validated with `z.enum` at the read ingress (D7), like `attempt_log.outcome` and `gate_answer.answer`.
 - `publishAttempt` for a **succeeded Attempt with no outputs and no required outputs** stages no commit (an empty tree is not valid `git mktree` input) and settles with
-  no version — exactly the approve-reject authored-gate answer (#108). Every other succeeded Attempt produces at least one output and stages a commit as before.
+  no version — the approve-reject authored-gate answer (#108) and every Agent-step Attempt (#116, which produces no Artifacts). Every other succeeded Attempt produces at
+  least one output and stages a commit as before.
+- Harness Turn records (#116): `admitTurn` writes the `turn` row **before** the stdin frame is sent (the durable admission the Adapter awaits) — it upserts the named Session
+  `open` and the rendered input as a `user` transcript entry in one transaction, and a fenced owner refuses it, proving the Turn `not-started` so no stdin is sent.
+- `settleTurn` is immutable: it no-ops once the `turn` row's `result_kind` is set, so a second settle rewrites neither the result nor the Session availability. `turn_event`s
+  append only. The Attempt's `effective_model` is set through `publishAttempt` (the `attempt` row is written after the Turn settles), never through `settleTurn`.

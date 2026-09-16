@@ -123,6 +123,12 @@ export function renderRun(run: RunView): string {
         ? "at rest"
         : `step ${run.position + 1} of ${run.progress.length}`
     }`,
+    // The effective model the latest Agent-step Attempt ran under (#116), from the
+    // Harness init message. Omitted for a Command-only Run.
+    ...(run.effectiveModel !== undefined
+      ? [`Effective model: ${run.effectiveModel}`]
+      : []),
+    ...(run.turnPosition !== undefined ? [`Turns: ${run.turnPosition}`] : []),
   ];
 
   // A blocked Run rests at a Review checkpoint (#84): print the authored message,
@@ -232,6 +238,24 @@ export function renderRun(run: RunView): string {
       `  artifact: ${run.conflict.artifactName}`,
       `  path: ${run.conflict.path}`,
     );
+  }
+
+  // The named Harness Sessions this Run opened and their last availability (#116).
+  if (run.sessions !== undefined && run.sessions.length > 0) {
+    lines.push("", "Sessions:");
+    for (const session of run.sessions) {
+      lines.push(`  ${session.session}: ${session.availability}`);
+    }
+  }
+
+  // The readable Session transcript (#116): the exact rendered Turn input and the
+  // authoritative assistant content. Status carried by the role word.
+  if (run.transcript !== undefined && run.transcript.length > 0) {
+    lines.push("", "Transcript:");
+    for (const entry of run.transcript) {
+      lines.push(`  [${entry.session}] ${entry.role}:`);
+      for (const line of entry.content.split("\n")) lines.push(`    ${line}`);
+    }
   }
 
   lines.push("", "Outputs:");

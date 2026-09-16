@@ -6,7 +6,10 @@
 // POSIX; an npm-style `.cmd` shim naming the Bun runtime plus this script on
 // Windows) and spawns it directly. It parses argv, answers `--version`, then for
 // a Turn case waits for each stdin frame before emitting that Turn's recorded
-// stdout/stderr bytes. This preserves the real process and backpressure seam.
+// stdout/stderr bytes. The one dynamic protocol value is `session_id`: recorded
+// frames echo the id supplied on this invocation, as real Claude Code does, so an
+// installed binary can mint its production UUID while every other recorded byte
+// remains unchanged. This preserves the real process and backpressure seam.
 //
 // It records argv, cwd, and each intact stdin line to the log named in its
 // runtime configuration. From #115 the case directory is a real recorded fixture
@@ -60,6 +63,27 @@ const valueAfter = (flag) => {
   const index = args.indexOf(flag);
   return index < 0 ? undefined : args[index + 1];
 };
+
+// Fresh production launches mint a UUID that cannot be present in a checked-in
+// recording. Resume recordings deliberately preserve their captured Session id:
+// some cases prove acknowledgement and others prove a mismatched acknowledgement.
+const requestedSessionId = valueAfter("--session-id");
+
+/** Replay recorded bytes while echoing this invocation's supplied Session id.
+ *  Session ids are UUIDs in the recordings and at runtime, so replacement keeps
+ *  frame boundaries and byte counts stable. */
+function replayBytes(path) {
+  const bytes = readFileSync(path);
+  if (requestedSessionId === undefined) return bytes;
+  return Buffer.from(
+    bytes
+      .toString("utf8")
+      .replace(
+        /"session_id":"[^"]+"/g,
+        `"session_id":${JSON.stringify(requestedSessionId)}`,
+      ),
+  );
+}
 
 // The MCP permission bridge Secant launched us against: its loopback URL and
 // bearer come from the `--mcp-config` argv, the tool name from
@@ -225,40 +249,17 @@ for await (const line of lines) {
     );
     process.exit(2);
   }
-  if (Array.isArray(turn.steps)) {
-    // Ordered mix of stdout emissions and permission-bridge calls. A bridge step
-    // blocks until Secant answers it, so the recorded stdout after it emits only
-    // once the permission verdict is in — the "recorded point in the Turn".
-    for (const step of turn.steps) {
-      if (step.emit) {
-        await write(
-          process.stdout,
-          readFileSync(join(caseDirectory, step.emit)),
-        );
-      } else if (step.bridge) {
-        await bridgeCall(step.bridge);
-      } else if (Array.isArray(step.bridgeAll)) {
-        await Promise.all(step.bridgeAll.map(bridgeCall));
-      }
+  let workspacePatchApplied = false;
+  const applyWorkspacePatch = () => {
+    if (workspacePatchApplied || typeof turn.workspacePatch !== "string") {
+      return;
     }
-  } else {
-    await write(process.stdout, readFileSync(join(caseDirectory, turn.stdout)));
-    if (turn.stderr) {
-      await write(
-        process.stderr,
-        readFileSync(join(caseDirectory, turn.stderr)),
-      );
-    }
-  }
-  // The Workspace patch is applied at the Turn's result — after this Turn's bytes
-  // and before we await the next stdin frame — so a replayed Test Repair Turn
-  // leaves the launch cwd's git Workspace changed exactly as the recording did.
-  if (typeof turn.workspacePatch === "string") {
     const patchPath = join(caseDirectory, turn.workspacePatch);
     try {
       execFileSync("git", ["apply", "--whitespace=nowarn", patchPath], {
         cwd: process.cwd(),
       });
+      workspacePatchApplied = true;
     } catch (error) {
       process.stderr.write(
         `secant replayer: git apply ${turn.workspacePatch} failed: ${
@@ -267,7 +268,40 @@ for await (const line of lines) {
       );
       process.exit(3);
     }
+  };
+  if (Array.isArray(turn.steps)) {
+    // Ordered mix of stdout emissions and permission-bridge calls. A bridge step
+    // blocks until Secant answers it, so the recorded stdout after it emits only
+    // once the permission verdict is in — the "recorded point in the Turn".
+    for (const step of turn.steps) {
+      if (step.emit) {
+        const bytes = replayBytes(join(caseDirectory, step.emit));
+        // A recorded Workspace patch is the effect the Harness completed during
+        // this Turn. Make it visible before the terminal result frame can advance
+        // the Run to its next Step; applying it after writing that frame races the
+        // consumer and can let the next Command observe stale Workspace bytes.
+        if (bytes.includes(Buffer.from('"type":"result"'))) {
+          applyWorkspacePatch();
+        }
+        await write(process.stdout, bytes);
+      } else if (step.bridge) {
+        await bridgeCall(step.bridge);
+      } else if (Array.isArray(step.bridgeAll)) {
+        await Promise.all(step.bridgeAll.map(bridgeCall));
+      }
+    }
+  } else {
+    await write(process.stdout, replayBytes(join(caseDirectory, turn.stdout)));
+    if (turn.stderr) {
+      await write(
+        process.stderr,
+        replayBytes(join(caseDirectory, turn.stderr)),
+      );
+    }
   }
+  // Legacy/simple cases without an explicit terminal result emission still apply
+  // their patch before the replayer waits for another Turn.
+  applyWorkspacePatch();
   // A Turn that models "process exits without a result" (a lost or corrupt case)
   // ends the process right after its bytes instead of awaiting more stdin.
   if (turn.exitAfter) process.exit(playback.exitCode ?? 0);

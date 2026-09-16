@@ -1516,7 +1516,17 @@ async function runCommand(
   const result = await context.spawnCommand({
     executable: resolution.executable,
     args: [...resolution.prefixArgs, ...args],
-    cwd: invocation.workingDirectory,
+    // Manifest validation makes this a Workspace-relative directory. Resolve it
+    // against the Run's pinned Workspace rather than the Secant process cwd.
+    // Omitted keeps the established inherited-cwd behavior; an authored "." means
+    // the Workspace root.
+    cwd:
+      invocation.workingDirectory === undefined
+        ? undefined
+        : resolveWorkspacePath(
+            context.owner.record.workspacePath,
+            invocation.workingDirectory,
+          ),
     env: resolveEnv(invocation, context),
     timeoutMs: context.commandTimeoutMs,
     // Execution owns the capture cap policy; the process Module enforces the value.
@@ -1608,8 +1618,8 @@ function resolveInvocation(
 }
 
 /** Resolve one argument or env value: a literal passes through; a `{asset}`
- *  becomes its Snapshot path; a `{artifact}` becomes the bytes currently bound to
- *  that name, decoded as UTF-8 text. An unresolved reference is a broken
+ *  becomes its Snapshot path; a `{artifact}` becomes either its currently bound
+ *  UTF-8 bytes or its Run launch-input value. An unresolved reference is a broken
  *  invariant the Composition check already ruled out, so it throws. */
 function resolveToken(token: string | Reference, context: StepContext): string {
   if (typeof token === "string") return token;
@@ -1624,8 +1634,10 @@ function resolveToken(token: string | Reference, context: StepContext): string {
   }
   const versionId = context.owner.currentVersion(token.artifact);
   if (versionId === undefined) {
+    const launch = launchInputs(context.owner)[token.artifact];
+    if (launch !== undefined) return launch;
     throw new Error(
-      `execution: artifact "${token.artifact}" is not bound at this Step.`,
+      `execution: artifact "${token.artifact}" is neither bound nor a Launch input at this Step.`,
     );
   }
   const bytes = context.owner.readArtifact(versionId, token.artifact);

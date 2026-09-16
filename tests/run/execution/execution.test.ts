@@ -30,7 +30,10 @@ const dec = (bytes: Uint8Array | undefined) =>
   bytes === undefined ? undefined : new TextDecoder().decode(bytes);
 
 /** Acquire an owner for a fresh Run under a temporary Secant home. */
-function ownerForFreshRun(t: { after: (fn: () => void) => void }): {
+function ownerForFreshRun(
+  t: { after: (fn: () => void) => void },
+  launch: Readonly<Record<string, string>> = {},
+): {
   owner: RunOwner;
   home: string;
   /** The Run's canonical state as the Store records it right now. */
@@ -42,7 +45,7 @@ function ownerForFreshRun(t: { after: (fn: () => void) => void }): {
   const created = group.createRun({
     operationId: "op-1",
     bundleSnapshotDigest: "sha256:deadbeef",
-    launch: {},
+    launch,
     at: AT,
   });
   assert.ok(created.outcome === "created");
@@ -132,6 +135,63 @@ test("a two-Command Routing whose scripts exit 0 runs to succeeded", async (t) =
     owner.attemptLog().map((entry) => entry.outcome),
     ["succeeded", "succeeded"],
   );
+});
+
+test("a Command resolves an authored working directory beneath the Run Workspace", async (t) => {
+  const { owner } = ownerForFreshRun(t);
+  let observedCwd: string | undefined;
+  const spawnCommand: SpawnCommand = (options) => {
+    observedCwd = options.cwd;
+    return Promise.resolve({
+      kind: "exited",
+      status: 0,
+      text: new Uint8Array(),
+    });
+  };
+
+  assert.deepEqual(
+    await run(
+      [
+        commandStep("nested", {
+          executable: NODE,
+          arguments: [],
+          workingDirectory: "packages/example",
+        }),
+      ],
+      owner,
+      { spawnCommand },
+    ),
+    { outcome: "succeeded" },
+  );
+  assert.equal(observedCwd, join(WORKSPACE, "packages", "example"));
+});
+
+test("a Command artifact argument resolves from the Run's Launch inputs", async (t) => {
+  const { owner } = ownerForFreshRun(t, { source: "tests/failing.test.mjs" });
+  let observedArgs: readonly string[] = [];
+  const spawnCommand: SpawnCommand = (options) => {
+    observedArgs = options.args;
+    return Promise.resolve({
+      kind: "exited",
+      status: 0,
+      text: new Uint8Array(),
+    });
+  };
+
+  assert.deepEqual(
+    await run(
+      [
+        commandStep("consume-input", {
+          executable: NODE,
+          arguments: [{ artifact: "source" }],
+        }),
+      ],
+      owner,
+      { spawnCommand },
+    ),
+    { outcome: "succeeded" },
+  );
+  assert.deepEqual(observedArgs, ["tests/failing.test.mjs"]);
 });
 
 // A command killed by a signal (Ctrl+C / termination) has no exit; its Attempt is

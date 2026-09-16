@@ -23,6 +23,8 @@ import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 // @ts-expect-error JS helper, no types
 import { TARGETS, hostTargetKey } from "./targets.mjs";
+import { installReplayerAt } from "../tests/harness/replayer-install.ts";
+import { seedTestRepairWorkspace } from "../tests/helpers/testRepairWorkspace.ts";
 
 // Smokes the Bun compiled single-file executable (ADR 0030). It replaces the
 // npm-tarball smoke and keeps its install-then-run shape: copy the standalone
@@ -375,6 +377,123 @@ try {
     throw new Error(
       `bundle inspect --json did not read back identity, digest, all three platforms, and zero error findings: ${JSON.stringify(focus)}`,
     );
+  }
+
+  // Run the installed Test Repair Proof Bundle headlessly against the recorded
+  // Claude Code replayer on PATH (#119, stories 46-49). The failing baseline
+  // enters one repair iteration; the policy-approved Edit applies the recording's
+  // Workspace patch; the next Verdict passes; and the authored approve-commit
+  // gate keeps Git unchanged until a separate `run answer --continue` invocation.
+  // Both Run-driving commands use the frozen --json envelope from the compiled
+  // binary, and only the temporary PATH selects the fake Harness.
+  {
+    const replayer = installReplayerAt(
+      join(smokeRoot, "claude-replayer"),
+      "2.1.273 (Claude Code)",
+      join(
+        projectRoot,
+        "tests",
+        "harness",
+        "fixtures",
+        "claude-code",
+        "test-repair",
+      ),
+    );
+    const proofWorkspace = join(smokeRoot, "test-repair-workspace");
+    const { failingTest, baselineCommit } =
+      seedTestRepairWorkspace(proofWorkspace);
+    const proofEnv = {
+      ...workspaceEnv,
+      PATH: `${replayer.dir}${delimiter}${workspaceEnv.PATH}`,
+    };
+    delete proofEnv.SECANT_CLAUDE_CODE;
+    run(binary, ["workspace", "approve"], {
+      cwd: proofWorkspace,
+      env: proofEnv,
+    });
+
+    const launchedJson = run(
+      binary,
+      [
+        "run",
+        "launch",
+        "dev.secant.test-repair",
+        "--input",
+        `failing-test=${failingTest}`,
+        "--trust",
+        listed.digest,
+        "--harness-requests",
+        "allow",
+        "--json",
+      ],
+      { cwd: proofWorkspace, env: proofEnv, expect: 2 },
+    );
+    const launched = JSON.parse(launchedJson);
+    const proofRun = launched.result?.run;
+    if (
+      launched.family !== "run" ||
+      typeof launched.runId !== "string" ||
+      launched.result?.found !== true ||
+      proofRun?.runId !== launched.runId ||
+      proofRun.bundle?.id !== "dev.secant.test-repair" ||
+      proofRun.state !== "blocked" ||
+      !Array.isArray(proofRun.progress) ||
+      !Array.isArray(proofRun.timeline) ||
+      !Array.isArray(proofRun.outputs) ||
+      !Array.isArray(proofRun.actionOffers) ||
+      proofRun.pendingGate?.gate?.shape !== "approve-reject" ||
+      proofRun.pendingGate?.gate?.stepId !== "approve-commit" ||
+      proofRun.effectiveModel !== "claude-opus-5[1m]" ||
+      !proofRun.timeline.some(
+        (event) =>
+          event.event === "request-raised" &&
+          /^Edit .*sum\.mjs/.test(event.detail ?? ""),
+      ) ||
+      !proofRun.timeline.some(
+        (event) =>
+          event.event === "request-answered" &&
+          event.detail === "answered by client policy (allow)",
+      )
+    ) {
+      throw new Error(
+        `Installed Proof Bundle did not reach its authored gate with the frozen Run JSON fields: ${launchedJson}`,
+      );
+    }
+    if (
+      run("git", ["rev-parse", "HEAD"], { cwd: proofWorkspace }).trim() !==
+      baselineCommit
+    ) {
+      throw new Error(
+        "The Proof Bundle committed before its authored gate was approved.",
+      );
+    }
+
+    const answeredJson = run(
+      binary,
+      ["run", "answer", launched.runId, "--continue", "--json"],
+      { cwd: proofWorkspace, env: proofEnv },
+    );
+    const answered = JSON.parse(answeredJson);
+    if (
+      answered.family !== "run" ||
+      answered.runId !== launched.runId ||
+      answered.result?.found !== true ||
+      answered.result.run?.state !== "succeeded" ||
+      answered.result.run?.pendingGate !== undefined
+    ) {
+      throw new Error(
+        `Installed Proof Bundle did not exit 0 at succeeded with the frozen Run JSON fields: ${answeredJson}`,
+      );
+    }
+    if (
+      run("git", ["log", "-1", "--format=%s"], {
+        cwd: proofWorkspace,
+      }).trim() !== "Repair failing test"
+    ) {
+      throw new Error(
+        "The approved Proof Bundle did not make its authored commit.",
+      );
+    }
   }
 
   // A byte-different archive of the same identity: rebuild a copy whose declared

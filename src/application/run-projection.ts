@@ -675,6 +675,19 @@ export function deriveRun(
       });
       for (const spanStep of span) mark(spanStep, "succeeded");
       if (cursor >= log.length) {
+        // A passing Verdict ends the group even when the next node has not settled
+        // an Attempt yet. This is the normal shape when that node is an authored
+        // Human Gate: its durable pending-gate record exists, but it deliberately
+        // has no attempt-log entry until answered. Advance so the next node can
+        // project that gate instead of misreporting the deciding Command as live.
+        const versionId = owner?.currentVersion(node.repeat.until);
+        if (
+          owner !== undefined &&
+          versionId !== undefined &&
+          readVerdict(owner, versionId, node.repeat.until) === "pass"
+        ) {
+          break;
+        }
         // No more Attempts: the group is the terminal reached node — derive the
         // block from its current (last) Step Attempt.
         return finishTerminalGroup(

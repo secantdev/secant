@@ -1,19 +1,22 @@
 import { randomUUID } from "node:crypto";
 import {
   createContext,
+  createSignal,
+  onCleanup,
   useContext,
   type Accessor,
   type ParentProps,
 } from "solid-js";
 import type {
   DiagnosticReference,
+  OpenedProjection,
   ProjectionPort,
   ResourceRead,
   ResourceReference,
+  RunLiveOverlay,
   RunGateReference,
   RunSnapshot,
 } from "../application/projection-port.js";
-import { followProjection } from "./follow.js";
 import { submitAndSettle, type SettleOutcome } from "./submit-and-settle.js";
 
 // The view-state the Run Workbench renders, mirroring bundle-view.tsx: it opens
@@ -34,10 +37,20 @@ import { submitAndSettle, type SettleOutcome } from "./submit-and-settle.js";
  *  refusal Problem. This is the shared submit-and-settle outcome (A23). */
 export type AnswerOutcome = SettleOutcome;
 
+/** The durable Run snapshot joined with its explicitly separate ephemeral Turn
+ * overlay and replaceable assistant preview. The Port keeps those update kinds
+ * distinct; this view seam preserves that distinction while giving the Workbench
+ * one lifecycle-owned subscription. */
+export interface RunWorkbenchProjection {
+  readonly snapshot: Accessor<RunSnapshot>;
+  readonly live: Accessor<RunLiveOverlay | undefined>;
+  readonly preview: Accessor<string | undefined>;
+}
+
 export interface RunWorkbenchView {
   /** Opens the `run` Projection for one Run id; closes it on cleanup of the
-   *  calling owner. The accessor tracks durable updates on the live edge. */
-  openRun(runId: string): Accessor<RunSnapshot>;
+   *  calling owner. Durable, live-overlay, and preview updates remain separate. */
+  openRun(runId: string): RunWorkbenchProjection;
   /** Resolves one output or diagnostic reference to its bytes, or a Problem. */
   readResource(
     reference: ResourceReference | DiagnosticReference,
@@ -80,10 +93,8 @@ export function createLiveRunWorkbenchView(
   port: ProjectionPort,
 ): RunWorkbenchView {
   return {
-    // Follow the `run` Projection through the shared helper (A22) so the timeline
-    // advances as Attempts settle on the live edge.
     openRun: (runId) =>
-      followProjection(port.openProjection({ family: "run", runId })),
+      followRunProjection(port.openProjection({ family: "run", runId })),
     readResource: (reference) => port.readResource(reference),
     // The one Workbench write: the same submit-and-settle protocol headless `run
     // answer` runs (A23), minus the read-back — submit against the snapshot's Gate
@@ -98,4 +109,58 @@ export function createLiveRunWorkbenchView(
         input: { runId: gate.runId, gate, answer },
       }),
   };
+}
+
+/** Follow all three update lanes of an opened Run Projection. Preview-only
+ * updates replace the current preview without changing the overlay generation;
+ * a settling overlay is cleared once the durable `turn-settled` truth lands, so
+ * replaceable text can never remain beside its authoritative content. */
+function followRunProjection(
+  opened: OpenedProjection<RunSnapshot>,
+): RunWorkbenchProjection {
+  const [snapshot, setSnapshot] = createSignal(opened.snapshot);
+  const [live, setLive] = createSignal<RunLiveOverlay>();
+  const [preview, setPreview] = createSignal<string>();
+  let closed = false;
+  let settledCountAtSettling: number | undefined;
+  void (async () => {
+    for await (const update of opened.updates) {
+      if (closed) break;
+      if (update.kind === "durable") {
+        setSnapshot(() => update.snapshot);
+        const settledCount = settledTurnCount(update.snapshot);
+        if (
+          live()?.phase === "settling" &&
+          settledCountAtSettling !== undefined &&
+          settledCount > settledCountAtSettling
+        ) {
+          setLive(undefined);
+          setPreview(undefined);
+          settledCountAtSettling = undefined;
+        }
+      } else if (update.kind === "live") {
+        setLive(update.overlay);
+        setPreview(update.overlay.preview);
+        settledCountAtSettling =
+          update.overlay.phase === "settling"
+            ? settledTurnCount(snapshot())
+            : undefined;
+      } else if (update.kind === "preview") {
+        setPreview(update.text.length > 0 ? update.text : undefined);
+      }
+    }
+  })();
+  onCleanup(() => {
+    closed = true;
+    opened.close();
+  });
+  return { snapshot, live, preview };
+}
+
+function settledTurnCount(snapshot: RunSnapshot): number {
+  return snapshot.result.found
+    ? snapshot.result.run.timeline.filter(
+        (event) => event.event === "turn-settled",
+      ).length
+    : 0;
 }

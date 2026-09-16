@@ -106,7 +106,11 @@ function runViewOf(run: RunView): RunWorkbenchView {
     result: { found: true, run },
   });
   return {
-    openRun: () => snapshot,
+    openRun: () => ({
+      snapshot,
+      live: () => undefined,
+      preview: () => undefined,
+    }),
     readResource: () => ({
       found: false,
       problem: {

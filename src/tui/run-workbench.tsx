@@ -42,6 +42,7 @@ import {
   type TimelineAction,
   type TimelineScroll,
 } from "./run-timeline.js";
+import { buildTimelineRows, type TimelineRow } from "./run-timeline-rows.js";
 import { useExit } from "./vendor/exit.js";
 import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
@@ -67,7 +68,7 @@ import { useTheme } from "./vendor/theme-context.js";
 // net-new (they don't exist upstream) and need event-index control the
 // scrollbox's pixel offset does not give.
 
-const HEADER_COMPACT_WIDTH = 40;
+const HEADER_COMPACT_WIDTH = 80;
 const DETAILS_MIN_WIDTH = 60;
 const DETAILS_HEIGHT = 8;
 /** Rows the Review checkpoint interaction occupies when it replaces the footer
@@ -97,7 +98,10 @@ export function RunWorkbench(props: {
   const dialog = useDialog();
   const view = useRunWorkbenchView();
   const actions = useRunActionsView();
-  const snapshot = view.openRun(props.runId);
+  const opened = view.openRun(props.runId);
+  const snapshot = opened.snapshot;
+  const live = opened.live;
+  const preview = opened.preview;
 
   const [dims, setDims] = createSignal(props.renderer.size());
   onCleanup(
@@ -112,8 +116,17 @@ export function RunWorkbench(props: {
     const result = snapshot().result;
     return result.found ? undefined : result.problem;
   };
-  const events = () => run()?.timeline ?? [];
-  const isBlocked = () => run()?.checkpoint !== undefined;
+  const blockedBasis = () => {
+    const current = run();
+    if ((live()?.outstanding.length ?? 0) > 0)
+      return "ephemeral Harness Request";
+    if (current?.state !== "blocked") return undefined;
+    if (current.pendingGate !== undefined || current.checkpoint !== undefined)
+      return "durable Human Gate";
+    if (current.progress[current.position]?.kind === "interactive-agent")
+      return "interactive Turn";
+    return undefined;
+  };
 
   const answerOffer = createMemo<AnswerHumanGateOffer | undefined>(() =>
     run()?.actionOffers.find(
@@ -215,8 +228,15 @@ export function RunWorkbench(props: {
     );
   };
 
+  const transcriptTarget = createMemo<Openable | undefined>(() => {
+    const current = run();
+    return current?.transcript !== undefined && current.transcript.length > 0
+      ? { label: "Session transcript", content: transcriptText(current) }
+      : undefined;
+  });
+
   // The evidence the details panel offers, in a stable order: bound outputs,
-  // then a blocked checkpoint's latest Verdict, then a halt diagnostic.
+  // then a blocked checkpoint's latest Verdict, a halt diagnostic, and transcript.
   const openables = createMemo<readonly Openable[]>(() => {
     const current = run();
     if (current === undefined) return [];
@@ -237,6 +257,8 @@ export function RunWorkbench(props: {
         reference: current.conflict.reference,
       });
     }
+    const transcript = transcriptTarget();
+    if (transcript !== undefined) list.push(transcript);
     return list;
   });
 
@@ -257,9 +279,16 @@ export function RunWorkbench(props: {
   });
   const hasConflict = () => run()?.conflict !== undefined;
   const compactHeader = () => dims().width < HEADER_COMPACT_WIDTH;
+  const headerRows = () => {
+    const hasHarness =
+      run()?.effectiveModel !== undefined || (run()?.sessions?.length ?? 0) > 0;
+    return compactHeader() ? (hasHarness ? 2 : 1) : hasHarness ? 3 : 2;
+  };
+  const hasGateLine = () =>
+    run()?.checkpoint !== undefined || run()?.pendingGate !== undefined;
   const chrome = () =>
-    (compactHeader() ? 1 : 2) +
-    (isBlocked() ? 1 : 0) +
+    headerRows() +
+    (hasGateLine() ? 1 : 0) +
     (hasConflict() ? 1 : 0) /*top-level conflict line (A13)*/ +
     1 /*progress*/ +
     actionLines() +
@@ -370,15 +399,21 @@ export function RunWorkbench(props: {
     setFocus(order[(index + 1) % order.length] ?? "timeline");
   };
 
-  const win = () => timelineWindow(scroll(), events().length, viewportH());
-  const visibleEvents = () => {
+  const timelineRows = createMemo<readonly TimelineRow[]>(() => {
+    const current = run();
+    if (current === undefined) return [];
+    return buildTimelineRows(current, live(), preview());
+  });
+  const win = () =>
+    timelineWindow(scroll(), timelineRows().length, viewportH());
+  const visibleRows = () => {
     const w = win();
-    return events().slice(w.top, w.top + w.visible);
+    return timelineRows().slice(w.top, w.top + w.visible);
   };
 
   const scrollBy = (action: TimelineAction) =>
     setScroll((prev) =>
-      scrollTimeline(prev, action, events().length, viewportH()),
+      scrollTimeline(prev, action, timelineRows().length, viewportH()),
     );
 
   const moveSelection = (delta: number) => {
@@ -404,6 +439,11 @@ export function RunWorkbench(props: {
     if (inspection.handleKey(name)) return;
     if (run() === undefined) {
       if (name === "escape") props.onLeave();
+      return;
+    }
+    if (name === "t") {
+      const target = transcriptTarget();
+      if (target !== undefined) inspection.open(target);
       return;
     }
     // A pending takeover/Cancel/Delete waits for its confirming keypress: `y` confirms and
@@ -561,9 +601,11 @@ export function RunWorkbench(props: {
               viewportH={viewportH}
               innerW={innerW}
               win={win}
-              visibleEvents={visibleEvents}
+              visibleRows={visibleRows}
+              blockedBasis={blockedBasis}
               focus={focus}
               openables={openables}
+              transcriptAvailable={() => transcriptTarget() !== undefined}
               selected={selectedRef}
               checkpointActive={checkpointActive}
               offer={answerOffer}
@@ -621,6 +663,15 @@ function livenessText(run: RunView): string {
   }
 }
 
+function transcriptText(run: RunView): string {
+  return (run.transcript ?? [])
+    .flatMap((entry) => [
+      `${entry.role === "user" ? "◇ User Turn" : "◆ Assistant"} · session ${entry.session}`,
+      ...entry.content.split(/\r?\n/).map((line) => `  ${line}`),
+    ])
+    .join("\n");
+}
+
 function Workbench(props: {
   run: Accessor<RunView>;
   compactHeader: Accessor<boolean>;
@@ -629,9 +680,11 @@ function Workbench(props: {
   viewportH: Accessor<number>;
   innerW: Accessor<number>;
   win: Accessor<ReturnType<typeof timelineWindow>>;
-  visibleEvents: Accessor<RunView["timeline"]>;
+  visibleRows: Accessor<readonly TimelineRow[]>;
+  blockedBasis: Accessor<string | undefined>;
   focus: Accessor<Focus>;
   openables: Accessor<readonly Openable[]>;
+  transcriptAvailable: Accessor<boolean>;
   selected: Accessor<number>;
   checkpointActive: Accessor<boolean>;
   offer: Accessor<AnswerHumanGateOffer | undefined>;
@@ -665,10 +718,29 @@ function Workbench(props: {
     return `${marker}Timeline${badge}`;
   };
 
-  const footer = () =>
-    props.focus() === "details"
-      ? "↑/↓ select · enter open · tab timeline · esc back · q quit"
-      : "↑/↓ scroll · d details · end latest · esc back · q quit";
+  const footer = () => {
+    const transcript = props.transcriptAvailable() ? " · t transcript" : "";
+    return props.focus() === "details"
+      ? `↑/↓ select · enter open${transcript} · tab timeline · esc back · q quit`
+      : `↑/↓ scroll · d details${transcript} · end latest · esc back · q quit`;
+  };
+
+  const displayState = () =>
+    props.blockedBasis() === "ephemeral Harness Request"
+      ? "BLOCKED"
+      : run().state.toUpperCase();
+  const stateWithBasis = () =>
+    props.blockedBasis() === undefined
+      ? displayState()
+      : `${displayState()} · ${props.blockedBasis()}`;
+  const harnessLine = () => {
+    if (
+      run().effectiveModel === undefined &&
+      (run().sessions?.length ?? 0) === 0
+    )
+      return undefined;
+    return `Claude Code · model ${run().effectiveModel ?? "not reported"}`;
+  };
 
   return (
     <box flexDirection="column" flexGrow={1} overflow="hidden">
@@ -679,14 +751,14 @@ function Workbench(props: {
           fallback={
             <text fg={stateColor(theme, run().state)}>
               {clip(
-                `Run ${run().runId} — ${run().state.toUpperCase()} · ${livenessText(run())}`,
+                `Run ${run().runId} — ${stateWithBasis()} · ${livenessText(run())}`,
                 w(),
               )}
             </text>
           }
         >
           <text fg={theme.text} attributes={TextAttributes.BOLD}>
-            {clip(`${run().bundle.name} — ${run().state.toUpperCase()}`, w())}
+            {clip(`${run().bundle.name} — ${stateWithBasis()}`, w())}
           </text>
           <text fg={theme.textMuted}>
             {clip(
@@ -695,6 +767,9 @@ function Workbench(props: {
             )}
           </text>
         </Show>
+        <Show when={harnessLine()}>
+          {(line) => <text fg={theme.textMuted}>{clip(line(), w())}</text>}
+        </Show>
       </box>
 
       {/* A blocked Run rests at a Review checkpoint: say so plainly (#91 AC "waiting for review"). */}
@@ -702,6 +777,13 @@ function Workbench(props: {
         {(checkpoint) => (
           <text fg={theme.warning} flexShrink={0}>
             {clip(`⏸ waiting for review — ${checkpoint().message}`, w())}
+          </text>
+        )}
+      </Show>
+      <Show when={run().pendingGate}>
+        {(gate) => (
+          <text fg={theme.warning} flexShrink={0}>
+            {clip(`◆ Human Gate · ${gate().message}`, w())}
           </text>
         )}
       </Show>
@@ -794,22 +876,17 @@ function Workbench(props: {
         overflow="hidden"
       >
         <Show
-          when={run().timeline.length > 0}
+          when={props.visibleRows().length > 0}
           fallback={
             <text fg={theme.textMuted} flexShrink={0}>
               {"  (no activity yet)"}
             </text>
           }
         >
-          <For each={props.visibleEvents()}>
-            {(event) => (
+          <For each={props.visibleRows()}>
+            {(row) => (
               <text fg={theme.text} flexShrink={0}>
-                {clip(
-                  `  ${event.at} ${event.event}${
-                    event.detail !== undefined ? ` ${event.detail}` : ""
-                  }`,
-                  w(),
-                )}
+                {clip(`  ${row.text}`, w())}
               </text>
             )}
           </For>

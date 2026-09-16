@@ -17,8 +17,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   A13) instead of `@opentui/keymap` + `useTerminalDimensions`: a single raw-key pipeline drives every control, so its input and layout are driven by a fake
   renderer in tests. Every other screen keeps the keymap/`useTerminalDimensions` path. Drawing still goes through OpenTUI elements — the Port never carries it.
 - The timeline's scroll/live-edge/anchor/new-activity is a pure index reducer (`run-timeline.ts`), not OpenTUI's `<scrollbox>` (which OpenCode's session
-  timeline uses): the durable timeline is append-only, so an absolute `top` index keeps naming the same first-visible event as newer events land — that
-  append-stability _is_ the prepend anchor, and the new-activity count is `total − viewportBottom`. Neither exists in the scrollbox.
+  timeline uses). `run-timeline-rows.ts` joins append-only durable history with stable-key replaceable live tail rows; an absolute `top` keeps naming the
+  same first-visible row while new rows land, and the new-activity count is `total − viewportBottom`. Neither invariant exists in the scrollbox.
 - Exactly one screen mounts at a time (`app.tsx`), so a screen's key bindings exist only while it is active and cannot conflict with another's. And
   `useBindings({ enabled })` must be gated off while a dialog overlays a screen (the approval dialog over Home, `home.tsx`), or the overlaid screen's
   bindings fire under the dialog.

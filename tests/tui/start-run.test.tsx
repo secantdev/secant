@@ -201,7 +201,11 @@ function succeedingRunView(): RunWorkbenchView {
           },
         },
       });
-      return snapshot;
+      return {
+        snapshot,
+        live: () => undefined,
+        preview: () => undefined,
+      };
     },
     readResource() {
       throw new Error("no reference read in this test");

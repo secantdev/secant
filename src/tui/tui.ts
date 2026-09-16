@@ -13,13 +13,17 @@ export type { BundleCatalogView } from "./bundle-view.js";
 export type { RunLaunchView, LaunchOutcome } from "./run-launch-view.js";
 export { createLiveRunLaunchView } from "./run-launch-view.js";
 // The Run Workbench, Previous Runs, and Run Actions view types are the App prop
-// contract and cross the Module boundary for the #91/#92 renderer tests, which
-// import these types here — the boundary suite requires cross-Module test imports
-// to go through this entrypoint. Their live factories are built only inside
-// `mount.tsx`, so — unlike the launch seam above — they are not re-exported. (The
-// lifecycle Renderer Port belongs to the sibling `renderer` Module; tests take its
-// type from that Module's own entrypoint, not re-exported here.)
-export type { RunWorkbenchView, AnswerOutcome } from "./run-view.js";
+// contract and cross the Module boundary for renderer tests. The Workbench's live
+// factory is also exported so its durable/live/preview join is tested through the
+// Module Interface rather than bypassed with independent signals. (The lifecycle
+// Renderer Port belongs to the sibling `renderer` Module; tests take its type from
+// that Module's own entrypoint, not re-exported here.)
+export {
+  createLiveRunWorkbenchView,
+  type RunWorkbenchView,
+  type RunWorkbenchProjection,
+  type AnswerOutcome,
+} from "./run-view.js";
 export type {
   RunListView,
   RunListController,

@@ -24,6 +24,7 @@ import type {
   InstalledBundleFocus,
   ResourceRead,
   ResourceReference,
+  RunLiveOverlay,
   RunCheckpointView,
   RunGateReference,
   ResumeRunOffer,
@@ -157,6 +158,8 @@ function refKey(reference: ResourceReference | DiagnosticReference): string {
 
 function makeRunView(initial: RunSnapshot) {
   const [snapshot, setSnapshot] = createSignal<RunSnapshot>(initial);
+  const [live, setLive] = createSignal<RunLiveOverlay>();
+  const [preview, setPreview] = createSignal<string>();
   const reads = new Map<string, ResourceRead>();
   // The answer seam is hand-driven: `answer` records the dispatch and returns the
   // outcome accessor a test advances (pending → applied/refused), so the tests
@@ -169,7 +172,7 @@ function makeRunView(initial: RunSnapshot) {
     answer: "continue" | "stop";
   }[] = [];
   const view: RunWorkbenchView = {
-    openRun: () => snapshot,
+    openRun: () => ({ snapshot, live, preview }),
     readResource: (reference) =>
       reads.get(refKey(reference)) ?? {
         found: false,
@@ -194,6 +197,11 @@ function makeRunView(initial: RunSnapshot) {
         result: { found: true, run },
       }),
     setSnapshot,
+    setLive: (overlay: RunLiveOverlay | undefined) => {
+      setLive(overlay);
+      setPreview(overlay?.preview);
+    },
+    setPreview,
     setRead: (key: string, read: ResourceRead) => reads.set(key, read),
     answers,
     setAnswerOutcome,
@@ -222,7 +230,18 @@ function runOf(over: Partial<RunView> = {}): RunView {
     timeline: over.timeline ?? [],
     outputs: over.outputs ?? [],
     ...(over.checkpoint !== undefined ? { checkpoint: over.checkpoint } : {}),
+    ...(over.pendingGate !== undefined
+      ? { pendingGate: over.pendingGate }
+      : {}),
     ...(over.conflict !== undefined ? { conflict: over.conflict } : {}),
+    ...(over.sessions !== undefined ? { sessions: over.sessions } : {}),
+    ...(over.effectiveModel !== undefined
+      ? { effectiveModel: over.effectiveModel }
+      : {}),
+    ...(over.turnPosition !== undefined
+      ? { turnPosition: over.turnPosition }
+      : {}),
+    ...(over.transcript !== undefined ? { transcript: over.transcript } : {}),
     actionOffers: over.actionOffers ?? [],
   };
 }
@@ -517,6 +536,220 @@ test("the timeline follows the live edge as durable updates append events", asyn
   assert.match(t.captureCharFrame(), / e8/); // followed to the newest
 });
 
+test("live Turn preview and activity join the durable timeline, then authoritative content replaces the preview", async () => {
+  const { t, control } = await mountWorkbench(
+    runOf({
+      progress: [{ id: "repair", kind: "agent", status: "running" }],
+      effectiveModel: "claude-sonnet-4-5",
+      timeline: [{ at: "T000", event: "turn-started", detail: "repair" }],
+    }),
+    110,
+    24,
+  );
+
+  control.setLive({
+    runId: "run-1",
+    generation: 2,
+    phase: "working",
+    outstanding: [],
+    offers: [],
+    activity: "Edit src/repair.ts",
+    preview: "I am checking the failing assertion",
+  });
+  await t.renderOnce();
+  const streaming = t.captureCharFrame();
+  assert.match(streaming, /Claude Code/);
+  assert.match(streaming, /model claude-sonnet-4-5/);
+  assert.match(streaming, /Agent Turn · working/);
+  assert.match(streaming, /Assistant preview · I am checking/);
+  assert.match(streaming, /Activity · Edit src\/repair\.ts/);
+
+  control.setRun(
+    runOf({
+      progress: [{ id: "repair", kind: "agent", status: "succeeded" }],
+      effectiveModel: "claude-sonnet-4-5",
+      timeline: [
+        { at: "T000", event: "turn-started", detail: "repair" },
+        {
+          at: "T001",
+          event: "assistant-content",
+          detail: "The assertion is fixed.",
+        },
+        { at: "T002", event: "turn-settled", detail: "completed" },
+      ],
+    }),
+  );
+  control.setLive(undefined);
+  await t.renderOnce();
+  const settled = t.captureCharFrame();
+  assert.doesNotMatch(settled, /Assistant preview/);
+  assert.match(settled, /Assistant · The assertion is fixed\./);
+  assert.match(settled, /Agent Turn settled · completed/);
+});
+
+test("context and usage appear only when the live overlay reports them", async () => {
+  const { t, control } = await mountWorkbench(
+    runOf({
+      progress: [{ id: "repair", kind: "agent", status: "running" }],
+    }),
+  );
+  control.setLive({
+    runId: "run-1",
+    generation: 1,
+    phase: "working",
+    outstanding: [],
+    offers: [],
+  });
+  await t.renderOnce();
+  assert.doesNotMatch(t.captureCharFrame(), /Context ·|Usage ·/);
+
+  control.setLive({
+    runId: "run-1",
+    generation: 2,
+    phase: "working",
+    outstanding: [],
+    offers: [],
+    context: { usedTokens: 12_500, limitTokens: 200_000 },
+    usage: "estimated $0.04",
+  });
+  await t.renderOnce();
+  const observed = t.captureCharFrame();
+  assert.match(observed, /Context · 12500 \/ 200000 tokens/);
+  assert.match(observed, /Usage · estimated \$0\.04/);
+});
+
+test("durable tool activity keeps Projection order beneath the live Turn", async () => {
+  const { t } = await mountWorkbench(
+    runOf({
+      progress: [{ id: "repair", kind: "agent", status: "running" }],
+      timeline: [
+        { at: "T000", event: "turn-started", detail: "repair" },
+        { at: "T001", event: "tool-activity", detail: "Bash started" },
+        { at: "T002", event: "tool-activity", detail: "Edit completed" },
+        { at: "T003", event: "assistant-content", detail: "Done." },
+      ],
+    }),
+  );
+  const frame = t.captureCharFrame();
+  const bash = frame.indexOf("Tool activity · Bash started");
+  const edit = frame.indexOf("Tool activity · Edit completed");
+  const assistant = frame.indexOf("Assistant · Done.");
+  assert.ok(bash >= 0 && edit > bash && assistant > edit, frame);
+});
+
+test("preview-only updates render before a full live overlay exists", async () => {
+  const { t, control } = await mountWorkbench(
+    runOf({
+      progress: [{ id: "repair", kind: "agent", status: "running" }],
+    }),
+  );
+  control.setPreview("First streamed words");
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Agent Turn · working/);
+  assert.match(frame, /Assistant preview · First streamed words/);
+});
+
+test("live rows respect paused timeline following and contribute to the new-activity count", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    runOf({ timeline: events(30) }),
+    100,
+    14,
+  );
+  await press(t, renderer, "up");
+  const before = t.captureCharFrame();
+  const topLine = before.split("\n").find((line) => / e\d/.test(line));
+  assert.ok(topLine);
+
+  control.setLive({
+    runId: "run-1",
+    generation: 1,
+    phase: "working",
+    outstanding: [],
+    offers: [],
+    preview: "new streamed content",
+  });
+  await t.renderOnce();
+  const paused = t.captureCharFrame();
+  assert.equal(
+    paused.split("\n").find((line) => / e\d/.test(line)),
+    topLine,
+  );
+  assert.match(paused, /\d+ new · end to jump/);
+
+  await press(t, renderer, "end");
+  const latest = t.captureCharFrame();
+  assert.match(latest, /Assistant preview · new streamed content/);
+  assert.match(latest, /\(live\)/);
+});
+
+test("gate, request, interactive Turn, and agent Turn have colour-independent labels", async () => {
+  const gate = await mountWorkbench(
+    runOf({
+      state: "blocked",
+      progress: [{ id: "approve", kind: "human-gate", status: "blocked" }],
+      pendingGate: {
+        gate: {
+          runId: "run-1",
+          stepId: "approve",
+          attemptId: "a1",
+          shape: "approve-reject",
+        },
+        message: "Approve the change?",
+      },
+    }),
+  );
+  assert.match(gate.t.captureCharFrame(), /BLOCKED · durable Human Gate/);
+  assert.match(gate.t.captureCharFrame(), /Human Gate · Approve the change\?/);
+
+  const request = await mountWorkbench(
+    runOf({
+      progress: [{ id: "repair", kind: "agent", status: "running" }],
+    }),
+  );
+  request.control.setLive({
+    runId: "run-1",
+    generation: 3,
+    phase: "awaiting-approval",
+    outstanding: [
+      {
+        requestId: "req-1",
+        tool: "Edit",
+        input: '{"path":"src/a.ts"}',
+        decisions: ["allow", "deny"],
+      },
+    ],
+    offers: [],
+  });
+  await request.t.renderOnce();
+  assert.match(
+    request.t.captureCharFrame(),
+    /BLOCKED · ephemeral Harness Request/,
+  );
+  assert.match(request.t.captureCharFrame(), /Harness Request · Edit/);
+  assert.match(request.t.captureCharFrame(), /Agent Turn · awaiting approval/);
+
+  const interactive = await mountWorkbench(
+    runOf({
+      state: "blocked",
+      progress: [
+        { id: "discuss", kind: "interactive-agent", status: "running" },
+      ],
+    }),
+  );
+  interactive.control.setLive({
+    runId: "run-1",
+    generation: 1,
+    phase: "working",
+    outstanding: [],
+    offers: [],
+  });
+  await interactive.t.renderOnce();
+  const interactiveFrame = interactive.t.captureCharFrame();
+  assert.match(interactiveFrame, /BLOCKED · interactive Turn/);
+  assert.match(interactiveFrame, /Interactive Turn · working/);
+});
+
 test("scrolling up anchors the first visible row, counts new activity, and jump-to-latest returns to the live edge", async () => {
   const { t, control, renderer } = await mountWorkbench(
     runOf({ timeline: events(30) }),
@@ -593,6 +826,36 @@ test("on a terminal too short for the panel, d does not open a clipped details p
 });
 
 // --- reference inspection (AC4) --------------------------------------------
+
+test("the Session transcript opens in the bounded inspection view and restores timeline focus", async () => {
+  const longReply = Array.from(
+    { length: 600 },
+    (_, index) => `assistant-line-${index}`,
+  ).join("\n");
+  const { t, renderer } = await mountWorkbench(
+    runOf({
+      transcript: [
+        { session: "repair", role: "user", content: "Fix the failing test" },
+        { session: "repair", role: "assistant", content: longReply },
+      ],
+    }),
+    100,
+    24,
+  );
+
+  await press(t, renderer, "t");
+  const opened = t.captureCharFrame();
+  assert.match(opened, /Session transcript/);
+  assert.match(opened, /User Turn · session repair/);
+  assert.match(opened, /Fix the failing test/);
+  assert.match(opened, /Assistant · session repair/);
+  assert.doesNotMatch(opened, /assistant-line-599/);
+
+  await press(t, renderer, "end");
+  assert.match(t.captureCharFrame(), /output truncated/);
+  await press(t, renderer, "escape");
+  assert.match(t.captureCharFrame(), /› Timeline/);
+});
 
 test("opening a large text output shows bounded content with a truncation marker and scrolls", async () => {
   const run = runOf({
@@ -770,7 +1033,7 @@ test("q and Ctrl+C quit from the Workbench", async () => {
 
 // --- layout (AC6) ----------------------------------------------------------
 
-test("small width hides the details panel first, then compacts the header, without overflow", async () => {
+test("small width compacts the header before hiding the details panel, without overflow", async () => {
   const { t, renderer } = await mountWorkbench(
     runOf({ progress: PROGRESS, timeline: events(6) }),
     100,
@@ -780,21 +1043,23 @@ test("small width hides the details panel first, then compacts the header, witho
   assert.match(t.captureCharFrame(), /Details/);
   assert.match(t.captureCharFrame(), /Alpha Flow/);
 
-  // Below the details breakpoint the panel is gone though it was toggled on.
+  // The header compacts first while the inspection affordance remains available.
+  renderer.resize(70, 30);
+  await t.renderOnce();
+  const compact = t.captureCharFrame();
+  assert.match(compact, /Workspace:/);
+  assert.doesNotMatch(compact, /Alpha Flow/);
+  assert.match(compact, /Run run-1/);
+  noOverflow(compact, 70);
+
+  // Below the details breakpoint the panel is hidden too.
   renderer.resize(50, 30);
   await t.renderOnce();
   const narrow = t.captureCharFrame();
   assert.doesNotMatch(narrow, /Workspace:/);
-  assert.match(narrow, /Alpha Flow/); // header still full here
+  assert.doesNotMatch(narrow, /Alpha Flow/);
+  assert.match(narrow, /Run run-1/);
   noOverflow(narrow, 50);
-
-  // Below the header breakpoint the header compacts to the Run id + state line.
-  renderer.resize(34, 30);
-  await t.renderOnce();
-  const tiny = t.captureCharFrame();
-  assert.doesNotMatch(tiny, /Alpha Flow/); // bundle name dropped
-  assert.match(tiny, /run-1/);
-  noOverflow(tiny, 34);
 });
 
 test("resize relayouts the timeline without overflow and keeps every state readable without colour", async () => {

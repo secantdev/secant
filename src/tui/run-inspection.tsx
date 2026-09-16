@@ -28,10 +28,19 @@ type Theme = ReturnType<typeof useTheme>["theme"];
 /** One openable piece of Run evidence, reached through its reference (#91 AC4):
  *  a bound output, the blocked checkpoint's latest Verdict, or the halt
  *  diagnostic. Timeline links exist only where they open real evidence. */
-export interface Openable {
-  readonly label: string;
-  readonly reference: ResourceReference | DiagnosticReference;
-}
+/** Port-backed evidence or already-projected bounded content. The union makes
+ * the exactly-one-source invariant explicit at the Workbench seam. */
+export type Openable =
+  | {
+      readonly label: string;
+      readonly reference: ResourceReference | DiagnosticReference;
+      readonly content?: never;
+    }
+  | {
+      readonly label: string;
+      readonly content: string;
+      readonly reference?: never;
+    };
 
 interface Inspection {
   readonly title: string;
@@ -75,7 +84,10 @@ export function createInspection(deps: {
   });
 
   const open = (target: Openable): void => {
-    const read = deps.readResource(target.reference);
+    const read =
+      target.content !== undefined
+        ? ({ found: true, type: "text", content: target.content } as const)
+        : deps.readResource(target.reference);
     if (!read.found) {
       setInspecting({
         title: target.label,

@@ -33,6 +33,7 @@ Before editing under a Module root that carries its own `AGENTS.md`, read that f
 - `src/tui/AGENTS.md` — presentation Module: OpenTUI layout invariants for screen authors.
 - `src/bundle/AGENTS.md` — Bundle Module: digest, validator, and budget invariants for slice authors.
 - `src/run/store/AGENTS.md` — Run Store Module: coordination/run.db split, crash-safety ordering, and fencing invariants for slice authors.
+- `src/harness/AGENTS.md` — Harness Module: Interface opacity, terminal ordering, typed-failure/throw split, and durable-admission invariants.
 
 ## Commits
 

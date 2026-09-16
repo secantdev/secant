@@ -68,3 +68,18 @@ export const gateAnswers = sqliteTable("gate_answer", {
   version_id: text("version_id").notNull(),
   at: text("at").notNull(),
 });
+
+// An authored Human Gate Step the walk paused at (#108): a durable record that
+// the Run rests `blocked` at this gate, distinct from a derived Review checkpoint
+// (which writes nothing and re-derives its gate from the attempt log). The
+// producing Attempt id is the key; the gate is "pending" until that Attempt
+// settles — answering settles it through the normal publication path. The output
+// artifact name is present only for a `free-text` gate.
+export const pendingGates = sqliteTable("pending_gate", {
+  attempt_id: text("attempt_id").primaryKey(),
+  step_id: text("step_id").notNull(),
+  shape: text("shape").notNull(),
+  message: text("message").notNull(),
+  output_artifact_name: text("output_artifact_name"),
+  raised_at: text("raised_at").notNull(),
+});

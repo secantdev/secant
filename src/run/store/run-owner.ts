@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, notInArray, sql } from "drizzle-orm";
 import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite";
 import { z } from "zod";
 import { openArtifactRepo } from "./artifacts/artifacts.js";
@@ -13,12 +13,15 @@ import {
   attempts,
   gateAnswers,
   materializationConflicts,
+  pendingGates,
   runRecord,
 } from "./run-schema.js";
 import type {
+  PendingGateRecord,
   PublishAttemptRequest,
   RecordConflictRequest,
   RecordGateAnswerRequest,
+  RecordPendingGateRequest,
   RunOwner,
   RunRecord,
   WriteResult,
@@ -111,6 +114,30 @@ const gateAnswerRow = z.object({
   version_id: z.string(),
   at: z.string(),
 });
+// The gate shape is a closed set domain logic branches on, so it is validated at
+// the read ingress like the other enum columns (D7, store/AGENTS.md), never cast.
+const gateShape = z.enum(["approve-reject", "free-text"]);
+const pendingGateRow = z.object({
+  attempt_id: z.string(),
+  step_id: z.string(),
+  shape: gateShape,
+  message: z.string(),
+  output_artifact_name: z.string().nullable(),
+  raised_at: z.string(),
+});
+
+function toPendingGate(row: z.infer<typeof pendingGateRow>): PendingGateRecord {
+  return {
+    attemptId: row.attempt_id,
+    stepId: row.step_id,
+    shape: row.shape,
+    message: row.message,
+    ...(row.output_artifact_name !== null
+      ? { outputArtifactName: row.output_artifact_name }
+      : {}),
+    raisedAt: row.raised_at,
+  };
+}
 
 function toRunRecord(row: z.infer<typeof runRecordRow>): RunRecord {
   return {
@@ -348,6 +375,34 @@ function recordGateAnswer(params: TRecordGateAnswerParams): void {
   });
 }
 
+interface TRecordPendingGateParams {
+  readonly db: SQLiteBunDatabase;
+  readonly runId: string;
+  readonly request: RecordPendingGateRequest;
+}
+
+// Record the authored pending gate and rest the Run `blocked`, all or nothing, so
+// a crash cannot leave the record without the pause (#108). Idempotent on the
+// producing Attempt id: a resume that re-reaches the same gate re-records nothing
+// and re-rests `blocked`.
+function recordPendingGate(params: TRecordPendingGateParams): void {
+  const { db, runId, request } = params;
+  db.transaction((tx) => {
+    tx.insert(pendingGates)
+      .values({
+        attempt_id: request.attemptId,
+        step_id: request.stepId,
+        shape: request.shape,
+        message: request.message,
+        output_artifact_name: request.outputArtifactName ?? null,
+        raised_at: request.at.toISOString(),
+      })
+      .onConflictDoNothing({ target: pendingGates.attempt_id })
+      .run();
+    updateRunState({ db: tx, runId, state: "blocked" });
+  });
+}
+
 function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
   const { db } = params.database;
   const repo = openArtifactRepo(params.runDir);
@@ -375,6 +430,19 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         return result;
       }
       if (request.outcome === "succeeded") {
+        // A succeeded Attempt that produced nothing (an approve-reject Human Gate
+        // answer, #108) needs no commit — there is no artifact to stage and an empty
+        // tree is not a valid `git mktree` input. Settle it with no version, like a
+        // non-producing outcome.
+        if (request.outputs.length === 0 && request.required.length === 0) {
+          commitAttempt({
+            db,
+            runId: params.runId,
+            request,
+            versionId: undefined,
+          });
+          return { ok: true };
+        }
         const staged = repo.stageCommit(
           request.attemptId,
           request.required,
@@ -528,6 +596,30 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
             at: parsed.at,
           };
         });
+    },
+    recordPendingGate(request) {
+      if (params.fenced()) return { ok: false, reason: "fenced" };
+      recordPendingGate({ db, runId: params.runId, request });
+      return { ok: true };
+    },
+    pendingGate() {
+      // The gate the Run currently rests at: the pending-gate record whose
+      // producing Attempt has not settled. Answering settles that Attempt (an
+      // `attempt` row), so this reads empty once the gate is answered.
+      const row = db
+        .select()
+        .from(pendingGates)
+        .where(
+          notInArray(
+            pendingGates.attempt_id,
+            db.select({ id: attempts.attempt_id }).from(attempts),
+          ),
+        )
+        .orderBy(asc(pendingGates.raised_at))
+        .get();
+      return row === undefined
+        ? undefined
+        : toPendingGate(pendingGateRow.parse(row));
     },
     release: params.release,
     close: params.close,

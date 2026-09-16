@@ -1,6 +1,7 @@
 import { delimiter, basename, dirname, join } from "node:path";
 import { writeFileSync } from "node:fs";
 import type {
+  HumanGateShape,
   LaunchInput,
   Platform,
   WorkspacePrerequisite,
@@ -272,6 +273,100 @@ export function writeMaterializationBundle(
     routing,
   };
   const folder = makeTempDir("secant-mat-bundle-");
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  return { folder, id, version };
+}
+
+export interface GateBundleOptions {
+  readonly id?: string;
+  readonly version?: string;
+  /** The Human Gate shape: `free-text` binds the answer as a `text` output the
+   *  downstream Command reads; `approve-reject` produces nothing. */
+  readonly shape: HumanGateShape;
+  readonly message?: string;
+  /** free-text only: the declared output artifact name the answer binds and the
+   *  downstream Command requires. */
+  readonly outputName?: string;
+}
+
+// An authored Human Gate Bundle (#108): `before` (a Command) → `gate` (an authored
+// `human-gate` Step) → `after` (a Command). For a `free-text` gate the `after`
+// Command `requires` the gate's declared `text` output and references it as an
+// argument, so the Run only succeeds if the answer was published and bound —
+// proving the free-text answer flows to the next Step. For an `approve-reject`
+// gate the `after` Command is plain. Command-only around the gate, so the M3
+// scheduler drives it with no Harness.
+export function writeGateBundle(options: GateBundleOptions): CommandBundle {
+  const id = options.id ?? "dev.secant.human-gate";
+  const version = options.version ?? "1.0.0";
+  const message = options.message ?? "please decide";
+  const outputName = options.outputName ?? "answer";
+  const folder = makeTempDir("secant-gate-bundle-");
+
+  const gateStep =
+    options.shape === "free-text"
+      ? {
+          id: "gate",
+          kind: "human-gate",
+          shape: "free-text",
+          message,
+          produces: [{ name: outputName, type: "text" }],
+        }
+      : { id: "gate", kind: "human-gate", shape: "approve-reject", message };
+
+  const afterStep =
+    options.shape === "free-text"
+      ? {
+          id: "after",
+          kind: "command",
+          requires: [outputName],
+          produces: [{ name: "after-log", type: "text" }],
+          command: {
+            executable: RUNTIME_NAME,
+            // The `{artifact}` reference resolves to the bound answer bytes before
+            // spawn; an unbound output throws, so a succeeding Run proves the
+            // downstream Command read the free-text answer.
+            arguments: ["-e", "console.log('after')", { artifact: outputName }],
+          },
+        }
+      : {
+          id: "after",
+          kind: "command",
+          produces: [{ name: "after-log", type: "text" }],
+          command: {
+            executable: RUNTIME_NAME,
+            arguments: ["-e", "console.log('after')"],
+          },
+        };
+
+  const manifest = {
+    formatVersion: 1,
+    bundle: {
+      id,
+      version,
+      name: "Human Gate",
+      description: "An authored human-gate test Bundle.",
+    },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [],
+    routing: [
+      {
+        id: "before",
+        kind: "command",
+        produces: [{ name: "before-log", type: "text" }],
+        command: {
+          executable: RUNTIME_NAME,
+          arguments: ["-e", "console.log('before')"],
+        },
+      },
+      gateStep,
+      afterStep,
+    ],
+  };
   writeFileSync(
     join(folder, "manifest.json"),
     JSON.stringify(manifest, null, 2),

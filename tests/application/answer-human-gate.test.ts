@@ -18,7 +18,9 @@ import {
   ensureRuntimeOnPath,
   hostPlatform,
   writeCommandBundle,
+  writeGateBundle,
   writeRepeatBundle,
+  type GateBundleOptions,
   type RepeatBundleOptions,
 } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
@@ -85,6 +87,39 @@ async function launchBlocked(
   assert.ok(admission.admitted);
   await settleOutcome(f.app, admission.operationId);
   return admission.runId!;
+}
+
+/** Launch an authored Human Gate Bundle to its blocked rest and return the Run id. */
+async function launchGateBlocked(
+  f: Fixture,
+  options: GateBundleOptions,
+): Promise<string> {
+  const bundle = writeGateBundle(options);
+  const built = f.app.bundleManagement.build(bundle.folder, {
+    noInstall: false,
+  });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = f.catalog.listEntries().find((e) => e.id === bundle.id)!;
+  f.catalog.approveWorkspace(f.workspace, new Date());
+  const admission = f.app.projectionPort.submit({
+    operationId: `launch-${bundle.id}`,
+    operation: "launch-run",
+    input: {
+      bundle: { id: bundle.id },
+      launchInputs: {},
+      trustDigest: entry.digest,
+    },
+  });
+  assert.ok(admission.admitted);
+  await settleOutcome(f.app, admission.operationId);
+  return admission.runId!;
+}
+
+/** The authored pending gate a Run rests at, asserted present. */
+function pendingGateOf(app: Application, runId: string): RunGateReference {
+  const gate = runOf(app, runId).pendingGate?.gate;
+  assert.ok(gate);
+  return gate!;
 }
 
 function runOf(app: Application, runId: string): RunView {
@@ -463,4 +498,195 @@ test("answering a Run that is not blocked is not applied (#85)", async (t) => {
   assert.equal(outcome.status, "not-applied");
   if (outcome.status !== "not-applied") throw new Error("unreachable");
   assert.equal(outcome.problem.code, "run-not-blocked");
+});
+
+// --- Authored Human Gate (#108) --------------------------------------------
+
+test("an authored free-text gate blocks, then a text answer publishes the output, settles succeeded, and advances (#108)", async (t) => {
+  const f = fixture(t);
+  const runId = await launchGateBlocked(f, {
+    shape: "free-text",
+    message: "name the release",
+    outputName: "answer",
+  });
+
+  // The Run rests blocked at a durable authored gate, not a Review checkpoint.
+  const blocked = runOf(f.app, runId);
+  assert.equal(blocked.state, "blocked");
+  assert.equal(blocked.checkpoint, undefined);
+  assert.equal(blocked.pendingGate?.gate.shape, "free-text");
+  assert.equal(blocked.pendingGate?.message, "name the release");
+  assert.equal(blocked.pendingGate?.outputArtifactName, "answer");
+  const gate = pendingGateOf(f.app, runId);
+
+  const admission = f.app.projectionPort.submit({
+    operationId: "answer-text-1",
+    operation: "answer-human-gate",
+    input: { runId, gate, text: "v2.0.0" },
+  });
+  assert.ok(admission.admitted);
+  assert.deepEqual(await settleOutcome(f.app, "answer-text-1"), {
+    status: "applied",
+  });
+
+  // The Run advanced past the gate: the downstream Command read the bound answer
+  // (it references it), so the Run rests succeeded.
+  const run = runOf(f.app, runId);
+  assert.equal(run.state, "succeeded");
+  assert.equal(run.pendingGate, undefined);
+  // The answer is published as a `text` output bound to the gate's declared name.
+  const answer = run.outputs.find((o) => o.name === "answer");
+  assert.ok(answer, "the free-text answer is a bound output");
+  const read = f.app.projectionPort.readResource(answer!.reference);
+  assert.ok(read.found);
+  if (read.found) assert.equal(read.content, "v2.0.0");
+});
+
+test("an authored approve-reject gate: continue advances, stop ends the Run failed (#108)", async (t) => {
+  const f = fixture(t);
+  // continue advances to succeeded.
+  const advance = await launchGateBlocked(f, {
+    id: "dev.secant.gate-approve",
+    shape: "approve-reject",
+  });
+  assert.equal(runOf(f.app, advance).pendingGate?.gate.shape, "approve-reject");
+  const advanceGate = pendingGateOf(f.app, advance);
+  const a = f.app.projectionPort.submit({
+    operationId: "approve-1",
+    operation: "answer-human-gate",
+    input: { runId: advance, gate: advanceGate, answer: "continue" },
+  });
+  assert.ok(a.admitted);
+  assert.deepEqual(await settleOutcome(f.app, "approve-1"), {
+    status: "applied",
+  });
+  assert.equal(runOf(f.app, advance).state, "succeeded");
+
+  // stop ends the Run failed, keeping history and Artifacts.
+  const reject = await launchGateBlocked(f, {
+    id: "dev.secant.gate-reject",
+    shape: "approve-reject",
+  });
+  const rejectGate = pendingGateOf(f.app, reject);
+  const r = f.app.projectionPort.submit({
+    operationId: "reject-1",
+    operation: "answer-human-gate",
+    input: { runId: reject, gate: rejectGate, answer: "stop" },
+  });
+  assert.ok(r.admitted);
+  assert.deepEqual(await settleOutcome(f.app, "reject-1"), {
+    status: "applied",
+  });
+  assert.equal(runOf(f.app, reject).state, "failed");
+});
+
+test("answer-shape mismatches change nothing: continue to a free-text gate, text to an approve-reject gate (#108)", async (t) => {
+  const f = fixture(t);
+  const freeText = await launchGateBlocked(f, {
+    id: "dev.secant.gate-free",
+    shape: "free-text",
+  });
+  const freeTextGate = pendingGateOf(f.app, freeText);
+  const wrong1 = f.app.projectionPort.submit({
+    operationId: "wrong-1",
+    operation: "answer-human-gate",
+    input: { runId: freeText, gate: freeTextGate, answer: "continue" },
+  });
+  assert.ok(wrong1.admitted);
+  const out1 = await settleOutcome(f.app, "wrong-1");
+  assert.equal(out1.status, "not-applied");
+  if (out1.status !== "not-applied") throw new Error("unreachable");
+  assert.equal(out1.problem.code, "gate-shape-mismatch");
+  // Nothing changed: still blocked at the same gate, no output bound.
+  assert.equal(runOf(f.app, freeText).state, "blocked");
+  assert.equal(
+    runOf(f.app, freeText).outputs.find((o) => o.name === "answer"),
+    undefined,
+  );
+
+  const approve = await launchGateBlocked(f, {
+    id: "dev.secant.gate-approve2",
+    shape: "approve-reject",
+  });
+  const approveGate = pendingGateOf(f.app, approve);
+  const wrong2 = f.app.projectionPort.submit({
+    operationId: "wrong-2",
+    operation: "answer-human-gate",
+    input: { runId: approve, gate: approveGate, text: "nope" },
+  });
+  assert.ok(wrong2.admitted);
+  const out2 = await settleOutcome(f.app, "wrong-2");
+  assert.equal(out2.status, "not-applied");
+  if (out2.status !== "not-applied") throw new Error("unreachable");
+  assert.equal(out2.problem.code, "gate-shape-mismatch");
+  assert.equal(runOf(f.app, approve).state, "blocked");
+});
+
+test("a different operation answering an already-answered authored gate is refused, not masked as applied (#108)", async (t) => {
+  const f = fixture(t);
+  const runId = await launchGateBlocked(f, { shape: "approve-reject" });
+  const gate = pendingGateOf(f.app, runId);
+
+  // Operation A approves the gate; the Run advances past it.
+  const a = f.app.projectionPort.submit({
+    operationId: "op-a",
+    operation: "answer-human-gate",
+    input: { runId, gate, answer: "continue" },
+  });
+  assert.ok(a.admitted);
+  assert.deepEqual(await settleOutcome(f.app, "op-a"), { status: "applied" });
+  assert.equal(runOf(f.app, runId).state, "succeeded");
+
+  // A genuinely different operation B targets the same, now-settled gate. It must
+  // be refused (the gate is gone), not silently reported `applied`.
+  const b = f.app.projectionPort.submit({
+    operationId: "op-b",
+    operation: "answer-human-gate",
+    input: { runId, gate, answer: "stop" },
+  });
+  assert.ok(b.admitted);
+  const outcome = await settleOutcome(f.app, "op-b");
+  assert.equal(outcome.status, "not-applied");
+  if (outcome.status !== "not-applied") throw new Error("unreachable");
+  assert.equal(outcome.problem.code, "run-not-blocked");
+  // B changed nothing: the Run is still succeeded, not flipped to failed by `stop`.
+  assert.equal(runOf(f.app, runId).state, "succeeded");
+});
+
+test("the same free-text answer operation id twice publishes the output once (#108)", async (t) => {
+  const f = fixture(t);
+  const runId = await launchGateBlocked(f, { shape: "free-text" });
+  const gate = pendingGateOf(f.app, runId);
+
+  const first = f.app.projectionPort.submit({
+    operationId: "answer-once",
+    operation: "answer-human-gate",
+    input: { runId, gate, text: "final" },
+  });
+  assert.ok(first.admitted);
+  assert.deepEqual(await settleOutcome(f.app, "answer-once"), {
+    status: "applied",
+  });
+  assert.equal(runOf(f.app, runId).state, "succeeded");
+
+  const replay = f.app.projectionPort.submit({
+    operationId: "answer-once",
+    operation: "answer-human-gate",
+    input: { runId, gate, text: "final" },
+  });
+  assert.ok(replay.admitted);
+  assert.deepEqual(await settleOutcome(f.app, "answer-once"), {
+    status: "applied",
+  });
+  assert.equal(runOf(f.app, runId).state, "succeeded");
+
+  // Exactly one version of the answer output was published (idempotent).
+  const owner = f.runGroup.acquireRun(runId)!;
+  t.after(() => owner.close());
+  const versionId = owner.currentVersion("answer");
+  assert.ok(versionId);
+  const answer = runOf(f.app, runId).outputs.find((o) => o.name === "answer");
+  const read = f.app.projectionPort.readResource(answer!.reference);
+  assert.ok(read.found);
+  if (read.found) assert.equal(read.content, "final");
 });

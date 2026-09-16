@@ -157,11 +157,17 @@ export function registerRunCommands(
     .argument("[run-id]", "the Run id printed at launch")
     .option("--continue", "grant one more review interval and resume the Run")
     .option("--stop", "end the Run failed, keeping history and Artifacts")
+    .option("--text <value>", "answer a free-text gate with this text")
     .option("--json", "print the Run snapshot as JSON")
     .action(
       (
         runId: string | undefined,
-        options: { continue?: boolean; stop?: boolean; json?: boolean },
+        options: {
+          continue?: boolean;
+          stop?: boolean;
+          text?: string;
+          json?: boolean;
+        },
       ) => {
         const json = options.json ?? false;
         if (runId === undefined) {
@@ -170,25 +176,36 @@ export function registerRunCommands(
               code: "missing-run-id",
               explanation: "run answer needs a Run id.",
               remediation:
-                "Run `secant run answer <run-id> --continue` or `--stop`.",
+                "Run `secant run answer <run-id> --continue`, `--stop`, or `--text <value>`.",
               possibleEffects: "none",
             }),
           );
         }
-        const chosen = [options.continue, options.stop].filter(Boolean).length;
+        // `--text ""` is a valid (empty) free-text answer, so test presence, not
+        // truthiness; exactly one of the three answer forms must be given.
+        const chosen = [
+          options.continue === true,
+          options.stop === true,
+          options.text !== undefined,
+        ].filter(Boolean).length;
         if (chosen !== 1) {
           return settle(
             fail(io, json, {
               code: "invalid-answer",
               explanation:
-                "run answer needs exactly one of --continue or --stop.",
+                "run answer needs exactly one of --continue, --stop, or --text.",
               remediation:
-                "Run `secant run answer <run-id> --continue` to grant another interval, or `--stop` to end the Run.",
+                "Run `secant run answer <run-id> --continue` or `--stop` for an approve/reject gate, or `--text <value>` for a free-text gate.",
               possibleEffects: "none",
             }),
           );
         }
-        const answer = options.continue ? "continue" : "stop";
+        const answer: HeadlessGateAnswer =
+          options.text !== undefined
+            ? { kind: "text", value: options.text }
+            : options.continue === true
+              ? { kind: "continue" }
+              : { kind: "stop" };
         return settle(
           execute((clients) =>
             answerRun(clients.projectionPort, io, fail, json, runId, answer),
@@ -406,10 +423,27 @@ async function settleAndReportRun(
     const run = snapshot.result.run;
     for (const line of heading(run)) io.out(`${line}\n`);
     io.out(`State: ${run.state}\n`);
+    // A Run that rests `blocked` names the follow-up answer command so a headless
+    // operator knows how to continue (A36, spec stories 33/34): a free-text gate
+    // names `--text`, an approve/reject gate (or checkpoint) names `--continue`/`--stop`.
+    for (const line of answerHint(run)) io.out(`${line}\n`);
     return exitForState(run.state);
   } finally {
     opened.close();
   }
+}
+
+/** The follow-up answer command to name when a Run rests `blocked` at a gate, or
+ *  nothing when the Run is not blocked at an answerable gate (#108). */
+function answerHint(run: RunView): readonly string[] {
+  const offer = run.actionOffers.find(
+    (candidate): candidate is AnswerHumanGateOffer =>
+      candidate.action === "answer-human-gate",
+  );
+  if (offer === undefined) return [];
+  return offer.gate.shape === "free-text"
+    ? [`Next: secant run answer ${run.runId} --text <value>`]
+    : [`Next: secant run answer ${run.runId} --continue | --stop`];
 }
 
 // --- command implementations -----------------------------------------------
@@ -537,21 +571,36 @@ async function resumeRun(params: TResumeRunParams): Promise<number> {
   );
 }
 
+/** The answer a client typed: `continue`/`stop` for an approve-reject gate (or a
+ *  Review checkpoint), or free `text` for a free-text gate (#108). The Port decides
+ *  legality against the live Gate's shape; the client only forwards what was typed. */
+type HeadlessGateAnswer =
+  | { readonly kind: "continue" }
+  | { readonly kind: "stop" }
+  | { readonly kind: "text"; readonly value: string };
+
 async function answerRun(
   port: ProjectionPort,
   io: HeadlessIO,
   fail: RunCommandDeps["fail"],
   json: boolean,
   runId: string,
-  answer: "continue" | "stop",
+  answer: HeadlessGateAnswer,
 ): Promise<number> {
   // Gate on the Port's answer Offer (A14): the Offer owns legality
   // (projection-port.ts) and carries the exact Gate reference, so its absence —
   // not a client re-derivation from `run.state` — is what refuses an unanswerable
   // Run, and a Gate that moved between the read and the submit is caught as stale
-  // by the Application because we submit against the Offer's reference.
+  // by the Application because we submit against the Offer's reference. The Offer's
+  // gate shape is not re-classified here; a `--text` answer to an approve-reject
+  // gate (or vice versa) is left for the Application to refuse precisely.
   const opened = port.openProjection({ family: "run", runId });
   let gate;
+  // Whether the Run rests at an authored Human Gate (vs a derived Review
+  // checkpoint), read before answering so the report describes what `continue`/
+  // `stop` did accurately — an authored gate approves/rejects a single pause, only
+  // a checkpoint grants a review interval (#108).
+  let authored = false;
   try {
     const snapshot = opened.snapshot;
     if (!snapshot.result.found) return fail(io, json, snapshot.result.problem);
@@ -571,6 +620,7 @@ async function answerRun(
       });
     }
     gate = offer.gate;
+    authored = run.pendingGate !== undefined;
   } finally {
     opened.close();
   }
@@ -578,11 +628,15 @@ async function answerRun(
   const admission = port.submit({
     operationId: randomUUID(),
     operation: "answer-human-gate",
-    input: { runId, gate, answer },
+    input:
+      answer.kind === "text"
+        ? { runId, gate, text: answer.value }
+        : { runId, gate, answer: answer.kind },
   });
   if (!admission.admitted) return fail(io, json, admission.problem);
 
-  // A `continue` answer drives execution (async now); await settlement and report.
+  // A `continue`/approve/free-text answer drives execution (async now); await
+  // settlement and report.
   return settleAndReportRun(
     port,
     io,
@@ -592,9 +646,15 @@ async function answerRun(
     runId,
     () => [
       `Run ${runId}`,
-      answer === "continue"
-        ? "Answered: continue (granted one more review interval)"
-        : "Answered: stop (ended the Run failed, history and Artifacts kept)",
+      answer.kind === "continue"
+        ? authored
+          ? "Answered: continue (approved; the Run advances past the gate)"
+          : "Answered: continue (granted one more review interval)"
+        : answer.kind === "stop"
+          ? authored
+            ? "Answered: stop (rejected; the Run ends failed, history and Artifacts kept)"
+            : "Answered: stop (ended the Run failed, history and Artifacts kept)"
+          : `Answered: ${answer.value} (published as the gate's output)`,
     ],
   );
 }

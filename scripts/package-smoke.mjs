@@ -76,15 +76,16 @@ function run(command, args, options = {}) {
   return result.stdout;
 }
 
-function assertMigrated(databasePath, label) {
+function assertMigrated(databasePath, label, expected = 1) {
   const database = new Database(databasePath);
   try {
     const row = database
       .query("SELECT COUNT(*) AS count FROM __drizzle_migrations")
       .get();
-    if (row?.count !== 1) {
+    if (row?.count !== expected) {
       throw new Error(
-        `Compiled binary did not record the embedded ${label} migration.`,
+        `Compiled binary did not record the embedded ${label} migrations ` +
+          `(expected ${expected}, found ${row?.count ?? 0}).`,
       );
     }
   } finally {
@@ -231,7 +232,8 @@ try {
     }
     assertMigrated(join(legacyHome, "catalog.db"), "Catalog");
     assertMigrated(join(groupDir, "coordination.db"), "coordination");
-    assertMigrated(join(groupDir, runId, "run.db"), "Run Store");
+    // The Run Store carries two migrations since #108 added the `pending_gate` table.
+    assertMigrated(join(groupDir, runId, "run.db"), "Run Store", 2);
   }
 
   run(binary, ["workspace", "approve"], {

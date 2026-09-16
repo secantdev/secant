@@ -282,6 +282,39 @@ const cases: ReadonlyArray<{
     code: "produces-type-unsupported",
     target: "seed",
   },
+  {
+    title: "a human-gate Step inside a Repeat span (#108)",
+    manifest: manifest({
+      routing: routing({
+        group: {
+          repeat: {
+            until: "v",
+            reviewCheckpoint: { interval: 5, message: "continue?" },
+            steps: [
+              {
+                id: "run",
+                kind: "command",
+                requires: ["doc"],
+                produces: [{ name: "v", type: "verdict" }],
+                command: {
+                  executable: "bash",
+                  arguments: [{ asset: "run.sh" }],
+                },
+              },
+              {
+                id: "gate",
+                kind: "human-gate",
+                shape: "approve-reject",
+                message: "ok?",
+              },
+            ],
+          },
+        },
+      }),
+    }),
+    code: "human-gate-in-repeat",
+    target: "routing[1].repeat.steps",
+  },
 ];
 
 for (const testCase of cases) {
@@ -301,8 +334,8 @@ for (const testCase of cases) {
 
 test("every composition rule owns a distinct stable code", () => {
   const codes = new Set(cases.map((testCase) => testCase.code));
-  // Ten rules; the missing/wrong-kind asset rule carries two codes, so eleven.
-  assert.equal(codes.size, 11);
+  // Eleven rules; the missing/wrong-kind asset rule carries two codes, so twelve.
+  assert.equal(codes.size, 12);
 });
 
 test("flags a duplicate Step id", () => {

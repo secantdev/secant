@@ -5,8 +5,17 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 ## Invariants
 
 - Every canonical write to a Run must go through `observedOwner`, not the raw `RunOwner`, or an open client's live `run` Projection never updates.
-  `observedOwner` spreads `...owner` and intercepts only four methods — `writeState`, `publishAttempt`, `recordMaterializationConflict`,
-  `recordGateAnswer` — pushing a fresh snapshot after each commits. A new `RunOwner` write method compiles and silently pushes nothing (A3).
+  `observedOwner` spreads `...owner` and intercepts only five methods — `writeState`, `publishAttempt`, `recordMaterializationConflict`,
+  `recordGateAnswer`, and `recordPendingGate` (the authored gate, #108, which rests the Run `blocked` in its own transaction) — pushing a fresh snapshot
+  after each commits. A new `RunOwner` write method compiles and silently pushes nothing (A3).
+- `answer-human-gate` serves two gate mechanisms off one Port operation (#108). The Projection derivation decides which: `derived.pendingGate` present is an
+  **authored** gate, answered by settling its producing Attempt through `observedOwner.publishAttempt` (into `attempt_log`, so the resumed walk skips the gate) —
+  `free-text` publishes the `text` answer as the gate's declared output and re-drives execution in this process, approve advances `running` and re-drives, reject
+  settles `failed` and rests. Otherwise `derived.checkpoint` is a **derived Review checkpoint**, answered by `recordGateAnswer` exactly as M2 did (no `attempt_log`,
+  `blocked` stays derived). The live Gate is `derived.pendingGate?.gate ?? derived.checkpoint?.gate` (a blocked Run has exactly one), and the answer form must match
+  `gate.shape` (`free-text` ⇒ `text`, `approve-reject` ⇒ `continue`/`stop`) or it is a `gate-shape-mismatch` Problem that changes nothing. Idempotency is keyed on the
+  operation id (`gate_answer` row for a checkpoint; the in-process operations map for both) — never on whether the gate settled, so a _different_ operation answering an
+  already-answered gate falls through to the staleness check and is refused, not silently masked as `applied`.
 - The Trust grant is written only after `createRun` succeeds: any refusal reached before creation (a mismatching trust acknowledgement, a failed
   Preflight) returns without a grant, so it never leaves a dangling one. (`createRun` itself no longer refuses — ADR 0031 admits any number of live
   Runs.) Preflight runs before the Trust gate, so a Run whose preconditions fail is refused before trust is ever asked for.

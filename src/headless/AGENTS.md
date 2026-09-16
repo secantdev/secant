@@ -10,7 +10,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `spawnSync`.
 - `run answer` gates on the Port's `answer-human-gate` Offer (A14): the Offer owns legality and carries the exact Gate reference, so its absence — not a
   client re-derivation from `run.state` — refuses an unanswerable Run, and submitting against `offer.gate` lets the Application catch a Gate that moved
-  as stale. Never classify the answer or synthesize the reference here.
+  as stale. Never classify the answer or synthesize the reference here. `run answer` takes `--continue`/`--stop` (approve-reject and checkpoints) or
+  `--text <value>` (a free-text authored gate, #108) — exactly one, tested by presence so `--text ""` is a valid empty answer. The client never re-classifies
+  the gate shape: a `--text` answer to an approve-reject gate (or vice versa) is forwarded and the Application refuses it as `gate-shape-mismatch`.
+- A Run that rests `blocked` at a gate names its follow-up answer command in the plain-text tail (`settleAndReportRun`'s `answerHint`, #108): a free-text
+  gate names `--text`, an approve-reject gate names `--continue`/`--stop`. `run show` renders the authored pending gate (shape, message, output) under a
+  "durable Human Gate" basis line, alongside the derived Review-checkpoint block; both are driven off `RunView` fields, additive to the frozen `--json`.
 - The `run` command group lives in `run-commands.ts` and registers onto the program `buildProgram` passes (A25); it is handed `io`/`execute`/`fail`/`settle`
   and shares `settledOutcome` and `settleAndReportRun` (the await-settlement-then-report tail, A24). `splitSelector` lives there too and `bundle inspect`
   imports it (A24).

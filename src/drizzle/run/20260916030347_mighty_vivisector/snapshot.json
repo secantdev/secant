@@ -1,0 +1,524 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "ac11a4c4-b921-4f2d-b1ac-a2f60aecaace",
+  "prevIds": ["ac08033e-84b7-4058-a0ef-d8667f248245"],
+  "ddl": [
+    {
+      "name": "artifact_binding",
+      "entityType": "tables"
+    },
+    {
+      "name": "artifact_version",
+      "entityType": "tables"
+    },
+    {
+      "name": "attempt_log",
+      "entityType": "tables"
+    },
+    {
+      "name": "attempt",
+      "entityType": "tables"
+    },
+    {
+      "name": "gate_answer",
+      "entityType": "tables"
+    },
+    {
+      "name": "materialization_conflict",
+      "entityType": "tables"
+    },
+    {
+      "name": "pending_gate",
+      "entityType": "tables"
+    },
+    {
+      "name": "run_record",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "artifact_name",
+      "entityType": "columns",
+      "table": "artifact_binding"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version_id",
+      "entityType": "columns",
+      "table": "artifact_binding"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "artifact_binding"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version_id",
+      "entityType": "columns",
+      "table": "artifact_version"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "artifact_name",
+      "entityType": "columns",
+      "table": "artifact_version"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "artifact_type",
+      "entityType": "columns",
+      "table": "artifact_version"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_id",
+      "entityType": "columns",
+      "table": "artifact_version"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "artifact_version"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "seq",
+      "entityType": "columns",
+      "table": "attempt_log"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_id",
+      "entityType": "columns",
+      "table": "attempt_log"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "outcome",
+      "entityType": "columns",
+      "table": "attempt_log"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "at",
+      "entityType": "columns",
+      "table": "attempt_log"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_id",
+      "entityType": "columns",
+      "table": "attempt"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "outcome",
+      "entityType": "columns",
+      "table": "attempt"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version_id",
+      "entityType": "columns",
+      "table": "attempt"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "settled_at",
+      "entityType": "columns",
+      "table": "attempt"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "seq",
+      "entityType": "columns",
+      "table": "gate_answer"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "answer_id",
+      "entityType": "columns",
+      "table": "gate_answer"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "operation_id",
+      "entityType": "columns",
+      "table": "gate_answer"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "gate_attempt_id",
+      "entityType": "columns",
+      "table": "gate_answer"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "answer",
+      "entityType": "columns",
+      "table": "gate_answer"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "iterations_at_grant",
+      "entityType": "columns",
+      "table": "gate_answer"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version_id",
+      "entityType": "columns",
+      "table": "gate_answer"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "at",
+      "entityType": "columns",
+      "table": "gate_answer"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "seq",
+      "entityType": "columns",
+      "table": "materialization_conflict"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "diagnostic_id",
+      "entityType": "columns",
+      "table": "materialization_conflict"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "artifact_name",
+      "entityType": "columns",
+      "table": "materialization_conflict"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "artifact_path",
+      "entityType": "columns",
+      "table": "materialization_conflict"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version_id",
+      "entityType": "columns",
+      "table": "materialization_conflict"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "at",
+      "entityType": "columns",
+      "table": "materialization_conflict"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_id",
+      "entityType": "columns",
+      "table": "pending_gate"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "step_id",
+      "entityType": "columns",
+      "table": "pending_gate"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "shape",
+      "entityType": "columns",
+      "table": "pending_gate"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "message",
+      "entityType": "columns",
+      "table": "pending_gate"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "output_artifact_name",
+      "entityType": "columns",
+      "table": "pending_gate"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "raised_at",
+      "entityType": "columns",
+      "table": "pending_gate"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "run_id",
+      "entityType": "columns",
+      "table": "run_record"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "workspace_path",
+      "entityType": "columns",
+      "table": "run_record"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "bundle_snapshot_digest",
+      "entityType": "columns",
+      "table": "run_record"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "launch",
+      "entityType": "columns",
+      "table": "run_record"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "state",
+      "entityType": "columns",
+      "table": "run_record"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "run_record"
+    },
+    {
+      "columns": ["version_id", "artifact_name"],
+      "nameExplicit": false,
+      "name": "artifact_version_pk",
+      "entityType": "pks",
+      "table": "artifact_version"
+    },
+    {
+      "columns": ["artifact_name"],
+      "nameExplicit": false,
+      "name": "artifact_binding_pk",
+      "table": "artifact_binding",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["seq"],
+      "nameExplicit": false,
+      "name": "attempt_log_pk",
+      "table": "attempt_log",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["attempt_id"],
+      "nameExplicit": false,
+      "name": "attempt_pk",
+      "table": "attempt",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["seq"],
+      "nameExplicit": false,
+      "name": "gate_answer_pk",
+      "table": "gate_answer",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["seq"],
+      "nameExplicit": false,
+      "name": "materialization_conflict_pk",
+      "table": "materialization_conflict",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["attempt_id"],
+      "nameExplicit": false,
+      "name": "pending_gate_pk",
+      "table": "pending_gate",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["run_id"],
+      "nameExplicit": false,
+      "name": "run_record_pk",
+      "table": "run_record",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["operation_id"],
+      "nameExplicit": false,
+      "name": "gate_answer_operation_id_unique",
+      "entityType": "uniques",
+      "table": "gate_answer"
+    }
+  ],
+  "renames": []
+}

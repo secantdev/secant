@@ -52,3 +52,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - A Human Gate answer (#85) is a bound Artifact recorded through `recordGateAnswer` — a publication-shaped write (stage a commit, then one transaction moves the
   binding and appends the `gate_answer` row) that deliberately skips `attempt_log`, so `blocked` stays derived and iterations still count off the log. Idempotent
   per `operation_id` (a UNIQUE column); its `iterations_at_grant` is the offset the derived "iterations since the last grant" count resets from.
+- An **authored** Human Gate (#108) is a different mechanism from the derived Review checkpoint above. `recordPendingGate` writes a durable `pending_gate` row (keyed on
+  the producing Attempt id) **and rests the Run `blocked` in the same transaction**, so a crash cannot leave the record without the pause; it is idempotent on the Attempt
+  id (`onConflictDoNothing`), so a resume that re-reaches the gate re-records nothing. The gate is "pending" only until that Attempt settles: `pendingGate()` returns the
+  row whose Attempt id is not yet in `attempts` (the Projection derives the authored gate from it, distinct from a derived checkpoint).
+  Unlike the derived checkpoint, the authored gate is answered by **settling its Attempt through `publishAttempt`** (into `attempt_log`, so resume skips the gate):
+  `free-text` publishes the `text` answer as the declared output and advances `running`; approve settles succeeded with no output; reject settles failed and rests
+  `failed`. The `pending_gate.shape` column is a closed enum validated with `z.enum` at the read ingress (D7), like `attempt_log.outcome` and `gate_answer.answer`.
+- `publishAttempt` for a **succeeded Attempt with no outputs and no required outputs** stages no commit (an empty tree is not valid `git mktree` input) and settles with
+  no version — exactly the approve-reject authored-gate answer (#108). Every other succeeded Attempt produces at least one output and stages a commit as before.

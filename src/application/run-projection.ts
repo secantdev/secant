@@ -13,6 +13,7 @@ import type {
   AttemptLogEntry,
   GateAnswerRecord,
   MaterializationConflict,
+  PendingGateRecord,
   RunGroup,
   RunListing,
   RunOwner,
@@ -24,6 +25,7 @@ import type {
   RunConflictView,
   RunGateReference,
   RunOutputView,
+  RunPendingGateView,
   RunResult,
   RunSnapshot,
   RunStateName,
@@ -176,15 +178,21 @@ function runResult(
         ...(derivedRun.checkpoint !== undefined
           ? { checkpoint: derivedRun.checkpoint }
           : {}),
-        // Typed Action Offers, legality decided inside Secant (#85, #86, #87, #98):
-        // the answer-human-gate offer appears only while blocked; resume-run only
-        // while resting halted or failed; cancel is offered while the Run is live or
+        ...(derivedRun.pendingGate !== undefined
+          ? { pendingGate: derivedRun.pendingGate }
+          : {}),
+        // Typed Action Offers, legality decided inside Secant (#85, #86, #87, #98,
+        // #108): the answer-human-gate offer appears only while blocked at a gate
+        // (a derived Review checkpoint or an authored gate); resume-run only while
+        // resting halted or failed; cancel is offered while the Run is live or
         // `blocked` (a blocked Run has resumable work, so it is cancelled rather than
         // deleted — A6), delete only otherwise (mutually exclusive).
         actionOffers: [
-          ...(derivedRun.checkpoint !== undefined && !liveElsewhere
-            ? [answerHumanGateOffer(derivedRun.checkpoint.gate)]
-            : []),
+          ...(!liveElsewhere && derivedRun.checkpoint !== undefined
+            ? [answerHumanGateOffer(derivedRun.checkpoint.gate, false)]
+            : !liveElsewhere && derivedRun.pendingGate !== undefined
+              ? [answerHumanGateOffer(derivedRun.pendingGate.gate, true)]
+              : []),
           ...(liveElsewhere &&
           listing?.ownerPid !== undefined &&
           derivedRun.state !== "succeeded" &&
@@ -358,14 +366,48 @@ function resumeRunOffer(
 
 /** The `answer-human-gate` offer for a blocked Run: names the consequence of each
  *  answer so a client presents them without re-deriving the model (#85). */
-function answerHumanGateOffer(gate: RunGateReference): ActionOffer {
+/** The `run` Projection view of an authored pending Human Gate (#108): the durable
+ *  record's message and free-text output, plus the exact Gate reference a client
+ *  answers against (the producing Attempt id). */
+function pendingGateView(
+  runId: string,
+  pending: PendingGateRecord,
+): RunPendingGateView {
+  return {
+    gate: {
+      runId,
+      stepId: pending.stepId,
+      attemptId: pending.attemptId,
+      shape: pending.shape,
+    },
+    message: pending.message,
+    ...(pending.outputArtifactName !== undefined
+      ? { outputArtifactName: pending.outputArtifactName }
+      : {}),
+  };
+}
+
+function answerHumanGateOffer(
+  gate: RunGateReference,
+  authored: boolean,
+): ActionOffer {
   return {
     action: "answer-human-gate",
     gate,
-    continueConsequence:
-      "continue: grant one more review interval and resume the Run.",
-    stopConsequence:
-      "stop: end the Run failed, keeping its history and Artifacts.",
+    // An authored gate approves/advances a single pause; only a derived Review
+    // checkpoint grants an interval of the Repeat cadence (#108).
+    continueConsequence: authored
+      ? "approve: advance the Run past the gate."
+      : "continue: grant one more review interval and resume the Run.",
+    stopConsequence: authored
+      ? "reject: end the Run failed, keeping its history and Artifacts."
+      : "stop: end the Run failed, keeping its history and Artifacts.",
+    ...(gate.shape === "free-text"
+      ? {
+          textConsequence:
+            "text: publish the answer as the gate's output and resume the Run.",
+        }
+      : {}),
   };
 }
 
@@ -416,8 +458,13 @@ export interface DerivedRun {
   readonly position: number;
   /** One event per completed Repeat-group iteration, for the timeline. */
   readonly iterationEvents: readonly RunTimelineEvent[];
-  /** The Review checkpoint facts, present only when the state derives to `blocked`. */
+  /** The Review checkpoint facts, present only when the state derives to `blocked`
+   *  at a derived Review checkpoint. */
   readonly checkpoint?: RunCheckpointView;
+  /** The authored Human Gate facts, present only when the state is `blocked` at an
+   *  authored `human-gate` Step (#108). A blocked Run derives exactly one of
+   *  `checkpoint` or `pendingGate`. */
+  readonly pendingGate?: RunPendingGateView;
 }
 
 /**
@@ -483,14 +530,16 @@ export function deriveRun(
   const iterationEvents: RunTimelineEvent[] = [];
   // The status of the Step the walk is currently paused at (log exhausted): a
   // failed Run's current Step failed; a running Run's is running; a `halted` Run's
-  // (a Materialization conflict, #88) is blocked; a `created` Run has not started,
-  // so its Steps stay pending.
+  // (a Materialization conflict, #88) or a durably `blocked` Run's (an authored
+  // Human Gate whose facts we cannot read here because the owner is absent — a Run
+  // live in another process, #108) current Step is blocked; a `created` Run has not
+  // started, so its Steps stay pending.
   const stalledStatus: RunStepStatus =
     state === "failed"
       ? "failed"
       : state === "running"
         ? "running"
-        : state === "halted"
+        : state === "halted" || state === "blocked"
           ? "blocked"
           : "pending";
   let cursor = 0;
@@ -499,6 +548,22 @@ export function deriveRun(
       const result = consumeStep(log, cursor);
       cursor = result.next;
       if (!result.complete) {
+        // An authored Human Gate the walk paused at: the Run rests `blocked`
+        // durably (a pending_gate record whose producing Attempt has not settled),
+        // distinct from a derived Review checkpoint (#108). Its facts come from the
+        // durable record, read through the owner.
+        const pending =
+          node.kind === "human-gate" ? owner?.pendingGate() : undefined;
+        if (pending !== undefined && pending.stepId === node.id) {
+          mark(node, "blocked");
+          return {
+            state: "blocked",
+            statuses,
+            position: flatIndex.get(node)!,
+            iterationEvents,
+            pendingGate: pendingGateView(runId, pending),
+          };
+        }
         mark(node, stalledStatus);
         return {
           state: toRunState(state),
@@ -518,6 +583,8 @@ export function deriveRun(
       if (!iteration.complete) {
         // The log ran out mid-iteration: the group is the current node, paused at
         // `iteration.stalled`. Earlier span Steps of this iteration already ran.
+        // (An authored Human Gate cannot appear in a Repeat span — the Composition
+        // check rejects that, #108 — so the only stall here is a Step's own pause.)
         markSpanBefore(span, iteration.stalled, mark);
         mark(iteration.stalled, stalledStatus);
         return {

@@ -259,6 +259,19 @@ export function checkComposition(
           "reviewCheckpoint.message must be non-empty plain text.",
         );
       }
+      // An authored Human Gate is a top-level Step only (#108): a Repeat group's
+      // in-loop pause is its Review checkpoint, and the engine does not drive an
+      // authored gate to rest inside the loop. Reject it here rather than let it
+      // produce a Run that blocks with no clean resume.
+      for (const step of steps) {
+        if (step.kind === "human-gate") {
+          error(
+            "human-gate-in-repeat",
+            `${path}.steps`,
+            `Step "${step.id}" is a human-gate inside a Repeat group; authored Human Gates are top-level Steps only (a Repeat group's in-loop pause is its Review checkpoint).`,
+          );
+        }
+      }
       // Steps inside the group start from the pre-entry bindings and accrue in
       // order; the group's producers then bind for the Steps that follow it.
       const scope = new Map(bound);

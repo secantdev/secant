@@ -143,16 +143,44 @@ export function renderRun(run: RunView): string {
     );
   }
 
-  // The answer-human-gate offer appears only while blocked (#85); print each
-  // answer's consequence so `run show` states what continuing or stopping does.
-  for (const offer of run.actionOffers) {
-    if (offer.action !== "answer-human-gate") continue;
+  // A blocked Run resting at an authored Human Gate (#108): name the basis
+  // (durable Human Gate), the shape, the exact rendered message, the declared
+  // free-text output, and the Gate's durable reference.
+  const pendingGate = run.pendingGate;
+  if (pendingGate !== undefined) {
     lines.push(
       "",
-      "Answer the checkpoint:",
-      `  secant run answer ${run.runId} --continue  # ${offer.continueConsequence}`,
-      `  secant run answer ${run.runId} --stop      # ${offer.stopConsequence}`,
+      "Blocked: durable Human Gate",
+      "Human Gate:",
+      `  shape: ${pendingGate.gate.shape}`,
+      `  message: ${pendingGate.message}`,
+      ...(pendingGate.outputArtifactName !== undefined
+        ? [`  output: ${pendingGate.outputArtifactName}`]
+        : []),
+      `  gate: ${pendingGate.gate.shape} at step ${pendingGate.gate.stepId}` +
+        ` (attempt ${pendingGate.gate.attemptId})`,
     );
+  }
+
+  // The answer-human-gate offer appears only while blocked (#85, #108); print each
+  // answer's consequence so `run show` states what each answer does. A free-text
+  // gate names `--text`; an approve/reject gate (or checkpoint) names `--continue`/`--stop`.
+  for (const offer of run.actionOffers) {
+    if (offer.action !== "answer-human-gate") continue;
+    if (offer.gate.shape === "free-text") {
+      lines.push(
+        "",
+        "Answer the gate:",
+        `  secant run answer ${run.runId} --text <value>  # ${offer.textConsequence ?? "publish the answer as the gate's output"}`,
+      );
+    } else {
+      lines.push(
+        "",
+        "Answer the checkpoint:",
+        `  secant run answer ${run.runId} --continue  # ${offer.continueConsequence}`,
+        `  secant run answer ${run.runId} --stop      # ${offer.stopConsequence}`,
+      );
+    }
   }
 
   // The resume-run offer appears only while resting halted or failed (#86); print

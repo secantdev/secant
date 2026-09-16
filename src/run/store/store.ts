@@ -17,6 +17,7 @@ import { z } from "zod";
 import type {
   ArtifactType,
   AttemptOutcome,
+  HumanGateShape,
   ProducedArtifact,
 } from "../../workflow/workflow.js";
 import {
@@ -235,6 +236,31 @@ export type RecordGateAnswerResult =
   | { readonly ok: false; readonly reason: "fenced" }
   | { readonly ok: false; readonly problem: StageProblem };
 
+/** An authored Human Gate the walk paused at (#108). A durable record, distinct
+ *  from a derived Review checkpoint: the Run rests `blocked` here until the
+ *  producing Attempt settles (answering settles it through `publishAttempt`). */
+export interface PendingGateRecord {
+  readonly attemptId: string; // the producing Attempt id; the key
+  readonly stepId: string;
+  readonly shape: HumanGateShape;
+  readonly message: string; // the exact rendered message shown to the human
+  readonly outputArtifactName?: string; // present only for a `free-text` gate
+  readonly raisedAt: string; // ISO 8601
+}
+
+/** The request to record one authored pending Human Gate. Recording it also rests
+ *  the Run `blocked` in the same transaction, so a crash cannot leave the record
+ *  without the pause. Idempotent on the producing Attempt id (a resume that
+ *  re-reaches the gate re-records nothing). */
+export interface RecordPendingGateRequest {
+  readonly attemptId: string;
+  readonly stepId: string;
+  readonly shape: HumanGateShape;
+  readonly message: string;
+  readonly outputArtifactName?: string;
+  readonly at: Date;
+}
+
 /**
  * Ownership of one Run's canonical store. Acquiring bumps a fencing epoch, so a
  * stale owner (a crashed process that comes back) is fenced: its canonical
@@ -284,6 +310,16 @@ export interface RunOwner {
   recordGateAnswer(request: RecordGateAnswerRequest): RecordGateAnswerResult;
   /** Every recorded Human Gate answer, in append order. */
   gateAnswers(): readonly GateAnswerRecord[];
+  /**
+   * Record an authored pending Human Gate and rest the Run `blocked` in one
+   * transaction (#108). Idempotent on the producing Attempt id, so a resume that
+   * re-reaches the gate re-records nothing. Refused if this owner is fenced.
+   */
+  recordPendingGate(request: RecordPendingGateRequest): WriteResult;
+  /** The authored gate the Run currently rests at: the pending-gate record whose
+   *  producing Attempt has not yet settled, or undefined if none is pending (a
+   *  derived Review checkpoint records nothing here). */
+  pendingGate(): PendingGateRecord | undefined;
   /** Release this Run only if this owner still holds the fencing epoch. A stale
    *  owner cannot clear ownership acquired by a takeover. */
   release(): WriteResult;

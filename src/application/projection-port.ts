@@ -87,14 +87,16 @@ export interface ResumeRunInput {
   readonly takeover?: { readonly ownerPid: number };
 }
 
-/** Answer the durable Human Gate a `blocked` Run rests at (ADR 0020, #85). The
- *  answer targets the Gate's exact durable reference — a stale or mismatched
+/** Answer the durable Human Gate a `blocked` Run rests at (ADR 0020, #85, #108).
+ *  The answer targets the Gate's exact durable reference — a stale or mismatched
  *  reference, or a Run that is not blocked, is not applied and changes nothing —
- *  and settles across process death: `continue` grants exactly one more interval
- *  and execution resumes in the answering process, `stop` (a rejecting
- *  approve/reject) ends the Run `failed` without discarding history or Artifacts.
- *  The answer is stored as a durable Run Artifact, so the Run can wait
- *  indefinitely and the answer survives closing Secant. */
+ *  and settles across process death. For an `approve-reject` gate (a derived Review
+ *  checkpoint or an authored gate) `continue`/approve grants exactly one more
+ *  interval and execution resumes in the answering process, `stop`/reject ends the
+ *  Run `failed` without discarding history or Artifacts. For an authored `free-text`
+ *  gate the `text` answer is published as a `text` Run Artifact bound to the Step's
+ *  declared output name, the gate's Attempt settles `succeeded`, and the Run
+ *  advances — all in one Store boundary. The answer survives closing Secant. */
 export interface AnswerHumanGateSubmission {
   readonly operationId: string;
   readonly operation: "answer-human-gate";
@@ -102,11 +104,18 @@ export interface AnswerHumanGateSubmission {
 }
 export interface AnswerHumanGateInput {
   readonly runId: string;
-  /** The Gate reference the answer resolves — `RunCheckpointView.gate`, read from
-   *  the current blocked snapshot. Staleness is decided against the live gate. */
+  /** The Gate reference the answer resolves — read from the current blocked
+   *  snapshot (`RunView.checkpoint.gate` or `RunView.pendingGate.gate`). Staleness
+   *  is decided against the live gate. Its `shape` says which answer field applies. */
   readonly gate: RunGateReference;
-  /** `continue` grants another interval; `stop` ends the Run `failed`. */
-  readonly answer: "continue" | "stop";
+  /** For an `approve-reject` gate: `continue` grants another interval, `stop` ends
+   *  the Run `failed`. Omitted for a `free-text` gate; providing it for one is a
+   *  precise shape-mismatch Problem that changes nothing. */
+  readonly answer?: "continue" | "stop";
+  /** For a `free-text` gate: the answer text, published as the gate's declared
+   *  `text` output. Omitted for an `approve-reject` gate; providing it for one is a
+   *  precise shape-mismatch Problem that changes nothing. */
+  readonly text?: string;
 }
 
 /** Cancel a live Run (#87): end it `cancelled` — the only route to that terminal
@@ -431,15 +440,16 @@ export interface RunOutputView {
   readonly reference: ResourceReference;
 }
 
-/** The exact durable reference of the approve/reject Human Gate a blocked Run
- *  rests at, derived from the current Step Attempt (never stored). Distinct from
- *  a `ResourceReference`: it names the Attempt the Gate pauses, so #85 can answer
- *  it. */
+/** The exact durable reference of the Human Gate a blocked Run rests at, so #85/
+ *  #108 can answer it. For a derived Review checkpoint (`approve-reject`) it comes
+ *  from the current Step Attempt (never stored); for an authored gate it is the
+ *  pending gate's producing Attempt. Distinct from a `ResourceReference`: it names
+ *  the Attempt the Gate pauses. `shape` says which answer the gate takes. */
 export interface RunGateReference {
   readonly runId: string;
-  readonly stepId: string; // the Step whose current Attempt the Gate derives from
-  readonly attemptId: string; // that current Step Attempt
-  readonly shape: "approve-reject";
+  readonly stepId: string; // the Step whose Attempt the Gate derives from
+  readonly attemptId: string; // that Step Attempt
+  readonly shape: "approve-reject" | "free-text";
 }
 
 /** The Review checkpoint a `blocked` Run is paused at (ADR 0020, #84). Present
@@ -455,6 +465,16 @@ export interface RunCheckpointView {
     readonly reference: ResourceReference;
   };
   readonly gate: RunGateReference; // the Gate's exact durable reference
+}
+
+/** The authored Human Gate Step a `blocked` Run rests at (#108), distinct from a
+ *  derived Review checkpoint (`checkpoint`). Present only when `state` is `blocked`
+ *  and the Run paused at an authored `human-gate` Step. `outputArtifactName` is the
+ *  declared `text` output a `free-text` answer binds; absent for `approve-reject`. */
+export interface RunPendingGateView {
+  readonly gate: RunGateReference; // shape ∈ {approve-reject, free-text}
+  readonly message: string; // the exact rendered message shown to the human
+  readonly outputArtifactName?: string; // free-text's declared output artifact
 }
 
 /** A Run's bounded snapshot. Outputs carry references, not bytes. */
@@ -478,10 +498,15 @@ export interface RunView {
   readonly position: number;
   readonly timeline: readonly RunTimelineEvent[];
   readonly outputs: readonly RunOutputView[];
-  /** The Review checkpoint facts, present only when `state` is `blocked` (#84). */
+  /** The Review checkpoint facts, present only when `state` is `blocked` at a
+   *  derived Review checkpoint (#84). */
   readonly checkpoint?: RunCheckpointView;
+  /** The authored Human Gate facts, present only when `state` is `blocked` at an
+   *  authored `human-gate` Step (#108). A blocked Run carries exactly one of
+   *  `checkpoint` or `pendingGate`. */
+  readonly pendingGate?: RunPendingGateView;
   /** Typed opportunities on this Run. The `answer-human-gate` offer appears only
-   *  while `state` is `blocked` (#85); absent otherwise. */
+   *  while `state` is `blocked` (#85, #108); absent otherwise. */
   readonly actionOffers: readonly ActionOffer[];
   /** Present only while the Run rests `halted` on a Materialization conflict. */
   readonly conflict?: RunConflictView;
@@ -559,16 +584,22 @@ export interface ApproveWorkspaceOffer {
   readonly input: { readonly path: string };
 }
 
-/** Answer the Human Gate a `blocked` Run rests at (#85). Offered on the `run`
+/** Answer the Human Gate a `blocked` Run rests at (#85, #108). Offered on the `run`
  *  Projection only while the Run is blocked; it names the consequence of each
- *  answer so a client can present them without re-deriving the model. */
+ *  answer so a client can present them without re-deriving the model. `gate.shape`
+ *  says which answer applies: `approve-reject` takes `continue`/`stop`, `free-text`
+ *  takes `--text`. The consequence fields for the other shape stay present but do
+ *  not apply — the client reads `gate.shape`, not the fields, to decide. */
 export interface AnswerHumanGateOffer {
   readonly action: "answer-human-gate";
   readonly gate: RunGateReference;
-  /** What `continue` does: grants exactly one more review interval. */
+  /** What `continue`/approve does: grants exactly one more review interval. */
   readonly continueConsequence: string;
-  /** What `stop` does: ends the Run `failed`, keeping history and Artifacts. */
+  /** What `stop`/reject does: ends the Run `failed`, keeping history and Artifacts. */
   readonly stopConsequence: string;
+  /** What a `free-text` answer does: publishes the text as the gate's declared
+   *  output and advances the Run. Present only for a `free-text` gate. */
+  readonly textConsequence?: string;
 }
 
 /** Resume a resting Run or take over a nonterminal Run owned by another process. */

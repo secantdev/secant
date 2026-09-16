@@ -235,6 +235,29 @@ export function gateStale(
   };
 }
 
+/** The answer's form does not match the Gate's shape (#108): a `free-text` answer
+ *  to an `approve-reject` gate, or a `continue`/`stop` answer to a `free-text`
+ *  gate. The Gate is unchanged. */
+export function gateShapeMismatch(
+  runId: string,
+  shape: "approve-reject" | "free-text",
+): Problem {
+  const expected =
+    shape === "free-text"
+      ? "a free-text answer (`run answer --text`)"
+      : "an approve/reject answer (`run answer --continue` or `--stop`)";
+  return {
+    code: "gate-shape-mismatch",
+    explanation: `This Gate is ${shape}; it takes ${expected}. Nothing was applied.`,
+    remediation:
+      shape === "free-text"
+        ? "Answer with `run answer <run-id> --text <value>`."
+        : "Answer with `run answer <run-id> --continue` or `--stop`.",
+    possibleEffects: "none",
+    details: { runId, shape },
+  };
+}
+
 export function operationNotFound(operationId: string): Problem {
   return {
     code: "operation-not-found",

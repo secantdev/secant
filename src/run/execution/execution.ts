@@ -7,6 +7,8 @@ import {
   type CommandInvocation,
   type CommandParams,
   type CommandStep,
+  type HumanGateShape,
+  type HumanGateStep,
   type Platform,
   type Reference,
   type RepeatGroup,
@@ -126,6 +128,18 @@ interface StepAttempt {
   readonly outputs: readonly CandidateOutput[];
 }
 
+/** A durable pause an executor returns instead of an Attempt (#108): the Step did
+ *  not run to a settled outcome — it rests the Run `blocked` and waits for a human.
+ *  The scheduler records the pending gate (with the minted Attempt id) and unwinds
+ *  the walk `blocked`, never publishing an Attempt. It branches on this shape, not
+ *  on the Step kind (#13 rule 6). */
+interface StepPause {
+  readonly pause: true;
+  readonly shape: HumanGateShape;
+  readonly message: string; // the exact rendered message shown to the human
+  readonly outputArtifactName?: string; // free-text's declared output artifact
+}
+
 interface StepContext {
   readonly owner: RunOwner;
   readonly platform: Platform;
@@ -134,11 +148,16 @@ interface StepContext {
   readonly cancelSignal?: AbortSignal;
 }
 
-type StepExecutor = (step: Step, context: StepContext) => Promise<StepAttempt>;
+type StepExecutor = (
+  step: Step,
+  context: StepContext,
+) => Promise<StepAttempt | StepPause>;
 
-// The closed executable Step-kind dispatch table (#13). Exactly one entry in M2;
-// a Human Gate is a durable pause rather than a dispatch, and Repeat groups land
-// in #84, so neither has a row here.
+// The closed executable Step-kind dispatch table (#13). A `command` runs to an
+// Attempt; a `human-gate` returns a durable pause the scheduler records as a
+// pending gate and rests `blocked` at (#108). The scheduler learns nothing per
+// kind — it branches only on `command`'s Attempt vs the pause shape. Repeat groups
+// land in #84 and Agent kinds later, so neither has a row yet.
 const STEP_EXECUTORS: Readonly<Partial<Record<StepKindName, StepExecutor>>> = {
   command: (step, context) => {
     // The table key guarantees the kind; narrow for the type system.
@@ -148,6 +167,14 @@ const STEP_EXECUTORS: Readonly<Partial<Record<StepKindName, StepExecutor>>> = {
       );
     }
     return runCommand(step, context);
+  },
+  "human-gate": (step, context) => {
+    if (step.kind !== "human-gate") {
+      throw new Error(
+        "execution: human-gate executor received a non-gate Step.",
+      );
+    }
+    return runHumanGate(step, context);
   },
 };
 
@@ -256,6 +283,9 @@ async function runStep(
   );
   if (outcome === "halted") return "halted";
   if (outcome === "failed") return "failed";
+  // A Human Gate paused: the pending gate is recorded and the Run rests `blocked`
+  // durably; executeRouting writes the `blocked` state so open clients update (#108).
+  if (outcome === "blocked") return "blocked";
   // A skipped Step (already settled on a prior run) rested nothing this run, so it
   // is `succeeded-open`; executeRouting's final rest covers an all-skipped Run.
   if (outcome === "skipped") return "succeeded-open";
@@ -300,6 +330,7 @@ async function runRepeatGroup(
     const result = await runIteration(repeat, context, isLastNode, iteration);
     if (result.outcome === "failed") return "failed";
     if (result.outcome === "halted") return "halted";
+    if (result.outcome === "blocked") return "blocked";
     if (result.ran) freshIterations++;
     // Re-evaluate the condition after the iteration. A pass ends the group;
     // `succeeded-rested` means the iteration's deciding Attempt already rested the
@@ -350,6 +381,9 @@ async function runIteration(
     );
     if (outcome === "halted") return { outcome: "halted", ran };
     if (outcome === "failed") return { outcome: "failed", ran };
+    // An authored Human Gate span Step paused: the pending gate is recorded and the
+    // Run rests `blocked`; unwind the group so executeRouting writes `blocked` (#108).
+    if (outcome === "blocked") return { outcome: "blocked", ran };
     if (outcome !== "skipped") ran = true;
   }
   return {
@@ -379,7 +413,7 @@ async function runStepAttempts(
   iteration: number,
   successAdvance: string | undefined,
   decideSuccessAdvance?: (result: StepAttempt) => string | undefined,
-): Promise<AttemptOutcome | "halted" | "skipped"> {
+): Promise<AttemptOutcome | "halted" | "skipped" | "blocked"> {
   const instance = instanceKey(step.id, iteration);
   // A Step instance that already settled `succeeded` on a prior run is skipped:
   // its outputs stay bound and materialized, so re-running it would duplicate work
@@ -405,8 +439,8 @@ async function runStepAttempts(
   const executor = STEP_EXECUTORS[step.kind];
   if (executor === undefined) {
     throw new Error(
-      `execution: Step kind "${step.kind}" is not dispatchable in M2 ` +
-        "(command-only; Human Gates pause and agent kinds land later).",
+      `execution: Step kind "${step.kind}" is not dispatchable ` +
+        "(Command runs and Human Gate pauses; agent kinds land later).",
     );
   }
   // Clamp a bad budget to zero so a typo (e.g. -1) still runs the Step once
@@ -425,6 +459,29 @@ async function runStepAttempts(
     // A cancel abort throws RunCancelledError out of the executor: it unwinds the
     // walk here without publishing this Attempt, so `cancel-run` (T4) owns the rest.
     const result = await executor(step, context.step);
+    // A durable pause (a Human Gate): record the pending gate with this minted
+    // Attempt id and rest the Run `blocked` — no Attempt is published, no retry
+    // (#108). Recording is idempotent on the Attempt id, so a resume that
+    // re-reaches the gate re-rests `blocked` and re-records nothing. A fenced owner
+    // means another process took over; throw as the publication path does.
+    if ("pause" in result) {
+      const recorded = context.step.owner.recordPendingGate({
+        attemptId,
+        stepId: step.id,
+        shape: result.shape,
+        message: result.message,
+        ...(result.outputArtifactName !== undefined
+          ? { outputArtifactName: result.outputArtifactName }
+          : {}),
+        at: context.now(),
+      });
+      if (!recorded.ok) {
+        throw new Error(
+          `execution: cannot record the pending Human Gate: ${recorded.reason}.`,
+        );
+      }
+      return "blocked";
+    }
     outcome = result.outcome;
     // An interrupted Attempt (a termination signal, never our timeout) has no
     // result: it is settled `indeterminate`, never retried, and rests the Run
@@ -742,7 +799,60 @@ function recordConflictOrThrow(
   }
 }
 
-// --- Command step (the one executable dispatch entry) ----------------------
+// --- Human Gate step (a durable pause, not a dispatch) ---------------------
+
+/** A Human Gate does not run to an Attempt: it renders the message the human sees,
+ *  names the `text` output a `free-text` answer will bind, and returns a pause the
+ *  scheduler records as a pending gate before resting the Run `blocked` (#108).
+ *  An `approve-reject` gate produces nothing; a `free-text` gate declares one
+ *  `text` output whose name the answer binds. */
+async function runHumanGate(
+  step: HumanGateStep,
+  context: StepContext,
+): Promise<StepPause> {
+  const outputArtifactName =
+    step.shape === "free-text"
+      ? step.produces?.find((produced) => produced.type === "text")?.name
+      : undefined;
+  return {
+    pause: true,
+    shape: step.shape,
+    message: renderGateMessage(step, context),
+    ...(outputArtifactName !== undefined ? { outputArtifactName } : {}),
+  };
+}
+
+/** The exact message a Human Gate shows: the authored `message`, or the decoded
+ *  text of an authored `prompt` reference (a Snapshot asset file, or a bound
+ *  artifact), or empty when the gate authored neither. */
+function renderGateMessage(step: HumanGateStep, context: StepContext): string {
+  if (step.message !== undefined) return step.message;
+  if (step.prompt === undefined) return "";
+  if ("asset" in step.prompt) {
+    const path = context.resolveAsset(step.prompt.asset);
+    if (path === undefined) {
+      throw new Error(
+        `execution: gate prompt asset "${step.prompt.asset}" is not in the pinned Bundle Snapshot.`,
+      );
+    }
+    return readFileSync(path, "utf8");
+  }
+  const versionId = context.owner.currentVersion(step.prompt.artifact);
+  if (versionId === undefined) {
+    throw new Error(
+      `execution: gate prompt artifact "${step.prompt.artifact}" is not bound at this Step.`,
+    );
+  }
+  const bytes = context.owner.readArtifact(versionId, step.prompt.artifact);
+  if (bytes === undefined) {
+    throw new Error(
+      `execution: gate prompt artifact "${step.prompt.artifact}" has no bytes at its bound version.`,
+    );
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+// --- Command step (an executable dispatch entry) ---------------------------
 
 async function runCommand(
   step: CommandStep,

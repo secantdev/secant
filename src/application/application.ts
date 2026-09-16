@@ -32,6 +32,7 @@ import {
   bundleBytesCorrupt,
   bundleBytesMissing,
   bundleTrustRequired,
+  gateShapeMismatch,
   gateStale,
   operationIdReused,
   operationNotFound,
@@ -419,6 +420,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
         // that advance into the in-memory state and push it to observers (#85).
         if (result.ok && request.advanceState !== undefined && tracking) {
           tracking.state = request.advanceState;
+          pushRunUpdate(runId);
+        }
+        return result;
+      },
+      recordPendingGate(request) {
+        const result = owner.recordPendingGate(request);
+        // Recording an authored gate rests the Run `blocked` in the same
+        // transaction (#108); mirror that into the in-memory state and push the
+        // blocked snapshot so an open client sees the gate at once (A3).
+        if (result.ok && tracking !== undefined) {
+          tracking.state = "blocked";
           pushRunUpdate(runId);
         }
         return result;
@@ -1216,50 +1228,122 @@ export function createApplication(deps: ApplicationDependencies): Application {
     let leaveClaimLive = ownershipWasHeld;
     try {
       const observed = observedOwner(activeOwner, input.runId);
-      // Idempotent across process death: an answer already recorded for this
-      // operation id settles `applied` without re-validating the (now-moved) Gate
-      // or re-driving execution.
-      // Process death after recording a `continue` but before the granted interval
-      // reaches its next rest leaves the Run stored `running` with a live claim, so
-      // startup reconciliation (#86) rests it `halted` on the next open and
-      // `run resume` re-drives it — one interval of already-run iterations is
-      // dropped whole-span, so the grant is honored, not double-counted.
-      // ponytail: that recovers the interrupted grant but reports it as a `halted`
-      // resume rather than a `blocked` re-answer; a persisted grant-pending marker
-      // would let it re-derive `blocked` instead — add it if the distinction matters.
-      const already = activeOwner
-        .gateAnswers()
-        .some((answer) => answer.operationId === operationId);
+      const log = activeOwner.attemptLog();
       const priorAnswers = activeOwner.gateAnswers();
       const derived = deriveRun(
         facts.routing,
-        activeOwner.attemptLog(),
+        log,
         record.state,
         input.runId,
         activeOwner,
         priorAnswers,
       );
-      if (!already) {
-        if (derived.state !== "blocked" || derived.checkpoint === undefined) {
-          return {
-            status: "not-applied",
-            problem: runNotBlocked(input.runId, derived.state),
-          };
-        }
-        if (!gateEquals(derived.checkpoint.gate, input.gate)) {
-          return {
-            status: "not-applied",
-            problem: gateStale(
-              input.runId,
-              input.gate,
-              derived.checkpoint.gate,
-            ),
-          };
-        }
-      }
+      // Idempotent replay of the *same* operation id: settle `applied` without
+      // re-validating the (now-moved) Gate or re-driving execution. Keyed on the
+      // operation id, not on whether the Gate settled — a different operation
+      // answering an already-answered gate must fall through to the staleness check
+      // below and be refused, exactly as a moved derived checkpoint would (#108).
+      // Within one process the operations map already dedupes a repeated operation
+      // id (an authored gate records no `gate_answer` row, so this durable check
+      // only fires for a derived checkpoint's cross-process replay). Process death
+      // after a `continue` but before the interval rests leaves the Run stored
+      // `running` with a live claim, so startup reconciliation (#86) rests it
+      // `halted` and `run resume` re-drives it — the grant is honored, not doubled.
+      const already = priorAnswers.some(
+        (answer) => answer.operationId === operationId,
+      );
       if (already) return { status: "applied" };
-      // The cumulative iteration count this grant/stop resets from: the prior
-      // grant offset plus the iterations completed since it (#85).
+
+      // The live Gate the Run currently rests at: an authored gate (a durable
+      // pending_gate) takes precedence over a derived Review checkpoint; a blocked
+      // Run derives exactly one of the two (#108).
+      const liveGate = derived.pendingGate?.gate ?? derived.checkpoint?.gate;
+      if (derived.state !== "blocked" || liveGate === undefined) {
+        return {
+          status: "not-applied",
+          problem: runNotBlocked(input.runId, derived.state),
+        };
+      }
+      if (!gateEquals(liveGate, input.gate)) {
+        return {
+          status: "not-applied",
+          problem: gateStale(input.runId, input.gate, liveGate),
+        };
+      }
+      // The answer's form must match the Gate's shape (#108): a `free-text` gate
+      // takes `--text`, an `approve-reject` gate takes `continue`/`stop`. A mismatch
+      // changes nothing.
+      const shapeMatches =
+        liveGate.shape === "free-text"
+          ? input.text !== undefined && input.answer === undefined
+          : input.answer !== undefined && input.text === undefined;
+      if (!shapeMatches) {
+        return {
+          status: "not-applied",
+          problem: gateShapeMismatch(input.runId, liveGate.shape),
+        };
+      }
+
+      // An authored gate settles its producing Attempt (#108): `free-text` publishes
+      // the answer as the gate's declared `text` output and advances; approve advances
+      // with no output; reject settles `failed` and rests the Run failed. All in one
+      // Store boundary; the answering process then drives the Run to its next rest.
+      if (derived.pendingGate !== undefined) {
+        if (liveGate.shape === "free-text") {
+          const outputName = derived.pendingGate.outputArtifactName;
+          if (outputName === undefined) {
+            throw new Error(
+              "application: a free-text gate has no declared output artifact name.",
+            );
+          }
+          publishGateAttemptOrThrow(
+            observed.publishAttempt({
+              attemptId: input.gate.attemptId,
+              outcome: "succeeded",
+              required: [{ name: outputName, type: "text" }],
+              outputs: [
+                {
+                  name: outputName,
+                  type: "text",
+                  content: new TextEncoder().encode(input.text!),
+                },
+              ],
+              at: new Date(),
+              advanceState: "running",
+            }),
+          );
+        } else {
+          const reject = input.answer === "stop";
+          publishGateAttemptOrThrow(
+            observed.publishAttempt({
+              attemptId: input.gate.attemptId,
+              outcome: reject ? "failed" : "succeeded",
+              required: [],
+              outputs: [],
+              at: new Date(),
+              advanceState: reject ? "failed" : "running",
+            }),
+          );
+          if (reject) {
+            leaveClaimLive = false;
+            return { status: "applied" };
+          }
+        }
+        // approve or free-text: drive the resumed Run to its next rest in this process.
+        const report = await runExecution({
+          routing: facts.routing,
+          digest: record.bundleSnapshotDigest,
+          owner: observed,
+          cancelSignal: activeTracking.abort.signal,
+        });
+        leaveClaimLive = report.outcome === "blocked";
+        return { status: "applied" };
+      }
+
+      // A derived Review checkpoint: the M2 continue/stop path (unchanged, #85).
+      // The cumulative iteration count this grant/stop resets from: the prior grant
+      // offset plus the iterations completed since it.
+      const answer = input.answer!;
       const priorOffset =
         priorAnswers.length === 0
           ? 0
@@ -1269,11 +1353,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
       const recorded = observed.recordGateAnswer({
         operationId,
         gateAttemptId: input.gate.attemptId,
-        answer: input.answer,
+        answer,
         iterationsAtGrant,
         artifactName: GATE_ANSWER_ARTIFACT,
         at: new Date(),
-        ...(input.answer === "stop" ? { advanceState: "failed" } : {}),
+        ...(answer === "stop" ? { advanceState: "failed" } : {}),
       });
       if (!recorded.ok) {
         throw new Error(
@@ -1282,7 +1366,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
             : `cannot record the gate answer: ${recorded.problem.kind}`,
         );
       }
-      if (input.answer === "stop") {
+      if (answer === "stop") {
         leaveClaimLive = false;
         return { status: "applied" };
       }
@@ -1662,6 +1746,21 @@ function gateEquals(a: RunGateReference, b: RunGateReference): boolean {
     a.stepId === b.stepId &&
     a.attemptId === b.attemptId &&
     a.shape === b.shape
+  );
+}
+
+/** Settle an authored gate's producing Attempt (#108). A fenced owner or an
+ *  unstageable answer is a coordination/environment fault the caller (the answer
+ *  use case) owns, so it throws — publication is idempotent per attempt id, so a
+ *  replay of an already-settled gate is a silent no-op, not a fault. */
+function publishGateAttemptOrThrow(
+  result: ReturnType<RunOwner["publishAttempt"]>,
+): void {
+  if (result.ok) return;
+  throw new Error(
+    "reason" in result
+      ? `cannot settle the gate answer: ${result.reason}`
+      : `cannot settle the gate answer: ${result.problem.kind}`,
   );
 }
 

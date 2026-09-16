@@ -13,7 +13,9 @@ import {
   ensureRuntimeOnPath,
   hostPlatform,
   writeCommandBundle,
+  writeGateBundle,
   writeRepeatBundle,
+  type GateBundleOptions,
   type RepeatBundleOptions,
 } from "../helpers/commandBundle.js";
 import { openHeadlessHarness } from "../helpers/headlessHarness.js";
@@ -40,6 +42,14 @@ function harness(t: TestContext, opts: { commandTimeoutMs?: number } = {}) {
     },
     installRepeat: async (repeatOpts: RepeatBundleOptions) => {
       const bundle = writeRepeatBundle(repeatOpts);
+      assert.equal(await h.run(["bundle", "build", bundle.folder]), 0);
+      h.reset();
+      const entry = h.catalog.listEntries().find((e) => e.id === bundle.id);
+      assert.ok(entry);
+      return { id: bundle.id, digest: entry.digest };
+    },
+    installGate: async (gateOpts: GateBundleOptions) => {
+      const bundle = writeGateBundle(gateOpts);
       assert.equal(await h.run(["bundle", "build", bundle.folder]), 0);
       h.reset();
       const entry = h.catalog.listEntries().find((e) => e.id === bundle.id);
@@ -682,3 +692,202 @@ function parseRun(json: string): {
   assert.ok(snapshot.result.found);
   return snapshot.result.run;
 }
+
+// --- Authored Human Gate, headless end to end (#108) ------------------------
+
+/** Launch an authored Human Gate Bundle and return its blocked Run id, asserting
+ *  it exits 2 at the gate and names the follow-up answer command. */
+async function launchGate(
+  h: Awaited<ReturnType<typeof harness>>,
+  opts: GateBundleOptions,
+): Promise<string> {
+  const { id, digest } = await h.installGate(opts);
+  h.approve();
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "launch", id, "--trust", digest],
+      h.io,
+    ),
+    2,
+  );
+  const out = h.stdout();
+  assert.match(out, /^State: blocked$/m);
+  const runId = /^Run (\S+)$/m.exec(out)![1]!;
+  h.reset();
+  return runId;
+}
+
+test("a free-text gate rests blocked naming run answer --text, and answering continues the Run reading the bound answer (#108, AC1)", async (t) => {
+  const h = await harness(t);
+  const { id, digest } = await h.installGate({
+    shape: "free-text",
+    message: "name the release",
+    outputName: "answer",
+  });
+  h.approve();
+
+  // The Run rests blocked at the gate, exits 2, and names the follow-up command.
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "launch", id, "--trust", digest],
+      h.io,
+    ),
+    2,
+  );
+  const launch = h.stdout();
+  assert.match(launch, /^State: blocked$/m);
+  assert.match(launch, /run answer .*--text/);
+  const runId = /^Run (\S+)$/m.exec(launch)![1]!;
+  h.reset();
+
+  // A later invocation answers with free text; the Run continues in that process
+  // and the downstream Command reads the bound answer, resting succeeded (exit 0).
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "answer", runId, "--text", "v2.0.0"],
+      h.io,
+    ),
+    0,
+  );
+  assert.match(h.stdout(), /Answered: v2\.0\.0/);
+  assert.match(h.stdout(), /^State: succeeded$/m);
+  h.reset();
+
+  // The free-text answer is published as the gate's declared `text` output.
+  assert.equal(
+    await runHeadless(h.clients, ["run", "read", `${runId}/answer`], h.io),
+    0,
+  );
+  assert.match(h.stdout(), /^v2\.0\.0$/m);
+});
+
+test("an authored approve-reject gate: --continue advances succeeded, --stop rests failed (#108, AC2)", async (t) => {
+  const h = await harness(t);
+  const approveId = await launchGate(h, {
+    id: "dev.secant.gate-cli-approve",
+    shape: "approve-reject",
+  });
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "answer", approveId, "--continue"],
+      h.io,
+    ),
+    0,
+  );
+  assert.match(h.stdout(), /^State: succeeded$/m);
+  h.reset();
+
+  const rejectId = await launchGate(h, {
+    id: "dev.secant.gate-cli-reject",
+    shape: "approve-reject",
+  });
+  assert.equal(
+    await runHeadless(h.clients, ["run", "answer", rejectId, "--stop"], h.io),
+    1,
+  );
+  assert.match(h.stdout(), /^State: failed$/m);
+});
+
+test("run show and --json carry the authored pending gate; blocked reads durable Human Gate (#108, AC4)", async (t) => {
+  const h = await harness(t);
+  const runId = await launchGate(h, {
+    shape: "free-text",
+    message: "name the release",
+    outputName: "answer",
+  });
+
+  assert.equal(await runHeadless(h.clients, ["run", "show", runId], h.io), 0);
+  const out = h.stdout();
+  assert.match(out, /^State: blocked$/m);
+  assert.match(out, /durable Human Gate/);
+  assert.match(out, /shape: free-text/);
+  assert.match(out, /message: name the release/);
+  assert.match(out, /output: answer/);
+  assert.match(out, /Answer the gate:/);
+  assert.match(out, /run answer .*--text/);
+  h.reset();
+
+  assert.equal(
+    await runHeadless(h.clients, ["run", "show", runId, "--json"], h.io),
+    0,
+  );
+  const snapshot = JSON.parse(h.stdout()) as {
+    result: {
+      found: boolean;
+      run: {
+        state: string;
+        pendingGate?: {
+          message: string;
+          outputArtifactName?: string;
+          gate: { shape: string; stepId: string; attemptId: string };
+        };
+      };
+    };
+  };
+  assert.ok(snapshot.result.found);
+  // Frozen existing field unchanged; new pending-gate fields are additive.
+  assert.equal(snapshot.result.run.state, "blocked");
+  assert.equal(snapshot.result.run.pendingGate?.gate.shape, "free-text");
+  assert.equal(snapshot.result.run.pendingGate?.message, "name the release");
+  assert.equal(snapshot.result.run.pendingGate?.outputArtifactName, "answer");
+  assert.match(snapshot.result.run.pendingGate?.gate.attemptId ?? "", /\S/);
+});
+
+test("answer-shape mismatches are refused and change nothing (#108, AC3)", async (t) => {
+  const h = await harness(t);
+  // --text to an approve-reject gate is refused; the Run stays blocked.
+  const approveId = await launchGate(h, {
+    id: "dev.secant.gate-cli-mismatch-a",
+    shape: "approve-reject",
+  });
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "answer", approveId, "--text", "nope"],
+      h.io,
+    ),
+    1,
+  );
+  assert.match(h.stderr(), /gate-shape-mismatch/);
+  h.reset();
+  await runHeadless(h.clients, ["run", "show", approveId], h.io);
+  assert.match(h.stdout(), /^State: blocked$/m);
+  h.reset();
+
+  // --continue to a free-text gate is refused; the Run stays blocked.
+  const freeTextId = await launchGate(h, {
+    id: "dev.secant.gate-cli-mismatch-f",
+    shape: "free-text",
+  });
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "answer", freeTextId, "--continue"],
+      h.io,
+    ),
+    1,
+  );
+  assert.match(h.stderr(), /gate-shape-mismatch/);
+});
+
+test("run answer needs exactly one of --continue, --stop, or --text (#108)", async (t) => {
+  const h = await harness(t);
+  const runId = await launchGate(h, {
+    id: "dev.secant.gate-cli-invalid",
+    shape: "free-text",
+  });
+  // Two answer forms at once is refused before any submission.
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "answer", runId, "--continue", "--text", "x"],
+      h.io,
+    ),
+    1,
+  );
+  assert.match(h.stderr(), /invalid-answer/);
+});

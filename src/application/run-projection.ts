@@ -159,6 +159,13 @@ function runResult(
     // transcript. Empty for a Command-only Run (and for a Run live elsewhere, read
     // without an owner), so the frozen `--json` stays unchanged for those.
     const turns = owner?.turns() ?? [];
+    // The live Turn a Turn-scoped control targets (#118): the one admitted Turn with
+    // no settled result, present only while the Run is live in this process (a Run
+    // live elsewhere is read without an owner, so `turns` is empty and no control is
+    // offered — resuming it is the only remote action).
+    const liveTurn = !liveElsewhere
+      ? turns.find((turn) => turn.resultKind === undefined)
+      : undefined;
     const turnEvents = owner?.turnEvents() ?? [];
     const sessions = owner?.harnessSessions() ?? [];
     const transcript = owner?.transcript() ?? [];
@@ -218,6 +225,16 @@ function runResult(
             : derivedRun.state === "halted" || derivedRun.state === "failed"
               ? [resumeRunOffer(runId, derivedRun.state)]
               : []),
+          // Turn-scoped controls (#118): while a Turn is live in this process, a
+          // user can interrupt it (rests the Run `halted`, resumable) without
+          // cancelling the Run; steer is offered unavailable because Claude Code
+          // has no same-Turn steer.
+          ...(isLive && liveTurn !== undefined
+            ? [
+                interruptTurnOffer(runId, liveTurn.turnId),
+                steerTurnOffer(runId, liveTurn.turnId),
+              ]
+            : []),
           isLive || derivedRun.state === "blocked"
             ? cancelRunOffer(runId)
             : deleteRunOffer(runId),
@@ -441,6 +458,35 @@ function cancelRunOffer(runId: string): ActionOffer {
     runId,
     consequence:
       "end the live Run cancelled, stopping execution and keeping its history and Artifacts.",
+  };
+}
+
+/** The fixed reason Claude Code's steer offer carries (#118): the Harness has no
+ *  same-Turn steer. ponytail: hardcoded because M3 ships only Claude Code — thread
+ *  the live Harness profile's steer reason through when a second Harness lands. */
+export const STEER_UNAVAILABLE_REASON = "Claude Code has no same-Turn steer";
+
+/** The `interrupt-turn` offer for a Run with a live Turn (#118): it carries the
+ *  live Turn's id so a control targets exactly that generation. */
+function interruptTurnOffer(runId: string, turnId: string): ActionOffer {
+  return {
+    action: "interrupt-turn",
+    runId,
+    turnId,
+    consequence:
+      "stop the live Turn and rest the Run halted (resumable), keeping its history.",
+  };
+}
+
+/** The `steer-turn` offer for a Run with a live Turn (#118): always unavailable
+ *  for Claude Code, so a client shows it disabled with the reason. */
+function steerTurnOffer(runId: string, turnId: string): ActionOffer {
+  return {
+    action: "steer-turn",
+    runId,
+    turnId,
+    available: false,
+    reason: STEER_UNAVAILABLE_REASON,
   };
 }
 

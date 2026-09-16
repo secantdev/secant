@@ -273,6 +273,47 @@ export function reconcileRunStore(params: TReconcileRunStoreParams): boolean {
         .set({ state: "halted" })
         .where(eq(runRecord.run_id, row.run_id))
         .run();
+      // An owner death mid-Turn leaves the Turn admitted without a settled result:
+      // no terminal truth survived, so settle it `lost` with completion-unknown so
+      // the durable Turn timeline shows its fate. No process is started — resume is
+      // explicit. Immutable like `settleTurn`: only rows still unsettled are set.
+      const abandoned = tx
+        .select({ session_key: turns.session_key })
+        .from(turns)
+        .where(isNull(turns.result_kind))
+        .all();
+      tx.update(turns)
+        .set({
+          result_kind: "lost",
+          result_detail: JSON.stringify({
+            kind: "lost",
+            unknown: "completion",
+          }),
+          settled_at: params.at.toISOString(),
+        })
+        .where(isNull(turns.result_kind))
+        .run();
+      // Detach the abandoned Turn's Session to its stored recovery coordinate, exactly
+      // as the in-process `lost` path (claude-code.ts `settleLost`) does — so a resume
+      // continues in the same Claude Code Session via `--resume` rather than silently
+      // opening a fresh conversation (ADR 0022). `admitTurn` recorded the coordinate as
+      // `native_session_id` before the Turn started, so it survives the crash. Only a
+      // still-`open` Session is moved; one already `detached`/`unusable` stays as-is.
+      for (const { session_key } of abandoned) {
+        tx.update(harnessSessions)
+          .set({
+            availability: "detached",
+            availability_detail: sql`${harnessSessions.native_session_id}`,
+            updated_at: params.at.toISOString(),
+          })
+          .where(
+            and(
+              eq(harnessSessions.session_key, session_key),
+              eq(harnessSessions.availability, "open"),
+            ),
+          )
+          .run();
+      }
     });
     return true;
   } catch {

@@ -190,6 +190,37 @@ export function runNotLive(runId: string): Problem {
   };
 }
 
+/** A Turn-scoped control (interrupt-turn/steer-turn) that names no live Turn is
+ *  rejected as a value (#118): the Run is not live here, or the named Turn already
+ *  settled — a control issued after acceptance. */
+export function turnControlRejected(
+  runId: string,
+  control: string,
+  turnId: string,
+): Problem {
+  return {
+    code: "turn-control-rejected",
+    explanation: `Run ${runId} has no live Turn ${turnId} to ${control}; the Turn has settled or the Run is not live here.`,
+    remediation:
+      "Re-read the Run; a control applies only while its Turn is live. Resume a halted Run to continue it.",
+    possibleEffects: "none",
+    details: { runId, control, turnId },
+  };
+}
+
+/** Steering a live Turn is rejected because the Harness has no same-Turn steer
+ *  (#118): the offer is marked unavailable and a submission never emulates it. */
+export function steerUnavailable(runId: string, reason: string): Problem {
+  return {
+    code: "steer-unavailable",
+    explanation: `Run ${runId} cannot be steered: ${reason}.`,
+    remediation:
+      "Interrupt the Turn to stop it, or let it run; same-Turn steer is not available for this Harness.",
+    possibleEffects: "none",
+    details: { runId, reason },
+  };
+}
+
 /** A live Run cannot be deleted: its store is in use (#87). */
 export function runIsLive(runId: string): Problem {
   return {

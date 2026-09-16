@@ -27,6 +27,7 @@ import type {
 import type {
   DurableTurnRecorder,
   PreparedHarness,
+  RecoveryCoordinate,
   RequestAnswer,
   TurnEvent,
   TurnResult,
@@ -201,6 +202,18 @@ export class RunCancelledError extends Error {
     this.name = "RunCancelledError";
   }
 }
+
+// The abort-reason vocabulary the cancel Seam carries, owned here because this is
+// the Module that interprets it — for a Command through the process Seam, and for
+// an Agent Turn at the Harness Seam (#118). All three stop a live Turn; they differ
+// only in the Run's resting state, which the Application decides from the reason:
+// `RUN_CANCEL_ABORT` ends the Run `cancelled` (the terminal cancel-run, #87/#98),
+// while `INTERRUPT_TURN_ABORT` (a Port control) and `SIGNAL_ABORT` (Ctrl+C / an OS
+// signal) rest it `halted`, resumable (ADR 0019). The Application imports these so
+// there is one source of truth for the sentinel strings.
+export const RUN_CANCEL_ABORT = "secant:cancel-run";
+export const INTERRUPT_TURN_ABORT = "secant:interrupt-turn";
+export const SIGNAL_ABORT = "secant:process-signal";
 
 /** How a Run came to rest. `blocked` is a durable pause at a Review checkpoint,
  *  derived (never written) from the current Step Attempt (#84, #85). `halted` is
@@ -1069,12 +1082,33 @@ async function runAgent(
     },
   };
 
+  // The Session's last recorded availability decides how this Turn opens (#118):
+  //  - `detached`: resume in the same Claude Code Session via `--resume` from the
+  //    stored recovery coordinate. A non-acknowledging init fails the Turn with the
+  //    typed recovery failure and marks the Session `unusable`.
+  //  - `unusable`: recovery already failed and ADR 0022 forbids fabricating a fresh
+  //    conversation, so the Attempt fails without starting a Turn — no retry ever
+  //    opens a fresh Session in its place.
+  //  - absent / `open`: a fresh Turn (a first launch, or a healthy same-Session Turn).
+  const sessionRecord = owner
+    .harnessSessions()
+    .find((candidate) => candidate.session === session);
+  if (sessionRecord?.availability === "unusable") {
+    return { outcome: "failed", outputs: [] };
+  }
+  const resume: RecoveryCoordinate | undefined =
+    sessionRecord?.availability === "detached" &&
+    sessionRecord.availabilityDetail !== undefined
+      ? { opaque: sessionRecord.availabilityDetail }
+      : undefined;
+
   const turn = harness.prepared.startTurn({
     session,
     origin: "managed",
     correlationKey: { opaque: turnId },
     recorder,
     input: { text: prompt },
+    ...(resume !== undefined ? { resume } : {}),
   });
   // The live request-answer channel (#117): each approval request reaches an
   // observing client through the channel, which the client answers by policy
@@ -1102,16 +1136,36 @@ async function runAgent(
         : { outcome: "rejected", reason: receipt.reason };
     });
   }
-  // ponytail: an in-flight cancel/interrupt of a live Agent Turn (Ctrl+C, story 38)
-  // is not wired here — the plain autonomous Turn runs to its own boundary. Wire
-  // `context.cancelSignal` to `turn.interrupt()` with the interrupt slice.
+  // A cancel signal aborting mid-Turn interrupts the live Turn at the Harness Seam
+  // (interrupt-turn, Ctrl+C, story 38, #118): the Adapter's `interrupt` stops the
+  // native work and the Turn drains to an `interrupted` (or `lost`) result. Both
+  // cases map to a resumable rest; the Application decides `cancelled` vs `halted`
+  // from the abort reason.
+  const signal = context.cancelSignal;
+  const onAbort = (): void => {
+    void turn.interrupt();
+  };
+  if (signal !== undefined) {
+    if (signal.aborted) void turn.interrupt();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
   try {
     const result = await turn.result();
     settleTurnResult(owner, turnId, session, result);
+    // A full cancel-run of a live Turn stops the Turn but ends the Run `cancelled`
+    // (#87/#98): unwind without publishing this Attempt, so the Application's cancel
+    // path owns the `cancelled` rest — the same RunCancelledError a cancelled
+    // Command throws. An interrupt-turn or an OS signal instead maps the result to
+    // an Attempt that rests the Run `halted` for resume.
+    if (signal?.aborted === true && signal.reason === RUN_CANCEL_ABORT) {
+      throw new RunCancelledError();
+    }
     return mapTurnResult(result);
   } finally {
-    // The Turn is over: unbind so a late `answer-harness-request` finds no live
-    // answer function and the Application refuses it (the request has expired).
+    // The Turn is over: drop the abort listener so a completed Turn leaks none, and
+    // unbind so a late `answer-harness-request` finds no live answer function and
+    // the Application refuses it (the request has expired).
+    if (signal !== undefined) signal.removeEventListener("abort", onAbort);
     channel?.bindAnswer(undefined);
   }
 }

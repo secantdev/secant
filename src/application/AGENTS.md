@@ -34,6 +34,17 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `cancel-run` is cancel-as-abort only for a Run live in THIS process (abort, await the promise, then delete the tracking entry); a Run live elsewhere still takes the
   fresh-owner epoch-bump path, which is why that path stays synchronous while the in-process path returns a Promise. `shutdown()` is the signal path: it aborts every live
   Run with `SIGNAL_ABORT` and awaits, leaving each ownership record live for startup reconciliation.
+- `interrupt-turn`/`steer-turn` (#118) reach a live Agent Turn through the same one `AbortController`: `interrupt-turn` aborts it with `INTERRUPT_TURN_ABORT`, which the
+  execution Module (owner of the reason strings, imported from there) translates into `turn.interrupt()` at the Harness Seam. All three reasons stop the live Turn; the reason
+  decides the rest — `INTERRUPT_TURN_ABORT` and `SIGNAL_ABORT` map the interrupted/lost Turn to a `cancelled`/`indeterminate` Attempt that rests the Run `halted` in-process
+  (no `RunCancelledError` thrown, so `runAndSettle` returns through its normal path), while `RUN_CANCEL_ABORT` throws `RunCancelledError` so cancel-run writes `cancelled`.
+  Both `interrupt-turn` and `steer-turn` are offered only while a live (unsettled) Turn exists in this process; a control naming a settled Turn is rejected as a value, and
+  `steer-turn` is always rejected (Claude Code has no same-Turn steer). `resume-run` continues a `detached` Session in the same Claude Code Session because the executor reads
+  the stored Session availability and passes its coordinate as `resume`; a Session recorded `unusable` fails the Attempt without ever opening a fresh Session (ADR 0022).
+  The one `AbortController` per Run means the three reasons race: a `cancel-run` and an `interrupt-turn` submitted concurrently for the same live Run both `abort()` it, and
+  whichever fires first sets the reason the executor reads, so the loser's Operation still settles `applied` while the Run rests in the winner's state. This is the accepted
+  extension of the pre-existing two-way (`CANCEL_ABORT` vs `SIGNAL_ABORT`) race — both callers intend to stop the Run, and the append-only Attempt log records what actually
+  happened — not a new class of bug.
 - A takeover that only re-owns a Run resting `blocked` settles synchronously in `runAndSettle` (it re-fences the owner, leaves the Run blocked, runs no execution). `startRun`
   must NOT set `tracking.promise` for it — the `promise === undefined` predicate is exactly what makes cancel/shutdown write the rest and release the owner rather than abort a
   dead signal and leave the Run stuck blocked with a leaked owner. The gate is `tracking.takeover === true && tracking.state === "blocked"`, captured before `runAndSettle`.

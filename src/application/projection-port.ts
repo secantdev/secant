@@ -43,6 +43,8 @@ export type Submission =
   | ResumeRunSubmission
   | AnswerHumanGateSubmission
   | AnswerHarnessRequestSubmission
+  | InterruptTurnSubmission
+  | SteerTurnSubmission
   | CancelRunSubmission
   | DeleteRunSubmission;
 
@@ -153,6 +155,39 @@ export interface AnswerHarnessRequestInput {
   readonly generation: number;
   readonly decision: ApprovalDecisionName;
   readonly by: HarnessAnswerSource;
+}
+
+/** Interrupt the live Turn of a running Run without cancelling the Run (spec
+ *  stories 18–20, 38; ADR 0022/0019, #118). Relays the Harness Adapter's
+ *  `interrupt`: the Step Attempt ends `cancelled`, the Run rests `halted`
+ *  (resumable), and the Session detaches; a `lost` termination ends the Attempt
+ *  `indeterminate` and still rests the Run `halted`. Offered on the `run`
+ *  Projection only while a Turn is live; a control issued once the Turn has
+ *  settled is rejected as a value (`not-applied`). Idempotent per operation id. */
+export interface InterruptTurnSubmission {
+  readonly operationId: string;
+  readonly operation: "interrupt-turn";
+  readonly input: InterruptTurnInput;
+}
+export interface InterruptTurnInput {
+  readonly runId: string;
+  /** The live Turn this control targets, read from the offer's live generation. A
+   *  control naming a Turn that is no longer the live one is rejected. */
+  readonly turnId: string;
+}
+
+/** Steer the live Turn with same-Turn guidance (spec story 20, #118). Claude Code
+ *  has no same-Turn steer, so the offer is marked unavailable and a submission is
+ *  rejected as a value (`not-applied`), never emulated. Idempotent per operation id. */
+export interface SteerTurnSubmission {
+  readonly operationId: string;
+  readonly operation: "steer-turn";
+  readonly input: SteerTurnInput;
+}
+export interface SteerTurnInput {
+  readonly runId: string;
+  readonly turnId: string;
+  readonly text: string;
 }
 
 /** Cancel a live Run (#87): end it `cancelled` — the only route to that terminal
@@ -651,6 +686,8 @@ export type ActionOffer =
   | AnswerHumanGateOffer
   | AnswerHarnessRequestOffer
   | ResumeRunOffer
+  | InterruptTurnOffer
+  | SteerTurnOffer
   | CancelRunOffer
   | DeleteRunOffer;
 
@@ -702,6 +739,30 @@ export interface ResumeRunOffer {
   readonly consequence: string;
   /** Present when resume requires an explicit takeover confirmation. */
   readonly takeover?: { readonly ownerPid: number };
+}
+
+/** Interrupt the live Turn of a running Run (#118). Offered on the `run`
+ *  Projection only while a Turn is live; it carries the live Turn's id — the
+ *  generation a control targets — so a stale control (naming a Turn that already
+ *  settled) is rejected. */
+export interface InterruptTurnOffer {
+  readonly action: "interrupt-turn";
+  readonly runId: string;
+  readonly turnId: string;
+  readonly consequence: string;
+}
+
+/** Steer the live Turn (#118). Offered while a Turn is live, but marked
+ *  unavailable for a Harness (Claude Code) that has no same-Turn steer: a client
+ *  shows it disabled with `reason` and never submits it. `available` is `false`
+ *  in M3 — ponytail: no `available: true` variant until a Harness supports steer,
+ *  at which point this becomes a discriminated union carrying the live turnId. */
+export interface SteerTurnOffer {
+  readonly action: "steer-turn";
+  readonly runId: string;
+  readonly turnId: string;
+  readonly available: false;
+  readonly reason: string;
 }
 
 /** Cancel a live Run (#87). Offered on the `run` Projection only while the Run is

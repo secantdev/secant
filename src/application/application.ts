@@ -11,12 +11,15 @@ import type {
   Platform,
   RoutingNode,
 } from "../workflow/workflow.js";
-import type {
-  LiveObservation,
-  LiveRequestView,
-  RequestAnswerFn,
-  RequestChannel,
-  RunReport,
+import {
+  type LiveObservation,
+  type LiveRequestView,
+  type RequestAnswerFn,
+  type RequestChannel,
+  type RunReport,
+  RUN_CANCEL_ABORT as CANCEL_ABORT,
+  INTERRUPT_TURN_ABORT,
+  SIGNAL_ABORT,
 } from "../run/execution/execution.js";
 import type { RunGroup, RunOwner } from "../run/store/store.js";
 import {
@@ -32,6 +35,7 @@ import {
   GATE_ANSWER_ARTIFACT,
   runSnapshot,
   selectRunEntry,
+  STEER_UNAVAILABLE_REASON,
   type RunProjectionDependencies,
 } from "./run-projection.js";
 import {
@@ -57,7 +61,9 @@ import {
   runOutputMissing,
   runStoreDamaged,
   runSupportUnavailable,
+  steerUnavailable,
   trustDigestMismatch,
+  turnControlRejected,
   workspaceNotApproved,
 } from "./problems.js";
 import { UpdateStream } from "./update-stream.js";
@@ -70,8 +76,10 @@ import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
   BundleFocusSnapshot,
+  InterruptTurnInput,
   LaunchRunInput,
   ResumeRunInput,
+  SteerTurnInput,
   OpenedProjection,
   OperationOutcome,
   OperationSnapshot,
@@ -112,14 +120,13 @@ export type RunExecution = (context: {
   readonly requestChannel?: RequestChannel;
 }) => Promise<RunReport>;
 
-// Why a live Run's execution was aborted (#98). A `cancel-run` rests the Run
-// `cancelled`; a process signal (SIGINT/SIGHUP/SIGTERM) leaves the Workspace claim
-// live so the next open reconciles the Run `halted` via the indeterminate path
-// (ADR 0019). The Application reads its own AbortController's reason to tell them
-// apart, so it never needs to import the execution `RunCancelledError` — an aborted
-// signal is proof enough that our cancel fired.
-const CANCEL_ABORT = "secant:cancel-run";
-const SIGNAL_ABORT = "secant:process-signal";
+// Why a live Run's execution was aborted. A `cancel-run` (CANCEL_ABORT) rests the
+// Run `cancelled`; a process signal (SIGNAL_ABORT: SIGINT/SIGHUP/SIGTERM) or a
+// Turn-scoped interrupt (INTERRUPT_TURN_ABORT, #118) rests it `halted` — a Command
+// leaves the claim live for the next open to reconcile, while a live Agent Turn
+// interrupts at the Harness Seam and rests `halted` in-process. The reasons live at
+// the execution Seam that interprets them (#98, #118); the Application reads its own
+// AbortController's reason to tell the cases apart.
 
 /** The ephemeral live-overlay state a tracked Run carries while executing an Agent
  *  Turn (#117). Never stored; rebuilt into a `RunLiveOverlay` for observers. */
@@ -1675,6 +1682,102 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { status: "applied" };
   }
 
+  // Interrupt the live Turn of a running Run (#118). Admitted at once; the
+  // interrupt is relayed at settle time (deferred, since it must await the Run's
+  // `halted` rest). Idempotent per operation id.
+  function submitInterruptTurn(
+    operationId: string,
+    input: InterruptTurnInput,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === interruptTurnReplayKey(input)) {
+        return { admitted: true, operationId, runId: input.runId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (runGroup === undefined) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    operations.set(operationId, {
+      replayKey: interruptTurnReplayKey(input),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId: input.runId,
+      settle: () => interruptTurnAndSettle(input),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId: input.runId };
+  }
+
+  // Relay the Harness Adapter's interrupt to the live Turn: abort the Run's
+  // execution (which the Agent executor translates into `turn.interrupt()`), then
+  // await the `halted` rest the interrupted Turn's `cancelled`/`indeterminate`
+  // Attempt writes through the still-held owner (#118). A Run that is not live in
+  // this process, or whose named Turn already settled, has no live control to make:
+  // it is rejected as a value, exactly the after-acceptance case the spec names.
+  function interruptTurnAndSettle(
+    input: InterruptTurnInput,
+  ): OperationOutcome | Promise<OperationOutcome> {
+    const rejected: OperationOutcome = {
+      status: "not-applied",
+      problem: turnControlRejected(input.runId, "interrupt-turn", input.turnId),
+    };
+    const tracking = runs.get(input.runId);
+    const owner =
+      tracking !== undefined && !tracking.done ? tracking.owner : undefined;
+    const promise = tracking?.done === false ? tracking.promise : undefined;
+    if (
+      tracking === undefined ||
+      owner === undefined ||
+      promise === undefined
+    ) {
+      return rejected;
+    }
+    // The Turn the control targets must be the one live generation: the single
+    // admitted Turn with no settled result. A control naming any other Turn is stale.
+    const live = owner.turns().find((turn) => turn.resultKind === undefined);
+    if (live === undefined || live.turnId !== input.turnId) {
+      return rejected;
+    }
+    tracking.abort.abort(INTERRUPT_TURN_ABORT);
+    return promise.then(() => {
+      // Execution rested the Run `halted` (the interrupted Turn's Attempt) and
+      // released the owner in its finally; the interrupt itself is applied.
+      return { status: "applied" };
+    });
+  }
+
+  // Steer the live Turn (#118). Claude Code has no same-Turn steer, so a submission
+  // is rejected as a value — never emulated. Settles inline: no execution to drive.
+  function submitSteerTurn(
+    operationId: string,
+    input: SteerTurnInput,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === steerTurnReplayKey(input)) {
+        return { admitted: true, operationId, runId: input.runId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (runGroup === undefined) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    operations.set(operationId, {
+      replayKey: steerTurnReplayKey(input),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId: input.runId,
+      settle: (): OperationOutcome => ({
+        status: "not-applied",
+        problem: steerUnavailable(input.runId, STEER_UNAVAILABLE_REASON),
+      }),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId: input.runId };
+  }
+
   // Cancel a live Run (#87). Admitted at once; the cancel is decided and applied
   // at settle time (inline by default). Idempotent per operation id via the
   // operations map.
@@ -1878,6 +1981,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
             submission.operationId,
             submission.input,
           );
+        case "interrupt-turn":
+          return submitInterruptTurn(submission.operationId, submission.input);
+        case "steer-turn":
+          return submitSteerTurn(submission.operationId, submission.input);
         case "cancel-run":
           return submitCancel(submission.operationId, submission.input.runId);
         case "delete-run":
@@ -2070,6 +2177,17 @@ function answerHarnessRequestReplayKey(
     input.decision,
     input.by,
   ]);
+}
+
+/** A stable replay key for an interrupt-turn: the Run and the targeted live Turn
+ *  (#118). A re-submitted operation id with an equal key replays. */
+function interruptTurnReplayKey(input: InterruptTurnInput): string {
+  return JSON.stringify(["interrupt-turn", input.runId, input.turnId]);
+}
+
+/** A stable replay key for a steer-turn: the Run, the Turn, and the text (#118). */
+function steerTurnReplayKey(input: SteerTurnInput): string {
+  return JSON.stringify(["steer-turn", input.runId, input.turnId, input.text]);
 }
 
 /** A stable replay key for a cancel: the Run id. A re-submitted operation id with

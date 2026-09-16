@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -16,6 +16,7 @@ import {
   RunCancelledError,
   TRUNCATION_MARKER,
   type AssetResolver,
+  type SpawnCommand,
 } from "../../../src/run/execution/execution.js";
 import { openRunGroup, type RunOwner } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
@@ -495,25 +496,25 @@ test("a Repeat group that fails twice then passes runs three iterations and rest
 
 test("a Repeat group whose Verdict is already pass before entry runs zero iterations and the Run continues", async (t) => {
   const { owner, state } = ownerForFreshRun(t);
-  const counter = freshCounter();
+  const fake = fakeExecutor();
   const routing: RoutingNode[] = [
     // Baseline binds `passing` = pass before the group is entered (exit 0).
-    commandStep(
+    fakeStep(
       "baseline",
-      { executable: NODE, arguments: ["-e", "process.exit(0)"] },
+      { exit: 0 },
       { produces: produces({ name: "passing", type: "verdict" }) },
     ),
-    // The group's counter Command would fail, but it must never run.
-    repeatOver(counter, 999, 5),
+    // The group's Command would fail, but it must never run.
+    fakeRepeat("check", { exit: 1 }, 5),
     // A node after the group proves the Run continues past a zero-iteration group.
-    commandStep(
+    fakeStep(
       "after",
-      { executable: NODE, arguments: ["-e", "console.log('after ran')"] },
+      { exit: 0, out: "after ran\n" },
       { produces: produces({ name: "done", type: "text" }) },
     ),
   ];
 
-  const report = await run(routing, owner);
+  const report = await run(routing, owner, { spawnCommand: fake.spawn });
   assert.deepEqual(report, { outcome: "succeeded" });
   assert.equal(state(), "succeeded");
   // Only the baseline and the trailing step ran — the group ran zero iterations.
@@ -522,31 +523,98 @@ test("a Repeat group whose Verdict is already pass before entry runs zero iterat
     ["succeeded", "succeeded"],
   );
   assert.equal(dec(readBound(owner, "done")), "after ran\n");
-  // The counter file was never written, so the group's Command never ran.
-  assert.equal(existsSync(counter), false);
+  // The group's Command executor was never called, so the group ran zero iterations.
+  assert.equal(fake.calls("check"), 0);
 });
 
-/** An always-failing single-step Repeat group (exit 1 each iteration), cheaper
- *  than the counter for tests that only need the loop to keep failing. */
-function alwaysFailRepeat(interval: number): RoutingNode {
+// --- Fast in-process command executor (the SpawnCommand Seam's test Adapter) ---
+//
+// The loop-arithmetic tests below (Repeat-group cadence, resume, the review clamp)
+// assert scheduler behaviour that does not depend on a real process — only on each
+// Command's exit code driving the loop. Spawning a real runtime per iteration made
+// them race the CI timeout on slow Windows runners (docs/agents/testing.md: a flaky
+// test is fixed deterministically, not with a sleep, a retry, or a bumped timeout).
+// So they inject this fake executor through the Seam and never spawn. The real spawn
+// path stays covered by the Command-contract tests above and by the one real-spawn
+// Repeat integration test ("fails twice then passes"), which together catch any
+// drift between this fake and the process Module's `spawnCommand` contract.
+
+const FAKE_MARKER = "--secant-fake";
+
+/** A behaviour the fake executor replays: a fixed exit (optionally with captured
+ *  stdout), or a counter that exits 1 until its `passAt`-th call then 0. */
+type FakePlan =
+  | { readonly exit: number; readonly out?: string }
+  | { readonly passAt: number };
+
+/** A Command Step wired to the fake executor: it carries its id and plan in its
+ *  arguments and keeps a real, resolvable executable (`NODE`) so `resolveExecutable`
+ *  still succeeds — but the injected fake replays the plan instead of spawning. */
+function fakeStep(
+  id: string,
+  plan: FakePlan,
+  step: Partial<CommandStep> = {},
+): CommandStep {
+  return commandStep(
+    id,
+    { executable: NODE, arguments: [FAKE_MARKER, id, JSON.stringify(plan)] },
+    step,
+  );
+}
+
+/** A single-step Repeat group whose `check` Command runs through the fake executor. */
+function fakeRepeat(id: string, plan: FakePlan, interval: number): RoutingNode {
   return {
     repeat: {
       until: "passing",
       reviewCheckpoint: { interval, message: "please review the loop" },
       steps: [
-        commandStep(
-          "check",
-          { executable: NODE, arguments: ["-e", "process.exit(1)"] },
-          { produces: produces({ name: "passing", type: "verdict" }) },
-        ),
+        fakeStep(id, plan, {
+          produces: produces({ name: "passing", type: "verdict" }),
+        }),
       ],
     },
   };
 }
 
+/** The fake command executor and a per-Step call counter. It never spawns: it reads
+ *  each Command's plan from its arguments and replays it, counting calls per Step id
+ *  so a `passAt` counter advances across iterations and resumes (a skipped iteration
+ *  never calls it, exactly as a real run never re-spawns one) and a test can assert a
+ *  Step's Command never ran. */
+function fakeExecutor(): {
+  readonly spawn: SpawnCommand;
+  readonly calls: (id: string) => number;
+} {
+  const counts = new Map<string, number>();
+  const spawn: SpawnCommand = (options) => {
+    const marker = options.args.indexOf(FAKE_MARKER);
+    if (marker === -1 || marker + 2 >= options.args.length) {
+      throw new Error(
+        "fakeExecutor: a Command was not wired through fakeStep.",
+      );
+    }
+    const id = options.args[marker + 1]!;
+    const plan = JSON.parse(options.args[marker + 2]!) as FakePlan;
+    const n = (counts.get(id) ?? 0) + 1;
+    counts.set(id, n);
+    const status = "passAt" in plan ? (n >= plan.passAt ? 0 : 1) : plan.exit;
+    const out = "passAt" in plan ? "" : (plan.out ?? "");
+    return Promise.resolve({
+      kind: "exited",
+      status,
+      text: new TextEncoder().encode(out),
+    });
+  };
+  return { spawn, calls: (id) => counts.get(id) ?? 0 };
+}
+
 test("a Repeat group that always fails blocks after `interval` iterations", async (t) => {
   const { owner, state } = ownerForFreshRun(t);
-  const report = await run([alwaysFailRepeat(3)], owner);
+  const fake = fakeExecutor();
+  const report = await run([fakeRepeat("check", { exit: 1 }, 3)], owner, {
+    spawnCommand: fake.spawn,
+  });
   assert.deepEqual(report, { outcome: "blocked" });
   assert.equal(state(), "blocked");
   // Exactly three iterations ran before the checkpoint; every one a fail Verdict.
@@ -555,64 +623,79 @@ test("a Repeat group that always fails blocks after `interval` iterations", asyn
     ["succeeded", "succeeded", "succeeded"],
   );
   assert.equal(dec(readBound(owner, "passing")), "fail");
+  assert.equal(fake.calls("check"), 3);
 });
 
-test(
-  "an authored interval above the engine ceiling never delays the checkpoint beyond the ceiling",
-  { timeout: 60_000 },
-  async (t) => {
-    const { owner } = ownerForFreshRun(t);
-    const report = await run(
-      [alwaysFailRepeat(MAX_REVIEW_CHECKPOINT_INTERVAL + 150)],
-      owner,
-    );
-    assert.deepEqual(report, { outcome: "blocked" });
-    // The clamp caps iterations-between-reviews at the ceiling, not the authored
-    // 250. Count only ran iterations (a rare transient spawn retry adds `failed`
-    // entries that do not count as an iteration).
-    const iterations = owner
-      .attemptLog()
-      .filter((entry) => entry.outcome === "succeeded").length;
-    assert.equal(iterations, MAX_REVIEW_CHECKPOINT_INTERVAL);
-  },
-);
+test("an authored interval above the engine ceiling never delays the checkpoint beyond the ceiling", async (t) => {
+  const { owner } = ownerForFreshRun(t);
+  const fake = fakeExecutor();
+  const report = await run(
+    [fakeRepeat("check", { exit: 1 }, MAX_REVIEW_CHECKPOINT_INTERVAL + 150)],
+    owner,
+    { spawnCommand: fake.spawn },
+  );
+  assert.deepEqual(report, { outcome: "blocked" });
+  // The clamp caps iterations-between-reviews at the ceiling, not the authored 250.
+  // The fake exits deterministically, so every iteration is one `succeeded` Attempt.
+  const iterations = owner
+    .attemptLog()
+    .filter((entry) => entry.outcome === "succeeded").length;
+  assert.equal(iterations, MAX_REVIEW_CHECKPOINT_INTERVAL);
+  assert.equal(fake.calls("check"), MAX_REVIEW_CHECKPOINT_INTERVAL);
+});
 
 test("resuming a blocked Repeat group runs exactly one more interval and blocks again (#85)", async (t) => {
   const { owner, state } = ownerForFreshRun(t);
+  const fake = fakeExecutor();
   // First interval: three iterations, then durably blocked.
-  assert.deepEqual(await run([alwaysFailRepeat(3)], owner), {
-    outcome: "blocked",
-  });
+  assert.deepEqual(
+    await run([fakeRepeat("check", { exit: 1 }, 3)], owner, {
+      spawnCommand: fake.spawn,
+    }),
+    { outcome: "blocked" },
+  );
   assert.equal(owner.attemptLog().length, 3);
   assert.equal(state(), "blocked");
 
   // Resume in the same owner (a `continue` grant re-walks the Routing): the three
-  // prior iterations are dropped, and a fresh interval of three runs before the
-  // Run blocks again — the count advanced from 3 to 6.
-  assert.deepEqual(await run([alwaysFailRepeat(3)], owner), {
-    outcome: "blocked",
-  });
+  // prior iterations are replayed by identity without spawning, and a fresh interval
+  // of three runs before the Run blocks again — the count advanced from 3 to 6.
+  assert.deepEqual(
+    await run([fakeRepeat("check", { exit: 1 }, 3)], owner, {
+      spawnCommand: fake.spawn,
+    }),
+    { outcome: "blocked" },
+  );
   assert.equal(
     owner.attemptLog().filter((e) => e.outcome === "succeeded").length,
     6,
   );
   assert.equal(state(), "blocked");
+  // Only fresh iterations spawned: three the first run, three the second — the
+  // replayed iterations never re-ran.
+  assert.equal(fake.calls("check"), 6);
 });
 
 test("a granted interval that makes the Verdict pass rests the Run succeeded (#85)", async (t) => {
   const { owner, state } = ownerForFreshRun(t);
-  const counter = freshCounter();
+  const fake = fakeExecutor();
   // passAt 5, interval 3: the first interval (iterations 1-3) fails and blocks.
-  assert.deepEqual(await run([repeatOver(counter, 5, 3)], owner), {
-    outcome: "blocked",
-  });
+  assert.deepEqual(
+    await run([fakeRepeat("check", { passAt: 5 }, 3)], owner, {
+      spawnCommand: fake.spawn,
+    }),
+    { outcome: "blocked" },
+  );
   assert.equal(owner.attemptLog().length, 3);
 
-  // The granted interval continues the shared counter (4, then 5 = pass) and the
-  // deciding Attempt rests the Run succeeded within the interval.
-  assert.deepEqual(await run([repeatOver(counter, 5, 3)], owner), {
-    outcome: "succeeded",
-  });
+  // The granted interval continues the shared counter (call 4, then 5 = pass) and
+  // the deciding Attempt rests the Run succeeded within the interval.
+  assert.deepEqual(
+    await run([fakeRepeat("check", { passAt: 5 }, 3)], owner, {
+      spawnCommand: fake.spawn,
+    }),
+    { outcome: "succeeded" },
+  );
   assert.equal(state(), "succeeded");
   assert.equal(dec(readBound(owner, "passing")), "pass");
   assert.equal(owner.attemptLog().length, 5);
@@ -620,48 +703,53 @@ test("a granted interval that makes the Verdict pass rests the Run succeeded (#8
 
 test("resuming past a group that already passed consumes no skip and does not re-run a later Step (#85)", async (t) => {
   const { owner } = ownerForFreshRun(t);
-  const counter = freshCounter();
+  const fake = fakeExecutor();
   const routing: RoutingNode[] = [
     // Baseline binds `passing` = pass, so the group runs zero iterations.
-    commandStep(
+    fakeStep(
       "baseline",
-      { executable: NODE, arguments: ["-e", "process.exit(0)"] },
+      { exit: 0 },
       { produces: produces({ name: "passing", type: "verdict" }) },
     ),
     // Would fail every iteration, but `passing` is already pass, so it never runs.
-    repeatOver(counter, 999, 5),
-    commandStep(
+    fakeRepeat("check", { exit: 1 }, 5),
+    fakeStep(
       "after",
-      { executable: NODE, arguments: ["-e", "console.log('after')"] },
+      { exit: 0, out: "after\n" },
       { produces: produces({ name: "done", type: "text" }) },
     ),
   ];
-  assert.deepEqual(await run(routing, owner), { outcome: "succeeded" });
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "succeeded",
+  });
   assert.equal(owner.attemptLog().length, 2); // baseline + after
 
   // Resume: the already-passed group must consume none of the skip budget (it is
   // not the terminal node), so `after` stays skipped rather than re-running, and
   // the group's Command never runs.
-  assert.deepEqual(await run(routing, owner), { outcome: "succeeded" });
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "succeeded",
+  });
   assert.equal(owner.attemptLog().length, 2);
-  assert.equal(existsSync(counter), false);
+  assert.equal(fake.calls("check"), 0);
 });
 
 test("resume re-runs a Step that failed after a passed Repeat group, never resting succeeded (A1)", async (t) => {
   const { owner, state } = ownerForFreshRun(t);
-  const counter = freshCounter();
+  const fake = fakeExecutor();
   const afterAttempts = () =>
     owner.attemptLog().filter((e) => e.attemptId.endsWith(":after")).length;
   const routing: RoutingNode[] = [
-    commandStep(
+    fakeStep(
       "baseline",
-      { executable: NODE, arguments: ["-e", "process.exit(0)"] },
+      { exit: 0 },
       { produces: produces({ name: "b", type: "text" }) },
     ),
     // Passes on its first iteration, so on resume it early-returns already-pass.
-    repeatOver(counter, 1, 5),
-    // Cannot spawn (missing binary), so it rests the Run failed. retry: 0 keeps
-    // one failed Attempt per run, so the re-run is unambiguous to count.
+    fakeRepeat("check", { passAt: 1 }, 5),
+    // Cannot spawn (missing binary): resolveExecutable fails before the Seam, so the
+    // fake is never reached and the Run rests failed. retry: 0 keeps one failed
+    // Attempt per run, so the re-run is unambiguous to count.
     commandStep(
       "after",
       { executable: "secant-no-such-binary-xyz", arguments: [] },
@@ -670,23 +758,27 @@ test("resume re-runs a Step that failed after a passed Repeat group, never resti
   ];
 
   // First run: baseline succeeds, the group passes on iteration 1, `after` fails.
-  assert.deepEqual(await run(routing, owner), { outcome: "failed" });
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "failed",
+  });
   assert.equal(state(), "failed");
   assert.equal(
     owner.attemptLog().filter((e) => e.outcome === "succeeded").length,
     2, // baseline + the one group iteration
   );
   assert.equal(afterAttempts(), 1);
-  assert.equal(readFileSync(counter, "utf8"), "1"); // one iteration ran
+  assert.equal(fake.calls("check"), 1); // one iteration ran
 
   // Resume: the old flat cursor leaked the group's iteration budget to `after` and
   // skipped it, resting the Run `succeeded` with no new Attempt. Skipping by Step
   // identity, `after` re-runs and the Run rests `failed` — never succeeded.
-  assert.deepEqual(await run(routing, owner), { outcome: "failed" });
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "failed",
+  });
   assert.equal(state(), "failed");
   assert.equal(afterAttempts(), 2); // `after` re-ran
-  // The already-passed group did not re-run — its shared counter is untouched.
-  assert.equal(readFileSync(counter, "utf8"), "1");
+  // The already-passed group did not re-run — its executor was not called again.
+  assert.equal(fake.calls("check"), 1);
 });
 
 /** Read the bytes currently bound to an artifact name through the owner. */

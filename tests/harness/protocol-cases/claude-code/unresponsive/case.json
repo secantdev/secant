@@ -1,0 +1,5 @@
+{
+  "ignoreSigterm": true,
+  "exitCode": 137,
+  "turns": [{ "stdout": "turn-1.stdout" }]
+}

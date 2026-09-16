@@ -23,6 +23,12 @@ const recording = JSON.parse(
 const args = process.argv.slice(2);
 const invocationId = `${process.pid}-${Date.now()}`;
 
+// SIGTERM ends the Turn and the process (exit 143), matching real `claude -p`. It
+// is installed at startup so an interrupt — which only ever arrives after the Turn
+// is live — never races the handler. A case may swap this for a swallow below to
+// model a process that ignores SIGTERM and must be force-killed.
+process.on("SIGTERM", () => process.exit(143));
+
 if (recording.log) {
   appendFileSync(
     recording.log,
@@ -162,6 +168,26 @@ if (!valid) {
 const protocolCase = JSON.parse(
   readFileSync(join(caseDirectory, "case.json"), "utf8"),
 );
+
+// A launch with `--resume` reattaches a detached Session: replay the case's
+// separately recorded resumed process (its init may or may not acknowledge the
+// Session, exactly as recorded). A first launch uses the initial recording.
+const resuming = valueAfter("--resume") !== undefined;
+const playback = resuming ? protocolCase.resume : protocolCase;
+if (!playback) {
+  process.stderr.write(
+    "secant replayer: no recorded process for this launch\n",
+  );
+  process.exit(2);
+}
+
+// A case can model a process that ignores SIGTERM: swallow it so only SIGKILL
+// (a group force-kill) stops the process, driving the Adapter's escalation path.
+if (playback.ignoreSigterm) {
+  process.removeAllListeners("SIGTERM");
+  process.on("SIGTERM", () => {});
+}
+
 const write = (stream, bytes) =>
   new Promise((resolve, reject) => {
     stream.write(bytes, (error) => (error ? reject(error) : resolve()));
@@ -188,7 +214,7 @@ for await (const line of lines) {
       JSON.stringify({ type: "stdin", id: invocationId, line }) + "\n",
     );
   }
-  const turn = protocolCase.turns[turnIndex++];
+  const turn = playback.turns[turnIndex++];
   if (!turn) {
     process.stderr.write(
       "secant replayer: received more Turns than recorded\n",
@@ -220,7 +246,10 @@ for await (const line of lines) {
       );
     }
   }
+  // A Turn that models "process exits without a result" (a lost or corrupt case)
+  // ends the process right after its bytes instead of awaiting more stdin.
+  if (turn.exitAfter) process.exit(playback.exitCode ?? 0);
 }
 
 await mcpClient?.close().catch(() => {});
-process.exitCode = protocolCase.exitCode;
+process.exitCode = playback.exitCode;

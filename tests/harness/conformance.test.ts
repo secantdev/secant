@@ -73,6 +73,51 @@ const COMPLETED_OPEN: TurnResult = {
   },
 };
 
+const SESSION_OPEN = {
+  kind: "session",
+  availability: { state: "open" },
+} as const;
+
+const DETACHED = {
+  state: "detached",
+  coordinate: { opaque: "conformance" },
+} as const;
+
+const LOST_INTERRUPTION: TurnResult = {
+  kind: "lost",
+  detail: {
+    unknown: "interruption",
+    lastObservation: "blocked before the interruption completed",
+    session: DETACHED,
+  },
+};
+
+const LOST_COMPLETION: TurnResult = {
+  kind: "lost",
+  detail: {
+    unknown: "completion",
+    lastObservation: "the producer closed before a result",
+    session: DETACHED,
+  },
+};
+
+const FAILED_RECOVERY: TurnResult = {
+  kind: "failed",
+  detail: {
+    failure: {
+      phase: "recovery",
+      category: "recovery-unacknowledged",
+      possibleEffects: "possible",
+      diagnostics: "the resumed Session was not acknowledged",
+    },
+    effectiveModel: { known: false },
+    session: {
+      state: "unusable",
+      reason: "the resumed Session was not acknowledged",
+    },
+  },
+};
+
 function fake(...turns: FakeTurnScript[]): FakeScript {
   return { profile: profile(), turns };
 }
@@ -171,6 +216,35 @@ const scenarios: ConformanceScenarios = {
       fake(
         { requests: [approval("req-r", true)], result: COMPLETED_OPEN },
         { result: COMPLETED_OPEN },
+      ),
+    ),
+  blockingTurn: () =>
+    createFake(
+      fake({ events: [SESSION_OPEN], block: true, result: COMPLETED_OPEN }),
+    ),
+  unresponsiveInterrupt: () =>
+    createFake(
+      fake({
+        events: [SESSION_OPEN],
+        block: true,
+        result: COMPLETED_OPEN,
+        interruptResult: LOST_INTERRUPTION,
+      }),
+    ),
+  lostCompletion: () =>
+    createFake(fake({ events: [SESSION_OPEN], result: LOST_COMPLETION })),
+  resumeAcknowledged: () =>
+    createFake(
+      fake(
+        { events: [SESSION_OPEN], block: true, result: COMPLETED_OPEN },
+        { events: [SESSION_OPEN], result: COMPLETED_OPEN },
+      ),
+    ),
+  resumeUnacknowledged: () =>
+    createFake(
+      fake(
+        { events: [SESSION_OPEN], block: true, result: COMPLETED_OPEN },
+        { result: FAILED_RECOVERY },
       ),
     ),
 };

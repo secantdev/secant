@@ -64,13 +64,40 @@ export interface ApprovalRequestScenarios {
 }
 
 /**
+ * The interrupt, lost, recovery, and cleanup behaviours a native Adapter must
+ * exhibit without needing Harness Requests (which a raw `claude -p` cannot raise
+ * until the MCP bridge lands). Each blocking Turn emits at least one event — a
+ * `session` event — before it blocks, so the driver can wait for the Turn to be
+ * live without a request. Both the fake and the Claude Code Adapter over the
+ * replayer implement these.
+ */
+export interface InterruptRecoveryScenarios extends TurnLifecycleScenarios {
+  /** A Turn that emits a `session` event then blocks until interrupted; the
+   *  graceful interrupt stops it and it settles `interrupted` with a detached
+   *  Session. */
+  blockingTurn(): HarnessAdapterFactory;
+  /** A blocking Turn whose process does not stop on the graceful signal and must
+   *  be force-killed → `lost` with unknown "interruption". */
+  unresponsiveInterrupt(): HarnessAdapterFactory;
+  /** A Turn whose producer closes with no authoritative result → `lost` with
+   *  unknown "completion". */
+  lostCompletion(): HarnessAdapterFactory;
+  /** Two Turns on one Session: the first blocks and is interrupted (detaches),
+   *  the second resumes from the coordinate and completes. */
+  resumeAcknowledged(): HarnessAdapterFactory;
+  /** Like `resumeAcknowledged`, but the resumed Session is not acknowledged: it
+   *  becomes `unusable` and the second Turn fails in the `recovery` phase. */
+  resumeUnacknowledged(): HarnessAdapterFactory;
+}
+
+/**
  * The full set of scenario factories. Each returns an Adapter factory set up to
  * exhibit one behaviour when the suite drives it through the Interface. The fake
  * implements all of these; a prepare-only provider implements just the inherited
  * prepare/profile subset.
  */
 export interface ConformanceScenarios
-  extends TurnLifecycleScenarios, ApprovalRequestScenarios {
+  extends InterruptRecoveryScenarios, ApprovalRequestScenarios {
   /** A Turn that raises one request it does not await, expiring it at terminal. */
   expiringRequest(): HarnessAdapterFactory;
   /** A Turn that ends `lost` with the given unknown. */
@@ -156,6 +183,152 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
     assert.equal(once, twice, "the same report value each time");
   });
 }
+
+/**
+ * Run the request-free interrupt, lost, recovery, and cleanup cases against one
+ * provider. Both the fake and the Claude Code Adapter over the replayer call it;
+ * `skipUnresponsiveInterrupt` is set where a real process cannot be made to ignore
+ * the graceful signal (Windows force-kills the tree, so escalation is unobservable).
+ */
+export function runInterruptRecoveryCases(
+  scenarios: InterruptRecoveryScenarios,
+  options: { readonly skipUnresponsiveInterrupt?: boolean } = {},
+): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+
+  test(
+    name("a graceful interrupt stops a blocking Turn and detaches the Session"),
+    async () => {
+      const prepared = await prepare(scenarios.blockingTurn());
+      const turn = prepared.startTurn(request(recorder().recorder));
+      const events = observe(turn);
+      await events.waitForSession();
+      const receipt = await turn.interrupt();
+      assert.deepEqual(receipt, { outcome: "accepted" });
+      const result = await turn.result();
+      assert.equal(result.kind, "interrupted");
+      if (result.kind !== "interrupted") throw new Error("unreachable");
+      assert.equal(result.detail.session.state, "detached");
+      // New inputs are rejected after an accepted interrupt.
+      const late = await turn.steer({ text: "too late" });
+      assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
+      await prepared.close();
+    },
+  );
+
+  test(
+    name("a process that ignores the graceful signal is force-killed and lost"),
+    { skip: options.skipUnresponsiveInterrupt === true },
+    async () => {
+      const prepared = await prepare(scenarios.unresponsiveInterrupt());
+      const turn = prepared.startTurn(request(recorder().recorder));
+      const events = observe(turn);
+      await events.waitForSession();
+      await turn.interrupt();
+      const result = await turn.result();
+      assert.equal(result.kind, "lost");
+      if (result.kind !== "lost") throw new Error("unreachable");
+      assert.equal(result.detail.unknown, "interruption");
+      await prepared.close();
+    },
+  );
+
+  test(
+    name("a producer that closes without a result loses the Turn"),
+    async () => {
+      const prepared = await prepare(scenarios.lostCompletion());
+      const turn = prepared.startTurn(request(recorder().recorder));
+      const result = await turn.result();
+      assert.equal(result.kind, "lost");
+      if (result.kind !== "lost") throw new Error("unreachable");
+      assert.equal(result.detail.unknown, "completion");
+      assert.ok(result.detail.lastObservation.length > 0);
+      await prepared.close();
+    },
+  );
+
+  test(
+    name("a detached Session resumes from its coordinate and completes"),
+    async () => {
+      const prepared = await prepare(scenarios.resumeAcknowledged());
+      const turn1 = prepared.startTurn(request(recorder().recorder));
+      const events1 = observe(turn1);
+      await events1.waitForSession();
+      await turn1.interrupt();
+      const result1 = await turn1.result();
+      assert.equal(result1.kind, "interrupted");
+      if (result1.kind !== "interrupted") throw new Error("unreachable");
+      if (result1.detail.session.state !== "detached")
+        throw new Error("unreachable");
+      const coordinate = result1.detail.session.coordinate;
+
+      const second = recorder();
+      const turn2 = prepared.startTurn(
+        request(second.recorder, { resume: coordinate }),
+      );
+      const result2 = await turn2.result();
+      assert.equal(result2.kind, "completed");
+      if (result2.kind !== "completed") throw new Error("unreachable");
+      assert.equal(result2.detail.session.state, "open");
+      assert.equal(second.admissions.length, 1);
+      assert.deepEqual(second.admissions[0].resume, coordinate);
+      await prepared.close();
+    },
+  );
+
+  test(
+    name(
+      "a resume the Harness does not acknowledge makes the Session unusable",
+    ),
+    async () => {
+      const prepared = await prepare(scenarios.resumeUnacknowledged());
+      const turn1 = prepared.startTurn(request(recorder().recorder));
+      const events1 = observe(turn1);
+      await events1.waitForSession();
+      await turn1.interrupt();
+      const result1 = await turn1.result();
+      assert.equal(result1.kind, "interrupted");
+      if (result1.kind !== "interrupted") throw new Error("unreachable");
+      if (result1.detail.session.state !== "detached")
+        throw new Error("unreachable");
+      const coordinate = result1.detail.session.coordinate;
+
+      const turn2 = prepared.startTurn(
+        request(recorder().recorder, { resume: coordinate }),
+      );
+      const result2 = await turn2.result();
+      assert.equal(result2.kind, "failed");
+      if (result2.kind !== "failed") throw new Error("unreachable");
+      assert.equal(result2.detail.failure.phase, "recovery");
+      assert.equal(result2.detail.session.state, "unusable");
+      await prepared.close();
+    },
+  );
+
+  test(
+    name("close during a live Turn bounds cleanup and is idempotent"),
+    async () => {
+      const prepared = await prepare(scenarios.blockingTurn());
+      const turn = prepared.startTurn(request(recorder().recorder));
+      const events = observe(turn);
+      await events.waitForSession();
+      const once = await prepared.close();
+      const twice = await prepared.close();
+      assert.deepEqual(once, twice);
+      // The live Turn still settles a terminal result rather than hanging.
+      const result = await turn.result();
+      assert.ok(TURN_RESULT_SETTLED.has(result.kind));
+    },
+  );
+}
+
+const TURN_RESULT_SETTLED = new Set([
+  "not-started",
+  "completed",
+  "failed",
+  "interrupted",
+  "lost",
+]);
 
 /** Run the prepare/profile cases against one provider. Both the full suite and
  *  a prepare-only provider (the Claude Code Adapter over the replayer) call it. */
@@ -304,6 +477,7 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
 
   runPrepareProfileCases(scenarios);
   runTurnLifecycleCases(scenarios);
+  runInterruptRecoveryCases(scenarios);
   runApprovalRequestCases(scenarios);
 
   test(name("answering after the Turn ends is rejected expired"), async () => {
@@ -454,19 +628,27 @@ interface Observation {
   readonly all: TurnEvent[];
   requests(): HarnessRequest[];
   waitForRequests(count: number): Promise<void>;
+  /** Resolve once the Turn is live — its first `session` event has arrived. The
+   *  request-free interrupt/recovery cases use this in place of a raised request. */
+  waitForSession(): Promise<void>;
 }
 
 function observe(turn: HarnessTurn): Observation {
   const all: TurnEvent[] = [];
   const waiters: { count: number; resolve: () => void }[] = [];
+  const sessionWaiters: (() => void)[] = [];
   const raisedCount = () =>
     all.filter((event) => event.kind === "request-raised").length;
+  const hasSession = () => all.some((event) => event.kind === "session");
   turn.subscribe((event) => {
     all.push(event);
     if (event.kind === "request-raised") {
       for (const waiter of waiters) {
         if (raisedCount() >= waiter.count) waiter.resolve();
       }
+    }
+    if (event.kind === "session") {
+      for (const resolve of sessionWaiters.splice(0)) resolve();
     }
   });
   return {
@@ -482,6 +664,12 @@ function observe(turn: HarnessTurn): Observation {
       if (raisedCount() >= count) return Promise.resolve();
       return new Promise<void>((resolve) => {
         waiters.push({ count, resolve });
+      });
+    },
+    waitForSession() {
+      if (hasSession()) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        sessionWaiters.push(resolve);
       });
     },
   };

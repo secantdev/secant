@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee","model":"claude-sonnet-4-5","claude_code_version":"2.1.234","tools":[],"mcp_servers":[]}
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Invalid API key sk-ant-oops-secret-token · Please run /login","session_id":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"}

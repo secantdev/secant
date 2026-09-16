@@ -72,6 +72,12 @@ const DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
 const MAX_STDERR_BYTES = 64 * 1024;
 
+/** The exact remediation surfaced when Claude Code is not authenticated. Secant
+ *  transports no credentials, so the fix is always to log in through Claude Code
+ *  itself. The raw result is never carried across the Seam — it may quote a key. */
+const AUTHENTICATION_REQUIRED =
+  "Authentication required for Claude Code. Log in separately through Claude Code, then retry.";
+
 /** Test seams, all optional; production passes none and the real PATH walk,
  *  host platform, and `process.env` decide. They mirror the process Module's
  *  own `ResolveExecutableOptions`, so the Windows `.cmd`-shim and refusal paths
@@ -347,11 +353,15 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
 
     let session = this.sessions.get(request.session);
     if (session === undefined) {
+      // Resuming a Session this Prepared Harness has not tracked (e.g. after a
+      // restart): its coordinate is the caller's recovery coordinate, not a fresh
+      // mint — otherwise `--resume` would name a Session Claude Code never saw.
+      const coordinate = request.resume?.opaque ?? this.createSessionId();
       session = new ClaudeCodeSession(
         request.session,
         this.target,
         this.workspace,
-        this.createSessionId(),
+        coordinate,
         () => this.ensureBridge(),
       );
       this.sessions.set(request.session, session);
@@ -434,6 +444,15 @@ class ClaudeCodeSession {
   private active: ClaudeCodeTurn | undefined;
   private closed = false;
   private initialized = false;
+  /** True for the current process only when it was launched with `--resume`, so a
+   *  non-acknowledging init is a recovery failure rather than a fresh not-started. */
+  private resuming = false;
+  /** Once a process has launched for this Session, any relaunch resumes rather than
+   *  starts fresh — recovery never silently creates a new conversation. */
+  private launchedOnce = false;
+  /** Set when a resume was not acknowledged: the Session cannot continue and every
+   *  further Turn fails with the same recovery failure. */
+  private unusableReason: string | undefined;
   private effectiveModel: ModelObservation = { known: false };
   private stderr = "";
 
@@ -462,11 +481,24 @@ class ClaudeCodeSession {
     return this.initialized;
   }
 
+  isResuming(): boolean {
+    return this.resuming;
+  }
+
   observeInit(model: ModelObservation): void {
     this.initialized = true;
     this.effectiveModel = model;
   }
 
+  markUnusable(reason: string): void {
+    this.unusableReason = reason;
+  }
+
+  /** Confirmed interruption: SIGTERM to the process tree through the process
+   *  Module, drain to exit, and settle. A process that stops on the graceful
+   *  signal ends the Turn `interrupted` (process-only stop); one that has to be
+   *  force-killed, or whose termination is unconfirmed, ends it `lost` with
+   *  `interruption-unknown`. */
   async interrupt(turn: ClaudeCodeTurn): Promise<void> {
     if (this.active !== turn) return;
     const owned = this.process;
@@ -474,15 +506,36 @@ class ClaudeCodeSession {
       turn.settleInterrupted();
       return;
     }
-    const result = await owned.terminate(DEFAULT_CLEANUP_TIMEOUT_MS);
-    if (result.kind === "cleanup-error" || result.kind === "cleanup-timeout") {
-      turn.settleLost("interruption", "process termination was not confirmed", {
+    // Claim sole ownership of the process before awaiting: a concurrent `close`
+    // then sees no live process and cannot start its own termination sequence on
+    // the same child, so the two never report divergent closes. `onClosed` sees
+    // `this.process !== owned` and yields the result to this interrupt.
+    this.process = undefined;
+    this.active = undefined;
+    const outcome = await owned.interrupt(DEFAULT_CLEANUP_TIMEOUT_MS);
+    if (turn.settled) return;
+    const close = outcome.close;
+    if (close.kind === "cleanup-error" || close.kind === "cleanup-timeout") {
+      turn.settleLost("interruption", turn.lastObservation, {
         phase: "control",
-        category: result.kind,
+        category: "interruption-unknown",
         possibleEffects: "possible",
-        ...(result.kind === "cleanup-error" ? { cause: result.cause } : {}),
+        diagnostics: `Claude Code termination was not confirmed: ${describeProcessResult(close)}.`,
+        ...(close.kind === "cleanup-error" ? { cause: close.cause } : {}),
       });
+      return;
     }
+    if (outcome.escalated) {
+      turn.settleLost("interruption", turn.lastObservation, {
+        phase: "control",
+        category: "interruption-unknown",
+        possibleEffects: "possible",
+        diagnostics: `Claude Code did not stop on SIGTERM and was force-killed (${describeProcessResult(close)}).`,
+        ...processCode(close),
+      });
+      return;
+    }
+    turn.settleInterrupted();
   }
 
   async close(): Promise<SessionCloseOutcome> {
@@ -534,6 +587,11 @@ class ClaudeCodeSession {
   private async submit(turn: ClaudeCodeTurn): Promise<void> {
     if (turn.settled) return;
 
+    if (this.unusableReason !== undefined) {
+      turn.settleRecoveryFailure(this.unusableReason, this.model());
+      return;
+    }
+
     const admission = await turn.admit(this.coordinate);
     if (!admission.recorded) {
       const owned = this.process;
@@ -560,7 +618,7 @@ class ClaudeCodeSession {
     }
 
     if (this.process === undefined) {
-      const launch = this.launch();
+      const launch = this.launch(turn);
       this.launchPromise = launch;
       const launched = await launch;
       if (this.launchPromise === launch) this.launchPromise = undefined;
@@ -593,7 +651,7 @@ class ClaudeCodeSession {
     }
   }
 
-  private async launch(): Promise<
+  private async launch(turn: ClaudeCodeTurn): Promise<
     | { readonly ok: true }
     | {
         readonly ok: false;
@@ -610,6 +668,17 @@ class ClaudeCodeSession {
     if (this.closed) {
       return { ok: false, category: "closed-before-launch", cause: undefined };
     }
+    // A first launch mints the Session with `--session-id`; any relaunch (an
+    // explicit resume coordinate, or a Session that already ran and detached)
+    // reattaches with `--resume`, never a silent fresh conversation.
+    const resuming = turn.request.resume !== undefined || this.launchedOnce;
+    this.resuming = resuming;
+    this.launchedOnce = true;
+    // Each process re-runs its own init handshake, so init state is per process.
+    this.initialized = false;
+    const sessionArgs = resuming
+      ? ["--resume", this.coordinate.opaque]
+      : ["--session-id", this.coordinate.opaque];
     const launched = await spawnOwnedProcess({
       executable: this.target.executable,
       args: [
@@ -621,8 +690,7 @@ class ClaudeCodeSession {
         "stream-json",
         "--verbose",
         "--include-partial-messages",
-        "--session-id",
-        this.coordinate.opaque,
+        ...sessionArgs,
         // The MCP permission bridge: Claude relays every permission prompt to
         // this loopback tool and waits on it. The inline config carries the
         // per-Run bearer token; it is the only place the token appears.
@@ -705,6 +773,8 @@ class ClaudeCodeSession {
   }
 
   private onClosed(owned: OwnedProcess, result: OwnedProcessClose): void {
+    // A confirmed interrupt claims the process before awaiting, so once it is in
+    // flight `this.process !== owned` and the interrupt owns the result here.
     if (this.process !== owned) return;
     this.process = undefined;
     const turn = this.active;
@@ -723,11 +793,12 @@ class ClaudeCodeSession {
       );
       return;
     }
-    turn.settleLost("completion", "process closed before result", {
+    turn.settleLost("completion", turn.lastObservation, {
       phase: "turn",
       category: "completion-unknown",
       possibleEffects: "possible",
-      diagnostics: `${describeProcessResult(result)}.${this.diagnostics()}`,
+      diagnostics: `Process closed before an authoritative result: ${describeProcessResult(result)}.${this.diagnostics()}`,
+      ...processCode(result),
       ...(result.kind === "cleanup-error" ? { cause: result.cause } : {}),
     });
   }
@@ -752,6 +823,9 @@ interface PendingApproval {
 class ClaudeCodeTurn implements HarnessTurn {
   settled = false;
   interrupting = false;
+  /** The last authoritative fact observed before truth could be lost — carried
+   *  into a `lost` result so a caller sees how far the Turn got. */
+  lastObservation = "no authoritative observation before the Turn ended";
   readonly request: TurnRequest;
   private readonly listeners = new Set<TurnEventListener>();
   private readonly events: TurnEvent[] = [];
@@ -1002,6 +1076,31 @@ class ClaudeCodeTurn implements HarnessTurn {
     });
   }
 
+  /** A resume that Claude Code did not acknowledge: the Session becomes unusable
+   *  and the Turn fails in the `recovery` phase. Recovery never falls back to a
+   *  fresh conversation, so this is a typed failure, not a new Session. */
+  settleRecoveryFailure(
+    reason: string,
+    effectiveModel: ModelObservation,
+  ): void {
+    this.session.markUnusable(reason);
+    this.settle({
+      kind: "failed",
+      detail: {
+        failure: {
+          phase: "recovery",
+          category: "recovery-unacknowledged",
+          // The Turn content was already sent before init, so a wrong conversation
+          // may have acted on it.
+          possibleEffects: "possible",
+          diagnostics: reason,
+        },
+        effectiveModel,
+        session: { state: "unusable", reason },
+      },
+    });
+  }
+
   settleLost(
     unknown: "acceptance" | "completion" | "interruption",
     lastObservation: string,
@@ -1025,12 +1124,23 @@ class ClaudeCodeTurn implements HarnessTurn {
     this.clearHandshake();
     const nativeSessionId = stringField(frame, "session_id");
     if (nativeSessionId !== this.session.coordinate.opaque) {
-      this.settleNotStarted(
-        "init-session",
-        nativeSessionId === undefined
-          ? "Claude Code init omitted its Session id."
-          : "Claude Code init did not acknowledge the minted Session id.",
-      );
+      // A resume that the Harness does not acknowledge is a recovery failure that
+      // makes the Session unusable — never a silent fresh conversation. A fresh
+      // launch whose id is not echoed simply never started.
+      if (this.session.isResuming()) {
+        const reason =
+          nativeSessionId === undefined
+            ? "Claude Code --resume did not report a Session id, so the conversation cannot be reattached."
+            : "Claude Code --resume acknowledged a different Session, so the conversation cannot be reattached.";
+        this.settleRecoveryFailure(reason, this.session.model());
+      } else {
+        this.settleNotStarted(
+          "init-session",
+          nativeSessionId === undefined
+            ? "Claude Code init omitted its Session id."
+            : "Claude Code init did not acknowledge the minted Session id.",
+        );
+      }
       void this.session.interrupt(this);
       return;
     }
@@ -1040,6 +1150,7 @@ class ClaudeCodeTurn implements HarnessTurn {
         ? { known: false }
         : { known: true, model: modelName };
     this.session.observeInit(model);
+    this.lastObservation = "Claude Code acknowledged the Session at init";
     const facts = sessionFacts(frame, this.session.coordinate);
     this.emit({ kind: "session", availability: { state: "open" }, facts });
     this.emit({ kind: "model", observation: model });
@@ -1054,6 +1165,7 @@ class ClaudeCodeTurn implements HarnessTurn {
         const content = stringField(block, "text");
         if (content !== undefined) {
           this.clearPreview();
+          this.lastObservation = `assistant content: ${truncate(content)}`;
           this.emit({
             kind: "assistant-content",
             content,
@@ -1116,6 +1228,24 @@ class ClaudeCodeTurn implements HarnessTurn {
           effectiveModel: this.session.model(),
           session: { state: "open" },
           ...(usage !== undefined ? { usage } : {}),
+        },
+      });
+      return;
+    }
+    if (isAuthenticationResult(frame)) {
+      // Never carry the raw result across the Seam: it may quote a key or token.
+      // Only the fixed remediation message reaches the caller.
+      this.settle({
+        kind: "failed",
+        detail: {
+          failure: {
+            phase: "turn",
+            category: "authentication",
+            possibleEffects: "none",
+            diagnostics: AUTHENTICATION_REQUIRED,
+          },
+          effectiveModel: this.session.model(),
+          session: { state: "open" },
         },
       });
       return;
@@ -1274,6 +1404,40 @@ function summarize(value: unknown): string {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function truncate(text: string, max = 200): string {
+  const trimmed = text.trim();
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}…`;
+}
+
+/** The native exit code or terminating signal of a close, as a diagnostic code.
+ *  Never a raw frame. */
+function processCode(result: OwnedProcessClose): { nativeCode?: string } {
+  if (result.kind === "exited") return { nativeCode: String(result.status) };
+  if (result.kind === "signal" && result.signal !== null) {
+    return { nativeCode: result.signal };
+  }
+  return {};
+}
+
+/** Claude Code reports a not-logged-in run as its stdout result (research:
+ *  "missing authentication ... emitted as the stdout result"). No typed auth field
+ *  exists in the documented print-mode contract, so this recognises the documented
+ *  not-logged-in remediation phrasings only — bare words like "unauthorized" or
+ *  "credential" are deliberately excluded so a task result that merely mentions
+ *  them keeps its real diagnostics rather than being masked by the login message.
+ *  #115 pins this to a recorded fixture; the matched text is never surfaced — only
+ *  `AUTHENTICATION_REQUIRED` is. */
+function isAuthenticationResult(frame: Record<string, unknown>): boolean {
+  const text = [
+    stringField(frame, "subtype") ?? "",
+    stringField(frame, "result") ?? "",
+    stringField(frame, "error") ?? "",
+  ].join(" ");
+  return /\bnot\s+logged\s+in\b|please (run \/login|log ?in)|\binvalid api key\b|\bauthentication (required|failed|error)\b|\bnot authenticated\b/i.test(
+    text,
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

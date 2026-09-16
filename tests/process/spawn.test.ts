@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { spawnCommand } from "../../src/process/process.js";
+import { spawnCommand, spawnOwnedProcess } from "../../src/process/process.js";
 
 // The process Module's direct spawn/kill Interface (AC4). A per-child kill would
 // leave a grandchild holding the capture pipe open, so `close` would never fire and
@@ -34,5 +34,72 @@ test(
     // Settled at all ⇒ the pipe-holding grandchild was reaped; our own timeout kill
     // ⇒ `timeout`.
     assert.equal(result.kind, "timeout");
+  },
+);
+
+// `interrupt` distinguishes a graceful stop from a force-kill — the fact the
+// Harness Adapter needs to tell an `interrupted` Turn from a `lost` one. A child
+// that exits on SIGTERM reports `escalated:false`; one that ignores SIGTERM must be
+// SIGKILLed and reports `escalated:true`. Each child announces "ready" on stdout
+// once its signal handler is installed; the test waits for that before signalling,
+// so a SIGTERM never races child startup. Bounded and deterministic: a regression
+// flips the boolean, never hangs.
+async function awaitReady(process: {
+  readonly stdout: AsyncIterable<Uint8Array>;
+}): Promise<void> {
+  const decoder = new TextDecoder();
+  let seen = "";
+  for await (const chunk of process.stdout) {
+    seen += decoder.decode(chunk, { stream: true });
+    if (seen.includes("ready")) return;
+  }
+}
+
+test(
+  "interrupt: a child that exits on the graceful signal is not escalated",
+  { timeout: 20_000 },
+  async () => {
+    // Blocks forever on stdin; the default SIGTERM disposition terminates it.
+    const launched = await spawnOwnedProcess({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "process.stdout.write('ready\\n');process.stdin.resume();setTimeout(()=>{},1e9);",
+      ],
+      cwd: process.cwd(),
+      env: process.env,
+      launchTimeoutMs: 10_000,
+    });
+    assert.equal(launched.ok, true);
+    if (!launched.ok) throw new Error("unreachable");
+    await awaitReady(launched.process);
+    const outcome = await launched.process.interrupt(5_000);
+    assert.equal(outcome.escalated, false);
+    // A second call returns the same interruption.
+    assert.equal(await launched.process.interrupt(5_000), outcome);
+  },
+);
+
+test(
+  "interrupt: a child that ignores SIGTERM is force-killed and escalated",
+  { timeout: 20_000, skip: process.platform === "win32" },
+  async () => {
+    // Swallows SIGTERM, so only SIGKILL stops it. It announces readiness after the
+    // handler is installed so the graceful signal cannot arrive before it.
+    const launched = await spawnOwnedProcess({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "process.on('SIGTERM',()=>{});process.stdout.write('ready\\n');process.stdin.resume();setTimeout(()=>{},1e9);",
+      ],
+      cwd: process.cwd(),
+      env: process.env,
+      launchTimeoutMs: 10_000,
+    });
+    assert.equal(launched.ok, true);
+    if (!launched.ok) throw new Error("unreachable");
+    await awaitReady(launched.process);
+    const outcome = await launched.process.interrupt(1_000);
+    assert.equal(outcome.escalated, true);
   },
 );

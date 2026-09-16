@@ -47,6 +47,10 @@ export interface FakeTurnScript {
    *  events are managed by the fake and must not appear here. */
   readonly events?: readonly TurnEvent[];
   readonly requests?: readonly FakeRequestSpec[];
+  /** When set with no awaited requests, the Turn blocks after its events until it
+   *  is interrupted or the Harness is closed — the request-free "blocks mid-Turn"
+   *  shape the interrupt/recovery cases drive. */
+  readonly block?: boolean;
   /** The result settled when the Turn ends naturally (all awaited requests
    *  answered, or no awaited requests). */
   readonly result: TurnResult;
@@ -128,6 +132,9 @@ class FakePreparedHarness implements PreparedHarness {
 
   close(): Promise<CleanupReport> {
     this.closed = true;
+    // Graceful stop of a still-live Turn, so `close` mid-Turn does not leave it
+    // hanging; the settled result cannot be rewritten by cleanup.
+    if (this.active && !this.active.settled) this.active.closeSettle();
     // Idempotent: the same report every time.
     return Promise.resolve(this.cleanup);
   }
@@ -240,14 +247,44 @@ class FakeTurn {
 
     if (!this.terminal) {
       for (const event of this.script.events ?? []) this.emit(event);
-      await this.raiseAndAwaitRequests();
+      if (this.script.requests?.length) {
+        await this.raiseAndAwaitRequests();
+      } else if (this.script.block) {
+        await this.awaitInterrupt();
+      }
     }
 
+    if (this.settled) return;
     if (this.interrupting) {
       this.settle(this.script.interruptResult ?? this.defaultInterrupt());
       return;
     }
     this.settle(withCheckpoint(this.script.result, checkpoint));
+  }
+
+  private awaitInterrupt(): Promise<void> {
+    if (this.interrupting || this.terminal) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.interruptSignal = resolve;
+    });
+  }
+
+  /** Settle a live Turn on `close`: lost, since no authoritative result arrived,
+   *  and release the blocked driver. */
+  closeSettle(): void {
+    if (this.settled) return;
+    this.settle({
+      kind: "lost",
+      detail: {
+        unknown: "completion",
+        lastObservation: "the Harness closed during a live Turn",
+        session: {
+          state: "detached",
+          coordinate: { opaque: this.request.session },
+        },
+      },
+    });
+    this.interruptSignal?.();
   }
 
   private async admit(): Promise<
@@ -301,6 +338,7 @@ class FakeTurn {
   /** Terminal ordering: expire outstanding requests, close the producer, then
    *  settle the one result. No event is emitted after this. */
   private settle(result: TurnResult): void {
+    if (this.settled) return;
     this.terminal = true;
     for (const [, state] of this.requests) {
       if (state.status === "outstanding") {

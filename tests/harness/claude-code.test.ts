@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
   createClaudeCodeAdapter,
+  type HarnessAdapterFactory,
   type HarnessRequest,
   type HarnessTurn,
   type TurnAdmission,
@@ -23,9 +24,11 @@ import {
 import { makeTempDir } from "../helpers/tempDir.js";
 import {
   runApprovalRequestCases,
+  runInterruptRecoveryCases,
   runPrepareProfileCases,
   runTurnLifecycleCases,
   type ApprovalRequestScenarios,
+  type InterruptRecoveryScenarios,
   type PrepareProfileScenarios,
   type TurnLifecycleScenarios,
 } from "./conformance.js";
@@ -354,6 +357,274 @@ test(
     assert.doesNotMatch(JSON.stringify(result), /Bearer [0-9a-f]{32,}/);
   },
 );
+
+// --- Interrupt, lost, recovery, and cleanup over the real replayer -----------
+
+// The shared interrupt, lost, recovery, and cleanup cases over the real replayer.
+// A fresh replayer per scenario keeps invocations isolated; each fixed session id
+// matches the id its fixture's init acknowledges. The unresponsive-interrupt case
+// is POSIX-only: on Windows `taskkill /T /F` always force-kills the tree, so a
+// process cannot ignore the graceful signal for the escalation to be observable.
+const AUTHENTICATION_REQUIRED =
+  "Authentication required for Claude Code. Log in separately through Claude Code, then retry.";
+const LEAKED_TOKEN = "sk-ant-oops-secret-token";
+
+const caseScenario =
+  (name: string, id: string) => (): HarnessAdapterFactory => {
+    const replayer = installReplayer(VERSION, protocolCase(name));
+    return () =>
+      createClaudeCodeAdapter({
+        path: replayer.path,
+        env: {},
+        sessionId: () => id,
+      });
+  };
+
+const interruptScenarios: InterruptRecoveryScenarios = {
+  ...turnScenarios,
+  blockingTurn: caseScenario(
+    "blocking",
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  ),
+  unresponsiveInterrupt: caseScenario(
+    "unresponsive",
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  ),
+  lostCompletion: caseScenario(
+    "lost-completion",
+    "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  ),
+  resumeAcknowledged: caseScenario(
+    "resume-acknowledged",
+    "55555555-5555-4555-8555-555555555555",
+  ),
+  resumeUnacknowledged: caseScenario(
+    "resume-unacknowledged",
+    "66666666-6666-4666-8666-666666666666",
+  ),
+};
+runInterruptRecoveryCases(interruptScenarios, {
+  skipUnresponsiveInterrupt: process.platform === "win32",
+});
+
+/** Drive one Turn against a protocol case over the real replayer, returning the
+ *  events, the result, the prepared Harness (to close), and the replayer. */
+async function runProtocolTurn(caseName: string, id: string) {
+  const replayer = installReplayer(VERSION, protocolCase(caseName));
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => id,
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+  const events: TurnEvent[] = [];
+  const turn = prepared.harness.startTurn({
+    session: caseName,
+    origin: "managed",
+    correlationKey: { opaque: caseName },
+    input: { text: "go" },
+    recorder: {
+      admit: () => Promise.resolve({ recorded: true }),
+      checkpoint: () => Promise.resolve({ recorded: true }),
+    },
+  });
+  turn.subscribe((event) => events.push(event));
+  const result = await turn.result();
+  return { harness: prepared.harness, events, result, replayer };
+}
+
+test("a not-logged-in result yields the exact authentication failure and leaks no credential", async () => {
+  const { harness, result } = await runProtocolTurn(
+    "authentication",
+    "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  );
+  assert.equal(result.kind, "failed");
+  if (result.kind !== "failed") throw new Error("unreachable");
+  assert.equal(result.detail.failure.category, "authentication");
+  assert.equal(result.detail.failure.phase, "turn");
+  assert.equal(result.detail.failure.diagnostics, AUTHENTICATION_REQUIRED);
+  // The raw result quoted a token; nothing but the fixed message crosses the Seam.
+  assert.equal(JSON.stringify(result).includes(LEAKED_TOKEN), false);
+  await harness.close();
+});
+
+test("a malformed JSON-looking line ends the Turn lost with protocol-corruption", async () => {
+  const { harness, result } = await runProtocolTurn(
+    "protocol-corruption",
+    "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  );
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "protocol-corruption");
+  await harness.close();
+});
+
+test("exit without a result loses the Turn with completion-unknown, the exit code, and the last observation", async () => {
+  const { harness, result } = await runProtocolTurn(
+    "lost-completion",
+    "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  );
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.unknown, "completion");
+  assert.equal(result.detail.failure?.category, "completion-unknown");
+  assert.equal(result.detail.failure?.nativeCode, "7");
+  // The last authoritative observation before the process closed is preserved.
+  assert.match(result.detail.lastObservation, /working on it/);
+  await harness.close();
+});
+
+test("interrupting a live Turn spawns no resume and settles interrupted with a detached Session", async () => {
+  const replayer = installReplayer(VERSION, protocolCase("blocking"));
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+  const turn = prepared.harness.startTurn({
+    session: "blocking",
+    origin: "managed",
+    correlationKey: { opaque: "blocking" },
+    input: { text: "go" },
+    recorder: {
+      admit: () => Promise.resolve({ recorded: true }),
+      checkpoint: () => Promise.resolve({ recorded: true }),
+    },
+  });
+  await new Promise<void>((resolve) => {
+    const sub = turn.subscribe((event) => {
+      if (event.kind === "session") {
+        resolve();
+        sub.unsubscribe();
+      }
+    });
+  });
+  // steer never touches the process: rejected unsupported while the Turn is live.
+  assert.deepEqual(await turn.steer({ text: "no" }), {
+    outcome: "rejected",
+    reason: "unsupported",
+  });
+  assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+  const result = await turn.result();
+  assert.equal(result.kind, "interrupted");
+  if (result.kind !== "interrupted") throw new Error("unreachable");
+  assert.equal(result.detail.interruption.mode, "process-only");
+  assert.equal(result.detail.session.state, "detached");
+  await prepared.harness.close();
+  const invocations = replayer.invocations();
+  assert.equal(
+    invocations.filter((i) => i.args.includes("--resume")).length,
+    0,
+    "an interrupt spawns no resume process",
+  );
+  assert.equal(
+    invocations.filter((i) => i.args.includes("--session-id")).length,
+    1,
+  );
+});
+
+test("a resumed Turn spawns with --resume and not --session-id", async () => {
+  const replayer = installReplayer(
+    VERSION,
+    protocolCase("resume-acknowledged"),
+  );
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => "55555555-5555-4555-8555-555555555555",
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+  const recorder = {
+    admit: () => Promise.resolve({ recorded: true } as const),
+    checkpoint: () => Promise.resolve({ recorded: true } as const),
+  };
+  const turn1 = prepared.harness.startTurn({
+    session: "resume",
+    origin: "managed",
+    correlationKey: { opaque: "t1" },
+    input: { text: "go" },
+    recorder,
+  });
+  await new Promise<void>((resolve) => {
+    const sub = turn1.subscribe((event) => {
+      if (event.kind === "session") {
+        resolve();
+        sub.unsubscribe();
+      }
+    });
+  });
+  await turn1.interrupt();
+  const result1 = await turn1.result();
+  assert.equal(result1.kind, "interrupted");
+  if (result1.kind !== "interrupted") throw new Error("unreachable");
+  if (result1.detail.session.state !== "detached")
+    throw new Error("unreachable");
+  const turn2 = prepared.harness.startTurn({
+    session: "resume",
+    origin: "managed",
+    correlationKey: { opaque: "t2" },
+    input: { text: "again" },
+    recorder,
+    resume: result1.detail.session.coordinate,
+  });
+  const result2 = await turn2.result();
+  assert.equal(result2.kind, "completed");
+  await prepared.harness.close();
+  const resumeInvocation = replayer
+    .invocations()
+    .find((i) => i.args.includes("--resume"));
+  assert.ok(resumeInvocation, "the second Turn spawned a --resume process");
+  assert.equal(resumeInvocation.args.includes("--session-id"), false);
+  const flag = resumeInvocation.args.indexOf("--resume");
+  assert.equal(
+    resumeInvocation.args[flag + 1],
+    "55555555-5555-4555-8555-555555555555",
+  );
+});
+
+test("resuming a coordinate on an untracked Session passes that coordinate, not a fresh mint", async () => {
+  // No prior Turn on this Prepared Harness minted the id, so the coordinate must
+  // come from the caller's `resume` — a fresh mint would name a Session Claude
+  // Code never saw and the acknowledging init would be rejected.
+  const replayer = installReplayer(
+    VERSION,
+    protocolCase("resume-acknowledged"),
+  );
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    // A different mint than the coordinate, to prove the mint is not used.
+    sessionId: () => "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+  const coordinate = { opaque: "55555555-5555-4555-8555-555555555555" };
+  const turn = prepared.harness.startTurn({
+    session: "never-tracked",
+    origin: "managed",
+    correlationKey: { opaque: "restart" },
+    input: { text: "resume me" },
+    recorder: {
+      admit: () => Promise.resolve({ recorded: true }),
+      checkpoint: () => Promise.resolve({ recorded: true }),
+    },
+    resume: coordinate,
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "completed");
+  await prepared.harness.close();
+  const resumeInvocation = replayer
+    .invocations()
+    .find((i) => i.args.includes("--resume"));
+  assert.ok(resumeInvocation);
+  const flag = resumeInvocation.args.indexOf("--resume");
+  assert.equal(resumeInvocation.args[flag + 1], coordinate.opaque);
+  assert.equal(resumeInvocation.args.includes("--session-id"), false);
+});
 
 test("one stream-json Turn yields normalized events and an authoritative completed result", async () => {
   const replayer = installReplayer(VERSION, COMPLETED_CASE);

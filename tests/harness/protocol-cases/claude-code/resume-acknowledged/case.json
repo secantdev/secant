@@ -1,0 +1,8 @@
+{
+  "exitCode": 143,
+  "turns": [{ "stdout": "initial.stdout" }],
+  "resume": {
+    "exitCode": 0,
+    "turns": [{ "stdout": "resume.stdout" }]
+  }
+}

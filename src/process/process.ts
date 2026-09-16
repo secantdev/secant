@@ -210,6 +210,17 @@ export interface OwnedProcessOptions {
   readonly launchTimeoutMs: number;
 }
 
+/** A graceful stop attempt: the close observation, and whether a forced kill was
+ * needed because the process did not stop on the graceful signal within the bound.
+ * `escalated: false` means the process stopped on its own (SIGTERM off Windows, or
+ * the tree kill on Windows); `escalated: true` means SIGKILL/`taskkill /F` followed.
+ * A caller distinguishing a confirmed graceful stop from a force-kill needs this;
+ * `terminate` alone cannot express it because it collapses both into one close. */
+export type ProcessInterruption = {
+  readonly close: OwnedProcessClose;
+  readonly escalated: boolean;
+};
+
 /** A directly spawned child whose pipe and process-tree lifecycle remains owned
  * by this Module. Consumers see byte streams and ordered writes, never the
  * platform child-process object. */
@@ -222,6 +233,11 @@ export interface OwnedProcess {
   closeStdin(timeoutMs: number): Promise<OwnedProcessClose>;
   /** Stop the process tree, escalating SIGTERM to SIGKILL within the bound. */
   terminate(timeoutMs: number): Promise<OwnedProcessClose>;
+  /** Signal the tree to stop (SIGTERM off Windows; `taskkill /T /F` on Windows)
+   * and wait up to `gracefulMs` for it to close. If it does not, escalate to a
+   * forced kill within the same bound and report `escalated: true`. Repeated calls
+   * return the same interruption. */
+  interrupt(gracefulMs: number): Promise<ProcessInterruption>;
   closed(): Promise<OwnedProcessClose>;
 }
 
@@ -330,6 +346,7 @@ class NodeOwnedProcess implements OwnedProcess {
   readonly stderr: AsyncIterable<Uint8Array>;
   private readonly closePromise: Promise<OwnedProcessClose>;
   private shutdownPromise: Promise<OwnedProcessClose> | undefined;
+  private interruptPromise: Promise<ProcessInterruption> | undefined;
 
   constructor(private readonly child: ChildProcessWithoutNullStreams) {
     this.stdout = child.stdout;
@@ -390,8 +407,38 @@ class NodeOwnedProcess implements OwnedProcess {
     return this.shutdownPromise;
   }
 
+  interrupt(gracefulMs: number): Promise<ProcessInterruption> {
+    if (this.interruptPromise !== undefined) return this.interruptPromise;
+    this.interruptPromise = this.safeInterrupt(gracefulMs);
+    return this.interruptPromise;
+  }
+
   closed(): Promise<OwnedProcessClose> {
     return this.closePromise;
+  }
+
+  /** Graceful signal, bounded wait, then a forced escalation if it did not stop.
+   * The two stages share `gracefulMs`: the process gets the whole bound to exit on
+   * the graceful signal, and the same bound again to die once force-killed. */
+  private async safeInterrupt(
+    gracefulMs: number,
+  ): Promise<ProcessInterruption> {
+    try {
+      // Off Windows this is SIGTERM; on Windows killGroup runs `taskkill /T /F`,
+      // which is already forceful, so a Windows child stops in the graceful stage
+      // and is never reported as escalated.
+      killGroup(this.child, "SIGTERM");
+      const graceful = await settleWithin(this.closePromise, gracefulMs);
+      if (graceful !== undefined) return { close: graceful, escalated: false };
+      killGroup(this.child, "SIGKILL");
+      const forced = await settleWithin(this.closePromise, gracefulMs);
+      return { close: forced ?? { kind: "cleanup-timeout" }, escalated: true };
+    } catch (error) {
+      return {
+        close: { kind: "cleanup-error", cause: error },
+        escalated: true,
+      };
+    }
   }
 
   private async shutdown(

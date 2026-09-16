@@ -36,13 +36,20 @@ export interface PrepareProfileScenarios {
   prepareFailure(): HarnessAdapterFactory;
 }
 
+/** The common Turn, terminal-ordering, and cleanup behaviours every native
+ * Adapter and the deterministic fake must exhibit. */
+export interface TurnLifecycleScenarios extends PrepareProfileScenarios {
+  /** A Turn the Harness ends with a terminal error subtype. */
+  failedTurn(): HarnessAdapterFactory;
+}
+
 /**
  * The full set of scenario factories. Each returns an Adapter factory set up to
  * exhibit one behaviour when the suite drives it through the Interface. The fake
  * implements all of these; a prepare-only provider implements just the inherited
  * prepare/profile subset.
  */
-export interface ConformanceScenarios extends PrepareProfileScenarios {
+export interface ConformanceScenarios extends TurnLifecycleScenarios {
   /** A Turn that raises three requests at once, settling once all are answered. */
   concurrentRequests(): HarnessAdapterFactory;
   /** A Turn that raises one approval request and awaits its answer. */
@@ -51,53 +58,14 @@ export interface ConformanceScenarios extends PrepareProfileScenarios {
   expiringRequest(): HarnessAdapterFactory;
   /** A Turn that raises one awaited request and can be interrupted. */
   interruptible(): HarnessAdapterFactory;
-  /** A Turn the Harness ends with a terminal error subtype. */
-  failedTurn(): HarnessAdapterFactory;
   /** A Turn that ends `lost` with the given unknown. */
   lost(unknown: LostUnknown): HarnessAdapterFactory;
   /** Two Turns: the first detaches, the second resumes and completes. */
   resumable(): HarnessAdapterFactory;
 }
 
-/** Run the prepare/profile cases against one provider. Both the full suite and
- *  a prepare-only provider (the Claude Code Adapter over the replayer) call it. */
-export function runPrepareProfileCases(
-  scenarios: PrepareProfileScenarios,
-): void {
+export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
-
-  test(name("prepare returns an evidence-bearing profile"), async () => {
-    const prepared = await prepare(scenarios.baseline());
-    const { profile } = prepared;
-    assert.ok(profile.harness.length > 0);
-    assert.ok(profile.executableVersion.length > 0);
-    // Every capability carries the evidence it rests on.
-    assert.ok(profile.recovery.evidence.length > 0);
-    assert.ok(profile.interruption.evidence.length > 0);
-    assert.ok(profile.approvals.evidence.length > 0);
-    assert.ok(profile.clarifications.evidence.length > 0);
-    assert.ok(profile.modelSelection.evidence.length > 0);
-    assert.ok(profile.recoveryCoordinate.evidence.length > 0);
-    assert.ok(profile.skillDelivery.evidence.length > 0);
-    assert.ok(profile.fileDelivery.evidence.length > 0);
-    await prepared.close();
-  });
-
-  test(name("prepare fails with a typed value, not a throw"), async () => {
-    const adapter = scenarios.prepareFailure()();
-    const result = await adapter.prepare({});
-    assert.equal(result.ok, false);
-    if (result.ok) throw new Error("unreachable");
-    assert.ok(result.failure.category.length > 0);
-    assert.equal(result.failure.phase, "prepare");
-  });
-}
-
-/** Run the whole suite against one provider. */
-export function runConformanceSuite(scenarios: ConformanceScenarios): void {
-  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
-
-  runPrepareProfileCases(scenarios);
 
   test(
     name("a completed Turn settles once, after the producer closes"),
@@ -111,7 +79,6 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
       const result = await turn.result();
       settled = true;
       assert.equal(result.kind, "completed");
-      // A second read of the result is the same settled value.
       assert.deepEqual(await turn.result(), result);
       await prepared.close();
     },
@@ -145,9 +112,76 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
       );
       const result = await turn.result();
       assert.equal(result.kind, "not-started");
+      if (result.kind !== "not-started") throw new Error("unreachable");
+      assert.ok(result.detail.failure.cause instanceof Error);
+      assert.equal(result.detail.failure.cause.message, "recorder threw");
       await prepared.close();
     },
   );
+
+  test(name("a terminal error subtype settles the Turn failed"), async () => {
+    const prepared = await prepare(scenarios.failedTurn());
+    const turn = prepared.startTurn(request(recorder().recorder));
+    const result = await turn.result();
+    assert.equal(result.kind, "failed");
+    if (result.kind !== "failed") throw new Error("unreachable");
+    assert.ok(result.detail.failure.category.length > 0);
+    assert.equal(result.detail.failure.phase, "turn");
+    assert.ok("state" in result.detail.session);
+    await prepared.close();
+  });
+
+  test(name("close after an idle Turn is idempotent"), async () => {
+    const prepared = await prepare(scenarios.baseline());
+    const turn = prepared.startTurn(request(recorder().recorder));
+    await turn.result();
+    const once = await prepared.close();
+    const twice = await prepared.close();
+    assert.deepEqual(once, twice);
+    assert.equal(once, twice, "the same report value each time");
+  });
+}
+
+/** Run the prepare/profile cases against one provider. Both the full suite and
+ *  a prepare-only provider (the Claude Code Adapter over the replayer) call it. */
+export function runPrepareProfileCases(
+  scenarios: PrepareProfileScenarios,
+): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+
+  test(name("prepare returns an evidence-bearing profile"), async () => {
+    const prepared = await prepare(scenarios.baseline());
+    const { profile } = prepared;
+    assert.ok(profile.harness.length > 0);
+    assert.ok(profile.executableVersion.length > 0);
+    // Every capability carries the evidence it rests on.
+    assert.ok(profile.recovery.evidence.length > 0);
+    assert.ok(profile.interruption.evidence.length > 0);
+    assert.ok(profile.approvals.evidence.length > 0);
+    assert.ok(profile.clarifications.evidence.length > 0);
+    assert.ok(profile.modelSelection.evidence.length > 0);
+    assert.ok(profile.recoveryCoordinate.evidence.length > 0);
+    assert.ok(profile.skillDelivery.evidence.length > 0);
+    assert.ok(profile.fileDelivery.evidence.length > 0);
+    await prepared.close();
+  });
+
+  test(name("prepare fails with a typed value, not a throw"), async () => {
+    const adapter = scenarios.prepareFailure()();
+    const result = await adapter.prepare({ workspace: process.cwd() });
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("unreachable");
+    assert.ok(result.failure.category.length > 0);
+    assert.equal(result.failure.phase, "prepare");
+  });
+}
+
+/** Run the whole suite against one provider. */
+export function runConformanceSuite(scenarios: ConformanceScenarios): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+
+  runPrepareProfileCases(scenarios);
+  runTurnLifecycleCases(scenarios);
 
   test(
     name("several requests are outstanding at once and each is answered"),
@@ -274,18 +308,6 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
     },
   );
 
-  test(name("a terminal error subtype settles the Turn failed"), async () => {
-    const prepared = await prepare(scenarios.failedTurn());
-    const turn = prepared.startTurn(request(recorder().recorder));
-    const result = await turn.result();
-    assert.equal(result.kind, "failed");
-    if (result.kind !== "failed") throw new Error("unreachable");
-    assert.ok(result.detail.failure.category.length > 0);
-    assert.equal(result.detail.failure.phase, "turn");
-    assert.ok("state" in result.detail.session);
-    await prepared.close();
-  });
-
   for (const unknown of LOST_UNKNOWNS) {
     test(name(`a Turn settles lost with unknown ${unknown}`), async () => {
       const prepared = await prepare(scenarios.lost(unknown));
@@ -326,20 +348,12 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
     assert.deepEqual(second.admissions[0].resume, coordinate);
     await prepared.close();
   });
-
-  test(name("close is idempotent and returns the same report"), async () => {
-    const prepared = await prepare(scenarios.baseline());
-    const once = await prepared.close();
-    const twice = await prepared.close();
-    assert.deepEqual(once, twice);
-    assert.equal(once, twice, "the same report value each time");
-  });
 }
 
 // --- Driving helpers ---------------------------------------------------------
 
 async function prepare(factory: HarnessAdapterFactory) {
-  const result = await factory().prepare({});
+  const result = await factory().prepare({ workspace: process.cwd() });
   assert.equal(result.ok, true);
   if (!result.ok) throw new Error("unreachable");
   return result.harness;

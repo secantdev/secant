@@ -224,7 +224,12 @@ class FakeTurn {
   private async drive(): Promise<void> {
     const admission = await this.admit();
     if (!admission.recorded) {
-      this.settle(notStarted(admission.reason));
+      this.settle(
+        notStarted(
+          admission.reason,
+          "cause" in admission ? admission.cause : admission.reason,
+        ),
+      );
       return;
     }
     let checkpoint: RecordingReceipt | undefined;
@@ -245,16 +250,26 @@ class FakeTurn {
     this.settle(withCheckpoint(this.script.result, checkpoint));
   }
 
-  private async admit(): Promise<RecordingReceipt> {
+  private async admit(): Promise<
+    | RecordingReceipt
+    | {
+        readonly recorded: false;
+        readonly reason: string;
+        readonly cause: unknown;
+      }
+  > {
     try {
       return await this.request.recorder.admit({
         correlationKey: this.request.correlationKey,
         session: this.request.session,
         origin: this.request.origin,
+        input: this.request.input,
+        recoveryCoordinate:
+          this.request.resume ?? ({ opaque: this.request.session } as const),
         resume: this.request.resume,
       });
     } catch (error) {
-      return { recorded: false, reason: describe(error) };
+      return { recorded: false, reason: describe(error), cause: error };
     }
   }
 
@@ -327,12 +342,13 @@ function reject(reason: ControlRejection): ControlReceipt {
   return { outcome: "rejected", reason };
 }
 
-function notStarted(reason: string): TurnResult {
+function notStarted(reason: string, cause: unknown): TurnResult {
   const failure: HarnessFailure = {
     phase: "turn",
     category: "durable-admission",
     possibleEffects: "none",
-    cause: reason,
+    cause,
+    diagnostics: reason,
   };
   return { kind: "not-started", detail: { failure } };
 }

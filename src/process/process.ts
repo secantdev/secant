@@ -1,4 +1,9 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import {
+  spawn,
+  type ChildProcess,
+  type ChildProcessWithoutNullStreams,
+  type StdioOptions,
+} from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import which from "which";
@@ -184,6 +189,266 @@ export interface SpawnOptions {
 // child is still alive this long later — long enough for a well-behaved child to
 // flush and exit, short enough to bound a hang (D2, #21).
 const KILL_ESCALATION_MS = 3000;
+
+// --- Long-lived owned process ----------------------------------------------
+
+/** The `close` observation for a long-lived child. `close`, rather than
+ * `exit`, proves that stdout and stderr have both been drained. */
+export type OwnedProcessClose =
+  | { readonly kind: "exited"; readonly status: number }
+  | { readonly kind: "signal"; readonly signal: NodeJS.Signals | null }
+  | { readonly kind: "spawn-error"; readonly cause: unknown }
+  | { readonly kind: "cleanup-error"; readonly cause: unknown }
+  | { readonly kind: "cleanup-timeout" };
+
+export interface OwnedProcessOptions {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+  /** Maximum time to observe either the child `spawn` event or a spawn error. */
+  readonly launchTimeoutMs: number;
+}
+
+/** A directly spawned child whose pipe and process-tree lifecycle remains owned
+ * by this Module. Consumers see byte streams and ordered writes, never the
+ * platform child-process object. */
+export interface OwnedProcess {
+  readonly stdout: AsyncIterable<Uint8Array>;
+  readonly stderr: AsyncIterable<Uint8Array>;
+  writeStdin(bytes: Uint8Array): Promise<void>;
+  /** Close stdin first, then bound the wait and escalate through the process
+   * tree. Repeated calls return the same close observation. */
+  closeStdin(timeoutMs: number): Promise<OwnedProcessClose>;
+  /** Stop the process tree, escalating SIGTERM to SIGKILL within the bound. */
+  terminate(timeoutMs: number): Promise<OwnedProcessClose>;
+  closed(): Promise<OwnedProcessClose>;
+}
+
+export type SpawnOwnedProcessResult =
+  | { readonly ok: true; readonly process: OwnedProcess }
+  | {
+      readonly ok: false;
+      readonly failure:
+        | Extract<OwnedProcessClose, { kind: "spawn-error" }>
+        | { readonly kind: "launch-timeout"; readonly cause: Error };
+    };
+
+/** Spawn a long-lived child with pipe backpressure and tree-owned cleanup. On
+ * Windows, `overlapped` pipes avoid synchronous handle semantics; elsewhere
+ * ordinary pipes are used. */
+export function spawnOwnedProcess(
+  options: OwnedProcessOptions,
+): Promise<SpawnOwnedProcessResult> {
+  const pipe: "pipe" | "overlapped" =
+    process.platform === "win32" ? "overlapped" : "pipe";
+  const stdio: StdioOptions = [pipe, pipe, pipe];
+  let child: ChildProcess;
+  try {
+    child = spawn(options.executable, [...options.args], {
+      cwd: options.cwd,
+      env: options.env,
+      stdio,
+      windowsHide: true,
+      detached: process.platform !== "win32",
+    });
+  } catch (error) {
+    return Promise.resolve({
+      ok: false,
+      failure: {
+        kind: "spawn-error",
+        cause: error,
+      },
+    });
+  }
+
+  return new Promise((resolve) => {
+    let decided = false;
+    const finish = (result: SpawnOwnedProcessResult): void => {
+      if (decided) return;
+      decided = true;
+      clearTimeout(launchTimeout);
+      child.removeListener("error", onError);
+      child.removeListener("spawn", onSpawn);
+      resolve(result);
+    };
+    const onError = (error: Error): void => {
+      finish({
+        ok: false,
+        failure: { kind: "spawn-error", cause: error },
+      });
+    };
+    const onSpawn = (): void => {
+      finish({
+        ok: true,
+        process: new NodeOwnedProcess(child as ChildProcessWithoutNullStreams),
+      });
+    };
+    const launchTimeout = setTimeout(() => {
+      if (decided) return;
+      decided = true;
+      child.removeListener("error", onError);
+      child.removeListener("spawn", onSpawn);
+      // A late child error must still be observed after this function gives up
+      // ownership of the launch result. Tree reaping remains best-effort here;
+      // no Turn content has been submitted yet.
+      child.on("error", () => {});
+      void reapTimedOutLaunch(child).finally(() => {
+        resolve({
+          ok: false,
+          failure: {
+            kind: "launch-timeout",
+            cause: new Error(
+              `process did not emit spawn within ${options.launchTimeoutMs}ms`,
+            ),
+          },
+        });
+      });
+    }, options.launchTimeoutMs);
+    child.once("error", onError);
+    child.once("spawn", onSpawn);
+  });
+}
+
+async function reapTimedOutLaunch(child: ChildProcess): Promise<void> {
+  const closed = new Promise<true>((resolve) =>
+    child.once("close", () => resolve(true)),
+  );
+  try {
+    killGroup(child, "SIGTERM");
+    if ((await settleWithin(closed, KILL_ESCALATION_MS)) === true) return;
+    killGroup(child, "SIGKILL");
+    await settleWithin(closed, KILL_ESCALATION_MS);
+  } catch {
+    // The launch result remains a typed timeout. Cleanup evidence cannot replace
+    // that pre-submission result, and there is no process handle safe to expose.
+  }
+}
+
+class NodeOwnedProcess implements OwnedProcess {
+  readonly stdout: AsyncIterable<Uint8Array>;
+  readonly stderr: AsyncIterable<Uint8Array>;
+  private readonly closePromise: Promise<OwnedProcessClose>;
+  private shutdownPromise: Promise<OwnedProcessClose> | undefined;
+
+  constructor(private readonly child: ChildProcessWithoutNullStreams) {
+    this.stdout = child.stdout;
+    this.stderr = child.stderr;
+    this.closePromise = new Promise((resolve) => {
+      // Once `spawn` succeeded, only `close` proves the process ended and both
+      // output pipes drained. Retain a later error until that close observation,
+      // but never mistake the error event itself for lifecycle completion.
+      let processError: Error | undefined;
+      child.on("error", (error) => {
+        processError = error;
+      });
+      child.once("close", (code, signal) => {
+        if (processError !== undefined) {
+          resolve({ kind: "cleanup-error", cause: processError });
+          return;
+        }
+        if (code === null) resolve({ kind: "signal", signal });
+        else resolve({ kind: "exited", status: code });
+      });
+    });
+  }
+
+  writeStdin(bytes: Uint8Array): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let callbackComplete = false;
+      let drained = true;
+      const finish = (): void => {
+        if (callbackComplete && drained) resolve();
+      };
+      const accepted = this.child.stdin.write(bytes, (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        callbackComplete = true;
+        finish();
+      });
+      if (!accepted) {
+        drained = false;
+        this.child.stdin.once("drain", () => {
+          drained = true;
+          finish();
+        });
+      }
+    });
+  }
+
+  closeStdin(timeoutMs: number): Promise<OwnedProcessClose> {
+    if (this.shutdownPromise !== undefined) return this.shutdownPromise;
+    this.shutdownPromise = this.safeShutdown("stdin", timeoutMs);
+    return this.shutdownPromise;
+  }
+
+  terminate(timeoutMs: number): Promise<OwnedProcessClose> {
+    if (this.shutdownPromise !== undefined) return this.shutdownPromise;
+    this.shutdownPromise = this.safeShutdown("terminate", timeoutMs);
+    return this.shutdownPromise;
+  }
+
+  closed(): Promise<OwnedProcessClose> {
+    return this.closePromise;
+  }
+
+  private async shutdown(
+    first: "stdin" | "terminate",
+    timeoutMs: number,
+  ): Promise<OwnedProcessClose> {
+    const deadline = Date.now() + timeoutMs;
+    const stageTimeout = (stagesRemaining: number): number =>
+      Math.max(0, Math.floor((deadline - Date.now()) / stagesRemaining));
+    if (first === "stdin") this.child.stdin.end();
+    else killGroup(this.child, "SIGTERM");
+
+    const firstWait = await settleWithin(
+      this.closePromise,
+      stageTimeout(first === "stdin" ? 3 : 2),
+    );
+    if (firstWait !== undefined) return firstWait;
+    killGroup(this.child, first === "stdin" ? "SIGTERM" : "SIGKILL");
+
+    const secondWait = await settleWithin(
+      this.closePromise,
+      stageTimeout(first === "stdin" ? 2 : 1),
+    );
+    if (secondWait !== undefined) return secondWait;
+    if (first === "stdin") killGroup(this.child, "SIGKILL");
+
+    const finalWait = await settleWithin(this.closePromise, stageTimeout(1));
+    return finalWait ?? { kind: "cleanup-timeout" };
+  }
+
+  private async safeShutdown(
+    first: "stdin" | "terminate",
+    timeoutMs: number,
+  ): Promise<OwnedProcessClose> {
+    try {
+      return await this.shutdown(first, timeoutMs);
+    } catch (error) {
+      return {
+        kind: "cleanup-error",
+        cause: error,
+      };
+    }
+  }
+}
+
+async function settleWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const elapsed = new Promise<undefined>((resolve) => {
+    timeout = setTimeout(() => resolve(undefined), timeoutMs);
+  });
+  const result = await Promise.race([promise, elapsed]);
+  if (timeout !== undefined) clearTimeout(timeout);
+  return result;
+}
 
 /**
  * Spawn a resolved Command target directly (never a shell), stream its output

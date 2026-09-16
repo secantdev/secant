@@ -1,0 +1,2 @@
+not-json startup output
+{"type":"result","subtype":"success","is_error":false,"result":"must not complete without init","session_id":"44444444-4444-4444-8444-444444444444"}

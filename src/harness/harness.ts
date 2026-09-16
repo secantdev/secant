@@ -5,9 +5,8 @@
 // bearing profile, and the factory a composition root calls. It names no native
 // conversation id, filesystem path, raw protocol frame, or protocol type; those
 // stay private to each Adapter. It knows nothing of Routing, Step kind, retry
-// budget, or Run policy, all of which live above the Seam. Discovery,
-// qualification, and the native Adapters arrive in later slices and re-export
-// their public surface from here.
+// budget, or Run policy, all of which live above the Seam. Native Adapter
+// implementations re-export only their deliberately public factories here.
 
 // ---------------------------------------------------------------------------
 // Opaque coordinates
@@ -153,6 +152,10 @@ export interface TurnAdmission {
   readonly correlationKey: CorrelationKey;
   readonly session: string;
   readonly origin: TurnOrigin;
+  /** The exact rendered transcript input admitted before native submission. */
+  readonly input: TurnInput;
+  /** The opaque native coordinate Secant records before submission. */
+  readonly recoveryCoordinate: RecoveryCoordinate;
   /** Present when this Turn resumes a detached Session. */
   readonly resume?: RecoveryCoordinate;
 }
@@ -248,6 +251,20 @@ export interface ToolActivity {
   readonly tool: string;
   readonly phase: "started" | "completed";
   readonly summary: string;
+  /** Parent activity identity for subagent work, when the Harness reports it. */
+  readonly parentActivity?: string;
+}
+
+/** Semantic Session facts observed during native initialization. The native id
+ * crosses the Seam only as an opaque recovery coordinate. */
+export interface SessionFacts {
+  readonly recoveryCoordinate: RecoveryCoordinate;
+  readonly executableVersion?: string;
+  readonly tools: readonly string[];
+  readonly mcp: readonly {
+    readonly name: string;
+    readonly status: string;
+  }[];
 }
 
 /** Context-window pressure, prominent when observed or honestly calculable. */
@@ -276,8 +293,16 @@ export type SessionAvailability =
 
 /** The closed set of Turn event kinds. */
 export type TurnEvent =
-  | { readonly kind: "session"; readonly availability: SessionAvailability }
-  | { readonly kind: "assistant-content"; readonly content: string }
+  | {
+      readonly kind: "session";
+      readonly availability: SessionAvailability;
+      readonly facts?: SessionFacts;
+    }
+  | {
+      readonly kind: "assistant-content";
+      readonly content: string;
+      readonly parentActivity?: string;
+    }
   | { readonly kind: "tool-activity"; readonly activity: ToolActivity }
   | { readonly kind: "request-raised"; readonly request: HarnessRequest }
   | {
@@ -374,7 +399,7 @@ export interface HarnessFailure {
   /** Useful diagnostics for the Harness owner. */
   readonly diagnostics?: string;
   /** The original cause, preserved, with Crucible-introduced secrets redacted. */
-  readonly cause?: string;
+  readonly cause?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +481,11 @@ export interface CleanupReport {
   readonly clean: boolean;
   readonly detail: string;
   readonly failure?: HarnessFailure;
+  /** Final availability of every Session the prepared Harness owned. */
+  readonly sessions?: readonly {
+    readonly session: string;
+    readonly availability: SessionAvailability;
+  }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +534,8 @@ export interface PreparedHarness {
 
 /** Options for non-conversational Preflight qualification. */
 export interface PrepareOptions {
+  /** The resolved absolute Workspace directory every Session runs against. */
+  readonly workspace: string;
   /** An explicit configured executable path or command, tried before the
    *  canonical name. */
   readonly configuredExecutable?: string;

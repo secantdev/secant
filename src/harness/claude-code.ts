@@ -1,29 +1,43 @@
 // The Claude Code Harness Adapter — private to the Harness Module, re-exported
-// from `harness.ts` only through its factory. This first slice (#111) does
-// discovery, non-conversational qualification, and the evidence-bearing profile
-// `prepare` returns; Turns, the MCP bridge, and resume arrive in #112+. It opens
-// no Session and writes nothing to stdin: it probes `claude --version` through
-// the `process` Module (the one PATH walk and shim resolver, ADR 0030) and reads
-// the platform. Every profile fact is an M3 spec fact (#107) carrying the
-// evidence it rests on; the configuration posture is user-compatible, so no
-// `--model`, tools, or permission flag is ever built here.
+// from `harness.ts` only through its factory. It discovers and qualifies the
+// executable, then owns named stream-json Sessions and normalizes their Turns.
+// Process spawning, pipe backpressure, and cleanup stay in the `process` Module;
+// Claude-native frames and identifiers stay behind this Seam. The MCP permission
+// bridge and detached-Session recovery land in later slices.
 
+import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import {
   resolveExecutable,
   spawnCommand,
+  spawnOwnedProcess,
   type ExecutableResolution,
+  type OwnedProcess,
+  type OwnedProcessClose,
 } from "../process/process.js";
 import type {
   CleanupReport,
+  ControlReceipt,
   HarnessAdapter,
   HarnessFailure,
   HarnessPlatform,
   HarnessProfile,
   HarnessTurn,
+  ModelObservation,
   PrepareOptions,
   PrepareResult,
   PreparedHarness,
+  RecoveryCoordinate,
+  RequestAnswer,
+  SessionAvailability,
+  SessionFacts,
+  SteerInput,
+  TurnEvent,
+  TurnEventListener,
+  TurnRequest,
+  TurnResult,
+  TurnSubscription,
+  UsageObservation,
 } from "./harness.js";
 
 /** The one M3 environment variable naming an explicit Claude Code executable
@@ -39,6 +53,10 @@ const HARNESS_NAME = "claude-code";
 /** The version probe's own timeout. Per ADR 0022 only launch/probe steps are
  *  bounded; agent thought and tools never are. */
 const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
+const DEFAULT_LAUNCH_TIMEOUT_MS = 15_000;
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
+const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
+const MAX_STDERR_BYTES = 64 * 1024;
 
 /** Test seams, all optional; production passes none and the real PATH walk,
  *  host platform, and `process.env` decide. They mirror the process Module's
@@ -54,6 +72,8 @@ export interface ClaudeCodeAdapterOverrides {
   /** Replace the PATH walk entirely, so the shim rule is testable off Windows. */
   readonly resolve?: (name: string) => string | undefined;
   readonly probeTimeoutMs?: number;
+  /** Override UUID generation for deterministic protocol replay. */
+  readonly sessionId?: () => string;
 }
 
 /** The factory a composition root calls. Satisfies `HarnessAdapterFactory` when
@@ -116,7 +136,15 @@ class ClaudeCodeAdapter implements HarnessAdapter {
     const cacheKey = `${target.source}\0${target.identityPath}\0${identity ?? "?"}`;
     const cached = this.cache.get(cacheKey);
     if (cached !== undefined) {
-      return { ok: true, harness: new ClaudeCodePreparedHarness(cached) };
+      return {
+        ok: true,
+        harness: new ClaudeCodePreparedHarness(
+          cached,
+          target,
+          options.workspace,
+          this.overrides.sessionId ?? randomUUID,
+        ),
+      };
     }
 
     const probe = await this.probeVersion(target);
@@ -124,7 +152,15 @@ class ClaudeCodeAdapter implements HarnessAdapter {
 
     const profile = buildProfile(target, probe.version, platform);
     this.cache.set(cacheKey, profile);
-    return { ok: true, harness: new ClaudeCodePreparedHarness(profile) };
+    return {
+      ok: true,
+      harness: new ClaudeCodePreparedHarness(
+        profile,
+        target,
+        options.workspace,
+        this.overrides.sessionId ?? randomUUID,
+      ),
+    };
   }
 
   /** Discover in order: an explicit configured command or path (the env var, or
@@ -240,29 +276,912 @@ class ClaudeCodeAdapter implements HarnessAdapter {
   }
 }
 
-/** The prepared Harness this slice returns. It carries the immutable profile;
- *  Turns are #112, so `startTurn` is a caller-contract violation for now, and
- *  `close` is a clean no-op (nothing was spawned or opened). */
+/** One prepared Harness owns every live named Session for one Workspace. It
+ * permits one active Turn globally, while retaining each idle Session process
+ * for a later Turn. */
 class ClaudeCodePreparedHarness implements PreparedHarness {
-  constructor(readonly profile: HarnessProfile) {}
+  private readonly sessions = new Map<string, ClaudeCodeSession>();
+  private active: ClaudeCodeTurn | undefined;
+  private closed = false;
+  private closePromise: Promise<CleanupReport> | undefined;
 
-  startTurn(): HarnessTurn {
-    throw new Error(
-      "Claude Code Turns are not available yet (#112): prepare only qualifies.",
-    );
+  constructor(
+    readonly profile: HarnessProfile,
+    private readonly target: DiscoveredTarget,
+    private readonly workspace: string,
+    private readonly createSessionId: () => string,
+  ) {}
+
+  startTurn(request: TurnRequest): HarnessTurn {
+    if (this.closed) {
+      throw new Error("startTurn after close: the prepared Harness is closed");
+    }
+    if (this.active !== undefined && !this.active.settled) {
+      throw new Error("startTurn while a Turn is active: one active Turn only");
+    }
+
+    let session = this.sessions.get(request.session);
+    if (session === undefined) {
+      session = new ClaudeCodeSession(
+        request.session,
+        this.target,
+        this.workspace,
+        this.createSessionId(),
+      );
+      this.sessions.set(request.session, session);
+    }
+    const turn = new ClaudeCodeTurn(request, session, () => {
+      if (this.active === turn) this.active = undefined;
+    });
+    this.active = turn;
+    session.start(turn);
+    return turn;
   }
 
   close(): Promise<CleanupReport> {
-    return Promise.resolve(CLEAN_CLOSE);
+    if (this.closePromise !== undefined) return this.closePromise;
+    this.closed = true;
+    this.closePromise = this.closeSessions();
+    return this.closePromise;
+  }
+
+  private async closeSessions(): Promise<CleanupReport> {
+    const outcomes = await Promise.all(
+      [...this.sessions.values()].map((session) => session.close()),
+    );
+    const failed = outcomes.find(
+      (
+        outcome,
+      ): outcome is Extract<SessionCloseOutcome, { readonly clean: false }> =>
+        !outcome.clean,
+    );
+    const sessions = outcomes.map((outcome) => ({
+      session: outcome.session,
+      availability: outcome.availability,
+    }));
+    if (failed !== undefined) {
+      return {
+        clean: false,
+        detail: failed.detail,
+        failure: failed.failure,
+        sessions,
+      };
+    }
+    return {
+      clean: true,
+      detail: `${outcomes.length} Claude Code Session(s) detached.`,
+      sessions,
+    };
   }
 }
 
-// `prepare` opens no Session and spawns no long-lived process, so close always
-// reports the same clean value — the same reference each call keeps it idempotent.
-const CLEAN_CLOSE: CleanupReport = {
-  clean: true,
-  detail: "prepare opened no Session; nothing to clean up.",
-};
+type SessionCloseOutcome = {
+  readonly clean: boolean;
+  readonly detail: string;
+  readonly session: string;
+  readonly availability: SessionAvailability;
+} & (
+  | { readonly clean: true }
+  | { readonly clean: false; readonly failure: HarnessFailure }
+);
+
+class ClaudeCodeSession {
+  readonly coordinate: RecoveryCoordinate;
+  private process: OwnedProcess | undefined;
+  private launchPromise:
+    | Promise<
+        | { readonly ok: true }
+        | {
+            readonly ok: false;
+            readonly category: string;
+            readonly cause: unknown;
+          }
+      >
+    | undefined;
+  private active: ClaudeCodeTurn | undefined;
+  private closed = false;
+  private initialized = false;
+  private effectiveModel: ModelObservation = { known: false };
+  private stderr = "";
+
+  constructor(
+    readonly name: string,
+    private readonly target: DiscoveredTarget,
+    private readonly workspace: string,
+    sessionId: string,
+  ) {
+    this.coordinate = { opaque: sessionId };
+  }
+
+  start(turn: ClaudeCodeTurn): void {
+    this.active = turn;
+    queueMicrotask(() => {
+      void this.submit(turn);
+    });
+  }
+
+  model(): ModelObservation {
+    return this.effectiveModel;
+  }
+
+  isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  observeInit(model: ModelObservation): void {
+    this.initialized = true;
+    this.effectiveModel = model;
+  }
+
+  async interrupt(turn: ClaudeCodeTurn): Promise<void> {
+    if (this.active !== turn) return;
+    const owned = this.process;
+    if (owned === undefined) {
+      turn.settleInterrupted();
+      return;
+    }
+    const result = await owned.terminate(DEFAULT_CLEANUP_TIMEOUT_MS);
+    if (result.kind === "cleanup-error" || result.kind === "cleanup-timeout") {
+      turn.settleLost("interruption", "process termination was not confirmed", {
+        phase: "control",
+        category: result.kind,
+        possibleEffects: "possible",
+        ...(result.kind === "cleanup-error" ? { cause: result.cause } : {}),
+      });
+    }
+  }
+
+  async close(): Promise<SessionCloseOutcome> {
+    this.closed = true;
+    if (this.process === undefined && this.launchPromise === undefined) {
+      const active = this.active;
+      if (active !== undefined && !active.settled) {
+        active.settleNotStarted(
+          "closed-before-launch",
+          "The prepared Harness closed before Claude Code launched.",
+        );
+      }
+      this.active = undefined;
+    }
+    const launch = this.launchPromise;
+    if (launch !== undefined) await launch;
+    const owned = this.process;
+    if (owned === undefined) {
+      return {
+        clean: true,
+        detail: `Session '${this.name}' had no live process.`,
+        session: this.name,
+        availability: this.detached(),
+      };
+    }
+    const result = await owned.closeStdin(DEFAULT_CLEANUP_TIMEOUT_MS);
+    const clean = isCleanClose(result);
+    const detail = describeClose(this.name, result);
+    const availability: SessionAvailability =
+      result.kind === "cleanup-error" || result.kind === "cleanup-timeout"
+        ? {
+            state: "unusable",
+            reason: `Claude Code cleanup was not confirmed: ${describeProcessResult(result)}.`,
+          }
+        : this.detached();
+    const common = {
+      detail,
+      session: this.name,
+      availability,
+    };
+    if (clean) return { clean: true, ...common };
+    return {
+      clean: false,
+      ...common,
+      failure: cleanupFailure(result, detail),
+    };
+  }
+
+  private async submit(turn: ClaudeCodeTurn): Promise<void> {
+    if (turn.settled) return;
+
+    const admission = await turn.admit(this.coordinate);
+    if (!admission.recorded) {
+      const owned = this.process;
+      if (owned !== undefined) {
+        this.process = undefined;
+        this.active = undefined;
+        await owned.closeStdin(DEFAULT_CLEANUP_TIMEOUT_MS);
+      }
+      turn.settleNotStarted(
+        "durable-admission",
+        admission.cause ?? admission.reason,
+        admission.reason,
+      );
+      return;
+    }
+    if (turn.settled || this.closed) {
+      if (!turn.settled) {
+        turn.settleNotStarted(
+          "closed-before-launch",
+          "The prepared Harness closed before Claude Code launched.",
+        );
+      }
+      return;
+    }
+
+    if (this.process === undefined) {
+      const launch = this.launch();
+      this.launchPromise = launch;
+      const launched = await launch;
+      if (this.launchPromise === launch) this.launchPromise = undefined;
+      if (!launched.ok) {
+        turn.settleNotStarted(launched.category, launched.cause);
+        return;
+      }
+    }
+    if (turn.settled) return;
+    if (this.closed) {
+      turn.settleNotStarted(
+        "closed-before-send",
+        "The prepared Harness closed before the Turn was sent.",
+      );
+      return;
+    }
+
+    if (!this.initialized) turn.armHandshake(DEFAULT_HANDSHAKE_TIMEOUT_MS);
+    try {
+      await this.process!.writeStdin(encodeTurn(turn.request));
+    } catch (error) {
+      turn.settleLost("acceptance", "stdin write failed", {
+        phase: "turn",
+        category: "stdin-write",
+        possibleEffects: "possible",
+        cause: error,
+      });
+      void this.interrupt(turn);
+      return;
+    }
+  }
+
+  private async launch(): Promise<
+    | { readonly ok: true }
+    | {
+        readonly ok: false;
+        readonly category: string;
+        readonly cause: unknown;
+      }
+  > {
+    const launched = await spawnOwnedProcess({
+      executable: this.target.executable,
+      args: [
+        ...this.target.prefixArgs,
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--session-id",
+        this.coordinate.opaque,
+      ],
+      cwd: this.workspace,
+      env: process.env,
+      launchTimeoutMs: DEFAULT_LAUNCH_TIMEOUT_MS,
+    });
+    if (!launched.ok) {
+      return {
+        ok: false,
+        category: launched.failure.kind,
+        cause: launched.failure.cause,
+      };
+    }
+
+    const owned = launched.process;
+    this.process = owned;
+    void this.consumeStdout(owned).catch((error) => {
+      this.active?.protocolCorruption(
+        `stdout read failed: ${describe(error)}`,
+        error,
+      );
+    });
+    void this.consumeStderr(owned).catch((error) => {
+      this.stderr += ` stderr read failed: ${describe(error)}`;
+    });
+    void owned.closed().then((result) => this.onClosed(owned, result));
+    return { ok: true };
+  }
+
+  private async consumeStdout(owned: OwnedProcess): Promise<void> {
+    const decoder = new TextDecoder();
+    let pending = "";
+    for await (const chunk of owned.stdout) {
+      pending += decoder.decode(chunk, { stream: true });
+      let newline = pending.indexOf("\n");
+      while (newline >= 0) {
+        const line = pending.slice(0, newline).replace(/\r$/, "");
+        pending = pending.slice(newline + 1);
+        this.consumeLine(line);
+        newline = pending.indexOf("\n");
+      }
+    }
+    pending += decoder.decode();
+    if (pending.trim().startsWith("{")) {
+      this.active?.protocolCorruption("truncated JSON frame");
+    }
+  }
+
+  private async consumeStderr(owned: OwnedProcess): Promise<void> {
+    const decoder = new TextDecoder();
+    for await (const chunk of owned.stderr) {
+      if (this.stderr.length >= MAX_STDERR_BYTES) continue;
+      this.stderr += decoder
+        .decode(chunk, { stream: true })
+        .slice(0, MAX_STDERR_BYTES - this.stderr.length);
+    }
+    if (this.stderr.length < MAX_STDERR_BYTES) this.stderr += decoder.decode();
+  }
+
+  private consumeLine(line: string): void {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || !trimmed.startsWith("{")) return;
+    let frame: unknown;
+    try {
+      frame = JSON.parse(trimmed);
+    } catch (error) {
+      this.active?.protocolCorruption("malformed JSON frame", error);
+      return;
+    }
+    if (!isRecord(frame)) return;
+    this.active?.acceptFrame(frame);
+  }
+
+  private onClosed(owned: OwnedProcess, result: OwnedProcessClose): void {
+    if (this.process !== owned) return;
+    this.process = undefined;
+    const turn = this.active;
+    this.active = undefined;
+    if (turn === undefined || turn.settled) return;
+    if (turn.interrupting) {
+      turn.settleInterrupted();
+      return;
+    }
+    if (!this.initialized) {
+      const diagnostics = `Claude Code closed before init (${describeProcessResult(result)}).${this.diagnostics()}`;
+      turn.settleNotStarted(
+        "initialization",
+        result.kind === "cleanup-error" ? result.cause : diagnostics,
+        diagnostics,
+      );
+      return;
+    }
+    turn.settleLost("completion", "process closed before result", {
+      phase: "turn",
+      category: "completion-unknown",
+      possibleEffects: "possible",
+      diagnostics: `${describeProcessResult(result)}.${this.diagnostics()}`,
+      ...(result.kind === "cleanup-error" ? { cause: result.cause } : {}),
+    });
+  }
+
+  private detached(): SessionAvailability {
+    return { state: "detached", coordinate: this.coordinate };
+  }
+
+  private diagnostics(): string {
+    const text = this.stderr.trim();
+    return text.length === 0 ? "" : ` stderr: ${text}`;
+  }
+}
+
+class ClaudeCodeTurn implements HarnessTurn {
+  settled = false;
+  interrupting = false;
+  readonly request: TurnRequest;
+  private readonly listeners = new Set<TurnEventListener>();
+  private readonly events: TurnEvent[] = [];
+  private readonly tools = new Map<string, string>();
+  private readonly resultPromise: Promise<TurnResult>;
+  private resolveResult!: (result: TurnResult) => void;
+  private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+  private preview = "";
+  private previewIndex: number | undefined;
+
+  constructor(
+    request: TurnRequest,
+    private readonly session: ClaudeCodeSession,
+    private readonly onSettled: () => void,
+  ) {
+    this.request = request;
+    this.resultPromise = new Promise((resolve) => {
+      this.resolveResult = resolve;
+    });
+  }
+
+  subscribe(listener: TurnEventListener): TurnSubscription {
+    for (const event of this.events) listener(event);
+    this.listeners.add(listener);
+    return { unsubscribe: () => this.listeners.delete(listener) };
+  }
+
+  result(): Promise<TurnResult> {
+    return this.resultPromise;
+  }
+
+  steer(_input: SteerInput): Promise<ControlReceipt> {
+    return Promise.resolve(
+      this.settled || this.interrupting
+        ? { outcome: "rejected", reason: "expired" }
+        : { outcome: "rejected", reason: "unsupported" },
+    );
+  }
+
+  async interrupt(): Promise<ControlReceipt> {
+    if (this.settled) return { outcome: "rejected", reason: "expired" };
+    if (this.interrupting) {
+      return { outcome: "rejected", reason: "already-settled" };
+    }
+    this.interrupting = true;
+    await this.session.interrupt(this);
+    return { outcome: "accepted" };
+  }
+
+  answerRequest(_answer: RequestAnswer): Promise<ControlReceipt> {
+    return Promise.resolve(
+      this.settled || this.interrupting
+        ? { outcome: "rejected", reason: "expired" }
+        : { outcome: "rejected", reason: "unsupported" },
+    );
+  }
+
+  async admit(coordinate: RecoveryCoordinate): Promise<
+    | { readonly recorded: true }
+    | {
+        readonly recorded: false;
+        readonly reason: string;
+        readonly cause?: unknown;
+      }
+  > {
+    try {
+      return await this.request.recorder.admit({
+        correlationKey: this.request.correlationKey,
+        session: this.request.session,
+        origin: this.request.origin,
+        input: this.request.input,
+        recoveryCoordinate: coordinate,
+        resume: this.request.resume,
+      });
+    } catch (error) {
+      return { recorded: false, reason: describe(error), cause: error };
+    }
+  }
+
+  armHandshake(timeoutMs: number): void {
+    this.handshakeTimer = setTimeout(() => {
+      this.settleNotStarted(
+        "init-timeout",
+        `Claude Code did not emit system/init within ${timeoutMs}ms.`,
+      );
+      void this.session.interrupt(this);
+    }, timeoutMs);
+  }
+
+  acceptFrame(frame: Record<string, unknown>): void {
+    if (this.settled) return;
+    const type = stringField(frame, "type");
+    if (type === "system" && stringField(frame, "subtype") === "init") {
+      this.acceptInit(frame);
+      return;
+    }
+    if (!this.session.isInitialized()) {
+      if (type !== "result") this.emit(genericActivity(type));
+      return;
+    }
+    switch (type) {
+      case "assistant":
+        this.acceptAssistant(frame);
+        return;
+      case "user":
+        this.acceptToolResults(frame);
+        return;
+      case "stream_event":
+        this.acceptStreamEvent(frame);
+        return;
+      case "result":
+        this.acceptResult(frame);
+        return;
+      case "telemetry":
+        return;
+      default:
+        this.emit(genericActivity(type));
+    }
+  }
+
+  protocolCorruption(detail: string, cause?: unknown): void {
+    if (this.settled) return;
+    this.settleLost("completion", detail, {
+      phase: "turn",
+      category: "protocol-corruption",
+      possibleEffects: "possible",
+      diagnostics: detail,
+      ...(cause !== undefined ? { cause } : {}),
+    });
+    void this.session.interrupt(this);
+  }
+
+  settleNotStarted(
+    category: string,
+    cause: unknown,
+    diagnostics?: string,
+  ): void {
+    this.settle({
+      kind: "not-started",
+      detail: {
+        failure: {
+          phase:
+            category === "spawn-error" || category === "launch-timeout"
+              ? "launch"
+              : "turn",
+          category,
+          possibleEffects: "none",
+          cause,
+          ...(diagnostics !== undefined ? { diagnostics } : {}),
+        },
+      },
+    });
+  }
+
+  settleInterrupted(): void {
+    this.settle({
+      kind: "interrupted",
+      detail: {
+        interruption: {
+          mode: "process-only",
+          evidence: "Claude Code process termination ended the active Turn.",
+        },
+        session: {
+          state: "detached",
+          coordinate: this.session.coordinate,
+        },
+      },
+    });
+  }
+
+  settleLost(
+    unknown: "acceptance" | "completion" | "interruption",
+    lastObservation: string,
+    failure: HarnessFailure,
+  ): void {
+    this.settle({
+      kind: "lost",
+      detail: {
+        unknown,
+        lastObservation,
+        session: {
+          state: "detached",
+          coordinate: this.session.coordinate,
+        },
+        failure,
+      },
+    });
+  }
+
+  private acceptInit(frame: Record<string, unknown>): void {
+    this.clearHandshake();
+    const nativeSessionId = stringField(frame, "session_id");
+    if (nativeSessionId !== this.session.coordinate.opaque) {
+      this.settleNotStarted(
+        "init-session",
+        nativeSessionId === undefined
+          ? "Claude Code init omitted its Session id."
+          : "Claude Code init did not acknowledge the minted Session id.",
+      );
+      void this.session.interrupt(this);
+      return;
+    }
+    const modelName = stringField(frame, "model");
+    const model: ModelObservation =
+      modelName === undefined
+        ? { known: false }
+        : { known: true, model: modelName };
+    this.session.observeInit(model);
+    const facts = sessionFacts(frame, this.session.coordinate);
+    this.emit({ kind: "session", availability: { state: "open" }, facts });
+    this.emit({ kind: "model", observation: model });
+    this.emit({ kind: "activity", description: describeSessionFacts(facts) });
+  }
+
+  private acceptAssistant(frame: Record<string, unknown>): void {
+    const parentActivity = optionalString(frame.parent_tool_use_id);
+    for (const block of contentBlocks(frame)) {
+      const blockType = stringField(block, "type");
+      if (blockType === "text") {
+        const content = stringField(block, "text");
+        if (content !== undefined) {
+          this.clearPreview();
+          this.emit({
+            kind: "assistant-content",
+            content,
+            ...(parentActivity !== undefined ? { parentActivity } : {}),
+          });
+        }
+        continue;
+      }
+      if (blockType !== "tool_use") continue;
+      const tool = stringField(block, "name") ?? "unknown tool";
+      const id = stringField(block, "id");
+      if (id !== undefined) this.tools.set(id, tool);
+      this.emit({
+        kind: "tool-activity",
+        activity: {
+          tool,
+          phase: "started",
+          summary: summarize(block.input),
+          ...(parentActivity !== undefined ? { parentActivity } : {}),
+        },
+      });
+    }
+  }
+
+  private acceptToolResults(frame: Record<string, unknown>): void {
+    const parentActivity = optionalString(frame.parent_tool_use_id);
+    for (const block of contentBlocks(frame)) {
+      if (stringField(block, "type") !== "tool_result") continue;
+      const id = stringField(block, "tool_use_id");
+      const tool = id === undefined ? undefined : this.tools.get(id);
+      this.emit({
+        kind: "tool-activity",
+        activity: {
+          tool: tool ?? "unknown tool",
+          phase: "completed",
+          summary: summarize(block.content),
+          ...(parentActivity !== undefined ? { parentActivity } : {}),
+        },
+      });
+    }
+  }
+
+  private acceptStreamEvent(frame: Record<string, unknown>): void {
+    if (!isRecord(frame.event) || !isRecord(frame.event.delta)) return;
+    if (stringField(frame.event.delta, "type") !== "text_delta") return;
+    const text = stringField(frame.event.delta, "text");
+    if (text !== undefined) this.emitPreview(text);
+  }
+
+  private acceptResult(frame: Record<string, unknown>): void {
+    const usage = usageObservation(frame);
+    if (usage !== undefined) this.emit({ kind: "usage", observation: usage });
+    const subtype = stringField(frame, "subtype") ?? "unknown-result";
+    if (subtype === "success") {
+      const finalContent = stringField(frame, "result");
+      this.settle({
+        kind: "completed",
+        detail: {
+          ...(finalContent !== undefined ? { finalContent } : {}),
+          effectiveModel: this.session.model(),
+          session: { state: "open" },
+          ...(usage !== undefined ? { usage } : {}),
+        },
+      });
+      return;
+    }
+    this.settle({
+      kind: "failed",
+      detail: {
+        failure: {
+          phase: "turn",
+          category: subtype,
+          possibleEffects: "possible",
+          ...(stringField(frame, "result") !== undefined
+            ? { partialOutput: stringField(frame, "result") }
+            : {}),
+        },
+        effectiveModel: this.session.model(),
+        session: { state: "open" },
+      },
+    });
+  }
+
+  private emit(event: TurnEvent): void {
+    if (this.settled) return;
+    this.events.push(event);
+    for (const listener of this.listeners) listener(event);
+  }
+
+  private emitPreview(delta: string): void {
+    if (this.settled) return;
+    this.preview += delta;
+    const event: TurnEvent = { kind: "preview", text: this.preview };
+    if (this.previewIndex === undefined) {
+      this.previewIndex = this.events.length;
+      this.events.push(event);
+    } else {
+      this.events[this.previewIndex] = event;
+    }
+    for (const listener of this.listeners) listener(event);
+  }
+
+  private clearPreview(): void {
+    if (this.previewIndex === undefined) return;
+    this.events.splice(this.previewIndex, 1);
+    this.previewIndex = undefined;
+    this.preview = "";
+  }
+
+  private settle(result: TurnResult): void {
+    if (this.settled) return;
+    this.clearHandshake();
+    this.clearPreview();
+    this.settled = true;
+    this.onSettled();
+    this.resolveResult(result);
+  }
+
+  private clearHandshake(): void {
+    if (this.handshakeTimer === undefined) return;
+    clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = undefined;
+  }
+}
+
+function encodeTurn(request: TurnRequest): Uint8Array {
+  return new TextEncoder().encode(
+    `${JSON.stringify({
+      type: "user",
+      message: { role: "user", content: request.input.text },
+      parent_tool_use_id: null,
+    })}\n`,
+  );
+}
+
+function contentBlocks(
+  frame: Record<string, unknown>,
+): Record<string, unknown>[] {
+  if (!isRecord(frame.message) || !Array.isArray(frame.message.content)) {
+    return [];
+  }
+  return frame.message.content.filter(isRecord);
+}
+
+function sessionFacts(
+  frame: Record<string, unknown>,
+  coordinate: RecoveryCoordinate,
+): SessionFacts {
+  const tools = Array.isArray(frame.tools)
+    ? frame.tools.filter((tool): tool is string => typeof tool === "string")
+    : [];
+  const mcp = Array.isArray(frame.mcp_servers)
+    ? frame.mcp_servers.filter(isRecord).flatMap((server) => {
+        const name = stringField(server, "name");
+        const status = stringField(server, "status");
+        return name === undefined || status === undefined
+          ? []
+          : [{ name, status }];
+      })
+    : [];
+  const executableVersion = stringField(frame, "claude_code_version");
+  return {
+    recoveryCoordinate: coordinate,
+    tools,
+    mcp,
+    ...(executableVersion !== undefined ? { executableVersion } : {}),
+  };
+}
+
+function describeSessionFacts(facts: SessionFacts): string {
+  const version = facts.executableVersion ?? "unknown version";
+  const tools = facts.tools.length === 0 ? "no tools" : facts.tools.join(", ");
+  const mcp =
+    facts.mcp.length === 0
+      ? "no MCP servers"
+      : facts.mcp.map((server) => `${server.name}=${server.status}`).join(", ");
+  return `Claude Code ${version}; tools: ${tools}; MCP: ${mcp}`;
+}
+
+function usageObservation(
+  frame: Record<string, unknown>,
+): UsageObservation | undefined {
+  const parts: string[] = [];
+  if (isRecord(frame.usage)) {
+    const input = numberField(frame.usage, "input_tokens");
+    const output = numberField(frame.usage, "output_tokens");
+    if (input !== undefined) parts.push(`input ${input}`);
+    if (output !== undefined) parts.push(`output ${output} tokens`);
+  }
+  const cost = numberField(frame, "total_cost_usd");
+  if (cost !== undefined) parts.push(`cost estimate USD ${cost}`);
+  if (parts.length === 0) return undefined;
+  return {
+    estimate: true,
+    summary: parts.join(", ").replace(", cost", "; cost"),
+  };
+}
+
+function genericActivity(type: string | undefined): TurnEvent {
+  return {
+    kind: "activity",
+    description: `Claude Code activity: ${type ?? "unknown"}`,
+  };
+}
+
+function summarize(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "unavailable";
+  }
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringField(
+  value: Record<string, unknown>,
+  field: string,
+): string | undefined {
+  return optionalString(value[field]);
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function numberField(
+  value: Record<string, unknown>,
+  field: string,
+): number | undefined {
+  const found = value[field];
+  return typeof found === "number" && Number.isFinite(found)
+    ? found
+    : undefined;
+}
+
+function isCleanClose(result: OwnedProcessClose): boolean {
+  return result.kind === "exited" && result.status === 0;
+}
+
+function describeClose(session: string, result: OwnedProcessClose): string {
+  return `Session '${session}' detached after ${describeProcessResult(result)}.`;
+}
+
+function describeProcessResult(result: OwnedProcessClose): string {
+  switch (result.kind) {
+    case "exited":
+      return `process close with exit ${result.status}`;
+    case "signal":
+      return `process close from signal ${result.signal ?? "unknown"}`;
+    case "spawn-error":
+      return `process error: ${describe(result.cause)}`;
+    case "cleanup-error":
+      return `process cleanup error: ${describe(result.cause)}`;
+    case "cleanup-timeout":
+      return "process cleanup timeout";
+  }
+}
+
+function cleanupFailure(
+  result: OwnedProcessClose,
+  diagnostics: string,
+): HarnessFailure {
+  return {
+    phase: "cleanup",
+    category: result.kind,
+    possibleEffects:
+      result.kind === "cleanup-error" || result.kind === "cleanup-timeout"
+        ? "possible"
+        : "none",
+    diagnostics,
+    ...(result.kind === "cleanup-error" ? { cause: result.cause } : {}),
+    ...(result.kind === "exited"
+      ? { nativeCode: String(result.status) }
+      : result.kind === "signal" && result.signal !== null
+        ? { nativeCode: result.signal }
+        : {}),
+  };
+}
 
 function toTarget(
   attempt: DiscoveryAttempt,

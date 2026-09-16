@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"33333333-3333-4333-8333-333333333333","model":"claude-sonnet-4-5","claude_code_version":"2.1.234","tools":[],"mcp_servers":[]}
+{"type":"result","subtype":"success","is_error":false,"result":"first complete","session_id":"33333333-3333-4333-8333-333333333333"}

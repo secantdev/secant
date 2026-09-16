@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222","model":"claude-sonnet-4-5","claude_code_version":"2.1.234","tools":[],"mcp_servers":[]}
+{"type":"result","subtype":"error_max_turns","is_error":true,"result":"maximum turns reached","session_id":"22222222-2222-4222-8222-222222222222"}

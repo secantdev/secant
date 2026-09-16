@@ -1,6 +1,6 @@
 // Installs the `claude` replayer (replayer.mjs) onto a temporary directory so
-// the Claude Code Adapter discovers and spawns it for real (#111). On POSIX the
-// replayer is copied to `claude` and made executable through its shebang; on
+// the Claude Code Adapter discovers and spawns it for real (#111/#112). On
+// POSIX the replayer is copied to `claude` and made executable through its shebang; on
 // Windows it is an npm-style `.cmd` shim naming the Bun runtime plus a colocated
 // `claude.mjs`, exactly the shape the process Module's shim resolver parses, so
 // the shim resolves to the runtime and script and is spawned directly.
@@ -39,8 +39,14 @@ export interface InstalledReplayer {
   readonly logPath: string;
   /** The version string the replayer answers `--version` with. */
   readonly version: string;
-  /** How many times the replayer has been spawned. */
-  invocations(): { args: string[]; stdinBytes: number }[];
+  /** Every real process invocation, including its working directory and intact
+   *  stdin frames. */
+  invocations(): {
+    args: string[];
+    cwd: string;
+    stdinBytes: number;
+    stdinLines: string[];
+  }[];
   /** Drift the install: change the identity file's bytes and the reported
    *  version, so the next `prepare` requalifies instead of reusing the cache. */
   drift(newVersion: string): void;
@@ -70,7 +76,10 @@ function npmBunShim(scriptRelative: string): string {
   ].join("\r\n");
 }
 
-export function installReplayer(version: string): InstalledReplayer {
+export function installReplayer(
+  version: string,
+  protocolCaseDirectory?: string,
+): InstalledReplayer {
   const dir = makeTempDir("secant-claude-replayer-");
   const logPath = join(dir, "invocations.log");
   writeFileSync(logPath, "");
@@ -103,6 +112,7 @@ export function installReplayer(version: string): InstalledReplayer {
           executableVersion: current,
           version: current,
           log: logPath,
+          protocolCaseDirectory,
           recordedAt: "1970-01-01T00:00:00Z",
           redactions: [],
           refreshCommand: "n/a — synthesised by tests/harness/replayer.ts",
@@ -126,7 +136,33 @@ export function installReplayer(version: string): InstalledReplayer {
     invocations() {
       const text = readFileSync(logPath, "utf8").trim();
       if (text.length === 0) return [];
-      return text.split("\n").map((line) => JSON.parse(line));
+      const entries = text.split("\n").map((line) => JSON.parse(line));
+      const invocations = new Map<
+        string,
+        {
+          args: string[];
+          cwd: string;
+          stdinBytes: number;
+          stdinLines: string[];
+        }
+      >();
+      for (const entry of entries) {
+        if (entry.type === "start") {
+          invocations.set(entry.id, {
+            args: entry.args,
+            cwd: entry.cwd,
+            stdinBytes: 0,
+            stdinLines: [],
+          });
+          continue;
+        }
+        if (entry.type !== "stdin") continue;
+        const invocation = invocations.get(entry.id);
+        if (!invocation) continue;
+        invocation.stdinLines.push(entry.line);
+        invocation.stdinBytes += Buffer.byteLength(`${entry.line}\n`);
+      }
+      return [...invocations.values()];
     },
     drift(newVersion: string) {
       current = newVersion;

@@ -86,7 +86,9 @@ function request(durable: DurableTurnRecorder): TurnRequest {
 }
 
 async function prepared(script: FakeScript): Promise<PreparedHarness> {
-  const result = await createFake(script)().prepare({});
+  const result = await createFake(script)().prepare({
+    workspace: process.cwd(),
+  });
   assert.equal(result.ok, true);
   if (!result.ok) throw new Error("unreachable");
   return result.harness;

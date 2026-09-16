@@ -26,10 +26,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Tests
 
-- The `tests/harness` domain owns the deterministic fake Adapter, the shared conformance suite, and (from #112) the replayer, recording tool, and the
+- The `tests/harness` domain owns the deterministic fake Adapter, the shared conformance suite, and the `claude` replayer. Its argv parser and recorded
+  `--version` landed in #111; #112 added per-Turn protocol replay from hand-authored `tests/harness/protocol-cases/`. #115 owns the recording tool and
   `tests/harness/fixtures/<harness>/<case>/` tree with its `recording.json` sidecar.
-- The conformance suite is the Seam's executable specification, parameterized by an Adapter factory. It runs against the fake here and against the
-  Claude Code Adapter over the replayer from #112, which keeps the fake honest to the Interface. The fake must exhibit behaviours a real Harness never
+- The conformance suite is the Seam's executable specification, parameterized by an Adapter factory. Its prepare/profile cases (`runPrepareProfileCases`)
+  factor out separately so they run against the Claude Code Adapter over the replayer from #111; the Turn cases follow in #112. It runs against the fake
+  here too, which keeps the fake honest to the Interface. The fake must exhibit behaviours a real Harness never
   will (native steer, structured clarifications, load-with-replay recovery, several concurrent requests, every `lost` variant) and is never the only
   end-to-end double (ADR 0027).
 

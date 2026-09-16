@@ -1,0 +1,4 @@
+{
+  "exitCode": 0,
+  "turns": [{ "stdout": "turn-1.stdout" }, { "stdout": "turn-2.stdout" }]
+}

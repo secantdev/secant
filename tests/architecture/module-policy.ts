@@ -28,7 +28,15 @@ export const modules = [
     root: "src/application/",
     entry: "application.ts",
     contracts: ["projection-port.ts", "bundle-management.ts"],
-    imports: ["workflow", "bundle", "catalog", "execution", "store", "harness"],
+    imports: [
+      "workflow",
+      "bundle",
+      "catalog",
+      "execution",
+      "store",
+      "harness",
+      "process",
+    ],
   },
   {
     name: "workflow",
@@ -58,7 +66,13 @@ export const modules = [
     name: "execution",
     root: "src/run/execution/",
     entry: "execution.ts",
-    imports: ["workflow", "store", "harness"],
+    imports: ["workflow", "store", "harness", "process"],
+  },
+  {
+    name: "process",
+    root: "src/process/",
+    entry: "process.ts",
+    imports: [],
   },
   {
     name: "store",
@@ -72,7 +86,12 @@ export const modules = [
     entry: "artifacts.ts",
     imports: ["workflow"],
   },
-  { name: "harness", root: "src/harness/", entry: "harness.ts", imports: [] },
+  {
+    name: "harness",
+    root: "src/harness/",
+    entry: "harness.ts",
+    imports: ["process"],
+  },
   {
     name: "tui",
     root: "src/tui/",

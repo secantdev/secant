@@ -20,6 +20,7 @@ One ESM package contains these ownership areas. Reserve the paths, but create fi
 | `src/run/execution/`       | Run lifecycle policy, uniform scheduling/retries, and private executable Step kinds                            |
 | `src/run/store/`           | Run creation/deletion, Workspace coordination and fencing, `run.db`, canonical records, and atomic publication |
 | `src/run/store/artifacts/` | Private Run Artifact capture, Git staging/history, and verified Workspace materialization                      |
+| `src/process/`             | Owned child process: PATH-walk executable resolution, Windows shim resolution, direct spawn, tree-reaping kill |
 | `src/harness/`             | Crucible's Harness Interface, discovery/qualification, and private native Adapters                             |
 | `src/tui/`                 | Crucible presentation plus the reduced OpenCode-derived presentation subset                                    |
 | `src/tui/renderer/`        | Renderer Port lifecycle and terminal teardown ordering                                                         |
@@ -43,11 +44,12 @@ An `index.ts` is valid for one cohesive Module after declaring it in that table.
   Catalog's Run index is advisory; Application uses Run Store authority for lifecycle decisions.
 - Drizzle owns only generated migration assets and their ordered journal Interface. Catalog and Run Store keep their schemas, queries, SQLite
   lifecycle, and migration invocation; only those two owners import the Drizzle entrypoint.
-- Run execution uses Workflow, Run Store, and Harness Interfaces. Store may reuse normalized Harness evidence types, but owns no Harness process.
-  Its private Artifact Module owns Git mechanics. The scheduler dispatches a closed Step-kind table; it never branches on Workflow identity.
+- Run execution uses Workflow, Run Store, Harness, and process Interfaces. Store may reuse normalized Harness evidence types, but owns no Harness
+  process. Its private Artifact Module owns Git mechanics. The scheduler dispatches a closed Step-kind table; it never branches on Workflow identity.
 - Harness knows no Routing, Step kind, retry budget, or Run policy. Its native Adapters, protocol models, qualification cache, and executable
-  discovery remain private. Command executable resolution and `git-worktree-root` checks remain private to their respective execution/Preflight
-  responsibilities. #14 ruled out a Git Step kind and a Git engine Module — Git is ordinary Command-step behaviour plus private mechanics — not a small
+  discovery remain private. Command executable resolution and the owned child-process spawn/kill live in the `process` Module, shared by Run execution,
+  Application (Preflight), and the Harness; the `git-worktree-root` check remains private to Preflight. #14 ruled out a Git Step kind and a Git engine
+  Module — Git is ordinary Command-step behaviour plus private mechanics — not a small
   shared helper: the isolated-Git-environment hardening is extracted once, exported from the Run Store entry, and reused by Preflight on repeated use (A31).
 - Each Interface owns its exposed types. Import another owner's public contract when the meaning is identical; Application translates facts for
   clients. Extract a small common value only for demonstrated consumers. A central `types/`, `models/`, or utility barrel is not a default owner.

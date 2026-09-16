@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { chmodSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import { resolveExecutable } from "../../../src/run/execution/execution.js";
-import { makeTempDir } from "../../helpers/tempDir.js";
+import { resolveExecutable } from "../../src/process/process.js";
+import { makeTempDir } from "../helpers/tempDir.js";
 
-// The one executable resolver the execution Module owns and Preflight shares (D1,
+// The one executable resolver the process Module owns and Preflight shares (D1,
 // A40). Its PATH walk is `which`, so the executable bit decides resolution on
 // POSIX; the Windows `.cmd`-shim path is driven cross-OS through the injected
 // resolver and platform seams (the real Windows behaviour is the package smoke).

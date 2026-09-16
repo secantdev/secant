@@ -9,10 +9,8 @@ import {
   type Platform,
   type Step,
 } from "../workflow/workflow.js";
-import {
-  EXECUTABLE_STEP_KINDS,
-  resolveExecutable,
-} from "../run/execution/execution.js";
+import { EXECUTABLE_STEP_KINDS } from "../run/execution/execution.js";
+import { resolveExecutable } from "../process/process.js";
 import { isolatedGitEnvironment } from "../run/store/store.js";
 import type { FieldViolation, Problem } from "./projection-port.js";
 
@@ -28,10 +26,10 @@ import type { FieldViolation, Problem } from "./projection-port.js";
 //
 // The `git-worktree-root` probe stays private to Preflight (topology.md,
 // glossary): Git has no Step kind and no public Module. Command executable
-// resolution is *not* private: it is the execution Module's exported resolver, so
-// Preflight's precondition and execution's spawn agree by construction (A40).
-// Preflight translates each external result into a typed Problem; presentation
-// only formats it.
+// resolution is *not* private: it is the process Module's exported resolver, which
+// execution also spawns through, so Preflight's precondition and execution's spawn
+// agree by construction (A40). Preflight translates each external result into a
+// typed Problem; presentation only formats it.
 
 export interface PreflightRequest {
   readonly manifest: AuthoredManifest;

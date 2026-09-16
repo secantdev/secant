@@ -11,7 +11,13 @@ import type {
   Platform,
   RoutingNode,
 } from "../workflow/workflow.js";
-import type { RunReport } from "../run/execution/execution.js";
+import type {
+  LiveObservation,
+  LiveRequestView,
+  RequestAnswerFn,
+  RequestChannel,
+  RunReport,
+} from "../run/execution/execution.js";
 import type { RunGroup, RunOwner } from "../run/store/store.js";
 import {
   focusSnapshot,
@@ -34,6 +40,9 @@ import {
   bundleTrustRequired,
   gateShapeMismatch,
   gateStale,
+  harnessRequestExpired,
+  harnessRequestRejected,
+  harnessRequestStale,
   operationIdReused,
   operationNotFound,
   pathNotFound,
@@ -55,6 +64,8 @@ import { UpdateStream } from "./update-stream.js";
 import { listRunsSnapshot } from "./run-list.js";
 import { preflight } from "./preflight.js";
 import type {
+  AnswerHarnessRequestInput,
+  AnswerHarnessRequestOffer,
   AnswerHumanGateInput,
   BundleCatalogSnapshot,
   BundleFocusSelector,
@@ -72,9 +83,12 @@ import type {
   ResourceReference,
   RunGateReference,
   RunListSnapshot,
+  RunLiveOverlay,
+  RunOutstandingRequest,
   RunSnapshot,
   Submission,
   SubmissionAdmission,
+  TurnPhase,
   WorkspaceSnapshot,
 } from "./projection-port.js";
 
@@ -92,6 +106,10 @@ export type RunExecution = (context: {
    *  one AbortController per live Run and passes its signal here; the execution
    *  Interface stays agnostic to why it aborted. */
   readonly cancelSignal?: AbortSignal;
+  /** The Application's per-Run live request-answer channel (#117): an Agent Turn's
+   *  approval requests reach the observing client through it, and a client answers
+   *  through `answer-harness-request`. Absent for a Command-only Run. */
+  readonly requestChannel?: RequestChannel;
 }) => Promise<RunReport>;
 
 // Why a live Run's execution was aborted (#98). A `cancel-run` rests the Run
@@ -102,6 +120,22 @@ export type RunExecution = (context: {
 // signal is proof enough that our cancel fired.
 const CANCEL_ABORT = "secant:cancel-run";
 const SIGNAL_ABORT = "secant:process-signal";
+
+/** The ephemeral live-overlay state a tracked Run carries while executing an Agent
+ *  Turn (#117). Never stored; rebuilt into a `RunLiveOverlay` for observers. */
+interface LiveOverlayState {
+  generation: number;
+  phase: TurnPhase;
+  readonly outstanding: Map<string, RunOutstandingRequest>;
+  answer?: RequestAnswerFn;
+  activity?: string;
+  preview?: string;
+  context?: { readonly usedTokens: number; readonly limitTokens: number };
+  usage?: string;
+  /** True once any Turn event arrived, so a joining observer knows an overlay is
+   *  worth delivering even with no outstanding request. */
+  active: boolean;
+}
 
 // Application owns the Workspace-approval use case behind the Projection Port.
 // The Port is in-memory: it resolves paths, records approvals through the
@@ -212,6 +246,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
       promise?: Promise<OperationOutcome>;
       readonly takeover?: boolean;
       readonly observers: Set<UpdateStream>;
+      // The live overlay of the Run's current Agent Turn (#117), ephemeral and
+      // never stored. `generation` bumps whenever the outstanding set changes, so a
+      // client answer formed against an older generation is stale.
+      readonly live: LiveOverlayState;
     }
   >();
   const workspaceObservers = new Set<UpdateStream>();
@@ -372,6 +410,136 @@ export function createApplication(deps: ApplicationDependencies): Application {
     }
   }
 
+  // The initial live-overlay state a tracked Run starts with (#117): generation 0,
+  // no outstanding request, no bound answer function, not yet active.
+  function freshLive(): LiveOverlayState {
+    return {
+      generation: 0,
+      phase: "working",
+      outstanding: new Map(),
+      active: false,
+    };
+  }
+
+  // Build the current live overlay for a tracked Run, or undefined when it has no
+  // live Turn to describe (#117). The generation and outstanding set drive answer
+  // staleness; the observations are coalesced context for a client to show.
+  function buildOverlay(runId: string): RunLiveOverlay | undefined {
+    const tracking = runs.get(runId);
+    if (tracking === undefined || !tracking.live.active) return undefined;
+    const live = tracking.live;
+    const outstanding = [...live.outstanding.values()];
+    const offers: AnswerHarnessRequestOffer[] = outstanding.map((request) => ({
+      action: "answer-harness-request",
+      runId,
+      requestId: request.requestId,
+      generation: live.generation,
+      decisions: request.decisions,
+      basis: "ephemeral Harness Request",
+    }));
+    return {
+      runId,
+      generation: live.generation,
+      // A blocked status while a request is outstanding reads awaiting-approval;
+      // otherwise the Turn is working (#117 AC4).
+      phase: outstanding.length > 0 ? "awaiting-approval" : live.phase,
+      outstanding,
+      offers,
+      ...(live.activity !== undefined ? { activity: live.activity } : {}),
+      ...(live.preview !== undefined ? { preview: live.preview } : {}),
+      ...(live.context !== undefined ? { context: live.context } : {}),
+      ...(live.usage !== undefined ? { usage: live.usage } : {}),
+    };
+  }
+
+  // Push the current live overlay to every observer watching this Run (#117), and
+  // to one specific observer for a late join. Ephemeral: never stored, never a
+  // durable snapshot — a client joins it with the durable snapshot it already has.
+  function pushLiveOverlay(runId: string, only?: UpdateStream): void {
+    const overlay = buildOverlay(runId);
+    if (overlay === undefined) return;
+    const tracking = runs.get(runId);
+    if (tracking === undefined) return;
+    const targets = only !== undefined ? [only] : tracking.observers;
+    for (const observer of targets) observer.push({ kind: "live", overlay });
+  }
+
+  // The Application's per-Run live request-answer channel handed to execution
+  // (#117). Execution relays the live Turn's approval requests here; each raise or
+  // settle bumps the generation and pushes a fresh overlay, so an answer formed
+  // against a superseded set is refused as stale. Preview is a lighter, coalesced
+  // update that does not bump the generation (an in-flight answer stays valid).
+  function makeRequestChannel(runId: string): RequestChannel {
+    return {
+      raised(request: LiveRequestView): void {
+        const tracking = runs.get(runId);
+        if (tracking === undefined) return;
+        tracking.live.active = true;
+        tracking.live.generation += 1;
+        tracking.live.outstanding.set(request.requestId, {
+          requestId: request.requestId,
+          tool: request.tool,
+          input: request.input,
+          decisions: request.decisions,
+        });
+        pushLiveOverlay(runId);
+      },
+      settled(requestId: string): void {
+        const tracking = runs.get(runId);
+        if (tracking === undefined) return;
+        if (!tracking.live.outstanding.delete(requestId)) return;
+        tracking.live.generation += 1;
+        pushLiveOverlay(runId);
+      },
+      bindAnswer(answer: RequestAnswerFn | undefined): void {
+        const tracking = runs.get(runId);
+        if (tracking === undefined) return;
+        tracking.live.answer = answer;
+        if (answer !== undefined) {
+          tracking.live.active = true;
+          tracking.live.phase = "working";
+        } else {
+          // The Turn ended: clear any residue so a resumed Run starts clean, and
+          // announce the settling overlay (no outstanding request).
+          tracking.live.phase = "settling";
+          if (tracking.live.outstanding.size > 0) {
+            tracking.live.outstanding.clear();
+            tracking.live.generation += 1;
+          }
+          pushLiveOverlay(runId);
+        }
+      },
+      observe(observation: LiveObservation): void {
+        const tracking = runs.get(runId);
+        if (tracking === undefined) return;
+        const live = tracking.live;
+        live.active = true;
+        if (observation.activity !== undefined)
+          live.activity = observation.activity;
+        if (observation.context !== undefined)
+          live.context = observation.context;
+        if (observation.usage !== undefined) live.usage = observation.usage;
+        // A preview-only observation is a coalesced `preview` update that does not
+        // bump the generation; other observations refresh the overlay in place.
+        if (
+          observation.preview !== undefined &&
+          observation.activity === undefined &&
+          observation.context === undefined &&
+          observation.usage === undefined
+        ) {
+          live.preview = observation.preview;
+          for (const observer of tracking.observers) {
+            observer.push({ kind: "preview", text: observation.preview });
+          }
+          return;
+        }
+        if (observation.preview !== undefined)
+          live.preview = observation.preview;
+        pushLiveOverlay(runId);
+      },
+    };
+  }
+
   // Tell every observer watching this Run that its subject is gone (#98): a delete
   // removes the store, so any open `run` Projection is closed rather than left to
   // read a Run that no longer exists. Pushed before the tracking entry is dropped.
@@ -482,6 +650,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         digest: tracking.digest,
         owner: observed,
         cancelSignal: tracking.abort.signal,
+        requestChannel: makeRequestChannel(runId),
       });
       leaveClaimLive = report.outcome === "blocked";
       return { status: "applied" };
@@ -737,6 +906,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // process; a settled or foreign Run receives no further publication.
     if (tracking !== undefined && !tracking.done) {
       tracking.observers.add(updates);
+      // A late-joining observer catches up on the current live overlay at once, so
+      // a headless follower that opens after a request was raised still sees it
+      // (#117). No-op when the Run has no live Turn to describe.
+      pushLiveOverlay(runId, updates);
       return {
         snapshot,
         catchUp: "fresh",
@@ -906,6 +1079,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       done: false,
       abort: new AbortController(),
       observers: new Set<UpdateStream>(),
+      live: freshLive(),
     });
     pushRunListUpdates();
     operations.set(operationId, {
@@ -1073,6 +1247,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       abort: new AbortController(),
       ...(takeoverMatches ? { takeover: true } : {}),
       observers: new Set<UpdateStream>(),
+      live: freshLive(),
     });
     operations.set(operationId, {
       replayKey: resumeReplayKey(input),
@@ -1221,6 +1396,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         done: false,
         abort: new AbortController(),
         observers: new Set<UpdateStream>(),
+        live: freshLive(),
       };
       runs.set(input.runId, tracking);
     }
@@ -1341,6 +1517,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
           digest: record.bundleSnapshotDigest,
           owner: observed,
           cancelSignal: activeTracking.abort.signal,
+          requestChannel: makeRequestChannel(input.runId),
         });
         leaveClaimLive = report.outcome === "blocked";
         return { status: "applied" };
@@ -1382,6 +1559,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         digest: record.bundleSnapshotDigest,
         owner: observed,
         cancelSignal: activeTracking.abort.signal,
+        requestChannel: makeRequestChannel(input.runId),
       });
       leaveClaimLive = report.outcome === "blocked";
       return { status: "applied" };
@@ -1413,6 +1591,88 @@ export function createApplication(deps: ApplicationDependencies): Application {
         pushRunUpdate(input.runId);
       }
     }
+  }
+
+  // Answer one outstanding approval Harness Request on a live Agent Turn (#117).
+  // Admitted at once; the answer reaches the live Turn at settle time (inline by
+  // default, so a headless follower's answer unblocks the Turn promptly). The
+  // request is ephemeral — never durable — so a Turn that already ended, a stale
+  // generation, or an id no longer outstanding is refused precisely and answers
+  // nothing. Idempotent per operation id via the operations map.
+  function submitAnswerHarnessRequest(
+    operationId: string,
+    input: AnswerHarnessRequestInput,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === answerHarnessRequestReplayKey(input)) {
+        return { admitted: true, operationId, runId: input.runId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (runGroup === undefined) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    operations.set(operationId, {
+      replayKey: answerHarnessRequestReplayKey(input),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId: input.runId,
+      settle: () => answerHarnessRequest(input),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId: input.runId };
+  }
+
+  // Route one answer to the live Turn's control (#117): accepted settles the
+  // Operation `applied`; a stale generation, an expired id, or a control race
+  // (`expired`/`already-settled`/`shape-mismatch`) settles `not-applied` with the
+  // precise Problem — the answer's provenance (`by`) is carried to the durable
+  // `request-answered` timeline record by execution.
+  async function answerHarnessRequest(
+    input: AnswerHarnessRequestInput,
+  ): Promise<OperationOutcome> {
+    const tracking = runs.get(input.runId);
+    if (
+      tracking === undefined ||
+      tracking.done ||
+      tracking.live.answer === undefined ||
+      !tracking.live.outstanding.has(input.requestId)
+    ) {
+      return {
+        status: "not-applied",
+        problem: harnessRequestExpired(input.runId, input.requestId),
+      };
+    }
+    if (input.generation !== tracking.live.generation) {
+      return {
+        status: "not-applied",
+        problem: harnessRequestStale(
+          input.runId,
+          input.generation,
+          tracking.live.generation,
+        ),
+      };
+    }
+    const result = await tracking.live.answer(
+      input.requestId,
+      input.decision,
+      input.by,
+    );
+    if (result.outcome === "rejected") {
+      return {
+        status: "not-applied",
+        problem: harnessRequestRejected(
+          input.runId,
+          input.requestId,
+          result.reason,
+        ),
+      };
+    }
+    // accepted, or indeterminate (the answer may have taken effect; do not refuse
+    // it — ponytail: OperationOutcome carries no "indeterminate" and the fixture
+    // path never reaches it, answerRequest settles accepted or a race rejection).
+    return { status: "applied" };
   }
 
   // Cancel a live Run (#87). Admitted at once; the cancel is decided and applied
@@ -1613,6 +1873,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
           return submitResume(submission.operationId, submission.input);
         case "answer-human-gate":
           return submitAnswer(submission.operationId, submission.input);
+        case "answer-harness-request":
+          return submitAnswerHarnessRequest(
+            submission.operationId,
+            submission.input,
+          );
         case "cancel-run":
           return submitCancel(submission.operationId, submission.input.runId);
         case "delete-run":
@@ -1788,6 +2053,22 @@ function answerReplayKey(input: AnswerHumanGateInput): string {
     input.runId,
     input.gate.attemptId,
     input.answer,
+  ]);
+}
+
+/** A stable replay key for an approval-request answer (#117): the Run, the exact
+ *  request, the generation it was formed against, the decision, and the provenance.
+ *  A re-submitted operation id with an equal key replays. */
+function answerHarnessRequestReplayKey(
+  input: AnswerHarnessRequestInput,
+): string {
+  return JSON.stringify([
+    "answer-harness-request",
+    input.runId,
+    input.requestId,
+    input.generation,
+    input.decision,
+    input.by,
   ]);
 }
 

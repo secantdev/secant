@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Command } from "commander";
 import type {
   AnswerHumanGateOffer,
+  ApprovalDecisionName,
   OperationOutcome,
   Problem,
   ProjectionPort,
@@ -56,11 +57,21 @@ export function registerRunCommands(
       (pair: string, prev: string[]) => [...prev, pair],
       [],
     )
+    .option(
+      "--harness-requests <policy>",
+      "answer each approval Harness Request by this policy: allow or deny",
+      "deny",
+    )
     .option("--json", "print the Run snapshot as JSON")
     .action(
       (
         selector: string | undefined,
-        options: { trust?: string; input: string[]; json?: boolean },
+        options: {
+          trust?: string;
+          input: string[];
+          harnessRequests?: string;
+          json?: boolean;
+        },
       ) => {
         const json = options.json ?? false;
         if (selector === undefined) {
@@ -75,6 +86,8 @@ export function registerRunCommands(
         }
         const inputs = parseInputs(options.input);
         if ("problem" in inputs) return settle(fail(io, json, inputs.problem));
+        const policy = parseHarnessRequestPolicy(options.harnessRequests);
+        if ("problem" in policy) return settle(fail(io, json, policy.problem));
         return settle(
           execute((clients) =>
             launchRun(
@@ -85,6 +98,7 @@ export function registerRunCommands(
               selector,
               options.trust,
               inputs.values,
+              policy.policy,
             ),
           ),
         );
@@ -120,11 +134,20 @@ export function registerRunCommands(
     )
     .argument("[run-id]", "the Run id printed at launch")
     .option("--takeover", "take over a Run owned by another process")
+    .option(
+      "--harness-requests <policy>",
+      "answer each approval Harness Request by this policy: allow or deny",
+      "deny",
+    )
     .option("--json", "print the Run snapshot as JSON")
     .action(
       (
         runId: string | undefined,
-        options: { takeover?: boolean; json?: boolean },
+        options: {
+          takeover?: boolean;
+          harnessRequests?: string;
+          json?: boolean;
+        },
       ) => {
         const json = options.json ?? false;
         if (runId === undefined) {
@@ -137,6 +160,8 @@ export function registerRunCommands(
             }),
           );
         }
+        const policy = parseHarnessRequestPolicy(options.harnessRequests);
+        if ("problem" in policy) return settle(fail(io, json, policy.problem));
         return settle(
           execute((clients) =>
             resumeRun({
@@ -146,6 +171,7 @@ export function registerRunCommands(
               json,
               runId,
               takeover: options.takeover ?? false,
+              harnessRequests: policy.policy,
             }),
           ),
         );
@@ -343,6 +369,79 @@ function parseInputs(
   return { values };
 }
 
+/** The declared `--harness-requests` policy a client answers approval Harness
+ *  Requests by while following a live Run (#117). Default `deny`: an unattended
+ *  headless Run denies every tool approval unless the operator opts into `allow`. */
+export type HarnessRequestPolicy = ApprovalDecisionName;
+
+/** Parse `--harness-requests`, defaulting to `deny`. Only `allow`/`deny` are
+ *  legal — Claude Code offers no "always". */
+function parseHarnessRequestPolicy(
+  value: string | undefined,
+): { policy: HarnessRequestPolicy } | { problem: Problem } {
+  if (value === undefined || value === "deny") return { policy: "deny" };
+  if (value === "allow") return { policy: "allow" };
+  return {
+    problem: {
+      code: "invalid-harness-requests",
+      explanation: `--harness-requests "${value}" is not a valid policy.`,
+      remediation:
+        "Pass `--harness-requests allow` or `--harness-requests deny`.",
+      possibleEffects: "none",
+    },
+  };
+}
+
+/** Follow a live Run and answer each outstanding approval Harness Request by the
+ *  declared policy (#117). Opens the `run` Projection alongside the driving
+ *  Operation's settlement, and on each `live` overlay submits `answer-harness-request`
+ *  (as `client-policy`) for every offer not yet attempted at its generation — a
+ *  request re-offered at a later generation (a prior answer went stale) is retried.
+ *  The answer reaches the live Turn and unblocks it, so the Run can rest. `stop`
+ *  closes the follower once the Run settles. Harmless for a Command-only Run: it
+ *  sees no overlay and answers nothing. */
+function followHarnessRequests(
+  port: ProjectionPort,
+  runId: string,
+  policy: HarnessRequestPolicy,
+): { stop: () => void } {
+  const opened = port.openProjection({ family: "run", runId });
+  const attempted = new Set<string>();
+  let stopped = false;
+  const loop = async (): Promise<void> => {
+    for await (const update of opened.updates) {
+      if (stopped) break;
+      if (update.kind !== "live") continue;
+      for (const offer of update.overlay.offers) {
+        const key = `${offer.generation}:${offer.requestId}`;
+        if (attempted.has(key)) continue;
+        attempted.add(key);
+        // Fire-and-forget: the answer settles inline in this process and unblocks
+        // the Turn; the follower stays responsive for the next request.
+        port.submit({
+          operationId: randomUUID(),
+          operation: "answer-harness-request",
+          input: {
+            runId,
+            requestId: offer.requestId,
+            generation: offer.generation,
+            decision: policy,
+            by: "client-policy",
+          },
+        });
+      }
+    }
+  };
+  const done = loop();
+  return {
+    stop: () => {
+      stopped = true;
+      opened.close();
+      void done.catch(() => undefined);
+    },
+  };
+}
+
 /** Split `<id>[@<version>]`; the first `@` divides them. Shared with `bundle
  *  inspect` (A24), which selects a Bundle the same way. */
 export function splitSelector(selector: string): {
@@ -456,6 +555,7 @@ async function launchRun(
   selector: string,
   trust: string | undefined,
   inputs: Record<string, string>,
+  harnessRequests: HarnessRequestPolicy,
 ): Promise<number> {
   const { id, version } = splitSelector(selector);
   const admission = port.submit({
@@ -478,17 +578,25 @@ async function launchRun(
       possibleEffects: "unknown",
     });
   }
-  // The launch drives execution (async now); await settlement, then report the
-  // Run and exit by its rest state — exit-when-blocked (A36).
-  return settleAndReportRun(
-    port,
-    io,
-    fail,
-    json,
-    admission.operationId,
-    runId,
-    (run) => [`Run ${run.runId}`],
-  );
+  // Follow the live Run and answer each approval request by the policy while
+  // execution drives it (#117); the follower must be running before settlement is
+  // awaited, so an Agent Turn that pauses on an approval is unblocked and can rest.
+  const follower = followHarnessRequests(port, runId, harnessRequests);
+  try {
+    // The launch drives execution (async now); await settlement, then report the
+    // Run and exit by its rest state — exit-when-blocked (A36).
+    return await settleAndReportRun(
+      port,
+      io,
+      fail,
+      json,
+      admission.operationId,
+      runId,
+      (run) => [`Run ${run.runId}`],
+    );
+  } finally {
+    follower.stop();
+  }
 }
 
 function showRun(
@@ -527,6 +635,7 @@ type TResumeRunParams = {
   readonly json: boolean;
   readonly runId: string;
   readonly takeover: boolean;
+  readonly harnessRequests: HarnessRequestPolicy;
 };
 
 async function resumeRun(params: TResumeRunParams): Promise<number> {
@@ -558,17 +667,28 @@ async function resumeRun(params: TResumeRunParams): Promise<number> {
   if (!admission.admitted) {
     return params.fail(params.io, params.json, admission.problem);
   }
-  // The resume drives execution (async now); await settlement and report, like
-  // `run launch`.
-  return settleAndReportRun(
+  // Follow the live Run and answer approval requests by the policy while execution
+  // drives it (#117), like `run launch`.
+  const follower = followHarnessRequests(
     params.port,
-    params.io,
-    params.fail,
-    params.json,
-    admission.operationId,
     params.runId,
-    (run) => [`Run ${run.runId}`],
+    params.harnessRequests,
   );
+  try {
+    // The resume drives execution (async now); await settlement and report, like
+    // `run launch`.
+    return await settleAndReportRun(
+      params.port,
+      params.io,
+      params.fail,
+      params.json,
+      admission.operationId,
+      params.runId,
+      (run) => [`Run ${run.runId}`],
+    );
+  } finally {
+    follower.stop();
+  }
 }
 
 /** The answer a client typed: `continue`/`stop` for an approve-reject gate (or a

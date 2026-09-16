@@ -258,6 +258,63 @@ export function gateShapeMismatch(
   };
 }
 
+/** The answered approval Harness Request is no longer outstanding (#117): its Turn
+ *  ended, it was already answered, or the Run is not executing a Turn. The request
+ *  is ephemeral, so there is nothing to answer. */
+export function harnessRequestExpired(
+  runId: string,
+  requestId: string,
+): Problem {
+  return {
+    code: "harness-request-expired",
+    explanation: `Approval request ${requestId} on Run ${runId} is no longer outstanding; the Turn answered or ended it.`,
+    remediation:
+      "The request was Turn-scoped and has expired; nothing was applied. Watch the live overlay for the next request.",
+    possibleEffects: "none",
+    details: { runId, requestId },
+  };
+}
+
+/** The answer was formed against a stale live-overlay generation (#117): the set
+ *  of outstanding requests changed after the client read it, so the answer targets
+ *  a superseded view and is not applied. */
+export function harnessRequestStale(
+  runId: string,
+  submitted: number,
+  current: number,
+): Problem {
+  return {
+    code: "harness-request-stale",
+    explanation: `The answer's overlay generation (${submitted}) is not the Run's current generation (${current}); nothing was applied.`,
+    remediation:
+      "Read the live overlay again and answer the outstanding request at its current generation.",
+    possibleEffects: "none",
+    details: {
+      runId,
+      submittedGeneration: String(submitted),
+      currentGeneration: String(current),
+    },
+  };
+}
+
+/** Answering was refused by the live Turn control (#117): a race the Adapter
+ *  settled as a rejected receipt (`expired`, `already-settled`, `shape-mismatch`).
+ *  Carried as a value, never thrown (ADR 0022). */
+export function harnessRequestRejected(
+  runId: string,
+  requestId: string,
+  reason: string,
+): Problem {
+  return {
+    code: "harness-request-rejected",
+    explanation: `The live Turn rejected the answer to request ${requestId} on Run ${runId} (${reason}); nothing was applied.`,
+    remediation:
+      "The request settled before the answer landed; nothing was applied. Watch the live overlay for the next request.",
+    possibleEffects: "none",
+    details: { runId, requestId, reason },
+  };
+}
+
 export function operationNotFound(operationId: string): Problem {
   return {
     code: "operation-not-found",

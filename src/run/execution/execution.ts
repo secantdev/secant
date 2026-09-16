@@ -27,6 +27,7 @@ import type {
 import type {
   DurableTurnRecorder,
   PreparedHarness,
+  RequestAnswer,
   TurnEvent,
   TurnResult,
 } from "../../harness/harness.js";
@@ -71,6 +72,66 @@ import { resolveExecutable, spawnCommand } from "../../process/process.js";
  */
 export type AssetResolver = (assetPath: string) => string | undefined;
 
+// --- Live request-answer channel (#117) ------------------------------------
+//
+// The Seam an Agent Step's live approval Harness Requests reach a client through.
+// Execution adapts the live Harness Turn (its `request-raised`/`answered`/`expired`
+// events and its `answerRequest` control) into these normalized, Harness-agnostic
+// notifications. The Application provides the channel per Run and turns the
+// notifications into the `run` Projection's live overlay; a client answers through
+// `answerRequest`, whose outcome is a value, never a throw (ADR 0022). Defined here
+// (not in the Application) because execution owns the Step context and must not
+// import above its Seam. Absent for a Command-only Run and whenever no client wired
+// one in.
+
+/** Who answered a request — carried down so the durable `request-answered` names
+ *  the provenance the Harness Adapter cannot know (a client policy vs a human). */
+export type RequestAnswerBy = "human" | "client-policy";
+
+/** One outstanding approval request, flattened to strings. */
+export interface LiveRequestView {
+  readonly requestId: string;
+  readonly tool: string;
+  readonly input: string;
+  readonly decisions: readonly ("allow" | "deny")[];
+}
+
+/** The normalized outcome of answering one request. Never throws. */
+export type LiveAnswerOutcome =
+  | { readonly outcome: "accepted" }
+  | { readonly outcome: "rejected"; readonly reason: string }
+  | { readonly outcome: "indeterminate" };
+
+/** Answer one outstanding request on the live Turn. */
+export type RequestAnswerFn = (
+  requestId: string,
+  decision: "allow" | "deny",
+  by: RequestAnswerBy,
+) => Promise<LiveAnswerOutcome>;
+
+/** Coalesced live observations for the overlay (never durable). */
+export interface LiveObservation {
+  readonly activity?: string;
+  readonly preview?: string;
+  readonly context?: {
+    readonly usedTokens: number;
+    readonly limitTokens: number;
+  };
+  readonly usage?: string;
+}
+
+export interface RequestChannel {
+  /** An approval request was raised on the live Turn (now outstanding). */
+  raised(request: LiveRequestView): void;
+  /** The request was answered or expired; it is no longer outstanding. */
+  settled(requestId: string): void;
+  /** Bind (or, with `undefined`, unbind) the answer function for the active Turn.
+   *  Bound before the first request can be raised, unbound when the Turn ends. */
+  bindAnswer(answer: RequestAnswerFn | undefined): void;
+  /** Merge live overlay observations (activity / preview / context / usage). */
+  observe(observation: LiveObservation): void;
+}
+
 /** What an Agent Step needs from composition (#116): the prepared Harness the Run
  *  owns (started once, reused across every Agent Step naming the same Session, and
  *  closed by composition when the Run rests), plus the manifest facts prompt
@@ -103,6 +164,9 @@ export interface ExecutionDeps {
   /** The prepared Harness and manifest facts an Agent Step runs against (#116).
    *  Absent for a Command-only Run, which needs no Harness. */
   readonly harness?: HarnessExecutionDeps;
+  /** The live request-answer channel an Agent Turn's approval requests reach a
+   *  client through (#117). Absent when no client is observing. */
+  readonly requestChannel?: RequestChannel;
   /** Injectable clock so Attempt timestamps are deterministic in tests. */
   readonly now?: () => Date;
 }
@@ -176,6 +240,8 @@ interface StepContext {
   readonly cancelSignal?: AbortSignal;
   /** The prepared Harness and manifest facts an Agent Step runs against (#116). */
   readonly harness?: HarnessExecutionDeps;
+  /** The live request-answer channel an Agent Turn reaches a client through (#117). */
+  readonly requestChannel?: RequestChannel;
 }
 
 type StepExecutor = (
@@ -261,6 +327,9 @@ export async function executeRouting(
         ? { cancelSignal: deps.cancelSignal }
         : {}),
       ...(deps.harness !== undefined ? { harness: deps.harness } : {}),
+      ...(deps.requestChannel !== undefined
+        ? { requestChannel: deps.requestChannel }
+        : {}),
     },
     budget: deps.defaultRetryBudget ?? DEFAULT_RETRY_BUDGET,
     now: deps.now ?? (() => new Date()),
@@ -981,13 +1050,87 @@ async function runAgent(
     recorder,
     input: { text: prompt },
   });
-  turn.subscribe((event) => recordTurnEvent(owner, turnId, event));
+  // The live request-answer channel (#117): each approval request reaches an
+  // observing client through the channel, which the client answers by policy
+  // (headless) or a human decision (TUI). The Harness Adapter always emits
+  // `request-answered` with `by:"human"` (it cannot know a client policy exists),
+  // so the client-declared provenance is stashed here and wins in the durable
+  // record.
+  const channel = context.requestChannel;
+  const answerSources = new Map<string, RequestAnswerBy>();
+  turn.subscribe((event) => {
+    recordTurnEvent(owner, turnId, event, answerSources);
+    if (channel !== undefined) notifyChannel(channel, event);
+  });
+  if (channel !== undefined) {
+    channel.bindAnswer(async (requestId, decision, by) => {
+      answerSources.set(requestId, by);
+      const answer: RequestAnswer = {
+        requestId: { opaque: requestId },
+        kind: "approval",
+        decision,
+      };
+      const receipt = await turn.answerRequest(answer);
+      return receipt.outcome === "accepted"
+        ? { outcome: "accepted" }
+        : { outcome: "rejected", reason: receipt.reason };
+    });
+  }
   // ponytail: an in-flight cancel/interrupt of a live Agent Turn (Ctrl+C, story 38)
   // is not wired here — the plain autonomous Turn runs to its own boundary. Wire
   // `context.cancelSignal` to `turn.interrupt()` with the interrupt slice.
-  const result = await turn.result();
-  settleTurnResult(owner, turnId, session, result);
-  return mapTurnResult(result);
+  try {
+    const result = await turn.result();
+    settleTurnResult(owner, turnId, session, result);
+    return mapTurnResult(result);
+  } finally {
+    // The Turn is over: unbind so a late `answer-harness-request` finds no live
+    // answer function and the Application refuses it (the request has expired).
+    channel?.bindAnswer(undefined);
+  }
+}
+
+/** Relay one Turn event to the live request-answer channel (#117): approval
+ *  requests toggle the outstanding set; preview, context, usage, and activity are
+ *  coalesced observations. Durable recording is separate (`recordTurnEvent`). */
+function notifyChannel(channel: RequestChannel, event: TurnEvent): void {
+  switch (event.kind) {
+    case "request-raised":
+      if (event.request.shape.kind === "approval") {
+        channel.raised({
+          requestId: event.request.requestId.opaque,
+          tool: event.request.shape.tool,
+          input: event.request.shape.input,
+          decisions: [...event.request.shape.decisions],
+        });
+      }
+      return;
+    case "request-answered":
+      channel.settled(event.requestId.opaque);
+      return;
+    case "request-expired":
+      channel.settled(event.requestId.opaque);
+      return;
+    case "preview":
+      channel.observe({ preview: event.text });
+      return;
+    case "context":
+      channel.observe({ context: event.observation });
+      return;
+    case "usage":
+      channel.observe({ usage: event.observation.summary });
+      return;
+    case "activity":
+      channel.observe({ activity: event.description });
+      return;
+    case "tool-activity":
+      channel.observe({
+        activity: `${event.activity.tool} ${event.activity.phase}`,
+      });
+      return;
+    default:
+      return;
+  }
 }
 
 /** Render the Agent prompt (#116): fill each `{{artifact:name}}` slot from the
@@ -1126,6 +1269,7 @@ function recordTurnEvent(
   owner: RunOwner,
   turnId: string,
   event: TurnEvent,
+  answerSources: ReadonlyMap<string, RequestAnswerBy>,
 ): void {
   if (event.kind === "assistant-content") {
     owner.appendTurnEvent({
@@ -1143,6 +1287,46 @@ function recordTurnEvent(
         phase: event.activity.phase,
         summary: event.activity.summary,
       }),
+      at: new Date(),
+    });
+  } else if (event.kind === "request-raised") {
+    // The request's tool and serialized input, so `run show` prints the exact
+    // approval a Turn paused on (#117 AC1). Durable history only; the request is
+    // never stored as live state, so a resumed Run re-raises nothing.
+    if (event.request.shape.kind === "approval") {
+      owner.appendTurnEvent({
+        turnId,
+        kind: "request-raised",
+        payload: JSON.stringify({
+          requestId: event.request.requestId.opaque,
+          tool: event.request.shape.tool,
+          input: event.request.shape.input,
+          decisions: event.request.shape.decisions,
+        }),
+        at: new Date(),
+      });
+    }
+  } else if (event.kind === "request-answered") {
+    // The client-declared provenance wins over the Adapter's `by:"human"`, so a
+    // headless policy answer records "answered by client policy" (#117 AC1).
+    const by = answerSources.get(event.requestId.opaque) ?? event.by;
+    const decision =
+      event.answer.kind === "approval" ? event.answer.decision : undefined;
+    owner.appendTurnEvent({
+      turnId,
+      kind: "request-answered",
+      payload: JSON.stringify({
+        requestId: event.requestId.opaque,
+        by,
+        ...(decision !== undefined ? { decision } : {}),
+      }),
+      at: new Date(),
+    });
+  } else if (event.kind === "request-expired") {
+    owner.appendTurnEvent({
+      turnId,
+      kind: "request-expired",
+      payload: JSON.stringify({ requestId: event.requestId.opaque }),
       at: new Date(),
     });
   }

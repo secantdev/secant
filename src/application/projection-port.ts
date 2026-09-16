@@ -42,8 +42,20 @@ export type Submission =
   | LaunchRunSubmission
   | ResumeRunSubmission
   | AnswerHumanGateSubmission
+  | AnswerHarnessRequestSubmission
   | CancelRunSubmission
   | DeleteRunSubmission;
+
+/** The decisions a tool-approval Harness Request offers (#117). Mirrors the
+ *  Harness Module's `ApprovalDecision` without importing it — the Port imports
+ *  nothing. Claude Code offers no "always". */
+export type ApprovalDecisionName = "allow" | "deny";
+
+/** Who answered an approval Harness Request (#117): a human in the TUI, or the
+ *  headless client's declared `--harness-requests` policy. The client naming its
+ *  own answer's provenance is what lets the durable timeline record "answered by
+ *  client policy" without the Harness Adapter knowing a client policy exists. */
+export type HarnessAnswerSource = "human" | "client-policy";
 
 export interface ApproveWorkspaceSubmission {
   readonly operationId: string;
@@ -116,6 +128,31 @@ export interface AnswerHumanGateInput {
    *  `text` output. Omitted for an `approve-reject` gate; providing it for one is a
    *  precise shape-mismatch Problem that changes nothing. */
   readonly text?: string;
+}
+
+/** Answer the ephemeral approval Harness Request a live Agent Turn raised (#117).
+ *  Unlike a Human Gate this rests nothing durably: the request is Turn-scoped and
+ *  expires when the Turn ends, so the answer must reach the live Turn before it
+ *  settles. `generation` is the live overlay generation the answer was formed
+ *  against — a stale generation, or a `requestId` no longer outstanding, is
+ *  rejected precisely and answers nothing (ADR 0022: races settle as rejected
+ *  values, never a throw). `by` is the answering client's provenance, recorded on
+ *  the durable `request-answered` timeline entry. */
+export interface AnswerHarnessRequestSubmission {
+  readonly operationId: string;
+  readonly operation: "answer-harness-request";
+  readonly input: AnswerHarnessRequestInput;
+}
+export interface AnswerHarnessRequestInput {
+  readonly runId: string;
+  /** The exact outstanding request, read from the live overlay's `outstanding`
+   *  (or its `answer-harness-request` Offer). */
+  readonly requestId: string;
+  /** The live overlay generation the offer carried; staleness is decided against
+   *  the current generation of that request. */
+  readonly generation: number;
+  readonly decision: ApprovalDecisionName;
+  readonly by: HarnessAnswerSource;
 }
 
 /** Cancel a live Run (#87): end it `cancelled` — the only route to that terminal
@@ -416,7 +453,14 @@ export type RunTimelineKind =
   | "turn-started"
   | "assistant-content"
   | "tool-activity"
-  | "turn-settled";
+  | "turn-settled"
+  // Approval Harness Request lifecycle (#117): a request raised (naming the tool
+  // and input), answered (naming who answered and the decision), or expired when
+  // its Turn ended unanswered. Durable history only — the request itself is never
+  // stored, so a resumed Run re-raises nothing.
+  | "request-raised"
+  | "request-answered"
+  | "request-expired";
 export interface RunTimelineEvent {
   readonly at: string; // ISO 8601
   readonly event: RunTimelineKind;
@@ -605,9 +649,26 @@ export interface RunListSnapshot {
 export type ActionOffer =
   | ApproveWorkspaceOffer
   | AnswerHumanGateOffer
+  | AnswerHarnessRequestOffer
   | ResumeRunOffer
   | CancelRunOffer
   | DeleteRunOffer;
+
+/** Answer one outstanding approval Harness Request (#117). Carried on the live
+ *  overlay, not the durable snapshot: the request is Turn-scoped and ephemeral, so
+ *  the offer lives only while the Turn holds it. It carries the live `generation`
+ *  the answer must be formed against — a client submits `answer-harness-request`
+ *  with this exact `requestId`/`generation`, and the Application refuses a stale
+ *  one. `basis` names the durability the blocked status reads: an ephemeral
+ *  Harness Request, distinct from a durable Human Gate. */
+export interface AnswerHarnessRequestOffer {
+  readonly action: "answer-harness-request";
+  readonly runId: string;
+  readonly requestId: string;
+  readonly generation: number;
+  readonly decisions: readonly ApprovalDecisionName[];
+  readonly basis: "ephemeral Harness Request";
+}
 
 /** Approve the launch Workspace (M1). Offered while it is unapproved. */
 export interface ApproveWorkspaceOffer {
@@ -659,10 +720,56 @@ export interface DeleteRunOffer {
   readonly consequence: string;
 }
 
+/** The Turn phase a live overlay reports (#117): the Agent Turn is starting up,
+ *  working, waiting on one or more outstanding approval requests, or settling. */
+export type TurnPhase =
+  "starting" | "working" | "awaiting-approval" | "settling";
+
+/** One outstanding approval Harness Request on the live overlay (#117): the tool
+ *  and its serialized input the human or policy decides on, and the decisions the
+ *  Adapter offered (Claude Code: `allow`/`deny`). Ephemeral — gone from the next
+ *  overlay once the request is answered or its Turn ends. */
+export interface RunOutstandingRequest {
+  readonly requestId: string;
+  readonly tool: string;
+  readonly input: string;
+  readonly decisions: readonly ApprovalDecisionName[];
+}
+
+/** The live overlay of a Run executing an Agent Turn (#117): the ephemeral,
+ *  never-durable view an open `run` Projection receives as `live` updates beside
+ *  its durable snapshot. It carries the Turn phase, every outstanding approval
+ *  request with its answer Offer, the current activity and coalesced preview text,
+ *  the latest context and usage observations, and a monotonic `generation` that
+ *  bumps on every change — a client answers a request against the generation it
+ *  saw, and a later generation makes that answer stale. Blocked status while a
+ *  request is outstanding reads "ephemeral Harness Request". */
+export interface RunLiveOverlay {
+  readonly runId: string;
+  readonly generation: number;
+  readonly phase: TurnPhase;
+  readonly outstanding: readonly RunOutstandingRequest[];
+  readonly offers: readonly AnswerHarnessRequestOffer[];
+  readonly activity?: string;
+  readonly preview?: string;
+  readonly context?: {
+    readonly usedTokens: number;
+    readonly limitTokens: number;
+  };
+  readonly usage?: string;
+}
+
 export type ProjectionUpdate<
   S extends ProjectionSnapshot = ProjectionSnapshot,
 > =
   | { readonly kind: "durable"; readonly snapshot: S }
+  // The live overlay of a Run executing an Agent Turn (#117). Ephemeral: it is
+  // never stored and never replaces the durable snapshot — a client joins the two.
+  | { readonly kind: "live"; readonly overlay: RunLiveOverlay }
+  // A coalesced preview-text-only update (#117), lighter than a full overlay so a
+  // stream of streaming previews does not bump the answer generation. Absent text
+  // clears the current preview.
+  | { readonly kind: "preview"; readonly text: string }
   | { readonly kind: "closed"; readonly reason: ObserverEnd };
 export type ObserverEnd =
   | "subject-gone"

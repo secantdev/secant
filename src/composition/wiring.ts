@@ -148,7 +148,7 @@ function makeRunExecution(
   platform: Platform,
   adapter: HarnessAdapter,
 ): RunExecution {
-  return async ({ routing, digest, owner, cancelSignal }) => {
+  return async ({ routing, digest, owner, cancelSignal, requestChannel }) => {
     const deps = {
       owner,
       platform,
@@ -156,6 +156,9 @@ function makeRunExecution(
       // The Application's per-Run cancel Seam (#98): an abort kills the child's
       // process group and unwinds execution, and the Application decides the rest.
       ...(cancelSignal !== undefined ? { cancelSignal } : {}),
+      // The Application's per-Run live request-answer channel (#117): an Agent
+      // Turn's approval requests reach the observing client through it.
+      ...(requestChannel !== undefined ? { requestChannel } : {}),
     };
     // A Command-only Run needs no Harness. A Bundle carrying an Agent Step prepares
     // one once, reused across every Agent Step of the Run, and closes it when the

@@ -892,6 +892,41 @@ function turnEventEntry(event: TurnEventRecord): RunTimelineEvent | undefined {
       detail: `${tool} ${phase}`.trim(),
     };
   }
+  // Approval Harness Request lifecycle (#117): the raised request names its tool
+  // and serialized input; the answer names who answered and the decision; the
+  // expiry names the request. Durable history — the request itself is never stored.
+  if (event.kind === "request-raised") {
+    const tool = safeField(event.payload, "tool") ?? "tool";
+    const input = safeField(event.payload, "input") ?? "";
+    return {
+      at: event.at,
+      event: "request-raised",
+      detail: timelineDetail(`${tool} ${input}`),
+    };
+  }
+  if (event.kind === "request-answered") {
+    const by = safeField(event.payload, "by");
+    const decision = safeField(event.payload, "decision");
+    const who =
+      by === "client-policy"
+        ? "answered by client policy"
+        : by === "human"
+          ? "answered by human"
+          : "answered";
+    return {
+      at: event.at,
+      event: "request-answered",
+      detail: decision !== undefined ? `${who} (${decision})` : who,
+    };
+  }
+  if (event.kind === "request-expired") {
+    const requestId = safeField(event.payload, "requestId");
+    return {
+      at: event.at,
+      event: "request-expired",
+      ...(requestId !== undefined ? { detail: requestId } : {}),
+    };
+  }
   return undefined;
 }
 
@@ -1017,12 +1052,17 @@ const TIMELINE_CATEGORY_RANK: Record<RunTimelineKind, number> = {
   "turn-started": 2,
   "assistant-content": 3,
   "tool-activity": 4,
-  "turn-settled": 5,
-  "attempt-settled": 6,
-  iteration: 7,
-  "checkpoint-blocked": 8,
-  "gate-answered": 9,
-  "materialization-conflict": 10,
+  // An approval request's lifecycle sorts between tool activity and the Turn's
+  // settle, in raise → answer → expire order for an equal instant (#117).
+  "request-raised": 5,
+  "request-answered": 6,
+  "request-expired": 7,
+  "turn-settled": 8,
+  "attempt-settled": 9,
+  iteration: 10,
+  "checkpoint-blocked": 11,
+  "gate-answered": 12,
+  "materialization-conflict": 13,
 };
 
 // --- entry selection -------------------------------------------------------

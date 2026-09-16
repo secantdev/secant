@@ -23,17 +23,26 @@ import {
 } from "../../src/harness/harness.js";
 
 /**
- * A set of scenario factories. Each returns an Adapter factory set up to exhibit
- * one behaviour when the suite drives it through the Interface. The fake
- * implements all of these; a recording-backed provider implements the subset a
- * real Harness can produce.
+ * The prepare/profile subset of the suite: qualification and the evidence-
+ * bearing profile, with no Turn. A prepare-only provider — the Claude Code
+ * Adapter over the replayer in #111, before Turns land in #112 — implements
+ * just these, and the full `ConformanceScenarios` extends them.
  */
-export interface ConformanceScenarios {
+export interface PrepareProfileScenarios {
   readonly label: string;
-  /** A plain Turn that reaches an authoritative boundary. */
+  /** An Adapter that qualifies and returns an evidence-bearing profile. */
   baseline(): HarnessAdapterFactory;
   /** An Adapter whose `prepare` returns a typed failure. */
   prepareFailure(): HarnessAdapterFactory;
+}
+
+/**
+ * The full set of scenario factories. Each returns an Adapter factory set up to
+ * exhibit one behaviour when the suite drives it through the Interface. The fake
+ * implements all of these; a prepare-only provider implements just the inherited
+ * prepare/profile subset.
+ */
+export interface ConformanceScenarios extends PrepareProfileScenarios {
   /** A Turn that raises three requests at once, settling once all are answered. */
   concurrentRequests(): HarnessAdapterFactory;
   /** A Turn that raises one approval request and awaits its answer. */
@@ -50,8 +59,11 @@ export interface ConformanceScenarios {
   resumable(): HarnessAdapterFactory;
 }
 
-/** Run the whole suite against one provider. */
-export function runConformanceSuite(scenarios: ConformanceScenarios): void {
+/** Run the prepare/profile cases against one provider. Both the full suite and
+ *  a prepare-only provider (the Claude Code Adapter over the replayer) call it. */
+export function runPrepareProfileCases(
+  scenarios: PrepareProfileScenarios,
+): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
 
   test(name("prepare returns an evidence-bearing profile"), async () => {
@@ -79,6 +91,13 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
     assert.ok(result.failure.category.length > 0);
     assert.equal(result.failure.phase, "prepare");
   });
+}
+
+/** Run the whole suite against one provider. */
+export function runConformanceSuite(scenarios: ConformanceScenarios): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+
+  runPrepareProfileCases(scenarios);
 
   test(
     name("a completed Turn settles once, after the producer closes"),

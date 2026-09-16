@@ -528,3 +528,17 @@ export interface HarnessAdapter {
  * the shared conformance suite is run against.
  */
 export type HarnessAdapterFactory = () => HarnessAdapter;
+
+// ---------------------------------------------------------------------------
+// Native Adapters
+//
+// Each native Adapter keeps its discovery, qualification cache, and protocol
+// model private and re-exports only its factory through this entry. The Claude
+// Code Adapter (#111) is the first; Codex and Gemini follow.
+// ---------------------------------------------------------------------------
+
+export {
+  createClaudeCodeAdapter,
+  CLAUDE_CODE_EXECUTABLE_ENV,
+} from "./claude-code.js";
+export type { ClaudeCodeAdapterOverrides } from "./claude-code.js";

@@ -1,0 +1,39 @@
+{
+  "formatVersion": 1,
+  "bundle": {
+    "id": "dev.secant.matt-front",
+    "version": "1.0.0",
+    "name": "Matt Front Spec",
+    "description": "Interview the human to shape a feature, then write the spec in the same Session once they approve."
+  },
+  "platforms": ["windows", "macos", "linux"],
+  "inputs": {},
+  "assets": [
+    { "path": "prompts/grill.md", "kind": "prompt" },
+    { "path": "prompts/spec.md", "kind": "prompt" },
+    { "path": "skills/grilling", "kind": "skill" },
+    { "path": "skills/spec-writing", "kind": "skill" }
+  ],
+  "routing": [
+    {
+      "id": "grill",
+      "kind": "interactive-agent",
+      "session": "spec",
+      "prompt": { "asset": "prompts/grill.md" },
+      "uses": [{ "asset": "skills/grilling" }]
+    },
+    {
+      "id": "approve-spec",
+      "kind": "human-gate",
+      "shape": "approve-reject",
+      "message": "The interview is complete. Approve writing the spec from this conversation?"
+    },
+    {
+      "id": "write-spec",
+      "kind": "agent",
+      "session": "spec",
+      "prompt": { "asset": "prompts/spec.md" },
+      "uses": [{ "asset": "skills/spec-writing" }]
+    }
+  ]
+}

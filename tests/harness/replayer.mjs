@@ -209,6 +209,50 @@ if (!playback) {
   process.exit(2);
 }
 
+// A Session can be resumed by more than one successive process — an interactive
+// grill sends each human Turn as its own resumed launch, and a following Agent
+// Step resumes the same Session again (#123). Each launch is a fresh process that
+// restarts `turnIndex` at 0, so the process alone cannot tell where in the resume
+// block it starts. Recover that from the invocation log: the number of Turns
+// (stdin `user` frames) that prior `--resume` launches already consumed is this
+// launch's offset into the resume block. Counting frames (not launches) stays
+// correct even if a resumed launch is held open across several Turns. Turns are
+// strictly sequential (the Run rests between them), so no concurrent write races
+// this count; a single resumed process sees offset 0, unchanged.
+let resumeOffset = 0;
+if (resuming && recording.log) {
+  const entries = readFileSync(recording.log, "utf8")
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        // The replayer wrote this log itself, one JSON object per line; a line
+        // that will not parse means the log is corrupt. Fail loudly rather than
+        // silently mis-count the offset and replay the wrong Turn.
+        process.stderr.write("secant replayer: invocation log is not JSON\n");
+        process.exit(2);
+      }
+    });
+  // Prior `--resume` launches (this process's own start is logged already, so
+  // exclude it by id), and the stdin Turns they consumed.
+  const priorResumeIds = new Set(
+    entries
+      .filter(
+        (entry) =>
+          entry.type === "start" &&
+          entry.id !== invocationId &&
+          Array.isArray(entry.args) &&
+          entry.args.includes("--resume"),
+      )
+      .map((entry) => entry.id),
+  );
+  resumeOffset = entries.filter(
+    (entry) => entry.type === "stdin" && priorResumeIds.has(entry.id),
+  ).length;
+}
+
 // A case can model a process that ignores SIGTERM: swallow it so only SIGKILL
 // (a group force-kill) stops the process, driving the Adapter's escalation path.
 if (playback.ignoreSigterm) {
@@ -242,7 +286,7 @@ for await (const line of lines) {
       JSON.stringify({ type: "stdin", id: invocationId, line }) + "\n",
     );
   }
-  const turn = playback.turns[turnIndex++];
+  const turn = playback.turns[resumeOffset + turnIndex++];
   if (!turn) {
     process.stderr.write(
       "secant replayer: received more Turns than recorded\n",

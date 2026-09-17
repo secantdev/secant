@@ -1170,10 +1170,16 @@ async function driveHarnessTurn(
     readonly resume?: RecoveryCoordinate;
     readonly requestChannel?: RequestChannel;
     readonly cancelSignal?: AbortSignal;
+    /** True for an interactive human Turn, whose Harness is closed the moment the
+     *  Turn ends, so its Session settles `detached` for the next Turn to resume. */
+    readonly detachAfterTurn?: boolean;
   },
 ): Promise<TurnResult> {
   const { session, attemptId, turnId } = params;
   const harnessName = prepared.profile.harness;
+  // The recovery coordinate the Adapter reveals at admission (Claude Code reveals it
+  // before submission), captured so an interactive Turn can settle `detached` by it.
+  let recoveryCoordinate: string | undefined;
   const recorder: DurableTurnRecorder = {
     admit(admission) {
       const result = owner.admitTurn({
@@ -1187,6 +1193,9 @@ async function driveHarnessTurn(
         harness: harnessName,
         at: new Date(),
       });
+      // Only a durable admission makes the coordinate meaningful; a fenced (rejected)
+      // admission drives the Turn `not-started`, whose availability is never detached.
+      if (result.ok) recoveryCoordinate = admission.recoveryCoordinate.opaque;
       return Promise.resolve(
         result.ok
           ? { recorded: true }
@@ -1249,7 +1258,13 @@ async function driveHarnessTurn(
   }
   try {
     const result = await turn.result();
-    settleTurnResult(owner, turnId, session, result);
+    settleTurnResult(
+      owner,
+      turnId,
+      session,
+      result,
+      params.detachAfterTurn === true ? recoveryCoordinate : undefined,
+    );
     // A full cancel-run of a live Turn stops the Turn but ends the Run `cancelled`
     // (#87/#98): unwind without settling this Attempt, so the Application's cancel
     // path owns the `cancelled` rest — the same RunCancelledError a cancelled
@@ -1312,6 +1327,9 @@ export async function driveInteractiveTurn(
     attemptId: request.attemptId,
     turnId: request.turnId,
     input: request.text,
+    // The interactive Harness is closed after each human Turn, so settle the Session
+    // `detached` for the next Turn (and the following Agent Step) to resume it (#122).
+    detachAfterTurn: true,
     ...(recovery.resume !== undefined ? { resume: recovery.resume } : {}),
     ...(request.requestChannel !== undefined
       ? { requestChannel: request.requestChannel }
@@ -1584,14 +1602,33 @@ function recordTurnEvent(
 
 /** Settle the durable Turn record from the authoritative result (#116): the result
  *  kind, the post-Turn Session availability, and any authoritative assistant
- *  content. Immutable in the Store; a fenced write is ignored (the walk unwinds). */
+ *  content. Immutable in the Store; a fenced write is ignored (the walk unwinds).
+ *
+ *  `detachCoordinate` is set for a Turn whose Harness is closed the moment the Turn
+ *  ends — an interactive human Turn, prepared fresh per Turn (#122, #123). Such a
+ *  Turn reports its Session `open` (the Adapter's live-process view at result time,
+ *  right for the autonomous held-Harness model), but the closed process leaves the
+ *  Session `detached`; recording that, with the recovery coordinate, is what lets
+ *  the next human Turn and the following Agent Step resume the same Session.
+ *
+ *  This settles `detached` before the caller's `finally` closes the Harness, which
+ *  is safe: Claude Code recovery is resume-by-id from the Session's persisted state
+ *  (native-reattach), not attachment to a live process, so the coordinate is valid
+ *  the instant the Turn completes regardless of when the old process is reaped; and
+ *  the next Turn/Step is a separate, later Operation (a human send or gate answer),
+ *  never concurrent with this close. */
 function settleTurnResult(
   owner: RunOwner,
   turnId: string,
   session: string,
   result: TurnResult,
+  detachCoordinate?: string,
 ): void {
-  const availability = resultAvailability(result);
+  const reported = resultAvailability(result);
+  const availability =
+    detachCoordinate !== undefined && reported.state === "open"
+      ? { state: "detached", detail: detachCoordinate }
+      : reported;
   owner.settleTurn({
     turnId,
     session,

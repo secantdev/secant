@@ -1,0 +1,31 @@
+diff --git a/specs/spec.md b/specs/spec.md
+new file mode 100644
+index 0000000..30732df
+--- /dev/null
++++ b/specs/spec.md
+@@ -0,0 +1,25 @@
++# Dark Mode Toggle
++
++## Summary
++
++Add a dark-mode toggle to the settings page. The choice is stored per-user in their profile and applies across all their logged-in sessions and devices.
++
++## Behavior
++
++- Settings page exposes a theme control with three states: **System**, **Light**, **Dark**.
++- Default for a user with no stored preference is **System**, which follows the OS/browser setting via `prefers-color-scheme`.
++- While set to System, changing the OS setting updates the app theme live, without a reload.
++- Selecting Light or Dark pins the theme and overrides the system setting.
++- Changes apply immediately on selection; no separate save step.
++
++## Persistence
++
++- Preference field on the user profile: `theme` — one of `system` | `light` | `dark`, defaulting to `system`.
++- Saved server-side on change and loaded with the user's profile at session start.
++- A local cache of the value is applied before first paint to avoid a flash of the wrong theme.
++
++## Out of Scope
++
++- Per-device overrides that diverge from the profile setting.
++- Scheduled or automatic time-of-day switching.
++- Custom themes beyond light and dark.

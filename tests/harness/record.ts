@@ -13,7 +13,8 @@
 //   bun tests/harness/record.ts <case>        # one case
 //   bun tests/harness/record.ts all           # every real case
 //
-// Cases: plain, test-repair, interrupt, resume, authentication, protocol-corruption.
+// Cases: plain, test-repair, interrupt, resume, authentication, protocol-corruption,
+// matt-front.
 // It records with `--restricted` (real login and model, but no personal hooks,
 // CLAUDE.md, plugins, or settings) so fixtures are clean and reproducible. The
 // authentication case uses a fresh, not-logged-in `CLAUDE_CONFIG_DIR`, so the real
@@ -59,6 +60,7 @@ const SESSION_IDS = {
   resume: "55555555-5555-4555-8555-555555555555",
   authentication: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
   "protocol-corruption": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "matt-front": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 } as const;
 
 // --- The launch contract (must mirror src/harness/claude-code.ts `launch`) ----
@@ -876,6 +878,135 @@ async function recordProtocolCorruption(): Promise<void> {
   }
 }
 
+/** Record the Matt front Bundle's Harness Turns (#123): a two-Turn interactive
+ *  grill and the autonomous spec Turn, all in one Session. The grill's first Turn
+ *  mints the Session (`--session-id`); every later Turn resumes it (`--resume`),
+ *  exactly as the Adapter drives a fresh prepared Harness per human Turn and then
+ *  the following Agent Step. The spec Turn writes `specs/spec.md` through one real
+ *  permission-bridge approval, and its Workspace patch is the created file. The
+ *  replayer serves the two resumed processes their own Turn from the resume block. */
+async function recordMattFront(): Promise<void> {
+  const ws = tempWorkspace("secant-rec-ws-");
+  // A git Workspace so the created spec file is captured as a `git apply`-able patch.
+  execFileSync("git", ["init", "-q"], { cwd: ws });
+  execFileSync("git", ["config", "user.email", "rec@secant.test"], { cwd: ws });
+  execFileSync("git", ["config", "user.name", "recorder"], { cwd: ws });
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "baseline"], {
+    cwd: ws,
+  });
+
+  const sid = SESSION_IDS["matt-front"];
+  let stdoutLen = 0;
+  const bridge = await startBridge(
+    () => ({ behavior: "allow" }),
+    () => stdoutLen,
+  );
+  try {
+    // Grill Turn 1 mints the Session. Bounded replies keep the fixture small; the
+    // grill prompt itself is not sent for an interactive Step in v1 (the human
+    // drives every Turn), so the frame text sets up the interview.
+    const grill1 = await runTurn({
+      args: launchArgs(
+        ["--session-id", sid],
+        bridge.mcpConfigArg,
+        bridge.toolName,
+      ),
+      cwd: ws,
+      env: baseEnv(),
+      input: userFrame(
+        "Let's design a feature together. I want to add a dark-mode toggle to " +
+          "our web app's settings page. Interview me: ask exactly one short " +
+          "question about it, under 40 words. Do not write any files.",
+      ),
+    });
+    // Grill Turn 2 resumes the same Session and concludes the interview.
+    const grill2 = await runTurn({
+      args: launchArgs(["--resume", sid], bridge.mcpConfigArg, bridge.toolName),
+      cwd: ws,
+      env: baseEnv(),
+      input: userFrame(
+        "The toggle should persist per-user in their profile and default to the " +
+          "system setting. That is enough context. In under 30 words, confirm " +
+          "you have what you need. Do not ask more questions or write files.",
+      ),
+    });
+
+    // Spec Turn resumes the Session and writes the one file through an approval.
+    stdoutLen = 0;
+    const callsBefore = bridge.calls.length;
+    const spec = await runTurn({
+      args: launchArgs(["--resume", sid], bridge.mcpConfigArg, bridge.toolName),
+      cwd: ws,
+      env: baseEnv(),
+      input: userFrame(
+        "Now write the spec. Using the Write tool, create the file " +
+          "specs/spec.md containing a short (under 200 words) Markdown spec for " +
+          "the dark-mode toggle we discussed. Write only that one file.",
+      ),
+      control: { onChunk: (_child, stdout) => (stdoutLen = stdout.length) },
+    });
+    // Stage the created file so the diff is a `git apply`-able new-file patch.
+    execFileSync("git", ["add", "-A"], { cwd: ws });
+    const patch = execFileSync("git", ["diff", "--cached"], {
+      cwd: ws,
+    }).toString();
+    if (patch.trim().length === 0) {
+      throw new Error("matt-front: the spec Turn wrote no file");
+    }
+
+    // Split the spec Turn's stdout around each bridge call, as test-repair does,
+    // so recorded bytes after a permission prompt emit only once the verdict is in.
+    const specCalls = bridge.calls.slice(callsBefore);
+    const specFiles: WriteFile[] = [];
+    const specSteps: unknown[] = [];
+    let cursor = 0;
+    specCalls.forEach((call, index) => {
+      specFiles.push({
+        name: `spec-${index}.stdout`,
+        bytes: spec.stdout.subarray(cursor, call.stdoutOffset),
+      });
+      specSteps.push({ emit: `spec-${index}.stdout` });
+      specSteps.push({
+        bridge: { tool_name: call.tool_name, input: call.input },
+      });
+      cursor = call.stdoutOffset;
+    });
+    specFiles.push({
+      name: "spec-final.stdout",
+      bytes: spec.stdout.subarray(cursor),
+    });
+    specSteps.push({ emit: "spec-final.stdout" });
+
+    writeCase({
+      name: "matt-front",
+      files: [
+        { name: "grill-1.stdout", bytes: grill1.stdout },
+        { name: "grill-2.stdout", bytes: grill2.stdout },
+        ...specFiles,
+        { name: "workspace.patch", bytes: Buffer.from(patch, "utf8") },
+      ],
+      caseJson: {
+        exitCode: grill1.exitCode,
+        turns: [{ stdout: "grill-1.stdout" }],
+        resume: {
+          exitCode: spec.exitCode,
+          turns: [
+            { stdout: "grill-2.stdout" },
+            { steps: specSteps, workspacePatch: "workspace.patch" },
+          ],
+        },
+      },
+      workspace: ws,
+      secrets: hostSecrets(bridge.token),
+      executableVersion: claudeVersion(),
+      protocolVersion: protocolVersionOf(grill1.stdout),
+    });
+  } finally {
+    await bridge.close();
+    rmSync(ws, { recursive: true, force: true });
+  }
+}
+
 const RECORDERS: Record<string, () => Promise<void>> = {
   plain: recordPlain,
   "test-repair": recordTestRepair,
@@ -883,6 +1014,7 @@ const RECORDERS: Record<string, () => Promise<void>> = {
   resume: recordResume,
   authentication: recordAuthentication,
   "protocol-corruption": recordProtocolCorruption,
+  "matt-front": recordMattFront,
 };
 
 async function main(): Promise<void> {

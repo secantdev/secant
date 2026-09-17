@@ -621,6 +621,48 @@ try {
     env: workspaceEnv,
   });
 
+  // The maintained Matt front Bundle (#123): built and installed the way a user's
+  // Bundle is (nothing in target source names its id), then refused headlessly with
+  // the exact interactive-step-needs-tui code AND its remediation — the assertion
+  // the M2 not-executable check was replaced by, now pointed at the Matt front. It
+  // runs to succeeded only in the TUI (tests/tui/matt-front-workbench.test.tsx).
+  const mattFrontFolder = join(projectRoot, "bundles", "matt-front-spec");
+  const mattFrontWfb = join(smokeRoot, "matt-front.wfb");
+  run(
+    binary,
+    [
+      "bundle",
+      "build",
+      mattFrontFolder,
+      "--no-install",
+      "--output",
+      mattFrontWfb,
+    ],
+    { cwd: smokeRoot, env: workspaceEnv },
+  );
+  run(binary, ["bundle", "install", mattFrontWfb], {
+    cwd: smokeRoot,
+    env: workspaceEnv,
+  });
+  {
+    const refused = spawnSync(
+      binary,
+      ["run", "launch", "dev.secant.matt-front"],
+      { cwd: workspaceDirectory, encoding: "utf8", env: workspaceEnv },
+    );
+    if (refused.error) throw refused.error;
+    const output = `${refused.stdout}${refused.stderr}`;
+    if (
+      refused.status === 0 ||
+      !output.includes("interactive-step-needs-tui") ||
+      !output.includes("Run this Bundle in the TUI.")
+    ) {
+      throw new Error(
+        `The Matt front was not refused headlessly with the interactive-step-needs-tui code and its remediation: ${output}`,
+      );
+    }
+  }
+
   for (const [args, needle] of [
     [
       ["run", "launch", "dev.secant.smoke-interactive"],

@@ -627,16 +627,32 @@ function fakeStep(
   );
 }
 
-/** A single-step Repeat group whose `check` Command runs through the fake executor. */
-function fakeRepeat(id: string, plan: FakePlan, interval: number): RoutingNode {
+/** A single-step Repeat group whose `check` Command runs through the fake executor.
+ *  `produceVerdict` is true by default so the `until` Verdict binds each iteration;
+ *  a test that only asserts the loop arithmetic (not the Verdict binding) passes false
+ *  to skip the produced Verdict — an unbound `until` never passes, so the group still
+ *  loops to its cadence, but no Artifact is staged, so a high-iteration loop does not
+ *  pay a real `git` commit per iteration and race the CI timeout on slow Windows
+ *  runners (docs/agents/testing.md: fixed deterministically, never with a bumped
+ *  timeout). */
+function fakeRepeat(
+  id: string,
+  plan: FakePlan,
+  interval: number,
+  produceVerdict = true,
+): RoutingNode {
   return {
     repeat: {
       until: "passing",
       reviewCheckpoint: { interval, message: "please review the loop" },
       steps: [
-        fakeStep(id, plan, {
-          produces: produces({ name: "passing", type: "verdict" }),
-        }),
+        fakeStep(
+          id,
+          plan,
+          produceVerdict
+            ? { produces: produces({ name: "passing", type: "verdict" }) }
+            : {},
+        ),
       ],
     },
   };
@@ -694,8 +710,19 @@ test("a Repeat group that always fails blocks after `interval` iterations", asyn
 test("an authored interval above the engine ceiling never delays the checkpoint beyond the ceiling", async (t) => {
   const { owner } = ownerForFreshRun(t);
   const fake = fakeExecutor();
+  // This loop runs the full engine ceiling (100) iterations to prove the clamp; it
+  // asserts only the iteration count, so it skips the produced Verdict (unbound → the
+  // group still loops to the ceiling) to avoid staging 100 real `git` commits, which
+  // would race the CI timeout on slow Windows runners.
   const report = await run(
-    [fakeRepeat("check", { exit: 1 }, MAX_REVIEW_CHECKPOINT_INTERVAL + 150)],
+    [
+      fakeRepeat(
+        "check",
+        { exit: 1 },
+        MAX_REVIEW_CHECKPOINT_INTERVAL + 150,
+        false,
+      ),
+    ],
     owner,
     { spawnCommand: fake.spawn },
   );

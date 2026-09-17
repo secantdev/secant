@@ -615,10 +615,19 @@ export interface RunPendingGateView {
   readonly outputArtifactName?: string; // free-text's declared output artifact
 }
 
-/** One named Harness Session's last observed availability (#116). */
+/** One named Harness Session's last observed availability (#116), and — when the
+ *  Session has a recorded transcript (#124) — the typed Resource References that
+ *  read it: a bounded newest `page` (paged older through its opaque cursor) and
+ *  the complete `export`. Both name only normalized Run/Session semantics; no
+ *  native Session id, database key, or path crosses the Port. */
 export interface RunSessionView {
   readonly session: string;
   readonly availability: "open" | "detached" | "unusable";
+  /** The newest transcript page reference; absent when the Session has no
+   *  recorded transcript. `readResource` bounds and orders the page. */
+  readonly transcriptPage?: TranscriptPageReference;
+  /** The complete retained transcript reference; absent alongside `transcriptPage`. */
+  readonly transcriptExport?: TranscriptExportReference;
 }
 
 /** The normalized Harness identity that qualified the current or latest Agent-step
@@ -969,6 +978,26 @@ export interface DiagnosticReference {
   readonly diagnosticId: string;
   readonly type: "diagnostic";
 }
+/** A reference to one bounded page of a Session's transcript (#124), resolved
+ *  through `readResource`. It names only the Run and the normalized Session; the
+ *  opaque `older` cursor (absent on the newest page) requests the next older page
+ *  and is Application-owned state, never a store row id or native Session
+ *  coordinate. */
+export interface TranscriptPageReference {
+  readonly runId: string;
+  readonly session: string;
+  readonly type: "transcript-page";
+  readonly older?: string;
+}
+/** A reference to a Session's complete retained transcript (#124), resolved
+ *  through `readResource`. Unbounded by design — the export is the whole
+ *  transcript, distinct from the bounded `page` an inspector opens. */
+export interface TranscriptExportReference {
+  readonly runId: string;
+  readonly session: string;
+  readonly type: "transcript-export";
+}
+
 /** The content of a resolved reference, or a Problem when the run or the bytes
  *  are gone. `text` is the captured output; `verdict` is `pass`/`fail`;
  *  `diagnostic` is a recorded diagnostic's text. M2 outputs are textual, so bytes
@@ -978,6 +1007,25 @@ export type ResourceRead =
       readonly found: true;
       readonly type: "text" | "verdict" | "diagnostic";
       readonly content: string;
+    }
+  | { readonly found: false; readonly problem: Problem };
+
+/** A resolved transcript reference (#124): a bounded ordered `page` (carrying an
+ *  opaque `older` cursor only when more retained entries exist), the complete
+ *  ordered `export`, or a normalized Problem for an unknown Run, Session, or
+ *  cursor. Structured entries, distinct from the textual `ResourceRead`, so the
+ *  page is never flattened to a blob a caller must re-parse. */
+export type TranscriptRead =
+  | {
+      readonly found: true;
+      readonly type: "transcript-page";
+      readonly entries: readonly RunTranscriptEntryView[];
+      readonly older?: string;
+    }
+  | {
+      readonly found: true;
+      readonly type: "transcript-export";
+      readonly entries: readonly RunTranscriptEntryView[];
     }
   | { readonly found: false; readonly problem: Problem };
 
@@ -1015,4 +1063,10 @@ export interface ProjectionPort {
   readResource(
     reference: ResourceReference | DiagnosticReference,
   ): ResourceRead;
+  /** Resolve one transcript `page` or `export` Resource Reference (#124),
+   *  validating the Run, Session, and cursor and returning normalized Problems —
+   *  never a native Session id, database identity, or path. */
+  readTranscript(
+    reference: TranscriptPageReference | TranscriptExportReference,
+  ): TranscriptRead;
 }

@@ -17,6 +17,9 @@ import type {
   RunLiveOverlay,
   RunGateReference,
   RunSnapshot,
+  TranscriptExportReference,
+  TranscriptPageReference,
+  TranscriptRead,
 } from "../application/projection-port.js";
 import { followProjectionUpdates } from "./follow.js";
 import { submitAndSettle, type SettleOutcome } from "./submit-and-settle.js";
@@ -57,6 +60,11 @@ export interface RunWorkbenchView {
   readResource(
     reference: ResourceReference | DiagnosticReference,
   ): ResourceRead;
+  /** Resolves a transcript `page`/`export` reference (#124): a bounded ordered
+   *  page (paged older through its cursor) or the complete export. */
+  readTranscript(
+    reference: TranscriptPageReference | TranscriptExportReference,
+  ): TranscriptRead;
   /** Answers the Human Gate the blocked snapshot rests at, against its exact Gate
    *  reference (ADR 0020, #85): `continue` grants one more interval, `stop` ends
    *  the Run `failed`. The accessor starts `pending` and settles once the
@@ -122,6 +130,7 @@ export function createLiveRunWorkbenchView(
     openRun: (runId) =>
       followRunProjection(port.openProjection({ family: "run", runId })),
     readResource: (reference) => port.readResource(reference),
+    readTranscript: (reference) => port.readTranscript(reference),
     // The one Workbench write: the same submit-and-settle protocol headless `run
     // answer` runs (A23), minus the read-back — submit against the snapshot's Gate
     // and follow the Operation to settlement. A `continue` answer drives execution

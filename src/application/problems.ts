@@ -156,6 +156,31 @@ export function runDiagnosticMissing(reference: DiagnosticReference): Problem {
   };
 }
 
+export function runSessionNotFound(runId: string, session: string): Problem {
+  return {
+    code: "run-session-not-found",
+    explanation: `Run ${runId} has no Session named ${session} with a recorded transcript.`,
+    remediation:
+      "Open the Run to see its Sessions, then read a transcript reference one of them advertises.",
+    possibleEffects: "none",
+    details: { runId, session },
+  };
+}
+
+export function runTranscriptCursorInvalid(
+  runId: string,
+  session: string,
+): Problem {
+  return {
+    code: "run-transcript-cursor-invalid",
+    explanation: `The transcript cursor for Run ${runId} Session ${session} is not one this Run produced.`,
+    remediation:
+      "Re-open the newest transcript page and page from the cursor it returns.",
+    possibleEffects: "none",
+    details: { runId, session },
+  };
+}
+
 export function runNotFound(runId: string): Problem {
   return {
     code: "run-not-found",

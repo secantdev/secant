@@ -174,6 +174,9 @@ function noRunView(): RunWorkbenchView {
     readResource() {
       throw new Error("run workbench not used in this test");
     },
+    readTranscript() {
+      throw new Error("run workbench not used in this test");
+    },
     answer() {
       throw new Error("run workbench not used in this test");
     },

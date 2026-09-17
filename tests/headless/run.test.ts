@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
 import {
   createApplication,
+  TRANSCRIPT_PAGE_SIZE,
   type RunExecution,
 } from "../../src/application/application.js";
 import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
@@ -243,6 +244,78 @@ test("run read of an unknown output exits non-zero", async (t) => {
     1,
   );
   assert.match(h.stderr(), /run-output-not-found/);
+});
+
+test("one multi-page transcript reads through both clients, no real Harness (#124)", async (t) => {
+  const h = await harness(t);
+  const { id, digest } = await h.install();
+  h.approve();
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "launch", id, "--trust", digest],
+      h.io,
+    ),
+    0,
+  );
+  const runId = h.stdout().match(/^Run (\S+)/m)?.[1];
+  assert.ok(runId);
+  assert.ok(h.runGroup);
+
+  // Seed a multi-page transcript directly in the Run Store — no Harness runs.
+  const total = TRANSCRIPT_PAGE_SIZE + 5;
+  const owner = h.runGroup.acquireRun(runId);
+  assert.ok(owner);
+  for (let i = 0; i < total; i++) {
+    owner.admitTurn({
+      turnId: `t-${i}`,
+      attemptId: "0.0:agent",
+      session: "s",
+      origin: "managed",
+      kind: "agent",
+      input: `input ${i}`,
+      recoveryCoordinate: "native",
+      harness: "claude-code",
+      at: new Date(),
+    });
+  }
+  owner.close();
+
+  // Client one — headless `run read --transcript`: a bounded newest page (with an
+  // "older" hint) and the complete export.
+  h.reset();
+  assert.equal(
+    await runHeadless(h.clients, ["run", "read", runId, "--transcript"], h.io),
+    0,
+  );
+  const printed = h.stdout();
+  assert.match(printed, /Transcript page \(s\)/);
+  assert.match(printed, new RegExp(`input ${total - 1}`));
+  assert.match(printed, /older entries retained/);
+  assert.match(printed, /Complete transcript \(s\)/);
+  assert.match(printed, /input 0\b/);
+
+  // Client two — the Projection Port read seam the Workbench uses: the same page
+  // is bounded and carries an opaque cursor; the export is complete.
+  const opened = h.clients.projectionPort.openProjection({
+    family: "run",
+    runId,
+  });
+  const snapshot = opened.snapshot;
+  opened.close();
+  assert.ok(snapshot.result.found);
+  const session = snapshot.result.run.sessions?.find((s) => s.session === "s");
+  assert.ok(session?.transcriptPage);
+  assert.ok(session.transcriptExport);
+  const page = h.clients.projectionPort.readTranscript(session.transcriptPage);
+  assert.ok(page.found && page.type === "transcript-page");
+  assert.equal(page.entries.length, TRANSCRIPT_PAGE_SIZE);
+  assert.ok(page.older, "the bounded page carries an opaque older cursor");
+  const complete = h.clients.projectionPort.readTranscript(
+    session.transcriptExport,
+  );
+  assert.ok(complete.found && complete.type === "transcript-export");
+  assert.equal(complete.entries.length, total);
 });
 
 // --- Repeat groups (#84, ADR 0020) -----------------------------------------

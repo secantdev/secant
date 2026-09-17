@@ -34,6 +34,7 @@ import type {
   RunTimelineEvent,
   RunView,
   SendInteractiveTurnOffer,
+  TranscriptRead,
   WorkspaceSnapshot,
 } from "../../src/application/projection-port.js";
 
@@ -163,6 +164,8 @@ function makeRunView(initial: RunSnapshot) {
   const [live, setLive] = createSignal<RunLiveOverlay>();
   const [preview, setPreview] = createSignal<string>();
   const reads = new Map<string, ResourceRead>();
+  // Transcript pages, keyed by the requested `older` cursor ("" for the newest).
+  const transcripts = new Map<string, TranscriptRead>();
   // The answer seam is hand-driven: `answer` records the dispatch and returns the
   // outcome accessor a test advances (pending → applied/refused), so the tests
   // exercise the controls-unavailable-while-pending and refusal paths (#92).
@@ -230,6 +233,20 @@ function makeRunView(initial: RunSnapshot) {
       });
       return requestOutcome;
     },
+    readTranscript: (reference) =>
+      transcripts.get(
+        reference.type === "transcript-page"
+          ? (reference.older ?? "")
+          : "export",
+      ) ?? {
+        found: false,
+        problem: {
+          code: "transcript-gone",
+          explanation: "The referenced transcript is gone.",
+          remediation: "Re-open the Run.",
+          possibleEffects: "none",
+        },
+      },
   };
   return {
     view,
@@ -246,6 +263,8 @@ function makeRunView(initial: RunSnapshot) {
     },
     setPreview,
     setRead: (key: string, read: ResourceRead) => reads.set(key, read),
+    setTranscript: (cursor: string, read: TranscriptRead) =>
+      transcripts.set(cursor, read),
     answers,
     texts,
     requests,
@@ -1033,34 +1052,152 @@ test("on a terminal too short for the panel, d does not open a clipped details p
 
 // --- reference inspection (AC4) --------------------------------------------
 
-test("the Session transcript opens in the bounded inspection view and restores timeline focus", async () => {
-  const longReply = Array.from(
-    { length: 600 },
-    (_, index) => `assistant-line-${index}`,
-  ).join("\n");
-  const { t, renderer } = await mountWorkbench(
-    runOf({
-      transcript: [
-        { session: "repair", role: "user", content: "Fix the failing test" },
-        { session: "repair", role: "assistant", content: longReply },
-      ],
-    }),
+/** A Run with one Session `s` that advertises transcript References (#124). */
+function transcriptRun() {
+  return runOf({
+    sessions: [
+      {
+        session: "s",
+        availability: "open",
+        transcriptPage: {
+          runId: "run-1",
+          session: "s",
+          type: "transcript-page",
+        },
+        transcriptExport: {
+          runId: "run-1",
+          session: "s",
+          type: "transcript-export",
+        },
+      },
+    ],
+  });
+}
+
+/** Transcript entries for Session `s` with the given role and contents. */
+function txEntries(role: "user" | "assistant", ...contents: string[]) {
+  return contents.map((content) => ({ session: "s", role, content }));
+}
+
+test("the Session transcript opens the newest page and restores timeline focus (#124)", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    transcriptRun(),
     100,
     24,
   );
+  control.setTranscript("", {
+    found: true,
+    type: "transcript-page",
+    entries: [
+      { session: "s", role: "user", content: "Fix the failing test" },
+      { session: "s", role: "assistant", content: "Working on it" },
+    ],
+  });
 
   await press(t, renderer, "t");
   const opened = t.captureCharFrame();
   assert.match(opened, /Session transcript/);
-  assert.match(opened, /User Turn · session repair/);
+  assert.match(opened, /User Turn · session s/);
   assert.match(opened, /Fix the failing test/);
-  assert.match(opened, /Assistant · session repair/);
-  assert.doesNotMatch(opened, /assistant-line-599/);
+  assert.match(opened, /Assistant · session s/);
+  assert.match(opened, /Working on it/);
 
-  await press(t, renderer, "end");
-  assert.match(t.captureCharFrame(), /output truncated/);
   await press(t, renderer, "escape");
   assert.match(t.captureCharFrame(), /› Timeline/);
+});
+
+test("paging older upward preserves the first visible entry (#124)", async () => {
+  // Height 10 → interior 8 → 6-line viewport, smaller than a 12-line page.
+  const { t, control, renderer } = await mountWorkbench(
+    transcriptRun(),
+    100,
+    10,
+  );
+  control.setTranscript("", {
+    found: true,
+    type: "transcript-page",
+    entries: txEntries("user", "N1", "N2", "N3", "N4"),
+    older: "c1",
+  });
+  control.setTranscript("c1", {
+    found: true,
+    type: "transcript-page",
+    entries: txEntries("user", "O1", "O2", "O3", "O4"),
+  });
+
+  await press(t, renderer, "t");
+  // Opens on the newest entries (the live edge, the bottom); older not loaded.
+  let f = t.captureCharFrame();
+  assert.match(f, /N4/);
+  assert.doesNotMatch(f, /O1|O2|O3|O4/);
+
+  await press(t, renderer, "home");
+  assert.match(t.captureCharFrame(), /N1/);
+
+  // Up at the top loads the older page and keeps N1 on screen (anchor preserved):
+  // if the view had jumped to the live edge instead, N4 would show and N1 would not.
+  await press(t, renderer, "up");
+  f = t.captureCharFrame();
+  assert.match(f, /N1/);
+  assert.doesNotMatch(f, /N4/);
+
+  // Paging further up reaches the just-loaded older entries.
+  await press(t, renderer, "pageup");
+  assert.match(t.captureCharFrame(), /O1/);
+});
+
+test("a large transcript entry scrolls without truncation (#124)", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    transcriptRun(),
+    100,
+    24,
+  );
+  const big = Array.from({ length: 600 }, (_, i) => `line-${i}`).join("\n");
+  control.setTranscript("", {
+    found: true,
+    type: "transcript-page",
+    entries: [{ session: "s", role: "assistant", content: big }],
+  });
+
+  await press(t, renderer, "t");
+  // Opens at the bottom, so the newest lines show; nothing is truncated away.
+  assert.match(t.captureCharFrame(), /line-599/);
+  assert.doesNotMatch(t.captureCharFrame(), /truncated/);
+  await press(t, renderer, "home");
+  assert.match(t.captureCharFrame(), /line-0\b/);
+});
+
+test("the transcript inspection stays within small widths and relays out on resize (#124)", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    transcriptRun(),
+    100,
+    24,
+  );
+  control.setTranscript("", {
+    found: true,
+    type: "transcript-page",
+    entries: [
+      {
+        session: "s",
+        role: "user",
+        content: "a very long single line that exceeds forty columns easily",
+      },
+    ],
+  });
+
+  await press(t, renderer, "t");
+  assert.match(t.captureCharFrame(), /Session transcript/);
+
+  // Narrow the terminal: the inspection clips each line to width, no overflow.
+  renderer.resize(40, 24);
+  await t.renderOnce();
+  noOverflow(t.captureCharFrame(), 40);
+
+  // Widen it again: it relays out and stays within the new width.
+  renderer.resize(80, 24);
+  await t.renderOnce();
+  noOverflow(t.captureCharFrame(), 80);
+  assert.match(t.captureCharFrame(), /Session transcript/);
 });
 
 test("opening a large text output shows bounded content with a truncation marker and scrolls", async () => {

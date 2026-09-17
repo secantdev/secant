@@ -120,6 +120,15 @@ function runViewOf(run: RunView): RunWorkbenchView {
         possibleEffects: "none",
       },
     }),
+    readTranscript: () => ({
+      found: false,
+      problem: {
+        code: "resource-gone",
+        explanation: "gone",
+        remediation: "re-run",
+        possibleEffects: "none",
+      },
+    }),
     // These tests never reach the checkpoint or interactive interaction; stubs
     // satisfy the seam.
     answer: () => () => ({ kind: "applied" }),

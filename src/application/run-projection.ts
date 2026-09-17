@@ -272,7 +272,17 @@ function runResult(
         ...(active !== undefined
           ? { conflict: conflictView(runId, active) }
           : {}),
-        ...(sessions.length > 0 ? { sessions: sessions.map(sessionView) } : {}),
+        ...(sessions.length > 0
+          ? {
+              sessions: sessions.map((s) =>
+                sessionView(
+                  runId,
+                  s,
+                  transcript.some((entry) => entry.session === s.session),
+                ),
+              ),
+            }
+          : {}),
         ...(effectiveModel !== undefined ? { effectiveModel } : {}),
         ...(harnessIdentity !== undefined
           ? {
@@ -969,15 +979,38 @@ function readVerdict(
 }
 
 /** Narrow a stored Session availability to the client union, defaulting an
- *  unrecognized value to `unusable` (the safe read at the ingress, D7). */
-function sessionView(record: HarnessSessionRecord): RunSessionView {
+ *  unrecognized value to `unusable` (the safe read at the ingress, D7). A Session
+ *  with a recorded transcript advertises its typed `page`/`export` References
+ *  (#124), reached through `readResource`; the bytes are never inlined here. */
+function sessionView(
+  runId: string,
+  record: HarnessSessionRecord,
+  hasTranscript: boolean,
+): RunSessionView {
   const availability =
     record.availability === "open" ||
     record.availability === "detached" ||
     record.availability === "unusable"
       ? record.availability
       : "unusable";
-  return { session: record.session, availability };
+  return {
+    session: record.session,
+    availability,
+    ...(hasTranscript
+      ? {
+          transcriptPage: {
+            runId,
+            session: record.session,
+            type: "transcript-page",
+          },
+          transcriptExport: {
+            runId,
+            session: record.session,
+            type: "transcript-export",
+          },
+        }
+      : {}),
+  };
 }
 
 /** Narrow a stored Turn kind to the client union, or undefined when it is absent
@@ -987,8 +1020,11 @@ function toTurnKind(kind: string | undefined): RunTurnKind | undefined {
   return kind === "agent" || kind === "interactive-agent" ? kind : undefined;
 }
 
-/** Narrow a stored transcript entry to the client view. */
-function transcriptView(record: TranscriptEntryRecord): RunTranscriptEntryView {
+/** Narrow a stored transcript entry to the client view. Shared with the
+ *  transcript-resource resolver so page/export output matches the inline view. */
+export function transcriptView(
+  record: TranscriptEntryRecord,
+): RunTranscriptEntryView {
   return {
     session: record.session,
     role: record.role === "assistant" ? "assistant" : "user",

@@ -370,6 +370,29 @@ export interface TranscriptEntryRecord {
   readonly at: string; // ISO 8601
 }
 
+/** A transcript entry tagged with its store sequence — the stable, monotonic
+ *  append order the Store pages on. The sequence is Store-internal: it never
+ *  crosses the Projection Port (the Application wraps it in an opaque cursor). */
+export interface SequencedTranscriptEntry extends TranscriptEntryRecord {
+  readonly seq: number;
+}
+
+/** A bounded, ordered request for one Session's transcript, newest-first paging.
+ *  `before` is an exclusive upper bound on the store sequence (absent = newest
+ *  page); `limit` bounds the page so the whole transcript is never materialized. */
+export interface TranscriptPageRequest {
+  readonly session: string;
+  readonly before?: number;
+  readonly limit: number;
+}
+
+/** One bounded transcript page, oldest-first. `hasOlder` is true when retained
+ *  entries older than this page's oldest exist, so the caller can page upward. */
+export interface TranscriptPage {
+  readonly entries: readonly SequencedTranscriptEntry[];
+  readonly hasOlder: boolean;
+}
+
 /**
  * Ownership of one Run's canonical store. Acquiring bumps a fencing epoch, so a
  * stale owner (a crashed process that comes back) is fenced: its canonical
@@ -447,6 +470,10 @@ export interface RunOwner {
   harnessSessions(): readonly HarnessSessionRecord[];
   /** Every readable transcript entry, in append order. */
   transcript(): readonly TranscriptEntryRecord[];
+  /** One bounded, ordered page of a Session's transcript (#124). The Store owns
+   *  stable paging: it reads only the requested page, never the whole transcript,
+   *  so inspecting a page never materializes the complete export. */
+  transcriptPage(request: TranscriptPageRequest): TranscriptPage;
   /** The most recent Attempt's effective model, or undefined when none ran a
    *  Harness Turn. */
   effectiveModel(): string | undefined;

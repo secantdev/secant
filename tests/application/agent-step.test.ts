@@ -217,7 +217,21 @@ test("a command -> agent -> command Bundle runs the plain Turn to succeeded (#11
   assert.equal(run.state, "succeeded");
   // The durable Turn view: one Session `s` open, the effective model from init, one
   // Turn admitted.
-  assert.deepEqual(run.sessions, [{ session: "s", availability: "open" }]);
+  assert.equal(run.sessions?.length, 1);
+  const session = run.sessions?.[0];
+  assert.equal(session?.session, "s");
+  assert.equal(session?.availability, "open");
+  // #124: a Session with a transcript advertises its typed page/export References.
+  assert.deepEqual(session?.transcriptPage, {
+    runId: run.runId,
+    session: "s",
+    type: "transcript-page",
+  });
+  assert.deepEqual(session?.transcriptExport, {
+    runId: run.runId,
+    session: "s",
+    type: "transcript-export",
+  });
   assert.match(run.effectiveModel ?? "", /^claude-/);
   assert.equal(run.turnPosition, 1);
 

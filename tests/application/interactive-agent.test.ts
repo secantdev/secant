@@ -231,9 +231,16 @@ test("interactive-agent rests blocked, takes two human Turns, and ends into the 
     .map((entry) => entry.content);
   assert.deepEqual(humanInputs, ["let us start here", "now the next idea"]);
   // The Session detached after each human Turn, so the next Turn resumes it.
-  assert.deepEqual(afterTwo.sessions, [
-    { session: "s", availability: "detached" },
-  ]);
+  assert.equal(afterTwo.sessions?.length, 1);
+  assert.equal(afterTwo.sessions?.[0]?.session, "s");
+  assert.equal(afterTwo.sessions?.[0]?.availability, "detached");
+  // #124: a detached Session that recorded human Turns still advertises its
+  // transcript page/export References.
+  assert.equal(afterTwo.sessions?.[0]?.transcriptPage?.type, "transcript-page");
+  assert.equal(
+    afterTwo.sessions?.[0]?.transcriptExport?.type,
+    "transcript-export",
+  );
 
   // End the Step at a boundary: it settles succeeded and the Agent Step reuses "s".
   const end = wired.projectionPort.submit({

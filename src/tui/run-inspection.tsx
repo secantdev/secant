@@ -6,9 +6,13 @@ import type {
   Problem,
   ResourceRead,
   ResourceReference,
+  RunTranscriptEntryView,
+  TranscriptPageReference,
+  TranscriptRead,
 } from "../application/projection-port.js";
 import { clip } from "./clip.js";
 import {
+  AT_LIVE,
   SCROLL_KEYS,
   scrollTimeline,
   timelineWindow,
@@ -22,42 +26,70 @@ import { useTheme } from "./vendor/theme-context.js";
 // `InspectionView` component. The Workbench selects which evidence to open (from
 // its Details panel) and hands it here; everything about *showing* the bytes —
 // stripping escapes, bounding the line count, scrolling, closing — is owned here.
+//
+// A Session transcript (#124) is a special evidence kind: it opens the newest
+// bounded page through a `page` Resource Reference, and pages older upward on
+// demand — never materializing the whole export to inspect a page. Scrolling up at
+// the top loads the next older page and preserves the first visible entry by
+// bumping the pinned top by the number of lines prepended.
 
 type Theme = ReturnType<typeof useTheme>["theme"];
 
 /** One openable piece of Run evidence, reached through its reference (#91 AC4):
- *  a bound output, the blocked checkpoint's latest Verdict, or the halt
- *  diagnostic. Timeline links exist only where they open real evidence. */
-/** Port-backed evidence or already-projected bounded content. The union makes
- * the exactly-one-source invariant explicit at the Workbench seam. */
+ *  a bound output, the blocked checkpoint's latest Verdict, the halt diagnostic,
+ *  or a paged Session transcript (#124). Timeline links exist only where they
+ *  open real evidence. Exactly one source is set (the union makes that explicit
+ *  at the Workbench seam). */
 export type Openable =
   | {
       readonly label: string;
       readonly reference: ResourceReference | DiagnosticReference;
       readonly content?: never;
+      readonly transcript?: never;
     }
   | {
       readonly label: string;
       readonly content: string;
       readonly reference?: never;
+      readonly transcript?: never;
+    }
+  | {
+      readonly label: string;
+      readonly transcript: TranscriptPageReference;
+      readonly reference?: never;
+      readonly content?: never;
     };
 
-interface Inspection {
+interface BlobInspection {
+  readonly kind: "blob";
   readonly title: string;
   readonly lines: readonly string[];
   readonly truncated: boolean;
   readonly problem?: Problem;
 }
 
-/** Large content is bounded: at most this many lines are inspected, with an
- *  explicit truncation marker past it (#91 AC4); the bytes are never inlined into
- *  the snapshot, only fetched on open through the reference. */
+interface TranscriptInspection {
+  readonly kind: "transcript";
+  readonly title: string;
+  readonly pageRef: TranscriptPageReference;
+  readonly entries: readonly RunTranscriptEntryView[];
+  /** The opaque cursor for the next older page, absent once the oldest is loaded. */
+  readonly older?: string;
+  readonly problem?: Problem;
+}
+
+type Inspection = BlobInspection | TranscriptInspection;
+
+/** Large blob content is bounded: at most this many lines are inspected, with an
+ *  explicit truncation marker past it (#91 AC4). A transcript is bounded instead
+ *  by paging, so it has no such cap. */
 const MAX_INSPECT_LINES = 500;
 
 export interface InspectionController {
   /** The open inspection, or undefined when the overlay is closed. */
   readonly inspecting: Accessor<Inspection | undefined>;
-  /** Open one Openable: resolve its reference, strip escapes, bound the lines. */
+  /** Open one Openable: resolve its reference (or newest transcript page), strip
+   *  escapes, bound the lines. */
   open(target: Openable): void;
   /** Handle a key while the overlay is open. Returns true if it consumed the
    *  key (the overlay is open), so the Workbench stops dispatching it further. */
@@ -68,13 +100,15 @@ export interface InspectionController {
   readonly window: Accessor<ReturnType<typeof timelineWindow>>;
 }
 
-/** The Workbench's inspection overlay controller. `readResource` resolves a
- *  reference to its bytes; `interiorH` is the Workbench's interior height, which
- *  the overlay windows its content over (title + footer subtracted). */
+/** The Workbench's inspection overlay controller. `readResource` resolves an
+ *  output/diagnostic reference to its bytes; `readTranscript` resolves a bounded
+ *  transcript page; `interiorH` is the Workbench's interior height, which the
+ *  overlay windows its content over (title + footer subtracted). */
 export function createInspection(deps: {
   readResource: (
     reference: ResourceReference | DiagnosticReference,
   ) => ResourceRead;
+  readTranscript: (reference: TranscriptPageReference) => TranscriptRead;
   interiorH: Accessor<number>;
 }): InspectionController {
   const [inspecting, setInspecting] = createSignal<Inspection | undefined>();
@@ -84,12 +118,17 @@ export function createInspection(deps: {
   });
 
   const open = (target: Openable): void => {
+    if (target.transcript !== undefined) {
+      openTranscript(target.label, target.transcript);
+      return;
+    }
     const read =
       target.content !== undefined
         ? ({ found: true, type: "text", content: target.content } as const)
         : deps.readResource(target.reference);
     if (!read.found) {
       setInspecting({
+        kind: "blob",
         title: target.label,
         lines: [],
         truncated: false,
@@ -102,6 +141,7 @@ export function createInspection(deps: {
       const all = stripAnsi(read.content).split(/\r?\n/);
       const truncated = all.length > MAX_INSPECT_LINES;
       setInspecting({
+        kind: "blob",
         title: target.label,
         lines: truncated ? all.slice(0, MAX_INSPECT_LINES) : all,
         truncated,
@@ -110,8 +150,73 @@ export function createInspection(deps: {
     setScroll({ mode: "paused", top: 0 });
   };
 
-  // Display lines include an explicit truncation marker as the final row when the
-  // resource was capped, so it scrolls into view like any other line (#91 AC4).
+  const openTranscript = (
+    label: string,
+    pageRef: TranscriptPageReference,
+  ): void => {
+    const read = deps.readTranscript(pageRef);
+    if (!read.found) {
+      setInspecting({
+        kind: "transcript",
+        title: label,
+        pageRef,
+        entries: [],
+        problem: read.problem,
+      });
+      setScroll({ mode: "paused", top: 0 });
+      return;
+    }
+    setInspecting({
+      kind: "transcript",
+      title: label,
+      pageRef,
+      entries: read.entries,
+      ...(read.type === "transcript-page" && read.older !== undefined
+        ? { older: read.older }
+        : {}),
+    });
+    // Open on the newest page's newest entries (the live edge, the bottom).
+    setScroll(AT_LIVE);
+  };
+
+  // Load the next older page and prepend it, preserving the first visible entry:
+  // every existing line shifts down by the number of lines prepended, so the
+  // pinned top is bumped by the same amount (#124 AC3).
+  const loadOlder = (): void => {
+    const current = inspecting();
+    if (
+      current === undefined ||
+      current.kind !== "transcript" ||
+      current.older === undefined
+    ) {
+      return;
+    }
+    const read = deps.readTranscript({
+      ...current.pageRef,
+      older: current.older,
+    });
+    if (!read.found || read.type !== "transcript-page") {
+      // A failed read (e.g. a raced owner reacquire) leaves the cursor in place so
+      // a later scroll-up retries, rather than silently pretending the oldest was
+      // reached; the headless client surfaces the Problem explicitly.
+      return;
+    }
+    // transcriptLines is a per-entry concatenation, so the prepended line count is
+    // exactly the older page's lines — no need to re-render the whole transcript.
+    const oldTop = window().top;
+    const prepended = transcriptLines(read.entries).length;
+    setInspecting({
+      ...current,
+      entries: [...read.entries, ...current.entries],
+      ...(read.older !== undefined
+        ? { older: read.older }
+        : { older: undefined }),
+    });
+    setScroll({ mode: "paused", top: oldTop + prepended });
+  };
+
+  // Display lines include an explicit truncation marker as the final row when a
+  // blob was capped, so it scrolls into view like any other line (#91 AC4).
   const lines = (): readonly string[] => {
     const current = inspecting();
     if (current === undefined) return [];
@@ -121,6 +226,7 @@ export function createInspection(deps: {
         current.problem.remediation,
       ];
     }
+    if (current.kind === "transcript") return transcriptLines(current.entries);
     return current.truncated
       ? [
           ...current.lines,
@@ -132,20 +238,51 @@ export function createInspection(deps: {
   const window = () => timelineWindow(scroll(), lines().length, viewportH());
 
   const handleKey = (name: string): boolean => {
-    if (inspecting() === undefined) return false;
+    const current = inspecting();
+    if (current === undefined) return false;
     if (name === "escape") {
       setInspecting(undefined);
       return true;
     }
     const action = SCROLL_KEYS[name];
-    if (action !== undefined)
-      setScroll((prev) =>
-        scrollTimeline(prev, action, lines().length, viewportH()),
-      );
+    if (action === undefined) return true;
+    // At the top of a transcript with older history, page older before scrolling,
+    // so the upward step reveals the just-loaded older entries.
+    if (
+      current.kind === "transcript" &&
+      current.older !== undefined &&
+      (action === "up" || action === "pageUp" || action === "top") &&
+      window().top === 0
+    ) {
+      loadOlder();
+    }
+    setScroll((prev) =>
+      scrollTimeline(prev, action, lines().length, viewportH()),
+    );
     return true;
   };
 
   return { inspecting, open, handleKey, lines, window };
+}
+
+/** Render transcript entries as display lines: a role header per entry, then its
+ *  content split on `\r?\n` with escapes stripped (captured content can carry
+ *  colour), then a blank separator. Whole-entry blocks, so a prepend adds only
+ *  leading lines and the anchor bump is exact. */
+function transcriptLines(
+  entries: readonly RunTranscriptEntryView[],
+): readonly string[] {
+  const out: string[] = [];
+  for (const entry of entries) {
+    out.push(
+      entry.role === "user"
+        ? `◇ User Turn · session ${entry.session}`
+        : `◆ Assistant · session ${entry.session}`,
+    );
+    for (const line of stripAnsi(entry.content).split(/\r?\n/)) out.push(line);
+    out.push("");
+  }
+  return out;
 }
 
 export function InspectionView(props: {
@@ -161,6 +298,10 @@ export function InspectionView(props: {
     const win = props.window();
     return props.lines().slice(win.top, win.top + win.visible);
   };
+  const footer = () =>
+    props.inspection.kind === "transcript"
+      ? "↑/↓ scroll · ↑ at top loads older · esc close · q quit"
+      : "↑/↓ scroll · esc close · q quit";
   return (
     <box flexDirection="column" flexGrow={1} overflow="hidden">
       <text fg={theme.text} attributes={TextAttributes.BOLD} flexShrink={0}>
@@ -176,7 +317,7 @@ export function InspectionView(props: {
         </For>
       </box>
       <text fg={theme.textMuted} flexShrink={0}>
-        {clip("↑/↓ scroll · esc close · q quit", w())}
+        {clip(footer(), w())}
       </text>
     </box>
   );

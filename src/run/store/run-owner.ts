@@ -9,6 +9,7 @@ import {
   eq,
   isNotNull,
   isNull,
+  lt,
   notInArray,
   sql,
 } from "drizzle-orm";
@@ -40,8 +41,11 @@ import type {
   RecordPendingGateRequest,
   RunOwner,
   RunRecord,
+  SequencedTranscriptEntry,
   SettleTurnRequest,
   TranscriptEntryRecord,
+  TranscriptPage,
+  TranscriptPageRequest,
   TurnEventRecord,
   TurnRecord,
   WriteResult,
@@ -176,6 +180,7 @@ const transcriptRow = z.object({
   content: z.string(),
   at: z.string(),
 });
+const sequencedTranscriptRow = transcriptRow.extend({ seq: z.number() });
 const effectiveModelRow = z.object({ effective_model: z.string() });
 const harnessIdentityRow = z.object({
   harness: z.string(),
@@ -953,6 +958,47 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
             at: parsed.at,
           };
         });
+    },
+    transcriptPage(request: TranscriptPageRequest): TranscriptPage {
+      // Read only the newest `limit` retained entries below the cursor (one extra
+      // to detect older history), so a page read never touches the whole
+      // transcript. `seq` is the monotonic append order; `before` pages upward.
+      const where =
+        request.before === undefined
+          ? eq(transcriptEntries.session_key, request.session)
+          : and(
+              eq(transcriptEntries.session_key, request.session),
+              lt(transcriptEntries.seq, request.before),
+            );
+      const rows = db
+        .select({
+          seq: transcriptEntries.seq,
+          session_key: transcriptEntries.session_key,
+          turn_id: transcriptEntries.turn_id,
+          role: transcriptEntries.role,
+          content: transcriptEntries.content,
+          at: transcriptEntries.at,
+        })
+        .from(transcriptEntries)
+        .where(where)
+        .orderBy(desc(transcriptEntries.seq))
+        .limit(request.limit + 1)
+        .all();
+      const hasOlder = rows.length > request.limit;
+      const page = hasOlder ? rows.slice(0, request.limit) : rows;
+      // Rows come newest-first for the bound; reverse so a page reads oldest-first.
+      const entries = page.reverse().map((row): SequencedTranscriptEntry => {
+        const parsed = sequencedTranscriptRow.parse(row);
+        return {
+          seq: parsed.seq,
+          session: parsed.session_key,
+          turnId: parsed.turn_id,
+          role: parsed.role,
+          content: parsed.content,
+          at: parsed.at,
+        };
+      });
+      return { entries, hasOlder };
     },
     effectiveModel() {
       // `attempt_id` is the tiebreaker so two Attempts settled in the same millisecond

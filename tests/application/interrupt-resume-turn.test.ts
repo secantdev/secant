@@ -201,7 +201,8 @@ test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Sessi
   await awaitSettled(port, "op-launch");
   const run = runView(port, runId);
   assert.equal(run.state, "halted");
-  assert.deepEqual(run.sessions, [{ session: "s", availability: "detached" }]);
+  assert.equal(run.sessions?.[0]?.session, "s");
+  assert.equal(run.sessions?.[0]?.availability, "detached");
   const settled = run.timeline.find((event) => event.event === "turn-settled");
   assert.equal(settled?.detail, "interrupted");
 
@@ -371,5 +372,6 @@ test("a resume the Harness does not acknowledge fails the Attempt and never crea
   // The recovery failure rests the Run failed; the Session went unusable and no
   // fresh Session was ever opened in its place (ADR 0022).
   assert.equal(run.state, "failed");
-  assert.deepEqual(run.sessions, [{ session: "s", availability: "unusable" }]);
+  assert.equal(run.sessions?.[0]?.session, "s");
+  assert.equal(run.sessions?.[0]?.availability, "unusable");
 });

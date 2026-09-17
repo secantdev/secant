@@ -1270,6 +1270,81 @@ test("Turn kind records both kinds in one Session, and a legacy row reads unknow
   assert.equal(legacy.kind, undefined);
 });
 
+test("transcriptPage reads bounded, ordered pages and flags older history (#124)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner !== undefined);
+  t.after(() => owner.close());
+
+  // Seed five user turns in one Session, and one in a second Session that must
+  // never leak into the first Session's page.
+  for (let i = 0; i < 5; i++) {
+    owner.admitTurn({
+      turnId: `t-${i}`,
+      attemptId: "0.0:write",
+      session: "s",
+      origin: "managed",
+      kind: "agent",
+      input: `input ${i}`,
+      recoveryCoordinate: "native-abc",
+      harness: "claude-code",
+      at: AT,
+    });
+  }
+  owner.admitTurn({
+    turnId: "other",
+    attemptId: "0.0:write",
+    session: "other",
+    origin: "managed",
+    kind: "agent",
+    input: "elsewhere",
+    recoveryCoordinate: "native-xyz",
+    harness: "claude-code",
+    at: AT,
+  });
+
+  // The newest page is bounded, oldest-first within the page, and flags older.
+  const newest = owner.transcriptPage({ session: "s", limit: 2 });
+  assert.deepEqual(
+    newest.entries.map((e) => e.content),
+    ["input 3", "input 4"],
+  );
+  assert.equal(newest.hasOlder, true);
+
+  // Paging upward with the oldest entry's seq walks older entries in order.
+  const older = owner.transcriptPage({
+    session: "s",
+    before: newest.entries[0]!.seq,
+    limit: 2,
+  });
+  assert.deepEqual(
+    older.entries.map((e) => e.content),
+    ["input 1", "input 2"],
+  );
+  assert.equal(older.hasOlder, true);
+
+  // The final page has no older history and is not padded.
+  const final = owner.transcriptPage({
+    session: "s",
+    before: older.entries[0]!.seq,
+    limit: 2,
+  });
+  assert.deepEqual(
+    final.entries.map((e) => e.content),
+    ["input 0"],
+  );
+  assert.equal(final.hasOlder, false);
+
+  // An empty Session pages to nothing without throwing.
+  assert.deepEqual(owner.transcriptPage({ session: "missing", limit: 2 }), {
+    entries: [],
+    hasOlder: false,
+  });
+});
+
 /** The `<slug>--<digest>` directory openRunGroup derives for WORKSPACE, recomputed
  *  here so the poisoned-coordination test can pre-seed it. */
 function exampleGroupName(): string {

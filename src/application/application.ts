@@ -76,6 +76,10 @@ import {
 } from "./problems.js";
 import { UpdateStream } from "./update-stream.js";
 import { listRunsSnapshot } from "./run-list.js";
+import { readTranscriptResource } from "./transcript-resource.js";
+// Re-exported through the Module entry so clients and tests reach the page size
+// without importing the internal resolver file (module-boundaries).
+export { TRANSCRIPT_PAGE_SIZE } from "./transcript-resource.js";
 import { preflight } from "./preflight.js";
 import type {
   AnswerHarnessRequestInput,
@@ -100,6 +104,9 @@ import type {
   ResourceRead,
   ResourceReference,
   RunGateReference,
+  TranscriptExportReference,
+  TranscriptPageReference,
+  TranscriptRead,
   RunListSnapshot,
   RunLiveOverlay,
   RunOutstandingRequest,
@@ -2424,6 +2431,33 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { status: "applied" };
   }
 
+  // Acquire an owner for a read (`readResource`/`readTranscript`): read through
+  // the live in-process owner when one exists (so the read never fences it), else
+  // acquire-and-close a rested Run, else refuse a Run live in another process
+  // (acquiring would bump its fencing epoch and abort it). `transient` says the
+  // caller must close the owner it was handed.
+  function acquireForRead(runId: string):
+    | {
+        readonly ok: true;
+        readonly owner: RunOwner;
+        readonly transient: boolean;
+      }
+    | { readonly ok: false; readonly problem: Problem } {
+    if (runGroup === undefined) {
+      return { ok: false, problem: runSupportUnavailable() };
+    }
+    const live = runs.get(runId)?.owner;
+    const foreign = live === undefined ? liveElsewhere(runId) : undefined;
+    if (foreign !== undefined) {
+      return { ok: false, problem: runLiveElsewhere(runId, foreign.ownerPid) };
+    }
+    const owner = live ?? runGroup.acquireRun(runId);
+    if (owner === undefined) {
+      return { ok: false, problem: runStoreDamaged(runId) };
+    }
+    return { ok: true, owner, transient: live === undefined };
+  }
+
   const projectionPort: ProjectionPort = {
     openProjection,
     submit(submission: Submission): SubmissionAdmission {
@@ -2467,27 +2501,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
     readResource(
       reference: ResourceReference | DiagnosticReference,
     ): ResourceRead {
-      if (runGroup === undefined) {
-        return { found: false, problem: runSupportUnavailable() };
-      }
-      // Read through the live owner when the Run is still executing in this
-      // process (so the read never fences it); otherwise acquire a short-lived
-      // owner and close it. Never acquire for a Run live in another process:
-      // acquiring bumps the fencing epoch and would abort the process running it,
-      // so refuse the read until the Run rests instead.
-      const live = runs.get(reference.runId)?.owner;
-      const foreign =
-        live === undefined ? liveElsewhere(reference.runId) : undefined;
-      if (foreign !== undefined) {
-        return {
-          found: false,
-          problem: runLiveElsewhere(reference.runId, foreign.ownerPid),
-        };
-      }
-      const owner = live ?? runGroup.acquireRun(reference.runId);
-      if (owner === undefined) {
-        return { found: false, problem: runStoreDamaged(reference.runId) };
-      }
+      const acquired = acquireForRead(reference.runId);
+      if (!acquired.ok) return { found: false, problem: acquired.problem };
+      const { owner, transient } = acquired;
       try {
         const bytes =
           reference.type === "diagnostic"
@@ -2508,7 +2524,20 @@ export function createApplication(deps: ApplicationDependencies): Application {
           content: new TextDecoder().decode(bytes),
         };
       } finally {
-        if (live === undefined) owner.close();
+        if (transient) owner.close();
+      }
+    },
+
+    readTranscript(
+      reference: TranscriptPageReference | TranscriptExportReference,
+    ): TranscriptRead {
+      const acquired = acquireForRead(reference.runId);
+      if (!acquired.ok) return { found: false, problem: acquired.problem };
+      const { owner, transient } = acquired;
+      try {
+        return readTranscriptResource(owner, reference);
+      } finally {
+        if (transient) owner.close();
       }
     },
   };

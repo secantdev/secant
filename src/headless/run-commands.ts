@@ -244,24 +244,53 @@ export function registerRunCommands(
     .description("read one Run output by reference (<run-id>/<name>)")
     .argument("[reference]", "a Run output reference, <run-id>/<name>")
     .option("--json", "print the resolved output as JSON")
-    .action((reference: string | undefined, options: { json?: boolean }) => {
-      const json = options.json ?? false;
-      if (reference === undefined) {
+    .option(
+      "--transcript",
+      "read a Session transcript (newest page and complete export) instead of an output",
+    )
+    .option(
+      "--session <name>",
+      "with --transcript, which Session to read (defaults to the sole Session)",
+    )
+    .action(
+      (
+        reference: string | undefined,
+        options: { json?: boolean; transcript?: boolean; session?: string },
+      ) => {
+        const json = options.json ?? false;
+        if (reference === undefined) {
+          return settle(
+            fail(io, json, {
+              code: "missing-reference",
+              explanation: options.transcript
+                ? "run read --transcript needs a Run id."
+                : "run read needs an output reference.",
+              remediation: options.transcript
+                ? "Run `secant run read <run-id> --transcript`."
+                : "Run `secant run read <run-id>/<name>`.",
+              possibleEffects: "none",
+            }),
+          );
+        }
+        if (options.transcript) {
+          return settle(
+            execute((clients) =>
+              readTranscript(clients.projectionPort, io, fail, json, {
+                reference,
+                ...(options.session !== undefined
+                  ? { session: options.session }
+                  : {}),
+              }),
+            ),
+          );
+        }
         return settle(
-          fail(io, json, {
-            code: "missing-reference",
-            explanation: "run read needs an output reference.",
-            remediation: "Run `secant run read <run-id>/<name>`.",
-            possibleEffects: "none",
-          }),
+          execute((clients) =>
+            readRun(clients.projectionPort, io, fail, json, reference),
+          ),
         );
-      }
-      return settle(
-        execute((clients) =>
-          readRun(clients.projectionPort, io, fail, json, reference),
-        ),
-      );
-    });
+      },
+    );
   run
     .command("list")
     .description("list this Workspace's Previous Runs, newest first")
@@ -827,6 +856,101 @@ function readRun(
   }
   io.out(read.content.endsWith("\n") ? read.content : `${read.content}\n`);
   return 0;
+}
+
+// `run read --transcript` (#124): resolve one Session's newest transcript page and
+// its complete export through the same typed References the Workbench uses, so the
+// two clients read one transcript the same way. The `--json` shape is additive.
+function readTranscript(
+  port: ProjectionPort,
+  io: HeadlessIO,
+  fail: RunCommandDeps["fail"],
+  json: boolean,
+  options: { reference: string; session?: string },
+): number {
+  const slash = options.reference.indexOf("/");
+  const runId =
+    slash > 0 ? options.reference.slice(0, slash) : options.reference;
+  // The Session comes from `<run-id>/<session>`, then `--session`.
+  const session =
+    slash > 0 ? options.reference.slice(slash + 1) : options.session;
+
+  const opened = port.openProjection({ family: "run", runId });
+  let pageRef;
+  let exportRef;
+  try {
+    const snapshot = opened.snapshot;
+    if (!snapshot.result.found) return fail(io, json, snapshot.result.problem);
+    const sessions = (snapshot.result.run.sessions ?? []).filter(
+      (s) => s.transcriptPage !== undefined,
+    );
+    const chosen =
+      session !== undefined
+        ? sessions.find((s) => s.session === session)
+        : sessions.length === 1
+          ? sessions[0]
+          : undefined;
+    if (chosen?.transcriptPage === undefined) {
+      return fail(io, json, {
+        code: "run-session-not-found",
+        explanation:
+          session !== undefined
+            ? `Run ${runId} has no Session named ${session} with a recorded transcript.`
+            : sessions.length === 0
+              ? `Run ${runId} has no recorded transcript.`
+              : `Run ${runId} has more than one Session; name one with --session.`,
+        remediation:
+          sessions.length > 1
+            ? `Run \`secant run read ${runId} --transcript --session <name>\` (Sessions: ${sessions
+                .map((s) => s.session)
+                .join(", ")}).`
+            : "Run `secant run show <run-id>` to see the Run's Sessions.",
+        possibleEffects: "none",
+        details: { runId, ...(session !== undefined ? { session } : {}) },
+      });
+    }
+    pageRef = chosen.transcriptPage;
+    exportRef = chosen.transcriptExport;
+  } finally {
+    opened.close();
+  }
+
+  const page = port.readTranscript(pageRef);
+  if (!page.found) return fail(io, json, page.problem);
+  const complete =
+    exportRef !== undefined ? port.readTranscript(exportRef) : undefined;
+  if (complete !== undefined && !complete.found) {
+    return fail(io, json, complete.problem);
+  }
+
+  if (json) {
+    io.out(`${JSON.stringify({ page, export: complete }, null, 2)}\n`);
+    return 0;
+  }
+  io.out(`Transcript page (${pageRef.session}):\n`);
+  io.out(renderTranscriptEntries(page.entries));
+  if (page.type === "transcript-page" && page.older !== undefined) {
+    io.out("… older entries retained; page up in the Run Workbench.\n");
+  }
+  if (complete !== undefined && complete.found) {
+    io.out(`\nComplete transcript (${pageRef.session}):\n`);
+    io.out(renderTranscriptEntries(complete.entries));
+  }
+  return 0;
+}
+
+/** Render transcript entries as plain text, one labelled block per entry. */
+function renderTranscriptEntries(
+  entries: readonly { role: string; content: string }[],
+): string {
+  if (entries.length === 0) return "(no entries)\n";
+  return entries
+    .map(
+      (entry) =>
+        `${entry.role === "user" ? "user" : "assistant"}: ${entry.content}`,
+    )
+    .join("\n")
+    .concat("\n");
 }
 
 function listRuns(

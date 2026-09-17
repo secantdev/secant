@@ -165,6 +165,9 @@ function noRunView(): RunWorkbenchView {
     readResource() {
       throw new Error("run workbench not opened in this test");
     },
+    readTranscript() {
+      throw new Error("run workbench not opened in this test");
+    },
     answer() {
       throw new Error("run workbench not opened in this test");
     },
@@ -221,6 +224,9 @@ function succeedingRunView(): RunWorkbenchView {
     },
     readResource() {
       throw new Error("no reference read in this test");
+    },
+    readTranscript() {
+      throw new Error("no transcript read in this test");
     },
     answer() {
       throw new Error("no answer dispatched in this test");
@@ -657,6 +663,9 @@ function fakePort(config: {
       return config.admission;
     },
     readResource() {
+      throw new Error("not used");
+    },
+    readTranscript() {
       throw new Error("not used");
     },
   };

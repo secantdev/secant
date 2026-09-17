@@ -431,12 +431,25 @@ export function RunWorkbench(props: {
     );
   };
 
-  const transcriptTarget = createMemo<Openable | undefined>(() => {
-    const current = run();
-    return current?.transcript !== undefined && current.transcript.length > 0
-      ? { label: "Session transcript", content: transcriptText(current) }
-      : undefined;
+  // One transcript openable per Session that has a recorded transcript (#124),
+  // each opening that Session's newest page through its `page` Resource Reference.
+  const transcriptTargets = createMemo<readonly Openable[]>(() => {
+    const sessions = run()?.sessions ?? [];
+    const withTranscript = sessions.filter(
+      (s) => s.transcriptPage !== undefined,
+    );
+    return withTranscript.map((s) => ({
+      label:
+        withTranscript.length > 1
+          ? `Session transcript · ${s.session}`
+          : "Session transcript",
+      transcript: s.transcriptPage!,
+    }));
   });
+  // The `t` shortcut and transcript-available hint follow the first Session.
+  const transcriptTarget = createMemo<Openable | undefined>(
+    () => transcriptTargets()[0],
+  );
 
   // The evidence the details panel offers, in a stable order: bound outputs,
   // then a blocked checkpoint's latest Verdict, a halt diagnostic, and transcript.
@@ -460,8 +473,7 @@ export function RunWorkbench(props: {
         reference: current.conflict.reference,
       });
     }
-    const transcript = transcriptTarget();
-    if (transcript !== undefined) list.push(transcript);
+    list.push(...transcriptTargets());
     return list;
   });
 
@@ -478,6 +490,7 @@ export function RunWorkbench(props: {
   // run-inspection; the Workbench selects which evidence to open and hands it here.
   const inspection = createInspection({
     readResource: view.readResource,
+    readTranscript: view.readTranscript,
     interiorH,
   });
   const hasConflict = () => run()?.conflict !== undefined;
@@ -1168,15 +1181,6 @@ function livenessText(run: RunView): string {
     case "live-elsewhere":
       return `live in another instance (process ${run.liveness.ownerPid})`;
   }
-}
-
-function transcriptText(run: RunView): string {
-  return (run.transcript ?? [])
-    .flatMap((entry) => [
-      `${entry.role === "user" ? "◇ User Turn" : "◆ Assistant"} · session ${entry.session}`,
-      ...entry.content.split(/\r?\n/).map((line) => `  ${line}`),
-    ])
-    .join("\n");
 }
 
 function Workbench(props: {

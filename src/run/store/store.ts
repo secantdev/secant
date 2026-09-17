@@ -159,6 +159,20 @@ export interface PublishAttemptRequest {
   /** The effective model an Agent-step Attempt ran under (#116), recorded on the
    *  Attempt. Absent for a Command/Gate Attempt. */
   readonly effectiveModel?: string;
+  /** The normalized Harness identity an Agent-step Attempt qualified under, from the
+   *  prepared Harness profile (#125): Harness name, resolved executable, and observed
+   *  executable version. Recorded together on the Attempt so it survives reopening and
+   *  resume. Absent for a Command/Gate Attempt, which runs no Harness. */
+  readonly harnessIdentity?: HarnessIdentityRecord;
+}
+
+/** The normalized Harness identity recorded on an Agent-step Attempt (#125). Carries
+ *  only the profile's semantic identity facts — never a native Session id, recovery
+ *  coordinate, or Adapter object. */
+export interface HarnessIdentityRecord {
+  readonly harness: string;
+  readonly executable: string;
+  readonly executableVersion: string;
 }
 
 /** The outcome of a publication attempt. A fenced owner or an unstageable set
@@ -436,6 +450,10 @@ export interface RunOwner {
   /** The most recent Attempt's effective model, or undefined when none ran a
    *  Harness Turn. */
   effectiveModel(): string | undefined;
+  /** The normalized Harness identity of the latest Agent-step Attempt (the latest
+   *  Attempt that recorded a Harness), or undefined when none ran a Harness Turn — a
+   *  Command-only Run (#125). */
+  harnessIdentity(): HarnessIdentityRecord | undefined;
   /** Release this Run only if this owner still holds the fencing epoch. A stale
    *  owner cannot clear ownership acquired by a takeover. */
   release(): WriteResult;

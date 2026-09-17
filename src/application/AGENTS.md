@@ -60,6 +60,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   exists; the async `prepare` (spawning `claude --version`) runs only at execution. `supportsInteractiveTurns` is a client fact the Application forwards to Preflight.
 - The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no live snapshot;
   the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`).
+- The Agent executor records the normalized Harness identity (name/executable/version) on that Attempt from the prepared profile (#125), so the `run`
+  Projection reads it back through `owner.harnessIdentity()` and exposes it as the additive `run.harness` view — one identity for the latest Agent-step
+  Attempt, no native id crossing the Port; absent for a Command-only Run.
 - `send-interactive-turn`/`end-interactive-step` (#122) drive an interactive-agent Step the Run rests `blocked` at. The executor records **no** durable gate — the block is
   derived from the current Step being `interactive-agent` (the same signal the TUI blocked-basis reads), and no Attempt settles until End. `beginInteractive` reuses the held
   owner (a blocked Run keeps it) or resumes+acquires a reopened one, then re-derives to confirm the Run is blocked at the named Step. `send` drives one human Turn (origin

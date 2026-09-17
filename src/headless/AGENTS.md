@@ -16,6 +16,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - A Run that rests `blocked` at a gate names its follow-up answer command in the plain-text tail (`settleAndReportRun`'s `answerHint`, #108): a free-text
   gate names `--text`, an approve-reject gate names `--continue`/`--stop`. `run show` renders the authored pending gate (shape, message, output) under a
   "durable Human Gate" basis line, alongside the derived Review-checkpoint block; both are driven off `RunView` fields, additive to the frozen `--json`.
+- `run show` renders the Harness identity of the latest Agent-step Attempt (#125) — `Harness:`/`Executable:`/`Version:` lines beside `Effective model:` — from the additive
+  `run.harness` view; the version prints unadorned (no `v` prefix, matching the TUI header) since a real version string can itself contain parentheses. The existing top-level
+  `effectiveModel` `--json` field is untouched and the new `harness` object is purely additive, so a Command-only Run's frozen shape is unchanged.
 - The `run` command group lives in `run-commands.ts` and registers onto the program `buildProgram` passes (A25); it is handed `io`/`execute`/`fail`/`settle`
   and shares `settledOutcome` and `settleAndReportRun` (the await-settlement-then-report tail, A24). `splitSelector` lives there too and `bundle inspect`
   imports it (A24).

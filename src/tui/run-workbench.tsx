@@ -483,8 +483,9 @@ export function RunWorkbench(props: {
   const hasConflict = () => run()?.conflict !== undefined;
   const compactHeader = () => dims().width < HEADER_COMPACT_WIDTH;
   const headerRows = () => {
-    const hasHarness =
-      run()?.effectiveModel !== undefined || (run()?.sessions?.length ?? 0) > 0;
+    // The Harness identity line renders exactly when the durable `harness` view is
+    // present (#125) — one extra header row in either layout.
+    const hasHarness = run()?.harness !== undefined;
     return compactHeader() ? (hasHarness ? 2 : 1) : hasHarness ? 3 : 2;
   };
   const hasGateLine = () =>
@@ -1263,13 +1264,20 @@ function Workbench(props: {
     props.blockedBasis() === undefined
       ? displayState()
       : `${displayState()} · ${props.blockedBasis()}`;
+  // The Harness identity that qualified the current or latest Agent-step Attempt (#125):
+  // the observed Harness name, resolved executable, and version, with the effective
+  // model. Read from the durable `harness` view — never inferred from configuration, so
+  // "Claude Code" is no longer hardcoded. A live Turn before its first Attempt settles
+  // has a Session but no durable identity yet; the line shows once the Attempt records
+  // it. The compact form drops the (long) executable path to stay readable at small
+  // widths; no value is invented when the model is unavailable.
   const harnessLine = () => {
-    if (
-      run().effectiveModel === undefined &&
-      (run().sessions?.length ?? 0) === 0
-    )
-      return undefined;
-    return `Claude Code · model ${run().effectiveModel ?? "not reported"}`;
+    const harness = run().harness;
+    if (harness === undefined) return undefined;
+    const model = run().effectiveModel ?? "not reported";
+    return props.compactHeader()
+      ? `${harness.name} · ${harness.executableVersion} · model ${model}`
+      : `${harness.name} · ${harness.executable} · ${harness.executableVersion} · model ${model}`;
   };
 
   return (

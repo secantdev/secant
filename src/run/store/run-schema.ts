@@ -40,6 +40,14 @@ export const attempts = sqliteTable("attempt", {
   // The effective model an Agent-step Attempt ran under, reported by the Harness
   // init message (#116). Null for a Command/Gate Attempt, which runs no Harness.
   effective_model: text("effective_model"),
+  // The normalized Harness identity an Agent-step Attempt qualified under, from the
+  // prepared Harness profile (#125): the Harness name, the resolved executable, and
+  // the observed executable version. Recorded together so the identity survives
+  // reopening and resume. All null for a Command/Gate Attempt, which runs no Harness;
+  // `harness` non-null marks an Agent-step Attempt.
+  harness: text("harness"),
+  executable: text("executable"),
+  executable_version: text("executable_version"),
 });
 
 export const attemptLog = sqliteTable("attempt_log", {

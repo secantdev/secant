@@ -1103,6 +1103,96 @@ test("a Turn is admitted, events append, and the result settles immutably (#116)
   assert.equal(owner.effectiveModel(), "claude-opus-5");
 });
 
+test("the latest Agent-step Attempt's Harness identity is durable across reopening (#125)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+
+  {
+    const owner = group.acquireRun(created.runId);
+    assert.ok(owner !== undefined);
+    // A Command/Gate Attempt records no Harness identity, so it never becomes the
+    // latest Agent-step Attempt.
+    owner.publishAttempt({
+      attemptId: "0.0:setup",
+      outcome: "succeeded",
+      required: [],
+      outputs: [],
+      at: AT,
+    });
+    // An earlier Agent Attempt under one profile.
+    owner.publishAttempt({
+      attemptId: "0.1:repair",
+      outcome: "failed",
+      required: [],
+      outputs: [],
+      at: new Date("2026-09-12T12:00:01.000Z"),
+      harnessIdentity: {
+        harness: "Claude Code",
+        executable: "/old/claude",
+        executableVersion: "0.9.0",
+      },
+    });
+    // The latest Agent Attempt under the profile the identity must report — with an
+    // effective model observed for the same Attempt.
+    owner.publishAttempt({
+      attemptId: "0.2:repair",
+      outcome: "succeeded",
+      required: [],
+      outputs: [],
+      at: new Date("2026-09-12T12:00:02.000Z"),
+      effectiveModel: "claude-opus-5",
+      harnessIdentity: {
+        harness: "Claude Code",
+        executable: "/usr/bin/claude",
+        executableVersion: "1.2.3",
+      },
+    });
+    assert.deepEqual(owner.harnessIdentity(), {
+      harness: "Claude Code",
+      executable: "/usr/bin/claude",
+      executableVersion: "1.2.3",
+    });
+    assert.equal(owner.effectiveModel(), "claude-opus-5");
+    owner.release();
+    owner.close();
+  }
+
+  // Reopen the whole home: the durable identity reads back identically, and the
+  // effective model stays the model authoritatively observed for that Attempt.
+  group.close();
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  const owner2 = reopened.acquireRun(created.runId);
+  assert.ok(owner2 !== undefined);
+  t.after(() => owner2.close());
+  assert.deepEqual(owner2.harnessIdentity(), {
+    harness: "Claude Code",
+    executable: "/usr/bin/claude",
+    executableVersion: "1.2.3",
+  });
+  assert.equal(owner2.effectiveModel(), "claude-opus-5");
+});
+
+test("a Command-only Run has no Harness identity (#125)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner !== undefined);
+  t.after(() => owner.close());
+  owner.publishAttempt({
+    attemptId: "0.0:build",
+    outcome: "succeeded",
+    required: [],
+    outputs: [],
+    at: AT,
+  });
+  assert.equal(owner.harnessIdentity(), undefined);
+});
+
 test("Turn kind records both kinds in one Session, and a legacy row reads unknown (#126)", async (t) => {
   const home = makeTempDir("secant-store-");
   const group = openRunGroup(home, WORKSPACE);

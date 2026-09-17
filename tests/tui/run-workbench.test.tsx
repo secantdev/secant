@@ -288,6 +288,7 @@ function runOf(over: Partial<RunView> = {}): RunView {
     ...(over.effectiveModel !== undefined
       ? { effectiveModel: over.effectiveModel }
       : {}),
+    ...(over.harness !== undefined ? { harness: over.harness } : {}),
     ...(over.turnPosition !== undefined
       ? { turnPosition: over.turnPosition }
       : {}),
@@ -467,6 +468,82 @@ test("header, progress, and timeline render the facts headless run show prints",
   assert.match(frame, /attempt-settled passed/);
 });
 
+test("the full header shows the Harness name, executable, version, and model (#125)", async () => {
+  const { t } = await mountWorkbench(
+    runOf({
+      state: "succeeded",
+      progress: PROGRESS,
+      harness: {
+        name: "Claude Code",
+        executable: "/usr/bin/claude",
+        executableVersion: "1.2.3",
+      },
+      effectiveModel: "fake-sonnet",
+    }),
+    100,
+    30,
+  );
+  const frame = t.captureCharFrame();
+  assert.match(
+    frame,
+    /Claude Code · \/usr\/bin\/claude · 1\.2\.3 · model fake-sonnet/,
+  );
+  noOverflow(frame, 100);
+});
+
+test("the compact header keeps the Harness name, version, and model readable without overflow (#125)", async () => {
+  const { t, renderer } = await mountWorkbench(
+    runOf({
+      state: "succeeded",
+      progress: PROGRESS,
+      harness: {
+        name: "Claude Code",
+        // A long executable path the compact layout drops to fit.
+        executable: "/a/very/long/path/to/the/claude/executable/binary/here",
+        executableVersion: "1.2.3",
+      },
+      effectiveModel: "fake-sonnet",
+    }),
+    100,
+    30,
+  );
+  renderer.resize(70, 30);
+  await t.renderOnce();
+  const compact = t.captureCharFrame();
+  assert.match(compact, /Claude Code · 1\.2\.3 · model fake-sonnet/);
+  noOverflow(compact, 70);
+});
+
+test("the header reports no model rather than inventing one, and omits the line for a Command-only Run (#125)", async () => {
+  // Harness present, model unobserved: the fact is stated honestly, not invented.
+  const missing = await mountWorkbench(
+    runOf({
+      state: "succeeded",
+      progress: PROGRESS,
+      harness: {
+        name: "Claude Code",
+        executable: "/usr/bin/claude",
+        executableVersion: "1.2.3",
+      },
+    }),
+    100,
+    30,
+  );
+  const frame = missing.t.captureCharFrame();
+  assert.match(
+    frame,
+    /Claude Code · \/usr\/bin\/claude · 1\.2\.3 · model not reported/,
+  );
+
+  // Command-only Run: no Harness identity, so no Harness line at all.
+  const commandOnly = await mountWorkbench(
+    runOf({ state: "succeeded", progress: PROGRESS }),
+    100,
+    30,
+  );
+  assert.doesNotMatch(commandOnly.t.captureCharFrame(), /model/);
+});
+
 test("the details panel toggles and shows identity, position, and resources", async () => {
   const { t, renderer } = await mountWorkbench(
     runOf({
@@ -591,6 +668,11 @@ test("live Turn preview and activity join the durable timeline, then authoritati
     runOf({
       progress: [{ id: "repair", kind: "agent", status: "running" }],
       effectiveModel: "claude-sonnet-4-5",
+      harness: {
+        name: "Claude Code",
+        executable: "/usr/bin/claude",
+        executableVersion: "1.2.3",
+      },
       timeline: [
         {
           at: "T000",
@@ -615,7 +697,7 @@ test("live Turn preview and activity join the durable timeline, then authoritati
   });
   await t.renderOnce();
   const streaming = t.captureCharFrame();
-  assert.match(streaming, /Claude Code/);
+  assert.match(streaming, /Claude Code · \/usr\/bin\/claude · 1\.2\.3/);
   assert.match(streaming, /model claude-sonnet-4-5/);
   assert.match(streaming, /Agent Turn · working/);
   assert.match(streaming, /Assistant preview · I am checking/);
@@ -625,6 +707,11 @@ test("live Turn preview and activity join the durable timeline, then authoritati
     runOf({
       progress: [{ id: "repair", kind: "agent", status: "succeeded" }],
       effectiveModel: "claude-sonnet-4-5",
+      harness: {
+        name: "Claude Code",
+        executable: "/usr/bin/claude",
+        executableVersion: "1.2.3",
+      },
       timeline: [
         {
           at: "T000",

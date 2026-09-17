@@ -297,7 +297,13 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
     (next) => next.includes("SUCCEEDED") && next.includes("model fake-sonnet"),
   );
   const settled = rendered.captureCharFrame();
-  assert.match(settled, /Claude Code · model fake-sonnet/);
+  // The Harness identity header now shows the observed name, executable, and version
+  // alongside the effective model, read from the durable `harness` view — not the old
+  // model-only header that hardcoded "Claude Code" (#125).
+  assert.match(
+    settled,
+    /Claude Code · fake-claude · 0\.0\.0-fake · model fake-sonnet/,
+  );
   assert.match(settled, /Tool activity · Edit started/);
   assert.doesNotMatch(settled, /Assistant preview/);
 });

@@ -221,6 +221,16 @@ test("a command -> agent -> command Bundle runs the plain Turn to succeeded (#11
   assert.match(run.effectiveModel ?? "", /^claude-/);
   assert.equal(run.turnPosition, 1);
 
+  // The normalized Harness identity of the latest Agent-step Attempt (#125): the
+  // observed name, the resolved executable, and the observed version — never inferred
+  // from configuration.
+  assert.equal(run.harness?.name, "claude-code");
+  assert.ok(
+    (run.harness?.executable ?? "").length > 0,
+    run.harness?.executable,
+  );
+  assert.match(run.harness?.executableVersion ?? "", /2\.1\.273/);
+
   // The timeline carries the Agent-Turn kinds the acceptance criterion names.
   const kinds = run.timeline.map((event) => event.event);
   assert.ok(kinds.includes("turn-started"), JSON.stringify(kinds));
@@ -244,6 +254,38 @@ test("run show prints the Turn timeline, Session availability, and effective mod
   assert.match(shown, /Sessions:/);
   assert.match(shown, /s: open/);
   assert.match(shown, /Effective model: claude-/);
+  // The Harness identity the same `run` Projection carries (#125): name, executable,
+  // and version rendered alongside the effective model.
+  assert.match(shown, /Harness: claude-code/);
+  assert.match(shown, /Executable: .+/);
+  assert.match(shown, /Version: 2\.1\.273/);
+});
+
+test("run show --json gains additive Harness-identity fields (#125)", async (t) => {
+  const { wired, runId } = await launchAgentRun(t);
+  const out: string[] = [];
+  const io: HeadlessIO = {
+    out: (text) => out.push(text),
+    err: () => {},
+    cwd: () => process.cwd(),
+  };
+  const code = await runHeadless(
+    {
+      projectionPort: wired.projectionPort,
+      bundleManagement: wired.bundleManagement,
+    },
+    ["run", "show", runId, "--json"],
+    io,
+  );
+  assert.equal(code, 0);
+  const parsed = JSON.parse(out.join(""));
+  const run = parsed.result.run;
+  // Additive to the frozen `--json`: the existing `effectiveModel` stays, and a new
+  // normalized `harness` object carries the identity — no native id crosses.
+  assert.equal(run.harness.name, "claude-code");
+  assert.match(run.harness.executableVersion, /2\.1\.273/);
+  assert.ok(typeof run.harness.executable === "string");
+  assert.match(run.effectiveModel, /^claude-/);
 });
 
 test("the rendered prompt carries the file's absolute path and the skill's SKILL.md, no @ (#116)", async (t) => {

@@ -185,6 +185,11 @@ function runResult(
     const sessions = owner?.harnessSessions() ?? [];
     const transcript = owner?.transcript() ?? [];
     const effectiveModel = owner?.effectiveModel();
+    // The normalized Harness identity of the latest Agent-step Attempt (#125): durable
+    // profile facts read back through the owner, empty for a Command-only Run (and for a
+    // Run live elsewhere, read without an owner), so the frozen `--json` stays unchanged
+    // for those.
+    const harnessIdentity = owner?.harnessIdentity();
     return {
       found: true,
       run: {
@@ -269,6 +274,15 @@ function runResult(
           : {}),
         ...(sessions.length > 0 ? { sessions: sessions.map(sessionView) } : {}),
         ...(effectiveModel !== undefined ? { effectiveModel } : {}),
+        ...(harnessIdentity !== undefined
+          ? {
+              harness: {
+                name: harnessIdentity.harness,
+                executable: harnessIdentity.executable,
+                executableVersion: harnessIdentity.executableVersion,
+              },
+            }
+          : {}),
         ...(turns.length > 0 ? { turnPosition: turns.length } : {}),
         ...(transcript.length > 0
           ? { transcript: transcript.map(transcriptView) }

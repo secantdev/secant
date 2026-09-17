@@ -22,11 +22,13 @@ import {
 import type {
   AttemptLogEntry,
   CandidateOutput,
+  HarnessIdentityRecord,
   RunOwner,
   TurnKind,
 } from "../store/store.js";
 import type {
   DurableTurnRecorder,
+  HarnessProfile,
   PreparedHarness,
   RecoveryCoordinate,
   RequestAnswer,
@@ -253,6 +255,14 @@ interface StepAttempt {
   /** The effective model an Agent Step's Turn ran under (#116), recorded on the
    *  Attempt. Absent for a Command/Gate Attempt. */
   readonly effectiveModel?: string;
+  /** The normalized Harness identity an autonomous Agent Step's Turn qualified under,
+   *  from the prepared profile (#125): Harness name, resolved executable, and observed
+   *  executable version. Present for every autonomous Agent Step Attempt (whatever its
+   *  outcome), so the identity is durable even for an interrupted, lost, or
+   *  recovery-refused Turn. Absent for a Command/Gate Attempt, and for the
+   *  interactive-agent Step's synthetic Attempt (#122), which records neither identity
+   *  nor effective model — the same scope as `effectiveModel`. */
+  readonly harnessIdentity?: HarnessIdentityRecord;
 }
 
 /** A durable pause an executor returns instead of an Attempt (#108, #122): the Step
@@ -666,6 +676,7 @@ async function runStepAttempts(
           outputs: [],
           at: context.now(),
           advanceState: "halted",
+          ...attemptIdentity(result),
         }),
       );
       return "halted";
@@ -682,6 +693,7 @@ async function runStepAttempts(
           outputs: [],
           at: context.now(),
           advanceState: "halted",
+          ...attemptIdentity(result),
         }),
       );
       return "halted";
@@ -705,6 +717,7 @@ async function runStepAttempts(
         ...(result.effectiveModel !== undefined
           ? { effectiveModel: result.effectiveModel }
           : {}),
+        ...attemptIdentity(result),
       }),
     );
     // A succeeded Attempt's `home: workspace` outputs are now canonical in the
@@ -1082,8 +1095,15 @@ async function runAgent(
   const recovery = sessionRecovery(owner, session);
   // `unusable`: recovery already failed and ADR 0022 forbids fabricating a fresh
   // conversation, so the Attempt fails without starting a Turn — no retry ever
-  // opens a fresh Session in its place.
-  if (recovery.unusable) return { outcome: "failed", outputs: [] };
+  // opens a fresh Session in its place. It still ran under a qualified Harness, so the
+  // failed Attempt records the identity (#125), never the effective model (no Turn ran).
+  if (recovery.unusable) {
+    return {
+      outcome: "failed",
+      outputs: [],
+      harnessIdentity: profileIdentity(harness.prepared.profile),
+    };
+  }
 
   const result = await driveHarnessTurn(owner, harness.prepared, {
     session,
@@ -1100,7 +1120,7 @@ async function runAgent(
       ? { cancelSignal: context.cancelSignal }
       : {}),
   });
-  return mapTurnResult(result);
+  return mapTurnResult(result, harness.prepared.profile);
 }
 
 /** What the named Session's last recorded availability says about how the next Turn
@@ -1606,10 +1626,42 @@ function resultAvailability(result: TurnResult): {
   return { state: "open" };
 }
 
-/** Map a Turn result to an Attempt outcome and its effective model (#116). */
-function mapTurnResult(result: TurnResult): StepAttempt {
+/** The Harness-identity fields to record on an Attempt (#125), spread into a
+ *  `publishAttempt` request. Empty for a Command/Gate Attempt (no identity), so it
+ *  adds nothing there. */
+function attemptIdentity(result: StepAttempt): {
+  harnessIdentity?: HarnessIdentityRecord;
+} {
+  return result.harnessIdentity !== undefined
+    ? { harnessIdentity: result.harnessIdentity }
+    : {};
+}
+
+/** The normalized Harness identity for an autonomous Agent Step Attempt (#125), read
+ *  from the prepared profile. Stamped on the Attempt whatever its outcome, so an
+ *  interrupted, lost, or recovery-refused Turn still records the Harness it ran under. */
+function profileIdentity(profile: HarnessProfile): HarnessIdentityRecord {
+  return {
+    harness: profile.harness,
+    executable: profile.executable,
+    executableVersion: profile.executableVersion,
+  };
+}
+
+/** Map a Turn result to an Attempt outcome, its effective model (#116), and the
+ *  normalized Harness identity it qualified under (#125). The identity comes from the
+ *  prepared profile, so it is present for every autonomous Agent Step Attempt whatever
+ *  its outcome — an interrupted or lost Turn still ran under a known Harness — while the
+ *  effective model is present only when the Turn authoritatively observed one. */
+function mapTurnResult(
+  result: TurnResult,
+  profile: HarnessProfile,
+): StepAttempt {
   const model = resultEffectiveModel(result);
-  const base = { outputs: [] as readonly CandidateOutput[] };
+  const base = {
+    outputs: [] as readonly CandidateOutput[],
+    harnessIdentity: profileIdentity(profile),
+  };
   switch (result.kind) {
     case "completed":
       return {

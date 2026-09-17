@@ -621,6 +621,18 @@ export interface RunSessionView {
   readonly availability: "open" | "detached" | "unusable";
 }
 
+/** The normalized Harness identity that qualified the current or latest Agent-step
+ *  Attempt (#125): the Harness name, the resolved executable, and the observed
+ *  executable version, all from the prepared Harness profile. Durable across reopening
+ *  and resume. Only these semantic facts cross the Port — never a native Session id, a
+ *  recovery coordinate, the Adapter object, or any storage identity. The effective
+ *  model that qualified the same Attempt is the sibling `effectiveModel` field. */
+export interface RunHarnessView {
+  readonly name: string;
+  readonly executable: string;
+  readonly executableVersion: string;
+}
+
 /** One readable transcript entry (#116): the exact Turn input (`user`) or the
  *  authoritative assistant content (`assistant`) of a Session. */
 export interface RunTranscriptEntryView {
@@ -667,6 +679,10 @@ export interface RunView {
   readonly sessions?: readonly RunSessionView[];
   /** The effective model the latest Agent-step Attempt ran under (#116). */
   readonly effectiveModel?: string;
+  /** The normalized Harness identity that qualified the current or latest Agent-step
+   *  Attempt (#125): Harness name, resolved executable, and observed executable
+   *  version. Additive to the frozen `--json`; absent for a Command-only Run. */
+  readonly harness?: RunHarnessView;
   /** The number of Harness Turns admitted so far — the current Turn position
    *  (#116). Absent for a Command-only Run. */
   readonly turnPosition?: number;

@@ -5,8 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-// @ts-expect-error JS helper, no types
-import { TARGETS, hostTargetKey } from "../../scripts/targets.mjs";
+import { TARGETS, hostTargetKey } from "../../scripts/targets.js";
 
 // The real-terminal lifecycle suite (#56). It runs the compiled shell under a
 // throwaway pseudo-terminal driven by `Bun.Terminal` (ConPTY on Windows) and

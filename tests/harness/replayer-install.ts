@@ -1,5 +1,5 @@
 // Runtime-only installer for the recorded Claude Code replayer. It deliberately
-// has no node:test dependency so package-smoke.mjs can use the same fake from a
+// has no node:test dependency so package-smoke.ts can use the same fake from a
 // plain Bun process; replayer.ts adds test-runner-owned temporary-directory cleanup.
 
 import {

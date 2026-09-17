@@ -169,6 +169,14 @@ function makeRunView(initial: RunSnapshot) {
   const [answerOutcome, setAnswerOutcome] = createSignal<AnswerOutcome>({
     kind: "pending",
   });
+  // The three Workbench writes are hand-driven so tests advance each outcome
+  // (pending → applied/refused) and assert the exact dispatch (#121).
+  const [requestOutcome, setRequestOutcome] = createSignal<AnswerOutcome>({
+    kind: "applied",
+  });
+  const [gateOutcome, setGateOutcome] = createSignal<AnswerOutcome>({
+    kind: "applied",
+  });
   const answers: {
     gate: RunGateReference;
     answer: "continue" | "stop";
@@ -180,6 +188,12 @@ function makeRunView(initial: RunSnapshot) {
     createSignal<AnswerOutcome>({ kind: "pending" });
   const sends: { runId: string; stepId: string; text: string }[] = [];
   const ends: { runId: string; stepId: string }[] = [];
+  const texts: { gate: RunGateReference; text: string }[] = [];
+  const requests: {
+    requestId: string;
+    generation: number;
+    decision: "allow" | "deny";
+  }[] = [];
   const view: RunWorkbenchView = {
     openRun: () => ({ snapshot, live, preview }),
     readResource: (reference) =>
@@ -204,6 +218,18 @@ function makeRunView(initial: RunSnapshot) {
       ends.push({ runId, stepId });
       return interactiveOutcome;
     },
+    answerText: (gate, text) => {
+      texts.push({ gate, text });
+      return gateOutcome;
+    },
+    answerRequest: (offer, decision) => {
+      requests.push({
+        requestId: offer.requestId,
+        generation: offer.generation,
+        decision,
+      });
+      return requestOutcome;
+    },
   };
   return {
     view,
@@ -221,10 +247,14 @@ function makeRunView(initial: RunSnapshot) {
     setPreview,
     setRead: (key: string, read: ResourceRead) => reads.set(key, read),
     answers,
+    texts,
+    requests,
     setAnswerOutcome,
     sends,
     ends,
     setInteractiveOutcome,
+    setRequestOutcome,
+    setGateOutcome,
   };
 }
 
@@ -1403,6 +1433,7 @@ function okActions(over: Partial<RunActionsView> = {}): RunActionsView {
     resume: () => () => ({ kind: "ok" }),
     cancel: () => () => ({ kind: "ok" }),
     remove: () => () => ({ kind: "ok" }),
+    interrupt: () => () => ({ kind: "ok" }),
     ...over,
   };
 }
@@ -1604,6 +1635,61 @@ function interactiveRunOf(over: Partial<RunView> = {}): RunView {
   });
 }
 
+// --- Answer requests, gates, interrupt, and resume (#121) ------------------
+
+/** A live overlay carrying one outstanding approval request and its answer Offer,
+ *  both at `generation`. Answering targets the exact requestId/generation. */
+function requestOverlay(generation = 3, requestId = "req-1"): RunLiveOverlay {
+  return {
+    runId: "run-1",
+    generation,
+    phase: "awaiting-approval",
+    outstanding: [
+      {
+        requestId,
+        tool: "Edit",
+        input: '{"path":"src/fix.ts"}',
+        decisions: ["allow", "deny"],
+      },
+    ],
+    offers: [
+      {
+        action: "answer-harness-request",
+        runId: "run-1",
+        requestId,
+        generation,
+        decisions: ["allow", "deny"],
+        basis: "ephemeral Harness Request",
+      },
+    ],
+  };
+}
+
+/** A running Run whose Turn is live: it offers interrupt and (unavailable) steer,
+ *  and cancel, exactly as the Application offers while a Turn runs (#118). */
+const INTERRUPT_OFFER = {
+  action: "interrupt-turn" as const,
+  runId: "run-1",
+  turnId: "turn-7",
+  consequence: "stop this Turn and rest the Run halted (resumable).",
+};
+const STEER_OFFER = {
+  action: "steer-turn" as const,
+  runId: "run-1",
+  turnId: "turn-7",
+  available: false as const,
+  reason: "Claude Code has no same-Turn steer",
+};
+
+function liveTurnRunOf(over: Partial<RunView> = {}): RunView {
+  return runOf({
+    state: "running",
+    progress: [{ id: "repair", kind: "agent", status: "running" }],
+    actionOffers: [INTERRUPT_OFFER, STEER_OFFER, CANCEL_OFFER],
+    ...over,
+  });
+}
+
 test("the interactive input takes the human's text and Enter sends one Turn (#122)", async () => {
   const wb = await mountWorkbench(interactiveRunOf());
   // Focus is on the input during the Step; the human's keystrokes accumulate.
@@ -1682,4 +1768,362 @@ test("the interactive input reads without colour and fits a narrow terminal (#12
   assert.match(frame, /Your Turn/);
   assert.match(frame, /enter send Turn · \^E end step/);
   noOverflow(frame, 48);
+});
+
+const FREE_TEXT_GATE: RunGateReference = {
+  runId: "run-1",
+  stepId: "ask",
+  attemptId: "a1",
+  shape: "free-text",
+};
+const FREE_TEXT_OFFER: AnswerHumanGateOffer = {
+  action: "answer-human-gate",
+  gate: FREE_TEXT_GATE,
+  continueConsequence: "",
+  stopConsequence: "",
+  textConsequence: "publish the text as the gate's output and advance the Run.",
+};
+function freeTextRunOf(over: Partial<RunView> = {}): RunView {
+  return runOf({
+    state: "blocked",
+    progress: [{ id: "ask", kind: "human-gate", status: "blocked" }],
+    pendingGate: {
+      gate: FREE_TEXT_GATE,
+      message: "What is the ticket number?",
+      outputArtifactName: "ticket",
+    },
+    actionOffers: [FREE_TEXT_OFFER],
+    ...over,
+  });
+}
+
+// Mount a running Run and put an outstanding request on the live overlay.
+async function mountWithRequest(overlay: RunLiveOverlay = requestOverlay()) {
+  const mounted = await mountWorkbench(runOf({ state: "running" }));
+  mounted.control.setLive(overlay);
+  await mounted.t.renderOnce();
+  return mounted;
+}
+
+// AC1 --------------------------------------------------------------
+
+test("an outstanding request renders the tool, input, and both decisions in place of the footer", async () => {
+  const { t } = await mountWithRequest();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Harness Request · awaiting your approval/);
+  assert.match(frame, /Tool: Edit/);
+  assert.match(frame, /Input: \{"path":"src\/fix\.ts"\}/);
+  assert.match(frame, /\[ Allow \]/);
+  assert.match(frame, /\[ Deny \]/);
+  assert.match(frame, /enter confirm · esc deny/);
+  assert.doesNotMatch(frame, /d details · end latest/); // footer replaced
+});
+
+test("Enter confirms allow and dispatches answer-harness-request with the offer's id and generation", async () => {
+  const { t, control, renderer } = await mountWithRequest(requestOverlay(5));
+  assert.match(t.captureCharFrame(), /› \[ Allow \]/); // allow selected by default
+  await press(t, renderer, "return");
+  assert.equal(control.requests.length, 1);
+  assert.deepEqual(control.requests[0], {
+    requestId: "req-1",
+    generation: 5,
+    decision: "allow",
+  });
+});
+
+test("→ selects deny and Enter dispatches the deny decision", async () => {
+  const { t, control, renderer } = await mountWithRequest();
+  await press(t, renderer, "right");
+  assert.match(t.captureCharFrame(), /› \[ Deny \]/);
+  await press(t, renderer, "return");
+  assert.equal(control.requests[0]?.decision, "deny");
+});
+
+test("Esc denies the outstanding request", async () => {
+  const { t, control, renderer } = await mountWithRequest();
+  await press(t, renderer, "escape");
+  assert.equal(control.requests.length, 1);
+  assert.equal(control.requests[0]?.decision, "deny");
+});
+
+test("the request control vanishes when the Turn settles without an answer", async () => {
+  const { t, control } = await mountWithRequest();
+  assert.match(t.captureCharFrame(), /Harness Request · awaiting/);
+  // The Turn ends (or is interrupted/lost): the ephemeral overlay is gone.
+  control.setLive(undefined);
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.doesNotMatch(frame, /awaiting your approval/);
+  assert.match(frame, /d details/); // footer returned
+});
+
+test("the request is never re-asked: a later overlay with no outstanding clears the control", async () => {
+  const { t, control } = await mountWithRequest();
+  control.setLive({
+    runId: "run-1",
+    generation: 4,
+    phase: "working",
+    outstanding: [],
+    offers: [],
+  });
+  await t.renderOnce();
+  assert.doesNotMatch(t.captureCharFrame(), /awaiting your approval/);
+});
+
+// AC2 --------------------------------------------------------------
+
+test("a stale answer is refused with the Problem inline and the current offer re-rendered", async () => {
+  const { t, control, renderer } = await mountWithRequest(requestOverlay(3));
+  control.setRequestOutcome({
+    kind: "refused",
+    problem: {
+      code: "harness-request-stale",
+      explanation: "The request moved on.",
+      remediation: "Answer the current request.",
+      possibleEffects: "none",
+    },
+  });
+  await press(t, renderer, "return");
+  await t.renderOnce();
+  // The generation bumped under the user; the same requestId re-renders, and the
+  // precise Problem shows inline while the control stays up.
+  control.setLive(requestOverlay(4));
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /refused: The request moved on/);
+  assert.match(frame, /\[ Allow \]/); // the current offer is still rendered
+});
+
+test("the controls are unavailable while a request answer is pending and dispatch nothing twice", async () => {
+  const { t, control, renderer } = await mountWithRequest();
+  control.setRequestOutcome({ kind: "pending" });
+  await press(t, renderer, "return");
+  await t.renderOnce();
+  assert.equal(control.requests.length, 1);
+  assert.match(t.captureCharFrame(), /relaying your decision/);
+  assert.match(t.captureCharFrame(), /\(unavailable\)/);
+  await press(t, renderer, "return"); // a second confirm while pending dispatches nothing
+  assert.equal(control.requests.length, 1);
+});
+
+// AC3: free-text gate ----------------------------------------------
+
+test("a free-text gate shows a text input in place of the footer", async () => {
+  const { t } = await mountWorkbench(freeTextRunOf());
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Human Gate · What is the ticket number\?/);
+  assert.match(frame, /Answer published as: ticket/);
+  assert.match(frame, /enter submit · esc back/);
+  assert.doesNotMatch(frame, /d details · end latest/); // footer replaced
+});
+
+test("typing then Enter dispatches answer-human-gate with the typed text against the gate", async () => {
+  const { t, control, renderer } = await mountWorkbench(freeTextRunOf());
+  for (const ch of ["f", "i", "x", "space", "4", "2"])
+    await press(t, renderer, ch);
+  assert.match(t.captureCharFrame(), /> fix 42/); // buffer echoed with a caret
+  await press(t, renderer, "return");
+  assert.equal(control.texts.length, 1);
+  assert.equal(control.texts[0]?.text, "fix 42");
+  assert.deepEqual(control.texts[0]?.gate, FREE_TEXT_GATE);
+});
+
+test("an empty free-text submission is refused locally without dispatching", async () => {
+  const { t, control, renderer } = await mountWorkbench(freeTextRunOf());
+  await press(t, renderer, "return"); // nothing typed
+  assert.equal(control.texts.length, 0);
+  assert.match(t.captureCharFrame(), /cannot be empty/);
+  // Backspace on an empty buffer stays empty and still refuses.
+  await press(t, renderer, "backspace");
+  await press(t, renderer, "return");
+  assert.equal(control.texts.length, 0);
+});
+
+test("the free-text gate control fits small widths without overflow and reads without colour", async () => {
+  const { t, renderer } = await mountWorkbench(freeTextRunOf(), 100, 30);
+  noOverflow(t.captureCharFrame(), 100);
+  renderer.resize(40, 24);
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  noOverflow(frame, 40);
+  assert.match(frame, /Human Gate/);
+  assert.match(frame, /enter submit/);
+});
+
+// AC4: interrupt, steer, resume ------------------------------------
+
+test("Steer renders as unavailable with the exact reason and has no dispatch", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    liveTurnRunOf(),
+    100,
+    40,
+    okActions(),
+  );
+  assert.match(
+    t.captureCharFrame(),
+    /steer — unavailable · Claude Code has no same-Turn steer/,
+  );
+  // No key dispatches steer; the seam is never touched from the Workbench.
+  await press(t, renderer, "s");
+  assert.equal(control.requests.length, 0);
+});
+
+test("first Interrupt press arms the hint, second dispatches interrupt-turn, and the Workbench stays", async () => {
+  let interrupted: typeof INTERRUPT_OFFER | undefined;
+  const actions = okActions({
+    interrupt: (offer) => {
+      interrupted = offer;
+      return () => ({ kind: "ok" });
+    },
+  });
+  const { t, renderer } = await mountWorkbench(
+    liveTurnRunOf(),
+    100,
+    40,
+    actions,
+  );
+  assert.match(t.captureCharFrame(), /esc esc interrupt/); // the control is listed
+  await press(t, renderer, "escape"); // arm
+  assert.equal(interrupted, undefined);
+  assert.match(t.captureCharFrame(), /Press esc again to interrupt/);
+  await press(t, renderer, "escape"); // dispatch
+  assert.deepEqual(interrupted, INTERRUPT_OFFER);
+  assert.match(t.captureCharFrame(), /Timeline/); // did not leave the Workbench
+});
+
+test("an outstanding request hides the interrupt/steer controls and Esc denies rather than arming interrupt", async () => {
+  // The interrupt/steer offers stand while a Turn is live even at awaiting-approval,
+  // so without the modal guard the request control and the interrupt hint collide
+  // over Esc. The request modal must own the bottom interaction.
+  const { t, control, renderer } = await mountWorkbench(
+    liveTurnRunOf(),
+    100,
+    40,
+    okActions(),
+  );
+  control.setLive(requestOverlay());
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  assert.match(frame, /awaiting your approval/);
+  assert.doesNotMatch(frame, /esc esc interrupt/); // interrupt control suppressed
+  assert.doesNotMatch(frame, /steer — unavailable/);
+  await press(t, renderer, "escape"); // a single Esc denies, and never arms interrupt
+  assert.equal(control.requests[0]?.decision, "deny");
+  assert.doesNotMatch(t.captureCharFrame(), /Press esc again to interrupt/);
+});
+
+test("a request appearing disarms an already-armed interrupt so no stale hint lingers", async () => {
+  const mounted = await mountWorkbench(liveTurnRunOf(), 100, 40, okActions());
+  await press(mounted.t, mounted.renderer, "escape"); // arm interrupt, no request yet
+  assert.match(mounted.t.captureCharFrame(), /Press esc again to interrupt/);
+  mounted.control.setLive(requestOverlay()); // a request takes over the interaction
+  await mounted.t.renderOnce();
+  const frame = mounted.t.captureCharFrame();
+  assert.doesNotMatch(frame, /Press esc again to interrupt/); // disarmed and hidden
+  assert.match(frame, /awaiting your approval/);
+});
+
+test("any other key cancels an armed Interrupt without dispatching or leaving", async () => {
+  let interrupted = 0;
+  const actions = okActions({
+    interrupt: () => {
+      interrupted += 1;
+      return () => ({ kind: "ok" });
+    },
+  });
+  const { t, renderer } = await mountWorkbench(
+    liveTurnRunOf({ timeline: events(4) }),
+    100,
+    40,
+    actions,
+  );
+  await press(t, renderer, "escape"); // arm
+  assert.match(t.captureCharFrame(), /Press esc again/);
+  await press(t, renderer, "up"); // any other key cancels the arm
+  assert.doesNotMatch(t.captureCharFrame(), /Press esc again/);
+  assert.equal(interrupted, 0);
+});
+
+test("interrupt rests the Run halted with the Attempt cancelled and offers resume", async () => {
+  const control = makeRunView(snapshotOf(liveTurnRunOf()));
+  const renderer = makeRenderer(100, 40);
+  const actions = okActions({
+    interrupt: () => {
+      // The live snapshot carries the halted rest in, exactly as production does.
+      control.setRun(
+        runOf({
+          state: "halted",
+          timeline: [
+            { at: "T0", event: "attempt-settled", detail: "cancelled" },
+            { at: "T1", event: "turn-settled", detail: "interrupted" },
+          ],
+          actionOffers: [RESUME_OFFER],
+        }),
+      );
+      return () => ({ kind: "ok" });
+    },
+  });
+  const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("Timeline"));
+  await press(t, renderer, "escape"); // arm
+  await press(t, renderer, "escape"); // interrupt
+  const frame = t.captureCharFrame();
+  assert.match(frame, /HALTED/);
+  assert.match(frame, /attempt-settled cancelled/);
+  assert.match(frame, /r resume/); // resumable
+});
+
+test("resume on a halted Run dispatches resume-run and live rows resume", async () => {
+  const control = makeRunView(
+    snapshotOf(runOf({ state: "halted", actionOffers: [RESUME_OFFER] })),
+  );
+  const renderer = makeRenderer(100, 40);
+  let resumed = 0;
+  const actions = okActions({
+    resume: () => {
+      resumed += 1;
+      control.setRun(
+        liveTurnRunOf({ timeline: [{ at: "T0", event: "turn-started" }] }),
+      );
+      return () => ({ kind: "ok" });
+    },
+  });
+  const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("r resume"));
+  await press(t, renderer, "r");
+  assert.equal(resumed, 1);
+  const frame = t.captureCharFrame();
+  assert.match(frame, /RUNNING/);
+  assert.match(frame, /Agent Turn started/); // the resumed Turn's rows appear
+});
+
+// AC5: Esc modes + focus -------------------------------------------
+
+test("Esc means deny in a request, interrupt-arm during a live Turn, and leave when at rest", async () => {
+  // At rest with no live Turn: Esc leaves the Workbench.
+  const rest = await mountWorkbench(runOf({ state: "succeeded" }));
+  await press(rest.t, rest.renderer, "escape");
+  assert.match(rest.t.captureCharFrame(), /Secant/); // back on Home
+
+  // During a live Turn: Esc arms interrupt rather than leaving.
+  const live = await mountWorkbench(liveTurnRunOf(), 100, 40, okActions());
+  await press(live.t, live.renderer, "escape");
+  assert.match(live.t.captureCharFrame(), /Press esc again to interrupt/);
+  assert.match(live.t.captureCharFrame(), /Timeline/); // stayed
+
+  // With an outstanding request: Esc denies (does not arm interrupt or leave).
+  const req = await mountWithRequest();
+  await press(req.t, req.renderer, "escape");
+  assert.equal(req.control.requests[0]?.decision, "deny");
+});
+
+test("the request control fits small widths without overflow and reads without colour", async () => {
+  const mounted = await mountWithRequest();
+  noOverflow(mounted.t.captureCharFrame(), 100);
+  mounted.renderer.resize(40, 24);
+  await mounted.t.renderOnce();
+  const frame = mounted.t.captureCharFrame();
+  noOverflow(frame, 40);
+  assert.match(frame, /Allow/);
+  assert.match(frame, /Deny/);
 });

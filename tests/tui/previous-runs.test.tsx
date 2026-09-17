@@ -125,6 +125,8 @@ function runViewOf(run: RunView): RunWorkbenchView {
     answer: () => () => ({ kind: "applied" }),
     sendInteractiveTurn: () => () => ({ kind: "applied" }),
     endInteractiveStep: () => () => ({ kind: "applied" }),
+    answerText: () => () => ({ kind: "applied" }),
+    answerRequest: () => () => ({ kind: "applied" }),
   };
 }
 
@@ -136,6 +138,7 @@ function okActions(onRemove?: (runId: string) => void): RunActionsView {
       onRemove?.(runId);
       return () => ({ kind: "ok" });
     },
+    interrupt: () => () => ({ kind: "ok" }),
   };
 }
 

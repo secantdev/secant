@@ -11,16 +11,22 @@ import {
   type Accessor,
 } from "solid-js";
 import type {
+  AnswerHarnessRequestOffer,
   AnswerHumanGateOffer,
+  ApprovalDecisionName,
   CancelRunOffer,
   DeleteRunOffer,
   EndInteractiveStepOffer,
+  InterruptTurnOffer,
   Problem,
   ResumeRunOffer,
   RunCheckpointView,
+  RunGateReference,
+  RunOutstandingRequest,
   RunStateName,
   RunStepProgress,
   RunStepStatus,
+  SteerTurnOffer,
   RunView,
   SendInteractiveTurnOffer,
 } from "../application/projection-port.js";
@@ -82,6 +88,23 @@ const CHECKPOINT_HEIGHT = 8;
  *  a label, the draft input line, and a hint/status line, plus one for a refusal.
  *  Fixed so the timeline viewport shrinks to fit and nothing overflows. */
 const INTERACTIVE_HEIGHT = 4;
+/** Rows the approval Harness Request control occupies while it replaces the footer
+ *  (#121, spec story 13/14): a heading, the exact tool, the exact input, the
+ *  allow/deny decisions, and a status/hint line that also carries a stale refusal. */
+const REQUEST_HEIGHT = 5;
+/** Rows the free-text Human Gate control occupies while it replaces the footer
+ *  (#121, spec story 17): the gate message, the declared output name, the text
+ *  entry line, and a status/hint line. */
+const GATE_HEIGHT = 4;
+
+/** An empty free-text answer is refused in the client before any dispatch (#121
+ *  AC3): the Port would accept `text: ""`, but the Workbench never sends a blank. */
+const EMPTY_GATE_ANSWER: Problem = {
+  code: "gate-answer-empty",
+  explanation: "A free-text answer cannot be empty.",
+  remediation: "Type an answer, then press enter.",
+  possibleEffects: "none",
+};
 
 const STEP_GLYPH: Record<RunStepStatus, string> = {
   pending: "·",
@@ -145,6 +168,55 @@ export function RunWorkbench(props: {
   const checkpointActive = () =>
     run()?.checkpoint !== undefined && answerOffer() !== undefined;
 
+  // The first outstanding approval Harness Request paired with its live answer
+  // Offer (#117): both ride the ephemeral overlay, so the control exists only while
+  // the Turn holds the request and vanishes the instant the Turn settles, is
+  // interrupted, or is lost — the request is never re-asked (spec story 15). Several
+  // may be outstanding; the control answers them one at a time, first outstanding
+  // first, and the next surfaces once this one clears.
+  const liveRequest = createMemo<
+    | { request: RunOutstandingRequest; offer: AnswerHarnessRequestOffer }
+    | undefined
+  >(() => {
+    const overlay = live();
+    if (overlay === undefined) return undefined;
+    const request = overlay.outstanding[0];
+    if (request === undefined) return undefined;
+    const offer = overlay.offers.find(
+      (candidate) => candidate.requestId === request.requestId,
+    );
+    return offer !== undefined ? { request, offer } : undefined;
+  });
+
+  // A blocked Run resting at an authored free-text Human Gate (#108, spec story 17),
+  // backed by its live answer-human-gate Offer. Distinct from the derived Review
+  // checkpoint (approve-reject) the CheckpointInteraction handles; an authored
+  // approve-reject gate keeps M2's headless answer path — no new TUI control here.
+  const freeTextGate = createMemo<
+    { gate: RunGateReference; message: string; outputName?: string } | undefined
+  >(() => {
+    const pending = run()?.pendingGate;
+    if (pending === undefined || pending.gate.shape !== "free-text")
+      return undefined;
+    if (answerOffer() === undefined) return undefined;
+    return {
+      gate: pending.gate,
+      message: pending.message,
+      ...(pending.outputArtifactName !== undefined
+        ? { outputName: pending.outputArtifactName }
+        : {}),
+    };
+  });
+
+  // A request or free-text gate control owns the whole bottom interaction while it
+  // is up: it captures Esc and every printable key, so the global Run Actions (r/c/x)
+  // and the Esc interrupt are inert and must not be shown. The interrupt/steer offers
+  // stay present through an `awaiting-approval` Turn (run-projection derives them from
+  // liveness alone), so without this guard the request modal and the "esc esc
+  // interrupt" hint would collide over Esc.
+  const modalControl = () =>
+    liveRequest() !== undefined || freeTextGate() !== undefined;
+
   const [scroll, setScroll] = createSignal<TimelineScroll>(AT_LIVE);
   const [focus, setFocus] = createSignal<Focus>("timeline");
   const [detailsOpen, setDetailsOpen] = createSignal(false);
@@ -153,6 +225,31 @@ export function RunWorkbench(props: {
   const [answerOutcome, setAnswerOutcome] =
     createSignal<Accessor<AnswerOutcome>>();
   const [answerRefusal, setAnswerRefusal] = createSignal<Problem | undefined>();
+
+  // Approval Harness Request control state (#117): the selected decision, the
+  // in-flight answer, and a stale/rejected refusal shown inline while the current
+  // offer (bumped to the fresh generation) re-renders.
+  const [requestDecision, setRequestDecision] =
+    createSignal<ApprovalDecisionName>("allow");
+  const [requestOutcome, setRequestOutcome] =
+    createSignal<Accessor<AnswerOutcome>>();
+  const [requestRefusal, setRequestRefusal] = createSignal<
+    Problem | undefined
+  >();
+  const requestPending = () => {
+    const accessor = requestOutcome();
+    return accessor !== undefined && accessor().kind === "pending";
+  };
+
+  // Free-text Human Gate control state (#108): the typed answer, the in-flight
+  // submission, and a refusal (an empty answer refused locally, or a Port refusal).
+  const [gateText, setGateText] = createSignal("");
+  const [gateOutcome, setGateOutcome] = createSignal<Accessor<AnswerOutcome>>();
+  const [gateRefusal, setGateRefusal] = createSignal<Problem | undefined>();
+  const gatePending = () => {
+    const accessor = gateOutcome();
+    return accessor !== undefined && accessor().kind === "pending";
+  };
 
   // Run Actions (resume/cancel/delete): a control renders — and its key
   // dispatches — iff its Offer is present, legality decided inside Secant (resume
@@ -171,6 +268,16 @@ export function RunWorkbench(props: {
       remove: list.find(
         (offer): offer is DeleteRunOffer => offer.action === "delete-run",
       ),
+      // Turn-scoped controls (#118), present only while a Turn is live in this
+      // process: interrupt is a real dispatch; steer is offered unavailable and
+      // never dispatches.
+      interrupt: list.find(
+        (offer): offer is InterruptTurnOffer =>
+          offer.action === "interrupt-turn",
+      ),
+      steer: list.find(
+        (offer): offer is SteerTurnOffer => offer.action === "steer-turn",
+      ),
     };
   });
   const [actionRefusal, setActionRefusal] = createSignal<Problem | undefined>();
@@ -182,9 +289,13 @@ export function RunWorkbench(props: {
   // starts `pending` and the effect below reports it. A second dispatch while one
   // is in flight is ignored.
   const [actionFlight, setActionFlight] = createSignal<{
-    readonly op: "resume" | "cancel" | "delete";
+    readonly op: "resume" | "cancel" | "delete" | "interrupt";
     readonly outcome: Accessor<RunActionOutcome>;
   }>();
+  // The Interrupt is a two-press bound key (Esc while a Turn is live, spec story 18):
+  // the first press arms it and shows the hint, the second dispatches. It disarms on
+  // any other key and whenever the live-Turn Offer disappears.
+  const [interruptArmed, setInterruptArmed] = createSignal(false);
   const actionInFlight = () => {
     const flight = actionFlight();
     return flight !== undefined && flight.outcome().kind === "pending";
@@ -195,6 +306,12 @@ export function RunWorkbench(props: {
     if (offer === undefined || actionInFlight()) return;
     setActionRefusal(undefined);
     setActionFlight({ op: "resume", outcome: actions.resume(offer) });
+  };
+  const dispatchInterrupt = () => {
+    const offer = offers().interrupt;
+    if (offer === undefined || actionInFlight()) return;
+    setActionRefusal(undefined);
+    setActionFlight({ op: "interrupt", outcome: actions.interrupt(offer) });
   };
   // Called on the confirming keypress. Cancel keeps the Run's history; delete
   // removes it and leaves the Workbench for the list once it settles, since the
@@ -212,23 +329,36 @@ export function RunWorkbench(props: {
     setActionFlight({ op: "delete", outcome: actions.remove(offer.runId) });
   };
   const anyActionOffer = () => {
+    if (modalControl()) return false; // a request/gate modal hides the Actions rail
     const current = offers();
     return (
       current.resume !== undefined ||
       current.cancel !== undefined ||
-      current.remove !== undefined
+      current.remove !== undefined ||
+      current.interrupt !== undefined ||
+      current.steer !== undefined
     );
   };
   const actionLines = () => {
+    if (modalControl()) return 0;
     const current = offers();
+    // Interrupt/steer are agent-Turn controls hidden while the interactive input owns
+    // the interaction (its Esc leaves, not interrupts), so they must not be counted.
+    const liveTurn = interactiveStepActive()
+      ? 0
+      : (current.interrupt ? 1 : 0) + (current.steer ? 1 : 0);
     const count =
       (current.resume ? 1 : 0) +
       (current.cancel ? 1 : 0) +
-      (current.remove ? 1 : 0);
+      (current.remove ? 1 : 0) +
+      liveTurn;
     if (count === 0) return 0;
     return (
       1 /*heading*/ +
       count +
+      (!interactiveStepActive() && interruptArmed()
+        ? 1
+        : 0) /*the "again to interrupt" hint*/ +
       (pending() !== undefined ? 1 : 0) +
       (actionRefusal() !== undefined ? 1 : 0)
     );
@@ -359,6 +489,20 @@ export function RunWorkbench(props: {
   };
   const hasGateLine = () =>
     run()?.checkpoint !== undefined || run()?.pendingGate !== undefined;
+  // The bottom region is one of, in precedence: the approval request control, the
+  // free-text gate control, the Review checkpoint interaction, the interactive-agent
+  // input, or the plain footer — each replacing the passive footer while its offer is
+  // live (#92, #121, #122). A Run rests at only one, so they never render together.
+  const bottomHeight = () =>
+    liveRequest() !== undefined
+      ? REQUEST_HEIGHT
+      : freeTextGate() !== undefined
+        ? GATE_HEIGHT
+        : checkpointActive()
+          ? CHECKPOINT_HEIGHT
+          : interactiveStepActive()
+            ? INTERACTIVE_HEIGHT
+            : 1;
   const chrome = () =>
     headerRows() +
     (hasGateLine() ? 1 : 0) +
@@ -366,11 +510,7 @@ export function RunWorkbench(props: {
     1 /*progress*/ +
     actionLines() +
     1 /*timeline label*/ +
-    (checkpointActive()
-      ? CHECKPOINT_HEIGHT
-      : interactiveStepActive()
-        ? INTERACTIVE_HEIGHT
-        : 1); /*footer, or the checkpoint / interactive input that replaces it*/
+    bottomHeight();
   // The details panel needs both room across (its width breakpoint) and room
   // down: DETAILS_HEIGHT rows plus at least one timeline row. On a short terminal
   // it stays hidden rather than clipping the panel and footer off the bottom.
@@ -397,6 +537,38 @@ export function RunWorkbench(props: {
     return accessor !== undefined && accessor().kind === "pending";
   };
 
+  // One settle-and-clear follow shared by the three write seams (answer, request,
+  // gate): a refusal surfaces and re-enables the control, then the in-flight outcome
+  // clears. An applied answer clears too — the live snapshot drops the offer, so each
+  // control disappears on its own.
+  const followSettlement = (
+    outcome: Accessor<Accessor<AnswerOutcome> | undefined>,
+    clear: () => void,
+    setRefusal: (problem: Problem) => void,
+  ) =>
+    createEffect(() => {
+      const accessor = outcome();
+      if (accessor === undefined) return;
+      const settled = accessor();
+      if (settled.kind === "pending") return;
+      if (settled.kind === "refused") setRefusal(settled.problem);
+      clear();
+    });
+
+  // Run `reset` whenever a control's identity changes — a fresh request id or a fresh
+  // gate Attempt — so a re-block never inherits the previous interaction's local
+  // state. (The checkpoint has its own keyed effect below; it also moves focus.)
+  const onIdentityChange = (identity: Accessor<string>, reset: () => void) => {
+    let last = "";
+    createEffect(() => {
+      const current = identity();
+      if (current !== last) {
+        last = current;
+        reset();
+      }
+    });
+  };
+
   const dispatchAnswer = (answer: "continue" | "stop") => {
     if (answerPending()) return;
     const checkpoint = run()?.checkpoint;
@@ -408,17 +580,82 @@ export function RunWorkbench(props: {
     setAnswerOutcome(() => view.answer(checkpoint.gate, answer));
   };
 
-  // Follow the answer to its settlement. A refusal (a stale Gate, or a Run no
-  // longer blocked) surfaces in the interaction and re-enables the controls; an
-  // applied answer just clears local state — the live snapshot drops the
-  // checkpoint and its offer, so the interaction disappears on its own.
+  // Follow the answer to its settlement (a stale Gate or a Run no longer blocked
+  // surfaces as a refusal that re-enables the controls).
+  followSettlement(
+    answerOutcome,
+    () => setAnswerOutcome(undefined),
+    setAnswerRefusal,
+  );
+
+  // Answer the outstanding approval Harness Request with a decision (#117). A stale
+  // generation settles refused — the Application decides, never the client — and the
+  // control stays up on the fresh generation with the Problem shown inline (AC2).
+  const dispatchRequestAnswer = (decision: ApprovalDecisionName) => {
+    if (requestPending()) return;
+    const current = liveRequest();
+    if (current === undefined) return;
+    setRequestRefusal(undefined);
+    setRequestOutcome(() => view.answerRequest(current.offer, decision));
+  };
+  followSettlement(
+    requestOutcome,
+    () => setRequestOutcome(undefined),
+    setRequestRefusal,
+  );
+  // A genuinely new request (a fresh requestId) resets the decision to the safer
+  // allow and clears any prior refusal; a stale answer keeps the same id, so its
+  // inline refusal survives while the bumped-generation offer re-renders (AC2).
+  onIdentityChange(
+    () => liveRequest()?.request.requestId ?? "",
+    () => {
+      setRequestDecision("allow");
+      setRequestRefusal(undefined);
+    },
+  );
+
+  // Submit the free-text gate answer (#108). An empty answer is refused locally with
+  // no dispatch (AC3); the open snapshot follows the Run leaving `blocked`, so the
+  // control disappears on its own once the answer applies.
+  const dispatchGateText = () => {
+    if (gatePending()) return;
+    const current = freeTextGate();
+    if (current === undefined) return;
+    if (gateText().trim().length === 0) {
+      setGateRefusal(EMPTY_GATE_ANSWER);
+      return;
+    }
+    setGateRefusal(undefined);
+    setGateOutcome(() => view.answerText(current.gate, gateText()));
+  };
+  followSettlement(
+    gateOutcome,
+    () => setGateOutcome(undefined),
+    setGateRefusal,
+  );
+  // A fresh gate (a different producing Attempt) clears the typed buffer and any
+  // refusal so a re-block never inherits the previous gate's half-typed answer.
+  onIdentityChange(
+    () => {
+      const current = freeTextGate();
+      return current !== undefined
+        ? `${current.gate.stepId}:${current.gate.attemptId}`
+        : "";
+    },
+    () => {
+      setGateText("");
+      setGateRefusal(undefined);
+    },
+  );
+  // The Interrupt disarms whenever the live-Turn Offer leaves (the Turn settled or
+  // was lost) or a request/gate modal takes over, so a stale "again to interrupt"
+  // hint never lingers under the request control that now owns Esc.
   createEffect(() => {
-    const accessor = answerOutcome();
-    if (accessor === undefined) return;
-    const settled = accessor();
-    if (settled.kind === "pending") return;
-    if (settled.kind === "refused") setAnswerRefusal(settled.problem);
-    setAnswerOutcome(undefined);
+    if (
+      (offers().interrupt === undefined || modalControl()) &&
+      interruptArmed()
+    )
+      setInterruptArmed(false);
   });
 
   // Follow a dispatched Run Action to settlement. A refusal surfaces in the
@@ -577,15 +814,8 @@ export function RunWorkbench(props: {
   const handleKey = (key: RendererKeyEvent) => {
     if (dialog.stack.length > 0) return;
     const name = key.name ?? "";
-    // Ctrl+C always exits, even while the interactive input has focus.
     if (name === "c" && key.ctrl) {
-      exit();
-      return;
-    }
-    const typing = focus() === "interactive" && interactiveStepActive();
-    // `q` quits, except while typing a Turn — then it is text (tui/AGENTS).
-    if (name === "q" && !typing) {
-      exit();
+      exit(); // Ctrl+C always quits, even from a text control
       return;
     }
     // Inspection overlay owns its own key loop while open (A26): it consumes the
@@ -593,6 +823,74 @@ export function RunWorkbench(props: {
     if (inspection.handleKey(name)) return;
     if (run() === undefined) {
       if (name === "escape") props.onLeave();
+      return;
+    }
+    // Approval Harness Request control (#117): modal while a request is outstanding.
+    // ←/→ choose the offered decision, enter confirms it, Esc denies. Other keys are
+    // swallowed — the prompt input is disabled only while a request is outstanding.
+    // The decisions come straight off the current offer (spec story 13: exactly the
+    // decisions Claude Code offered — allow/deny), never a paraphrase.
+    const request = liveRequest();
+    if (request !== undefined) {
+      const decisions = request.offer.decisions;
+      switch (name) {
+        case "left":
+          if (!requestPending()) setRequestDecision(decisions[0] ?? "allow");
+          return;
+        case "right":
+          if (!requestPending())
+            setRequestDecision(decisions[1] ?? decisions[0] ?? "deny");
+          return;
+        case "return":
+          dispatchRequestAnswer(requestDecision());
+          return;
+        case "escape":
+          dispatchRequestAnswer(
+            decisions.includes("deny")
+              ? "deny"
+              : (decisions[decisions.length - 1] ?? "deny"),
+          );
+          return;
+        default:
+          return;
+      }
+    }
+    // Free-text Human Gate control (#108): a hand-rolled text buffer over the raw-key
+    // pipeline. The Workbench is Port-driven (tui/AGENTS.md), so a native <input> on
+    // the keymap path could not see these keys; enter submits, backspace deletes, Esc
+    // leaves, and unbound printable keys append. ponytail: single-char `name` only —
+    // shifted symbols and IME are real-terminal input, deferred with the other #23
+    // renderer/platform evidence.
+    if (freeTextGate() !== undefined) {
+      if (name === "return") {
+        dispatchGateText();
+        return;
+      }
+      if (name === "escape") {
+        props.onLeave();
+        return;
+      }
+      if (gatePending()) return; // buffer frozen while the answer is in flight
+      if (name === "backspace" || name === "delete") {
+        setGateText((text) => text.slice(0, -1));
+        return;
+      }
+      if (name === "space") {
+        setGateText((text) => text + " ");
+        return;
+      }
+      if (name.length === 1 && key.ctrl !== true) {
+        setGateText((text) => text + name);
+        return;
+      }
+      return;
+    }
+    // Beyond the request/gate modals, the interactive input owns keys too (#122): a
+    // bare letter typed into a Turn must not fire its command, so `q`/`t` and the
+    // Run Actions are gated on not typing.
+    const typing = focus() === "interactive" && interactiveStepActive();
+    if (name === "q" && !typing) {
+      exit(); // quit — never reached inside a text-entry control above
       return;
     }
     if (name === "t" && !typing) {
@@ -624,6 +922,25 @@ export function RunWorkbench(props: {
       handleInteractiveKey(key);
       return;
     }
+    // Interrupt is a two-press Esc while an agent Turn is live (spec story 18): it
+    // takes Esc over "leave the Workbench" only while the live-Turn Offer is present
+    // and no interactive Step owns the interaction (its Esc leaves, #122). First press
+    // arms and shows the hint; second dispatches `interrupt-turn`. Any other key below
+    // disarms it, so the hint never lingers.
+    if (
+      name === "escape" &&
+      offers().interrupt !== undefined &&
+      !interactiveStepActive()
+    ) {
+      if (interruptArmed()) {
+        setInterruptArmed(false);
+        dispatchInterrupt();
+      } else {
+        setInterruptArmed(true);
+      }
+      return;
+    }
+    if (interruptArmed()) setInterruptArmed(false);
     // Run Actions from any focus, gated on the Offer being present. A local resume
     // dispatches at once; takeover, Cancel, and Delete arm a confirmation first.
     if (name === "r" && offers().resume !== undefined) {
@@ -797,6 +1114,15 @@ export function RunWorkbench(props: {
               endStepArmed={() => pending() === "end-step"}
               interactivePending={interactivePending}
               interactiveRefusal={interactiveRefusal}
+              interruptArmed={interruptArmed}
+              liveRequest={liveRequest}
+              requestDecision={requestDecision}
+              requestPending={requestPending}
+              requestRefusal={requestRefusal}
+              freeTextGate={freeTextGate}
+              gateText={gateText}
+              gatePending={gatePending}
+              gateRefusal={gateRefusal}
               theme={theme}
             />
           )}
@@ -876,6 +1202,8 @@ function Workbench(props: {
     resume?: ResumeRunOffer;
     cancel?: CancelRunOffer;
     remove?: DeleteRunOffer;
+    interrupt?: InterruptTurnOffer;
+    steer?: SteerTurnOffer;
   }>;
   anyActionOffer: Accessor<boolean>;
   actionRefusal: Accessor<Problem | undefined>;
@@ -888,6 +1216,20 @@ function Workbench(props: {
   endStepArmed: Accessor<boolean>;
   interactivePending: Accessor<boolean>;
   interactiveRefusal: Accessor<Problem | undefined>;
+  interruptArmed: Accessor<boolean>;
+  liveRequest: Accessor<
+    | { request: RunOutstandingRequest; offer: AnswerHarnessRequestOffer }
+    | undefined
+  >;
+  requestDecision: Accessor<ApprovalDecisionName>;
+  requestPending: Accessor<boolean>;
+  requestRefusal: Accessor<Problem | undefined>;
+  freeTextGate: Accessor<
+    { gate: RunGateReference; message: string; outputName?: string } | undefined
+  >;
+  gateText: Accessor<string>;
+  gatePending: Accessor<boolean>;
+  gateRefusal: Accessor<Problem | undefined>;
   theme: Theme;
 }) {
   const { theme } = props;
@@ -1021,6 +1363,33 @@ function Workbench(props: {
               </text>
             )}
           </Show>
+          {/* Interrupt (Esc twice) and Steer, shown only while an agent Turn is live
+              and no interactive Step owns the interaction (its Esc leaves, #122).
+              Steer names its unavailable reason and never dispatches (story 19). */}
+          <Show
+            when={!props.interactiveActive() && props.actionOffers().interrupt}
+          >
+            {(offer) => (
+              <text fg={theme.text} flexShrink={0}>
+                {clip(`  esc esc interrupt — ${offer().consequence}`, w())}
+              </text>
+            )}
+          </Show>
+          <Show when={!props.interactiveActive() && props.actionOffers().steer}>
+            {(offer) => (
+              <text fg={theme.textMuted} flexShrink={0}>
+                {clip(`  steer — unavailable · ${offer().reason}`, w())}
+              </text>
+            )}
+          </Show>
+          <Show when={!props.interactiveActive() && props.interruptArmed()}>
+            <text fg={theme.warning} flexShrink={0}>
+              {clip(
+                "  ⚠ Press esc again to interrupt · any other key cancels",
+                w(),
+              )}
+            </text>
+          </Show>
           <Show when={props.actionPending()}>
             {(action) => (
               <text fg={theme.warning} flexShrink={0}>
@@ -1093,12 +1462,11 @@ function Workbench(props: {
         />
       </Show>
 
-      {/* While the answer-human-gate offer is live the checkpoint interaction, and
-          while an interactive-agent Step is blocked the human input, replace the
-          footer input rather than sharing a permanent rail (#92, #122). A Run rests
-          at only one of the two, so they never render together. */}
-      <Show
-        when={props.checkpointActive() ? run().checkpoint : undefined}
+      {/* The bottom region: one control replaces the passive footer input while its
+          offer is live, in precedence — an outstanding approval request, a free-text
+          gate, a Review checkpoint, or the interactive-agent input (#92, #108, #117,
+          #121, #122). A Run rests at only one, so they never render together. */}
+      <Switch
         fallback={
           <Show
             when={props.interactiveActive()}
@@ -1123,20 +1491,47 @@ function Workbench(props: {
           </Show>
         }
       >
-        {(checkpoint) => (
-          <CheckpointInteraction
-            checkpoint={checkpoint}
-            offer={props.offer}
-            evidence={props.evidence}
-            control={props.control}
-            focused={() => props.focus() === "checkpoint"}
-            pending={props.answerPending}
-            refusal={props.answerRefusal}
-            width={props.innerW}
-            theme={theme}
-          />
-        )}
-      </Show>
+        <Match when={props.liveRequest()}>
+          {(current) => (
+            <HarnessRequestControl
+              request={() => current().request}
+              offer={() => current().offer}
+              decision={props.requestDecision}
+              pending={props.requestPending}
+              refusal={props.requestRefusal}
+              width={props.innerW}
+              theme={theme}
+            />
+          )}
+        </Match>
+        <Match when={props.freeTextGate()}>
+          {(current) => (
+            <FreeTextGateControl
+              gate={current}
+              text={props.gateText}
+              pending={props.gatePending}
+              refusal={props.gateRefusal}
+              width={props.innerW}
+              theme={theme}
+            />
+          )}
+        </Match>
+        <Match when={props.checkpointActive() ? run().checkpoint : undefined}>
+          {(checkpoint) => (
+            <CheckpointInteraction
+              checkpoint={checkpoint}
+              offer={props.offer}
+              evidence={props.evidence}
+              control={props.control}
+              focused={() => props.focus() === "checkpoint"}
+              pending={props.answerPending}
+              refusal={props.answerRefusal}
+              width={props.innerW}
+              theme={theme}
+            />
+          )}
+        </Match>
+      </Switch>
     </box>
   );
 }
@@ -1197,6 +1592,138 @@ function InteractiveInput(props: {
       </Show>
     </box>
   );
+}
+
+/** The approval Harness Request control (#117, spec story 13/14): the exact tool
+ *  and input Claude Code asked to run, the exact decisions it offered, and a
+ *  status/hint line carrying a pending state or a stale-offer refusal. It replaces
+ *  the footer while a request is outstanding; every line is plain text so both
+ *  decisions read with colour removed. */
+function HarnessRequestControl(props: {
+  request: Accessor<RunOutstandingRequest>;
+  offer: Accessor<AnswerHarnessRequestOffer>;
+  decision: Accessor<ApprovalDecisionName>;
+  pending: Accessor<boolean>;
+  refusal: Accessor<Problem | undefined>;
+  width: Accessor<number>;
+  theme: Theme;
+}) {
+  const { theme } = props;
+  const w = () => props.width();
+  const decisions = () => props.offer().decisions;
+  const marker = (which: ApprovalDecisionName) =>
+    props.decision() === which ? "› " : "  ";
+  const decisionsLine = () =>
+    decisions()
+      .map((which) => `${marker(which)}[ ${label(which)} ]`)
+      .join("   ");
+  const status = () => {
+    if (props.pending()) return "… relaying your decision";
+    const refusal = props.refusal();
+    if (refusal !== undefined)
+      return `refused: ${refusal.explanation} ${refusal.remediation}`;
+    return "←/→ choose · enter confirm · esc deny · ctrl+c quit";
+  };
+  return (
+    <box
+      flexDirection="column"
+      height={REQUEST_HEIGHT}
+      flexShrink={0}
+      overflow="hidden"
+      backgroundColor={theme.backgroundPanel}
+    >
+      <text fg={theme.warning} attributes={TextAttributes.BOLD} flexShrink={0}>
+        {clip("› Harness Request · awaiting your approval", w())}
+      </text>
+      <text fg={theme.text} flexShrink={0}>
+        {clip(`  Tool: ${props.request().tool}`, w())}
+      </text>
+      <text fg={theme.textMuted} flexShrink={0}>
+        {clip(`  Input: ${oneLine(props.request().input)}`, w())}
+      </text>
+      <text
+        fg={theme.text}
+        attributes={props.pending() ? 0 : TextAttributes.BOLD}
+        flexShrink={0}
+      >
+        {clip(
+          `  ${decisionsLine()}${props.pending() ? "  (unavailable)" : ""}`,
+          w(),
+        )}
+      </text>
+      <text
+        fg={props.refusal() !== undefined ? theme.error : theme.textMuted}
+        flexShrink={0}
+      >
+        {clip(`  ${status()}`, w())}
+      </text>
+    </box>
+  );
+}
+
+/** The free-text Human Gate control (#108, spec story 17): the gate message, the
+ *  declared output the answer binds, a text-entry line with a block caret, and a
+ *  status/hint line carrying a pending state or a refusal (empty local or Port). It
+ *  replaces the footer while the Run rests blocked at the gate. */
+function FreeTextGateControl(props: {
+  gate: Accessor<{
+    gate: RunGateReference;
+    message: string;
+    outputName?: string;
+  }>;
+  text: Accessor<string>;
+  pending: Accessor<boolean>;
+  refusal: Accessor<Problem | undefined>;
+  width: Accessor<number>;
+  theme: Theme;
+}) {
+  const { theme } = props;
+  const w = () => props.width();
+  const status = () => {
+    if (props.pending()) return "… submitting your answer";
+    const refusal = props.refusal();
+    if (refusal !== undefined)
+      return `refused: ${refusal.explanation} ${refusal.remediation}`;
+    return "type your answer · enter submit · esc back · ctrl+c quit";
+  };
+  return (
+    <box
+      flexDirection="column"
+      height={GATE_HEIGHT}
+      flexShrink={0}
+      overflow="hidden"
+      backgroundColor={theme.backgroundPanel}
+    >
+      <text fg={theme.warning} attributes={TextAttributes.BOLD} flexShrink={0}>
+        {clip(`› Human Gate · ${props.gate().message}`, w())}
+      </text>
+      <text fg={theme.textMuted} flexShrink={0}>
+        {clip(
+          `  Answer published as: ${props.gate().outputName ?? "the gate's text output"}`,
+          w(),
+        )}
+      </text>
+      <text fg={theme.text} flexShrink={0}>
+        {clip(`  > ${props.text()}${props.pending() ? "" : "▌"}`, w())}
+      </text>
+      <text
+        fg={props.refusal() !== undefined ? theme.error : theme.textMuted}
+        flexShrink={0}
+      >
+        {clip(`  ${status()}`, w())}
+      </text>
+    </box>
+  );
+}
+
+/** Collapse whitespace so a serialized tool input or usage string stays one line. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** The human label for an approval decision (spec story 13). */
+function label(decision: ApprovalDecisionName): string {
+  return decision === "allow" ? "Allow" : "Deny";
 }
 
 /** The Review checkpoint interaction (#92): the authored message and cadence, the

@@ -29,7 +29,6 @@ import type {
 } from "../../src/tui/renderer/renderer.js";
 import { createFake } from "../harness/fake-adapter.js";
 import { makeTempDir } from "../helpers/tempDir.js";
-import { awaitSettled } from "../helpers/settleOperation.js";
 import { inertRunActionsView, inertRunListView } from "./inert.js";
 
 function profile(): HarnessProfile {
@@ -272,53 +271,28 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
     frame.includes("Harness Request · Edit"),
   );
 
+  // The approval request replaces the bottom input with the inline decision control
+  // naming the exact tool and input and both offered decisions (#121 AC1).
+  await rendered.waitForFrame((frame) =>
+    frame.includes("Harness Request · awaiting your approval"),
+  );
   const frame = rendered.captureCharFrame();
   assert.match(frame, /BLOCKED · ephemeral Harness Request/);
   assert.match(frame, /Assistant preview · Streaming the repair/);
   assert.match(frame, /Activity · delegating to subagent/);
   assert.match(frame, /Context · 12500 \/ 200000 tokens/);
   assert.match(frame, /Usage · estimated 25 tokens/);
+  assert.match(frame, /Tool: Edit/); // the exact tool
+  assert.match(frame, /\[ Allow \]/); // both offered decisions
+  assert.match(frame, /\[ Deny \]/);
 
   const receipt = launched?.();
   assert.equal(receipt?.kind, "launched");
   if (receipt?.kind !== "launched") throw new Error("Run was not launched");
-  const requestObserver = wired.projectionPort.openProjection({
-    family: "run",
-    runId: receipt.runId,
-  });
-  let request:
-    | { requestId: string; generation: number; decisions: readonly string[] }
-    | undefined;
-  for await (const update of requestObserver.updates) {
-    if (update.kind !== "live" || update.overlay.offers.length === 0) continue;
-    const offer = update.overlay.offers[0]!;
-    request = {
-      requestId: offer.requestId,
-      generation: offer.generation,
-      decisions: offer.decisions,
-    };
-    break;
-  }
-  requestObserver.close();
-  assert.ok(request);
-  assert.deepEqual(request.decisions, ["allow", "deny"]);
-  const answer = wired.projectionPort.submit({
-    operationId: "answer-live-request",
-    operation: "answer-harness-request",
-    input: {
-      runId: receipt.runId,
-      requestId: request.requestId,
-      generation: request.generation,
-      decision: "allow",
-      by: "human",
-    },
-  });
-  assert.ok(answer.admitted);
-  const outcome = await awaitSettled(
-    wired.projectionPort,
-    "answer-live-request",
-  );
-  assert.equal(outcome.status, "applied");
+  // Answer allow *through the control*, over the real Port: Enter on the default
+  // (allow) decision dispatches `answer-harness-request` and the Turn continues to
+  // completion — the whole client wiring, not a hand-built Port submit (#121 AC1).
+  fakeRenderer.key("return");
   await rendered.waitForFrame(
     (next) => next.includes("SUCCEEDED") && next.includes("model fake-sonnet"),
   );

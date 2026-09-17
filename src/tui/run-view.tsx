@@ -6,6 +6,8 @@ import {
   type ParentProps,
 } from "solid-js";
 import type {
+  AnswerHarnessRequestOffer,
+  ApprovalDecisionName,
   DiagnosticReference,
   OpenedProjection,
   ProjectionPort,
@@ -75,6 +77,18 @@ export interface RunWorkbenchView {
   /** Ends the interactive-agent Step the Run is blocked at (#122): settles the Step
    *  succeeded and advances the Run. Offered only at a Turn boundary. */
   endInteractiveStep(runId: string, stepId: string): Accessor<AnswerOutcome>;
+  /** Answers a free-text Human Gate (#108): publishes `text` as the gate's declared
+   *  `text` output and advances the Run. The accessor starts `pending` and settles
+   *  once the Operation resolves; a shape mismatch or stale Gate settles `refused`. */
+  answerText(gate: RunGateReference, text: string): Accessor<AnswerOutcome>;
+  /** Answers one outstanding approval Harness Request (#117) against the exact
+   *  `requestId`/`generation` its Offer carried. A stale generation or an
+   *  already-settled request settles `refused` (the Application decides, never the
+   *  client); an applied answer lets the live Turn continue. `by` is `human`. */
+  answerRequest(
+    offer: AnswerHarnessRequestOffer,
+    decision: ApprovalDecisionName,
+  ): Accessor<AnswerOutcome>;
 }
 
 const ctx = createContext<RunWorkbenchView>();
@@ -133,6 +147,29 @@ export function createLiveRunWorkbenchView(
         operationId: randomUUID(),
         operation: "end-interactive-step",
         input: { runId, stepId },
+      }),
+    // A free-text gate answer publishes the text as the gate's declared output and
+    // advances the Run in one Store boundary (#108); the open snapshot follows the
+    // Run leaving `blocked`, so this seam never re-reads it.
+    answerText: (gate, text) =>
+      submitAndSettle(port, {
+        operationId: randomUUID(),
+        operation: "answer-human-gate",
+        input: { runId: gate.runId, gate, text },
+      }),
+    // The live Turn request answer (#117): Turn-scoped, so it must reach the live
+    // Turn before it settles. The Application refuses a stale generation as a value.
+    answerRequest: (offer, decision) =>
+      submitAndSettle(port, {
+        operationId: randomUUID(),
+        operation: "answer-harness-request",
+        input: {
+          runId: offer.runId,
+          requestId: offer.requestId,
+          generation: offer.generation,
+          decision,
+          by: "human",
+        },
       }),
   };
 }

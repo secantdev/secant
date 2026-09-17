@@ -6,6 +6,7 @@ import {
   type ParentProps,
 } from "solid-js";
 import type {
+  InterruptTurnOffer,
   Problem,
   ProjectionPort,
   ResumeRunOffer,
@@ -43,6 +44,10 @@ export interface RunActionsView {
   cancel(runId: string): Accessor<RunActionOutcome>;
   /** Delete a resting or terminal Run: removes its store from disk (#87). */
   remove(runId: string): Accessor<RunActionOutcome>;
+  /** Interrupt the live Turn its Offer names (#118): stops the Turn, ends the
+   *  Attempt `cancelled`, and rests the Run `halted` (resumable). The Offer carries
+   *  the live `turnId`, so a control that named a settled Turn is refused. */
+  interrupt(offer: InterruptTurnOffer): Accessor<RunActionOutcome>;
 }
 
 const ctx = createContext<RunActionsView>();
@@ -100,5 +105,16 @@ export function createLiveRunActionsView(port: ProjectionPort): RunActionsView {
     },
     cancel: (runId) => end("cancel-run", runId),
     remove: (runId) => end("delete-run", runId),
+    interrupt: (offer) => {
+      const settle = submitAndSettle(port, {
+        operationId: randomUUID(),
+        operation: "interrupt-turn",
+        input: { runId: offer.runId, turnId: offer.turnId },
+      });
+      return () => {
+        const outcome = settle();
+        return outcome.kind === "applied" ? { kind: "ok" } : outcome;
+      };
+    },
   };
 }

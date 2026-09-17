@@ -35,5 +35,6 @@ export function inertRunActionsView(): RunActionsView {
     resume: () => () => refusal,
     cancel: () => () => refusal,
     remove: () => () => refusal,
+    interrupt: () => () => refusal,
   };
 }

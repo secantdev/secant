@@ -227,8 +227,12 @@ export function renderRun(run: RunView): string {
   lines.push("", "Timeline:");
   if (run.timeline.length === 0) lines.push("  (none)");
   for (const event of run.timeline) {
+    // The recorded Turn kind (#126) distinguishes a historical Agent Turn from an
+    // Interactive Turn in the plain-text timeline, in the same order; a legacy row
+    // with no kind prints without it. Additive to the frozen `--json`.
+    const kind = event.turnKind !== undefined ? ` ${event.turnKind}` : "";
     const detail = event.detail !== undefined ? ` ${event.detail}` : "";
-    lines.push(`  ${event.at} ${event.event}${detail}`);
+    lines.push(`  ${event.at} ${event.event}${kind}${detail}`);
   }
 
   if (run.conflict !== undefined) {

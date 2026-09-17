@@ -1,0 +1,1 @@
+ALTER TABLE `turn` ADD `kind` text;

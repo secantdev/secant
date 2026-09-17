@@ -23,6 +23,7 @@ import type {
   AttemptLogEntry,
   CandidateOutput,
   RunOwner,
+  TurnKind,
 } from "../store/store.js";
 import type {
   DurableTurnRecorder,
@@ -1087,6 +1088,7 @@ async function runAgent(
   const result = await driveHarnessTurn(owner, harness.prepared, {
     session,
     origin: "managed",
+    kind: "agent",
     attemptId,
     turnId,
     input: prompt,
@@ -1137,6 +1139,11 @@ async function driveHarnessTurn(
   params: {
     readonly session: string;
     readonly origin: TurnOrigin;
+    /** The Crucible Step kind that produced this Turn (#126). This is the Step-kind
+     *  dispatch seam: the kind is known from the executing Step — the Agent executor
+     *  passes `agent`, the interactive human Turn passes `interactive-agent` — and is
+     *  recorded durably at admission, never derived from a Harness-native type. */
+    readonly kind: TurnKind;
     readonly attemptId: string;
     readonly turnId: string;
     readonly input: string;
@@ -1154,6 +1161,7 @@ async function driveHarnessTurn(
         attemptId,
         session,
         origin: admission.origin,
+        kind: params.kind,
         input: admission.input.text,
         recoveryCoordinate: admission.recoveryCoordinate.opaque,
         harness: harnessName,
@@ -1280,6 +1288,7 @@ export async function driveInteractiveTurn(
   return driveHarnessTurn(request.owner, request.prepared, {
     session: request.session,
     origin: "human",
+    kind: "interactive-agent",
     attemptId: request.attemptId,
     turnId: request.turnId,
     input: request.text,

@@ -1027,6 +1027,7 @@ test("a Turn is admitted, events append, and the result settles immutably (#116)
     attemptId: "0.0:write",
     session: "s",
     origin: "managed",
+    kind: "agent",
     input: "do the thing at /abs/path.md",
     recoveryCoordinate: "native-abc",
     harness: "claude-code",
@@ -1035,9 +1036,12 @@ test("a Turn is admitted, events append, and the result settles immutably (#116)
   assert.ok(admitted.ok);
 
   // The Turn row is admitted before any result, the Session reads `open`, and the
-  // input is a `user` transcript entry.
+  // input is a `user` transcript entry. The Crucible Turn kind is recorded durably
+  // (#126), independent of the `managed` origin.
   assert.equal(owner.turns().length, 1);
   assert.equal(owner.turns()[0]?.resultKind, undefined);
+  assert.equal(owner.turns()[0]?.kind, "agent");
+  assert.equal(owner.turns()[0]?.origin, "managed");
   assert.equal(owner.turns()[0]?.input, "do the thing at /abs/path.md");
   assert.deepEqual(owner.harnessSessions(), [
     { session: "s", availability: "open" },
@@ -1097,6 +1101,83 @@ test("a Turn is admitted, events append, and the result settles immutably (#116)
   });
   assert.ok(published.ok);
   assert.equal(owner.effectiveModel(), "claude-opus-5");
+});
+
+test("Turn kind records both kinds in one Session, and a legacy row reads unknown (#126)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner !== undefined);
+  t.after(() => owner.close());
+
+  // Two Interactive Turns then a following Agent Turn, all in one named Session —
+  // the kind is Crucible truth independent of origin (`human`/`managed`).
+  owner.admitTurn({
+    turnId: "turn-1",
+    attemptId: "0.0:discuss",
+    session: "shared",
+    origin: "human",
+    kind: "interactive-agent",
+    input: "let's talk",
+    recoveryCoordinate: "native-1",
+    harness: "claude-code",
+    at: AT,
+  });
+  owner.admitTurn({
+    turnId: "turn-2",
+    attemptId: "0.0:discuss",
+    session: "shared",
+    origin: "human",
+    kind: "interactive-agent",
+    input: "one more thing",
+    recoveryCoordinate: "native-1",
+    harness: "claude-code",
+    at: AT,
+  });
+  owner.admitTurn({
+    turnId: "turn-3",
+    attemptId: "0.0:build",
+    session: "shared",
+    origin: "managed",
+    kind: "agent",
+    input: "now build it",
+    recoveryCoordinate: "native-1",
+    harness: "claude-code",
+    at: AT,
+  });
+  assert.deepEqual(
+    owner.turns().map((turn) => turn.kind),
+    ["interactive-agent", "interactive-agent", "agent"],
+  );
+
+  // A legacy row admitted before the kind column existed (a raw INSERT that omits
+  // `kind`, so it is NULL) reads its kind back undefined — genuinely unknown, never
+  // fabricated to a guess.
+  const runDb = new Database(join(groupDirOf(home), created.runId, "run.db"));
+  try {
+    runDb
+      .query(
+        `INSERT INTO turn
+           (turn_id, attempt_id, session_key, origin, sequence, input, admitted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "turn-legacy",
+        "legacy",
+        "shared",
+        "managed",
+        3,
+        "old turn",
+        AT.toISOString(),
+      );
+  } finally {
+    runDb.close();
+  }
+  const legacy = owner.turns().find((turn) => turn.turnId === "turn-legacy");
+  assert.ok(legacy !== undefined);
+  assert.equal(legacy.kind, undefined);
 });
 
 /** The `<slug>--<digest>` directory openRunGroup derives for WORKSPACE, recomputed

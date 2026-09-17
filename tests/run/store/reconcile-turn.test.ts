@@ -36,6 +36,7 @@ test("startup reconciliation settles an admitted-but-unsettled Turn as lost/comp
       attemptId: "0.0:fix",
       session: "s",
       origin: "managed",
+      kind: "agent",
       input: "Repair the failing test.",
       recoveryCoordinate: "11111111-1111-4111-8111-111111111111",
       harness: "claude-code",

@@ -591,7 +591,14 @@ test("live Turn preview and activity join the durable timeline, then authoritati
     runOf({
       progress: [{ id: "repair", kind: "agent", status: "running" }],
       effectiveModel: "claude-sonnet-4-5",
-      timeline: [{ at: "T000", event: "turn-started", detail: "repair" }],
+      timeline: [
+        {
+          at: "T000",
+          event: "turn-started",
+          detail: "repair",
+          turnKind: "agent",
+        },
+      ],
     }),
     110,
     24,
@@ -619,13 +626,23 @@ test("live Turn preview and activity join the durable timeline, then authoritati
       progress: [{ id: "repair", kind: "agent", status: "succeeded" }],
       effectiveModel: "claude-sonnet-4-5",
       timeline: [
-        { at: "T000", event: "turn-started", detail: "repair" },
+        {
+          at: "T000",
+          event: "turn-started",
+          detail: "repair",
+          turnKind: "agent",
+        },
         {
           at: "T001",
           event: "assistant-content",
           detail: "The assertion is fixed.",
         },
-        { at: "T002", event: "turn-settled", detail: "completed" },
+        {
+          at: "T002",
+          event: "turn-settled",
+          detail: "completed",
+          turnKind: "agent",
+        },
       ],
     }),
   );
@@ -635,6 +652,58 @@ test("live Turn preview and activity join the durable timeline, then authoritati
   assert.doesNotMatch(settled, /Assistant preview/);
   assert.match(settled, /Assistant · The assertion is fixed\./);
   assert.match(settled, /Agent Turn settled · completed/);
+});
+
+test("reopened durable Turn rows label kind by words, colour removed, legacy neutral (#126)", async () => {
+  // One reopened Session with an Interactive Turn, a following Agent Turn, and a
+  // legacy row whose kind is unknown — the Workbench distinguishes each by glyph
+  // plus words alone, with no live overlay (a settled, reopened Run).
+  const { t } = await mountWorkbench(
+    runOf({
+      state: "succeeded",
+      progress: [
+        { id: "discuss", kind: "interactive-agent", status: "succeeded" },
+      ],
+      position: 1,
+      timeline: [
+        {
+          at: "T000",
+          event: "turn-started",
+          detail: "shared",
+          turnKind: "interactive-agent",
+        },
+        {
+          at: "T001",
+          event: "turn-settled",
+          detail: "completed",
+          turnKind: "interactive-agent",
+        },
+        {
+          at: "T002",
+          event: "turn-started",
+          detail: "shared",
+          turnKind: "agent",
+        },
+        {
+          at: "T003",
+          event: "turn-settled",
+          detail: "completed",
+          turnKind: "agent",
+        },
+        // A legacy row (admitted before the kind column): no turnKind, so it reads a
+        // neutral "Turn" rather than a fabricated kind.
+        { at: "T004", event: "turn-started", detail: "shared" },
+      ],
+    }),
+    110,
+    24,
+  );
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Interactive Turn started · shared/);
+  assert.match(frame, /Interactive Turn settled · completed/);
+  assert.match(frame, /Agent Turn started · shared/);
+  assert.match(frame, /Agent Turn settled · completed/);
+  assert.match(frame, /● Turn started · shared/); // legacy: neither kind claimed
 });
 
 test("context and usage appear only when the live overlay reports them", async () => {
@@ -2083,7 +2152,9 @@ test("resume on a halted Run dispatches resume-run and live rows resume", async 
     resume: () => {
       resumed += 1;
       control.setRun(
-        liveTurnRunOf({ timeline: [{ at: "T0", event: "turn-started" }] }),
+        liveTurnRunOf({
+          timeline: [{ at: "T0", event: "turn-started", turnKind: "agent" }],
+        }),
       );
       return () => ({ kind: "ok" });
     },

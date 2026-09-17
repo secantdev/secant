@@ -151,6 +151,7 @@ const turnRow = z.object({
   attempt_id: z.string(),
   session_key: z.string(),
   origin: z.string(),
+  kind: z.string().nullable(),
   sequence: z.number(),
   input: z.string(),
   admitted_at: z.string(),
@@ -535,6 +536,7 @@ function admitTurn(db: SQLiteBunDatabase, request: AdmitTurnRequest): void {
         attempt_id: request.attemptId,
         session_key: request.session,
         origin: request.origin,
+        kind: request.kind,
         sequence,
         input: request.input,
         admitted_at: at,
@@ -846,6 +848,7 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
           attempt_id: turns.attempt_id,
           session_key: turns.session_key,
           origin: turns.origin,
+          kind: turns.kind,
           sequence: turns.sequence,
           input: turns.input,
           admitted_at: turns.admitted_at,
@@ -862,6 +865,9 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
             attemptId: parsed.attempt_id,
             session: parsed.session_key,
             origin: parsed.origin,
+            // A legacy row admitted before the kind column reads it back null: the
+            // kind is genuinely unknown, so omit it rather than fabricate a guess.
+            ...(parsed.kind !== null ? { kind: parsed.kind } : {}),
             sequence: parsed.sequence,
             input: parsed.input,
             admittedAt: parsed.admitted_at,

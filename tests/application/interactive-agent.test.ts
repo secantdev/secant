@@ -11,6 +11,7 @@ import type {
   ActionOffer,
   RunView,
 } from "../../src/application/projection-port.js";
+import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import { createFake, type FakeScript } from "../harness/fake-adapter.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
@@ -252,16 +253,66 @@ test("interactive-agent rests blocked, takes two human Turns, and ends into the 
   );
 
   // The human Turns are origin `human`; the autonomous Agent Turn is `managed`. The
-  // Run has rested, so acquiring the owner here fences nothing live.
+  // Run has rested, so acquiring the owner here fences nothing live. The Crucible
+  // Turn kind is recorded independently (#126): the two Interactive Turns and the
+  // following Agent Turn are distinguished even though they share one Session.
   const owner = wired.runGroup.acquireRun(runId);
   assert.ok(owner);
   try {
     const origins = owner.turns().map((turn) => turn.origin);
     assert.deepEqual(origins, ["human", "human", "managed"]);
+    const kinds = owner.turns().map((turn) => turn.kind);
+    assert.deepEqual(kinds, [
+      "interactive-agent",
+      "interactive-agent",
+      "agent",
+    ]);
   } finally {
     owner.close();
   }
+
+  // After settlement and reopen, the projected durable timeline distinguishes the
+  // same historical Turn kinds in the same order — both clients read them off the
+  // `turn-started` entries, never from `progress[position]` (#126).
+  const timelineKinds = done.timeline
+    .filter((event) => event.event === "turn-started")
+    .map((event) => event.turnKind);
+  assert.deepEqual(timelineKinds, [
+    "interactive-agent",
+    "interactive-agent",
+    "agent",
+  ]);
+
+  // The headless client reads the same reopened history: `run show` prints each
+  // historical Turn kind in the same order (AC4), the Interactive Turns before the
+  // Agent Turn.
+  const shown = await runShow(wired, runId);
+  const firstInteractive = shown.indexOf("turn-started interactive-agent");
+  const firstAgent = shown.indexOf("turn-started agent");
+  assert.ok(firstInteractive >= 0, shown);
+  assert.ok(firstAgent > firstInteractive, shown);
 });
+
+/** Render the headless `run show` for a Run through the public headless entrypoint,
+ *  so this reads the reopened history exactly as the CLI client does. */
+async function runShow(wired: Wiring, runId: string): Promise<string> {
+  const out: string[] = [];
+  const io: HeadlessIO = {
+    out: (text) => out.push(text),
+    err: () => {},
+    cwd: () => process.cwd(),
+  };
+  const code = await runHeadless(
+    {
+      projectionPort: wired.projectionPort,
+      bundleManagement: wired.bundleManagement,
+    },
+    ["run", "show", runId],
+    io,
+  );
+  assert.equal(code, 0);
+  return out.join("");
+}
 
 test("a blank interactive Turn is refused before any stdin is sent (#122)", async (t) => {
   const { wired, runId } = await launchInteractive(t, {

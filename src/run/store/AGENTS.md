@@ -66,3 +66,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `open` and the rendered input as a `user` transcript entry in one transaction, and a fenced owner refuses it, proving the Turn `not-started` so no stdin is sent.
 - `settleTurn` is immutable: it no-ops once the `turn` row's `result_kind` is set, so a second settle rewrites neither the result nor the Session availability. `turn_event`s
   append only. The Attempt's `effective_model` is set through `publishAttempt` (the `attempt` row is written after the Turn settles), never through `settleTurn`.
+- Turn `kind` (#126): `admitTurn` records the Crucible Step kind that produced the Turn — `agent` or `interactive-agent` — in the nullable `turn.kind` column, Crucible-owned
+  durable truth independent of `origin` (`managed`/`human`). The column is nullable so a row admitted before it existed reads its kind back **null** (undefined in
+  `TurnRecord`) — a legacy row whose kind is genuinely unknown, never fabricated to a guess. Unlike the enum columns domain logic branches on here, the store returns `kind`
+  raw; the Projection narrows it to the client union at its read ingress (D7).

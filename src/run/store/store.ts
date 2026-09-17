@@ -266,6 +266,12 @@ export interface RecordPendingGateRequest {
 
 // --- Harness Turns (#116) --------------------------------------------------
 
+/** The Crucible Step kind that produced a durable Turn (#126): an autonomous
+ *  `agent` Step's Turn or an `interactive-agent` Step's human Turn. Crucible-owned
+ *  durable truth, recorded from the executing Step at admission and independent of
+ *  Turn `origin` (`managed`/`human`) and of any Harness-native message type. */
+export type TurnKind = "agent" | "interactive-agent";
+
 /** Admit one Turn before its stdin frame is sent: the durable admission the
  *  Harness Adapter awaits. A refusal (or a fenced owner) proves the Turn
  *  `not-started`. Records the `turn` row, upserts the named Session `open`, and
@@ -275,6 +281,9 @@ export interface AdmitTurnRequest {
   readonly attemptId: string;
   readonly session: string;
   readonly origin: "managed" | "human";
+  /** The Crucible Step kind that produced this Turn (#126), recorded durably so
+   *  reopened history distinguishes an Interactive Turn from an Agent Turn. */
+  readonly kind: TurnKind;
   /** The exact rendered transcript input admitted before native submission. */
   readonly input: string;
   /** The opaque native recovery coordinate (native session id) observed. */
@@ -311,6 +320,10 @@ export interface TurnRecord {
   readonly attemptId: string;
   readonly session: string;
   readonly origin: string;
+  /** The Crucible Step kind that produced this Turn (#126). Absent for a legacy
+   *  row admitted before the kind column existed — genuinely unknown, so the
+   *  Projection narrows a known value and omits an unknown one rather than guess. */
+  readonly kind?: string;
   readonly sequence: number;
   readonly input: string;
   readonly admittedAt: string; // ISO 8601

@@ -32,6 +32,16 @@ function durableTimelineRow(
 ): TimelineRow {
   const detail = event.detail !== undefined ? ` · ${event.detail}` : "";
   const prefix = `${event.at} `;
+  // The durable Turn label is driven by the recorded Turn kind (#126), so reopened
+  // history distinguishes an Interactive Turn from an Agent Turn by words alone
+  // (colour removed). A legacy row with no kind reads a neutral "Turn" — truthful
+  // where the kind is genuinely unknown rather than a guess.
+  const turnLabel =
+    event.turnKind === "interactive-agent"
+      ? "Interactive Turn"
+      : event.turnKind === "agent"
+        ? "Agent Turn"
+        : "Turn";
   const label = (() => {
     switch (event.event) {
       case "assistant-content":
@@ -39,9 +49,9 @@ function durableTimelineRow(
       case "tool-activity":
         return `↳ Tool activity${detail}`;
       case "turn-started":
-        return `● Agent Turn started${detail}`;
+        return `● ${turnLabel} started${detail}`;
       case "turn-settled":
-        return `● Agent Turn settled${detail}`;
+        return `● ${turnLabel} settled${detail}`;
       case "request-raised":
         return `? Harness Request raised${detail}`;
       case "request-answered":

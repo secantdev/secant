@@ -112,11 +112,20 @@ export const harnessSessions = sqliteTable("harness_session", {
 // `not-started`. `input` is the exact rendered transcript input. `result_kind` and
 // `result_detail` stay null until the Turn settles, and a settled result is
 // immutable (settle only writes when `result_kind` is still null).
+//
+// `kind` is the Crucible Step kind that produced the Turn — `agent` or
+// `interactive-agent` (#126) — recorded from the executing Step at admission, so
+// reopened history distinguishes an Interactive Turn from an autonomous Agent Turn
+// without inferring from the Run's current position. It is Crucible-owned durable
+// truth, independent of `origin` (`managed`/`human`) and of any Harness-native type.
+// Nullable: a Turn admitted before this column existed reads it back null — a legacy
+// row whose kind is genuinely unknown, never fabricated to a guess.
 export const turns = sqliteTable("turn", {
   turn_id: text("turn_id").primaryKey(),
   attempt_id: text("attempt_id").notNull(),
   session_key: text("session_key").notNull(),
   origin: text("origin").notNull(),
+  kind: text("kind"),
   sequence: integer("sequence").notNull(),
   input: text("input").notNull(),
   admitted_at: text("admitted_at").notNull(),

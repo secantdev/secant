@@ -39,6 +39,7 @@ import type {
   RunTimelineEvent,
   RunTimelineKind,
   RunTranscriptEntryView,
+  RunTurnKind,
   RunView,
 } from "./projection-port.js";
 import {
@@ -965,6 +966,13 @@ function sessionView(record: HarnessSessionRecord): RunSessionView {
   return { session: record.session, availability };
 }
 
+/** Narrow a stored Turn kind to the client union, or undefined when it is absent
+ *  (a legacy row) or unrecognized — the safe truthful read at the ingress (D7): an
+ *  unknown kind is omitted, never coerced to a guess. */
+function toTurnKind(kind: string | undefined): RunTurnKind | undefined {
+  return kind === "agent" || kind === "interactive-agent" ? kind : undefined;
+}
+
 /** Narrow a stored transcript entry to the client view. */
 function transcriptView(record: TranscriptEntryRecord): RunTranscriptEntryView {
   return {
@@ -1116,19 +1124,26 @@ function buildTimeline(
     });
   }
   // Each Harness Turn (#116): admitted (naming its Session), then — once settled —
-  // its result kind. The authoritative assistant content and tool activity in
-  // between come from the normalized durable events.
+  // its result kind. Each carries its Crucible Turn kind (#126), narrowed at this
+  // read ingress (D7) so a client labels reopened Agent and Interactive Turns
+  // without inferring from `progress[position]`; a legacy row with no kind omits it.
+  // The authoritative assistant content and tool activity in between come from the
+  // normalized durable events.
   for (const turn of turns) {
+    const turnKind = toTurnKind(turn.kind);
+    const kindField = turnKind !== undefined ? { turnKind } : {};
     events.push({
       at: turn.admittedAt,
       event: "turn-started",
       detail: turn.session,
+      ...kindField,
     });
     if (turn.settledAt !== undefined && turn.resultKind !== undefined) {
       events.push({
         at: turn.settledAt,
         event: "turn-settled",
         detail: turn.resultKind,
+        ...kindField,
       });
     }
   }

@@ -234,10 +234,11 @@ try {
     }
     assertMigrated(join(legacyHome, "catalog.db"), "Catalog");
     assertMigrated(join(groupDir, "coordination.db"), "coordination");
-    // The Run Store carries three migrations: #108 added `pending_gate`, and #116
-    // added the Harness Turn records (`harness_session`/`turn`/`turn_event`/
-    // `transcript_entry`) and Attempt `effective_model`.
-    assertMigrated(join(groupDir, runId, "run.db"), "Run Store", 3);
+    // The Run Store carries four migrations: #108 added `pending_gate`, #116 added
+    // the Harness Turn records (`harness_session`/`turn`/`turn_event`/
+    // `transcript_entry`) and Attempt `effective_model`, and #126 added the durable
+    // Turn `kind` column.
+    assertMigrated(join(groupDir, runId, "run.db"), "Run Store", 4);
   }
 
   run(binary, ["workspace", "approve"], {

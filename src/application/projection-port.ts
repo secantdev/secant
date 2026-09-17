@@ -536,6 +536,14 @@ export type RunTimelineKind =
   | "request-raised"
   | "request-answered"
   | "request-expired";
+
+/** The Crucible Step kind a durable Turn was produced by (#126): an autonomous
+ *  `agent` Step's Turn or an `interactive-agent` Step's human Turn. Carried on the
+ *  `turn-started`/`turn-settled` timeline entries so both clients label reopened
+ *  history with the right vocabulary without inferring from `progress[position]`.
+ *  A subset of `StepKindName`, and independent of the Turn's `origin`. */
+export type RunTurnKind = "agent" | "interactive-agent";
+
 export interface RunTimelineEvent {
   readonly at: string; // ISO 8601
   readonly event: RunTimelineKind;
@@ -543,8 +551,13 @@ export interface RunTimelineEvent {
    *  `trust-granted`; the iteration ordinal for `iteration`; the completed
    *  iteration count for `checkpoint-blocked`; the answer (`continue`/`stop`) for
    *  `gate-answered`; the declared Workspace path for `materialization-conflict`;
-   *  absent for `run-created`. */
+   *  the Session for `turn-started`; the result kind for `turn-settled`; absent for
+   *  `run-created`. */
   readonly detail?: string;
+  /** The Turn kind of a `turn-started`/`turn-settled` entry (#126), additive to the
+   *  frozen `--json`. Present when the durable Turn recorded its kind; absent on
+   *  every other event and on a legacy Turn row whose kind is unknown. */
+  readonly turnKind?: RunTurnKind;
 }
 
 /** A Materialization conflict currently resting a Run `halted`: a `home: workspace`

@@ -228,14 +228,19 @@ test("a command -> agent -> command Bundle runs the plain Turn to succeeded (#11
   assert.ok(kinds.includes("turn-settled"), JSON.stringify(kinds));
   const settled = run.timeline.find((event) => event.event === "turn-settled");
   assert.equal(settled?.detail, "completed");
+  // The durable Turn events carry the recorded Crucible Turn kind (#126) additively,
+  // so a client labels reopened history without inferring from the Run's position.
+  const started = run.timeline.find((event) => event.event === "turn-started");
+  assert.equal(started?.turnKind, "agent");
+  assert.equal(settled?.turnKind, "agent");
 });
 
 test("run show prints the Turn timeline, Session availability, and effective model (#116)", async (t) => {
   const { wired, runId } = await launchAgentRun(t);
   const shown = await runShow(wired, runId);
-  assert.match(shown, /turn-started/);
+  assert.match(shown, /turn-started agent/); // the recorded Turn kind (#126)
   assert.match(shown, /assistant-content/);
-  assert.match(shown, /turn-settled/);
+  assert.match(shown, /turn-settled agent/);
   assert.match(shown, /Sessions:/);
   assert.match(shown, /s: open/);
   assert.match(shown, /Effective model: claude-/);

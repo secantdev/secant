@@ -63,6 +63,18 @@ export interface RunWorkbenchView {
     gate: RunGateReference,
     answer: "continue" | "stop",
   ): Accessor<AnswerOutcome>;
+  /** Sends one human Turn to the interactive-agent Step the Run is blocked at (#122):
+   *  the verbatim text becomes the Turn's transcript input. The accessor starts
+   *  `pending` and settles once the Operation resolves; the open snapshot follows the
+   *  new transcript in. */
+  sendInteractiveTurn(
+    runId: string,
+    stepId: string,
+    text: string,
+  ): Accessor<AnswerOutcome>;
+  /** Ends the interactive-agent Step the Run is blocked at (#122): settles the Step
+   *  succeeded and advances the Run. Offered only at a Turn boundary. */
+  endInteractiveStep(runId: string, stepId: string): Accessor<AnswerOutcome>;
 }
 
 const ctx = createContext<RunWorkbenchView>();
@@ -107,6 +119,20 @@ export function createLiveRunWorkbenchView(
         operationId: randomUUID(),
         operation: "answer-human-gate",
         input: { runId: gate.runId, gate, answer },
+      }),
+    // Interactive turn-taking (#122): each write is the same submit-and-settle
+    // protocol; the open `run` snapshot follows the Run's new transcript / advance.
+    sendInteractiveTurn: (runId, stepId, text) =>
+      submitAndSettle(port, {
+        operationId: randomUUID(),
+        operation: "send-interactive-turn",
+        input: { runId, stepId, text },
+      }),
+    endInteractiveStep: (runId, stepId) =>
+      submitAndSettle(port, {
+        operationId: randomUUID(),
+        operation: "end-interactive-step",
+        input: { runId, stepId },
       }),
   };
 }

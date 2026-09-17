@@ -177,6 +177,12 @@ function noRunView(): RunWorkbenchView {
     answer() {
       throw new Error("run workbench not used in this test");
     },
+    sendInteractiveTurn() {
+      throw new Error("run workbench not used in this test");
+    },
+    endInteractiveStep() {
+      throw new Error("run workbench not used in this test");
+    },
   };
 }
 function fakeRenderer(): RendererPort {

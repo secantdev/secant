@@ -60,6 +60,14 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   exists; the async `prepare` (spawning `claude --version`) runs only at execution. `supportsInteractiveTurns` is a client fact the Application forwards to Preflight.
 - The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no live snapshot;
   the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`).
+- `send-interactive-turn`/`end-interactive-step` (#122) drive an interactive-agent Step the Run rests `blocked` at. The executor records **no** durable gate — the block is
+  derived from the current Step being `interactive-agent` (the same signal the TUI blocked-basis reads), and no Attempt settles until End. `beginInteractive` reuses the held
+  owner (a blocked Run keeps it) or resumes+acquires a reopened one, then re-derives to confirm the Run is blocked at the named Step. `send` drives one human Turn (origin
+  `human`, verbatim text as the transcript input) through the `runInteractiveTurn` seam against that owner and stays `blocked` between Turns (owner held, no execution promise,
+  ADR 0031); the Turn's writes bypass `observedOwner`, so it `pushRunUpdate`s the new transcript itself. `end` publishes the Step's derived Attempt
+  (`interactiveStepAttemptId`, an empty succeeded Attempt that stages no commit) with `advanceState: "running"` and re-drives execution, which skips the settled Step and
+  reuses its Session. Both set `tracking.promise` (via a `start*` helper) so cancel-run/interrupt-turn find and abort a live human Turn; the abort reason decides the rest as
+  the answer path does. `send` is refused blank at admission (before any stdin); `end` mid-Turn (a live Turn) is refused as a value.
 - `deriveRun`'s walk assumes `attempt_log` holds only per-Step Attempts, but the Run Store already appends the reconciliation `indeterminate` marker row
   there (see `store/AGENTS.md`). The marker is harmless only because its outcome is not `succeeded`, not because the walk excludes it — keep that true if
   you add marker rows.

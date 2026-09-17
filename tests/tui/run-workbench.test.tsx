@@ -21,6 +21,7 @@ import type {
   BundleCatalogSnapshot,
   BundleFocusSnapshot,
   DiagnosticReference,
+  EndInteractiveStepOffer,
   InstalledBundleFocus,
   ResourceRead,
   ResourceReference,
@@ -32,6 +33,7 @@ import type {
   RunStepProgress,
   RunTimelineEvent,
   RunView,
+  SendInteractiveTurnOffer,
   WorkspaceSnapshot,
 } from "../../src/application/projection-port.js";
 
@@ -171,6 +173,13 @@ function makeRunView(initial: RunSnapshot) {
     gate: RunGateReference;
     answer: "continue" | "stop";
   }[] = [];
+  // The interactive seams are hand-driven too (#122): each records its dispatch and
+  // returns the shared outcome accessor a test advances, so the tests exercise the
+  // blank guard, the boundary-gated End Step, and the pending path.
+  const [interactiveOutcome, setInteractiveOutcome] =
+    createSignal<AnswerOutcome>({ kind: "pending" });
+  const sends: { runId: string; stepId: string; text: string }[] = [];
+  const ends: { runId: string; stepId: string }[] = [];
   const view: RunWorkbenchView = {
     openRun: () => ({ snapshot, live, preview }),
     readResource: (reference) =>
@@ -186,6 +195,14 @@ function makeRunView(initial: RunSnapshot) {
     answer: (gate, answer) => {
       answers.push({ gate, answer });
       return answerOutcome;
+    },
+    sendInteractiveTurn: (runId, stepId, text) => {
+      sends.push({ runId, stepId, text });
+      return interactiveOutcome;
+    },
+    endInteractiveStep: (runId, stepId) => {
+      ends.push({ runId, stepId });
+      return interactiveOutcome;
     },
   };
   return {
@@ -205,6 +222,9 @@ function makeRunView(initial: RunSnapshot) {
     setRead: (key: string, read: ResourceRead) => reads.set(key, read),
     answers,
     setAnswerOutcome,
+    sends,
+    ends,
+    setInteractiveOutcome,
   };
 }
 
@@ -1554,4 +1574,112 @@ test("a refused action surfaces the reason without leaving", async () => {
   const frame = t.captureCharFrame();
   assert.match(frame, /live in another process/); // the reason is shown
   assert.match(frame, /Timeline/); // still on the Workbench
+});
+
+// --- interactive-agent turn-taking (#122) ----------------------------------
+
+const SEND_OFFER: SendInteractiveTurnOffer = {
+  action: "send-interactive-turn",
+  runId: "run-1",
+  stepId: "discuss",
+  basis: "interactive Turn",
+  consequence: "send the typed text as one human Turn in the Step's Session.",
+};
+const END_OFFER: EndInteractiveStepOffer = {
+  action: "end-interactive-step",
+  runId: "run-1",
+  stepId: "discuss",
+  consequence: "end the interactive Step succeeded and advance the Run.",
+};
+
+/** A Run blocked at an interactive-agent Step at a Turn boundary (send + end
+ *  offered). Omit the offers via `actionOffers: []` to model a live Turn. */
+function interactiveRunOf(over: Partial<RunView> = {}): RunView {
+  return runOf({
+    state: "blocked",
+    progress: [{ id: "discuss", kind: "interactive-agent", status: "running" }],
+    position: 0,
+    actionOffers: [SEND_OFFER, END_OFFER],
+    ...over,
+  });
+}
+
+test("the interactive input takes the human's text and Enter sends one Turn (#122)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  // Focus is on the input during the Step; the human's keystrokes accumulate.
+  await press(wb.t, wb.renderer, "h");
+  await press(wb.t, wb.renderer, "i");
+  assert.match(wb.t.captureCharFrame(), /> hi/);
+
+  await press(wb.t, wb.renderer, "return");
+  assert.deepEqual(wb.control.sends, [
+    { runId: "run-1", stepId: "discuss", text: "hi" },
+  ]);
+});
+
+test("a blank interactive Turn is not sent (#122)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  // Enter with an empty draft sends nothing; a whitespace-only draft is the same.
+  await press(wb.t, wb.renderer, "return");
+  await press(wb.t, wb.renderer, "space");
+  await press(wb.t, wb.renderer, "return");
+  assert.equal(wb.control.sends.length, 0);
+});
+
+test("End Step arms a confirmation and dispatches on y (#122)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  await press(wb.t, wb.renderer, "e", { ctrl: true });
+  assert.match(wb.t.captureCharFrame(), /End this interactive Step\?/);
+  await press(wb.t, wb.renderer, "y");
+  assert.deepEqual(wb.control.ends, [{ runId: "run-1", stepId: "discuss" }]);
+});
+
+test("Escape backs out of an armed End Step without dispatching (#122)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  await press(wb.t, wb.renderer, "e", { ctrl: true });
+  assert.match(wb.t.captureCharFrame(), /End this interactive Step\?/);
+  await press(wb.t, wb.renderer, "escape");
+  assert.equal(wb.control.ends.length, 0);
+  assert.doesNotMatch(wb.t.captureCharFrame(), /End this interactive Step\?/);
+});
+
+test("End Step is not offered mid-Turn (#122)", async () => {
+  // No send/end offers means a Turn is live: End Step cannot arm and Enter sends
+  // nothing, so the human waits (or interrupts) rather than ending mid-Turn.
+  const wb = await mountWorkbench(interactiveRunOf({ actionOffers: [] }));
+  const frame = wb.t.captureCharFrame();
+  assert.match(frame, /a Turn is running/);
+  await press(wb.t, wb.renderer, "e", { ctrl: true });
+  assert.equal(wb.control.ends.length, 0);
+  assert.doesNotMatch(wb.t.captureCharFrame(), /End this interactive Step\?/);
+  await press(wb.t, wb.renderer, "a");
+  await press(wb.t, wb.renderer, "return");
+  assert.equal(wb.control.sends.length, 0);
+});
+
+test("a send refusal surfaces in the input and re-enables it (#122)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  await press(wb.t, wb.renderer, "h");
+  await press(wb.t, wb.renderer, "return");
+  wb.control.setInteractiveOutcome({
+    kind: "refused",
+    problem: {
+      code: "interactive-turn-busy",
+      explanation: "a Turn is already live",
+      remediation: "wait for it",
+      possibleEffects: "none",
+    },
+  });
+  await wb.t.renderOnce();
+  assert.match(wb.t.captureCharFrame(), /a Turn is already live/);
+});
+
+test("the interactive input reads without colour and fits a narrow terminal (#122)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf(), 48, 24);
+  const frame = wb.t.captureCharFrame();
+  // The Step and its controls read from glyphs and words, not colour.
+  assert.match(frame, /BLOCKED · interactive Turn/);
+  assert.match(frame, /Your Turn/);
+  assert.match(frame, /enter send Turn · \^E end step/);
+  noOverflow(frame, 48);
 });

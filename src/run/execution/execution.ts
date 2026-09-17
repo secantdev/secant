@@ -30,6 +30,7 @@ import type {
   RecoveryCoordinate,
   RequestAnswer,
   TurnEvent,
+  TurnOrigin,
   TurnResult,
 } from "../../harness/harness.js";
 import {
@@ -253,16 +254,23 @@ interface StepAttempt {
   readonly effectiveModel?: string;
 }
 
-/** A durable pause an executor returns instead of an Attempt (#108): the Step did
- *  not run to a settled outcome — it rests the Run `blocked` and waits for a human.
- *  The scheduler records the pending gate (with the minted Attempt id) and unwinds
- *  the walk `blocked`, never publishing an Attempt. It branches on this shape, not
+/** A durable pause an executor returns instead of an Attempt (#108, #122): the Step
+ *  did not run to a settled outcome — it rests the Run `blocked` and waits for a
+ *  human. A Human Gate pause carries the gate the scheduler records (with the minted
+ *  Attempt id); an interactive-agent pause records nothing durable — the block is
+ *  derived from the current Step being interactive-agent, and its Attempt settles
+ *  later through `end-interactive-step`. The scheduler branches on this shape, not
  *  on the Step kind (#13 rule 6). */
-interface StepPause {
+type StepPause = GatePause | InteractivePause;
+interface GatePause {
   readonly pause: true;
   readonly shape: HumanGateShape;
   readonly message: string; // the exact rendered message shown to the human
   readonly outputArtifactName?: string; // free-text's declared output artifact
+}
+interface InteractivePause {
+  readonly pause: true;
+  readonly interactive: true;
 }
 
 interface StepContext {
@@ -289,9 +297,10 @@ type StepExecutor = (
 // The closed executable Step-kind dispatch table (#13). A `command` runs to an
 // Attempt; a `human-gate` returns a durable pause the scheduler records as a
 // pending gate and rests `blocked` at (#108); an `agent` runs one autonomous
-// Harness Turn to an Attempt (#116). The scheduler learns nothing per kind — it
-// branches only on an Attempt vs the pause shape. `interactive-agent` has no row
-// yet (its human-driven turns land in a later slice).
+// Harness Turn to an Attempt (#116); an `interactive-agent` returns a durable pause
+// that rests `blocked` for human turn-taking, driven from the Application and
+// settled by `end-interactive-step` (#122). The scheduler learns nothing per kind —
+// it branches only on an Attempt vs the pause shape.
 const STEP_EXECUTORS: Readonly<Partial<Record<StepKindName, StepExecutor>>> = {
   command: (step, context) => {
     // The table key guarantees the kind; narrow for the type system.
@@ -316,7 +325,19 @@ const STEP_EXECUTORS: Readonly<Partial<Record<StepKindName, StepExecutor>>> = {
     }
     return runAgent(step, context, attemptId);
   },
+  "interactive-agent": () => runInteractiveAgent(),
 };
+
+/** An interactive-agent Step runs no Turn itself: it rests the Run `blocked` and
+ *  hands its named Session to the human, who drives each Turn through the
+ *  Application's `send-interactive-turn` and settles the Step through
+ *  `end-interactive-step` (#122). Like a Human Gate it is a durable pause the
+ *  scheduler rests `blocked` at, but it records no gate — the block is derived from
+ *  the current Step being interactive-agent, and no Attempt is published until the
+ *  human ends the Step. */
+function runInteractiveAgent(): Promise<StepPause> {
+  return Promise.resolve({ pause: true, interactive: true });
+}
 
 /** The Step kinds this release can dispatch — the keys of the closed executable
  *  table. Preflight refuses a Routing that uses any other kind (an intrinsic
@@ -585,10 +606,7 @@ async function runStepAttempts(
   }
   const executor = STEP_EXECUTORS[step.kind];
   if (executor === undefined) {
-    throw new Error(
-      `execution: Step kind "${step.kind}" is not dispatchable ` +
-        "(Command runs, Human Gate pauses, Agent runs a Turn; interactive-agent lands later).",
-    );
+    throw new Error(`execution: Step kind "${step.kind}" is not dispatchable.`);
   }
   // Clamp a bad budget to zero so a typo (e.g. -1) still runs the Step once
   // rather than silently skipping it and resting the Run failed with no Attempt.
@@ -612,6 +630,10 @@ async function runStepAttempts(
     // re-reaches the gate re-rests `blocked` and re-records nothing. A fenced owner
     // means another process took over; throw as the publication path does.
     if ("pause" in result) {
+      // An interactive-agent pause: a durable block with no gate record (#122). The
+      // Run rests `blocked` (executeRouting writes it) and the human drives Turns;
+      // `end-interactive-step` publishes this Step's Attempt. No Attempt here, no retry.
+      if ("interactive" in result) return "blocked";
       const recorded = context.step.owner.recordPendingGate({
         attemptId,
         stepId: step.id,
@@ -1055,8 +1077,76 @@ async function runAgent(
     step.session === "fresh" ? `fresh-${attemptId}` : step.session;
   // One Turn per Agent Step Attempt in M3. The id keys the durable Turn record.
   const turnId = `${attemptId}#turn`;
-  const harnessName = harness.prepared.profile.harness;
 
+  const recovery = sessionRecovery(owner, session);
+  // `unusable`: recovery already failed and ADR 0022 forbids fabricating a fresh
+  // conversation, so the Attempt fails without starting a Turn — no retry ever
+  // opens a fresh Session in its place.
+  if (recovery.unusable) return { outcome: "failed", outputs: [] };
+
+  const result = await driveHarnessTurn(owner, harness.prepared, {
+    session,
+    origin: "managed",
+    attemptId,
+    turnId,
+    input: prompt,
+    ...(recovery.resume !== undefined ? { resume: recovery.resume } : {}),
+    ...(context.requestChannel !== undefined
+      ? { requestChannel: context.requestChannel }
+      : {}),
+    ...(context.cancelSignal !== undefined
+      ? { cancelSignal: context.cancelSignal }
+      : {}),
+  });
+  return mapTurnResult(result);
+}
+
+/** What the named Session's last recorded availability says about how the next Turn
+ *  opens (#118): `unusable` forbids another Turn (recovery failed, ADR 0022);
+ *  `detached` resumes the same Claude Code Session from the stored coordinate;
+ *  absent or `open` opens a fresh Turn (a first launch or a healthy same-Session
+ *  Turn). Shared by the autonomous Agent Step and the interactive human Turn. */
+function sessionRecovery(
+  owner: RunOwner,
+  session: string,
+):
+  | { readonly unusable: true }
+  | { readonly unusable: false; readonly resume?: RecoveryCoordinate } {
+  const record = owner
+    .harnessSessions()
+    .find((candidate) => candidate.session === session);
+  if (record?.availability === "unusable") return { unusable: true };
+  const resume: RecoveryCoordinate | undefined =
+    record?.availability === "detached" &&
+    record.availabilityDetail !== undefined
+      ? { opaque: record.availabilityDetail }
+      : undefined;
+  return { unusable: false, ...(resume !== undefined ? { resume } : {}) };
+}
+
+/** The mechanical driving of one Harness Turn shared by the autonomous Agent Step
+ *  and the interactive human Turn (#116, #122): admit the input as the Turn's
+ *  transcript before the stdin frame (the durable admission the Adapter awaits),
+ *  drain events into the Store, relay approval requests to the live channel, wire the
+ *  cancel Seam to `interrupt`, settle the durable Turn, and return the raw result.
+ *  A full cancel-run (RUN_CANCEL_ABORT) throws `RunCancelledError` so the cancel path
+ *  owns the `cancelled` rest; every other result is returned for the caller to map. */
+async function driveHarnessTurn(
+  owner: RunOwner,
+  prepared: PreparedHarness,
+  params: {
+    readonly session: string;
+    readonly origin: TurnOrigin;
+    readonly attemptId: string;
+    readonly turnId: string;
+    readonly input: string;
+    readonly resume?: RecoveryCoordinate;
+    readonly requestChannel?: RequestChannel;
+    readonly cancelSignal?: AbortSignal;
+  },
+): Promise<TurnResult> {
+  const { session, attemptId, turnId } = params;
+  const harnessName = prepared.profile.harness;
   const recorder: DurableTurnRecorder = {
     admit(admission) {
       const result = owner.admitTurn({
@@ -1082,33 +1172,13 @@ async function runAgent(
     },
   };
 
-  // The Session's last recorded availability decides how this Turn opens (#118):
-  //  - `detached`: resume in the same Claude Code Session via `--resume` from the
-  //    stored recovery coordinate. A non-acknowledging init fails the Turn with the
-  //    typed recovery failure and marks the Session `unusable`.
-  //  - `unusable`: recovery already failed and ADR 0022 forbids fabricating a fresh
-  //    conversation, so the Attempt fails without starting a Turn — no retry ever
-  //    opens a fresh Session in its place.
-  //  - absent / `open`: a fresh Turn (a first launch, or a healthy same-Session Turn).
-  const sessionRecord = owner
-    .harnessSessions()
-    .find((candidate) => candidate.session === session);
-  if (sessionRecord?.availability === "unusable") {
-    return { outcome: "failed", outputs: [] };
-  }
-  const resume: RecoveryCoordinate | undefined =
-    sessionRecord?.availability === "detached" &&
-    sessionRecord.availabilityDetail !== undefined
-      ? { opaque: sessionRecord.availabilityDetail }
-      : undefined;
-
-  const turn = harness.prepared.startTurn({
+  const turn = prepared.startTurn({
     session,
-    origin: "managed",
+    origin: params.origin,
     correlationKey: { opaque: turnId },
     recorder,
-    input: { text: prompt },
-    ...(resume !== undefined ? { resume } : {}),
+    input: { text: params.input },
+    ...(params.resume !== undefined ? { resume: params.resume } : {}),
   });
   // The live request-answer channel (#117): each approval request reaches an
   // observing client through the channel, which the client answers by policy
@@ -1116,7 +1186,7 @@ async function runAgent(
   // `request-answered` with `by:"human"` (it cannot know a client policy exists),
   // so the client-declared provenance is stashed here and wins in the durable
   // record.
-  const channel = context.requestChannel;
+  const channel = params.requestChannel;
   const answerSources = new Map<string, RequestAnswerBy>();
   turn.subscribe((event) => {
     recordTurnEvent(owner, turnId, event, answerSources);
@@ -1141,7 +1211,7 @@ async function runAgent(
   // native work and the Turn drains to an `interrupted` (or `lost`) result. Both
   // cases map to a resumable rest; the Application decides `cancelled` vs `halted`
   // from the abort reason.
-  const signal = context.cancelSignal;
+  const signal = params.cancelSignal;
   const onAbort = (): void => {
     void turn.interrupt();
   };
@@ -1153,14 +1223,14 @@ async function runAgent(
     const result = await turn.result();
     settleTurnResult(owner, turnId, session, result);
     // A full cancel-run of a live Turn stops the Turn but ends the Run `cancelled`
-    // (#87/#98): unwind without publishing this Attempt, so the Application's cancel
+    // (#87/#98): unwind without settling this Attempt, so the Application's cancel
     // path owns the `cancelled` rest — the same RunCancelledError a cancelled
     // Command throws. An interrupt-turn or an OS signal instead maps the result to
-    // an Attempt that rests the Run `halted` for resume.
+    // a resumable `halted` rest.
     if (signal?.aborted === true && signal.reason === RUN_CANCEL_ABORT) {
       throw new RunCancelledError();
     }
-    return mapTurnResult(result);
+    return result;
   } finally {
     // The Turn is over: drop the abort listener so a completed Turn leaks none, and
     // unbind so a late `answer-harness-request` finds no live answer function and
@@ -1168,6 +1238,77 @@ async function runAgent(
     if (signal !== undefined) signal.removeEventListener("abort", onAbort);
     channel?.bindAnswer(undefined);
   }
+}
+
+/** The Attempt id an interactive-agent Step's pause carries (#122): a top-level
+ *  Step runs at Iteration 0, Attempt 0, so `end-interactive-step` settles exactly
+ *  this id and a resume skips the settled Step. The Composition check keeps an
+ *  interactive-agent Step top-level, so the Iteration is always zero. */
+export function interactiveStepAttemptId(stepId: string): string {
+  return encodeAttemptId(stepId, 0, 0);
+}
+
+/** What driving one human interactive Turn needs (#122). */
+export interface InteractiveTurnRequest {
+  readonly owner: RunOwner;
+  readonly prepared: PreparedHarness;
+  /** The Step's named Session, reused across the Step's human Turns and the
+   *  following Agent Steps that name it. */
+  readonly session: string;
+  /** The interactive Step's pending Attempt id, so every human Turn links to it. */
+  readonly attemptId: string;
+  /** A unique id per human Turn (the durable Turn record's key). */
+  readonly turnId: string;
+  /** The human's verbatim text — Secant authors nothing; recorded as the Turn's
+   *  `user` transcript entry before any stdin frame is sent. */
+  readonly text: string;
+  readonly requestChannel?: RequestChannel;
+  readonly cancelSignal?: AbortSignal;
+}
+
+/** Drive one human Turn of an interactive-agent Step (#122): admit the human's
+ *  verbatim text (origin `human`), resume the named Session when detached, record
+ *  the Turn durably, and return the raw result. The Application maps the result to
+ *  the Run's next resting state; between Turns the Run stays `blocked`. */
+export async function driveInteractiveTurn(
+  request: InteractiveTurnRequest,
+): Promise<TurnResult> {
+  const recovery = sessionRecovery(request.owner, request.session);
+  // A Session whose recovery already failed cannot take another Turn (ADR 0022);
+  // surface it as a failed result without opening a fresh conversation.
+  if (recovery.unusable) return unusableTurnResult(request.session);
+  return driveHarnessTurn(request.owner, request.prepared, {
+    session: request.session,
+    origin: "human",
+    attemptId: request.attemptId,
+    turnId: request.turnId,
+    input: request.text,
+    ...(recovery.resume !== undefined ? { resume: recovery.resume } : {}),
+    ...(request.requestChannel !== undefined
+      ? { requestChannel: request.requestChannel }
+      : {}),
+    ...(request.cancelSignal !== undefined
+      ? { cancelSignal: request.cancelSignal }
+      : {}),
+  });
+}
+
+/** The failed result an interactive Turn returns for an unusable Session (#122). */
+function unusableTurnResult(session: string): TurnResult {
+  return {
+    kind: "failed",
+    detail: {
+      failure: {
+        phase: "recovery",
+        category: "session-unusable",
+        possibleEffects: "none",
+        cause: undefined,
+        diagnostics: `Session "${session}" is unusable and cannot take another Turn.`,
+      },
+      effectiveModel: { known: false },
+      session: { state: "unusable", reason: "recovery previously failed" },
+    },
+  };
 }
 
 /** Relay one Turn event to the live request-answer channel (#117): approval

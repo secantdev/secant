@@ -6,12 +6,15 @@ import {
   type Budgets,
 } from "../bundle/bundle.js";
 import type { Catalog } from "../catalog/catalog.js";
-import type {
-  AuthoredManifest,
-  Platform,
-  RoutingNode,
+import {
+  flattenSteps,
+  type AgentStep,
+  type AuthoredManifest,
+  type Platform,
+  type RoutingNode,
 } from "../workflow/workflow.js";
 import {
+  interactiveStepAttemptId,
   type LiveObservation,
   type LiveRequestView,
   type RequestAnswerFn,
@@ -21,7 +24,7 @@ import {
   INTERRUPT_TURN_ABORT,
   SIGNAL_ABORT,
 } from "../run/execution/execution.js";
-import type { RunGroup, RunOwner } from "../run/store/store.js";
+import type { RunGroup, RunOwner, RunRecord } from "../run/store/store.js";
 import {
   focusSnapshot,
   listSnapshot,
@@ -36,6 +39,7 @@ import {
   runSnapshot,
   selectRunEntry,
   STEER_UNAVAILABLE_REASON,
+  type RunFacts,
   type RunProjectionDependencies,
 } from "./run-projection.js";
 import {
@@ -47,6 +51,10 @@ import {
   harnessRequestExpired,
   harnessRequestRejected,
   harnessRequestStale,
+  interactiveStepMidTurn,
+  interactiveStepNotActive,
+  interactiveTurnBlank,
+  interactiveTurnBusy,
   operationIdReused,
   operationNotFound,
   pathNotFound,
@@ -76,9 +84,11 @@ import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
   BundleFocusSnapshot,
+  EndInteractiveStepInput,
   InterruptTurnInput,
   LaunchRunInput,
   ResumeRunInput,
+  SendInteractiveTurnInput,
   SteerTurnInput,
   OpenedProjection,
   OperationOutcome,
@@ -120,6 +130,36 @@ export type RunExecution = (context: {
   readonly requestChannel?: RequestChannel;
 }) => Promise<RunReport>;
 
+/** How one human interactive Turn is driven (#122). Composition prepares a Harness,
+ *  drives one Turn (origin `human`) with the verbatim text in the named Session —
+ *  resuming it when detached, recording it durably — and closes the Harness, then
+ *  reports the mechanical outcome. The Application maps it to the Run's next resting
+ *  state; between Turns the Run stays `blocked`. A full cancel-run aborts the signal
+ *  and the driver throws (composition owns it), which the Application's cancel path
+ *  catches by its own AbortController, exactly as `runExecution` does. */
+export type RunInteractiveTurn = (context: {
+  readonly runId: string;
+  readonly digest: string;
+  readonly owner: RunOwner;
+  /** The Step's named Session, reused across the Step's Turns and later Steps. */
+  readonly session: string;
+  /** The interactive Step's pending Attempt id, so every human Turn links to it. */
+  readonly attemptId: string;
+  /** A unique id per human Turn. */
+  readonly turnId: string;
+  /** The human's verbatim Turn text. */
+  readonly text: string;
+  readonly cancelSignal?: AbortSignal;
+  readonly requestChannel?: RequestChannel;
+}) => Promise<InteractiveTurnReport>;
+
+/** The mechanical outcome of one human interactive Turn (#122), normalized so the
+ *  Application stays Harness-agnostic. `completed`/`failed` leave the Run `blocked`
+ *  for the next Turn; `interrupted`/`lost` rest it `halted` (resumable). */
+export type InteractiveTurnReport = {
+  readonly outcome: "completed" | "failed" | "interrupted" | "lost";
+};
+
 // Why a live Run's execution was aborted. A `cancel-run` (CANCEL_ABORT) rests the
 // Run `cancelled`; a process signal (SIGNAL_ABORT: SIGINT/SIGHUP/SIGTERM) or a
 // Turn-scoped interrupt (INTERRUPT_TURN_ABORT, #118) rests it `halted` — a Command
@@ -142,6 +182,39 @@ interface LiveOverlayState {
   /** True once any Turn event arrived, so a joining observer knows an overlay is
    *  worth delivering even with no outstanding request. */
   active: boolean;
+}
+
+/** A launched Run tracked in this process (#98): its routing and Bundle facts, the
+ *  owner while live (so a snapshot read never fences the executing owner), the
+ *  in-memory latest state, the AbortController that stops its execution, the
+ *  settlement promise a cancel awaits, the streams watching it, and its live
+ *  Agent-Turn overlay (#117). */
+interface TrackedRun {
+  readonly digest: string;
+  readonly routing: readonly RoutingNode[];
+  readonly name: string;
+  readonly id: string;
+  readonly version: string;
+  state: string;
+  owner?: RunOwner;
+  done: boolean;
+  readonly abort: AbortController;
+  promise?: Promise<OperationOutcome>;
+  readonly takeover?: boolean;
+  readonly observers: Set<UpdateStream>;
+  readonly live: LiveOverlayState;
+}
+
+/** What `beginInteractive` returns once a Run is confirmed to rest at the named
+ *  interactive-agent Step (#122): the claimed owner and its tracking, whether the
+ *  ownership was already held, and the resolved Step/record/facts. */
+interface InteractiveContext {
+  readonly tracking: TrackedRun;
+  readonly owner: RunOwner;
+  readonly ownershipWasHeld: boolean;
+  readonly step: AgentStep;
+  readonly record: RunRecord;
+  readonly facts: RunFacts;
 }
 
 // Application owns the Workspace-approval use case behind the Projection Port.
@@ -183,6 +256,10 @@ export interface ApplicationDependencies {
   readonly runGroup?: RunGroup;
   /** The Run execution composition constructs and hands in (see RunExecution). */
   readonly runExecution?: RunExecution;
+  /** How one human interactive Turn is driven (#122); composition hands it in.
+   *  Absent when a caller wires no interactive support (headless refuses interactive
+   *  Bundles at Preflight, so it never reaches this seam). */
+  readonly runInteractiveTurn?: RunInteractiveTurn;
   /** The clock the `run-list` Projection groups rows by (Today / Yesterday /
    *  Older). Defaults to the wall clock; a test injects a fixed instant (#87). */
   readonly now?: () => Date;
@@ -209,7 +286,7 @@ export interface Application {
 const launchInputMap = z.record(z.string(), z.string());
 
 export function createApplication(deps: ApplicationDependencies): Application {
-  const { catalog, runGroup, runExecution } = deps;
+  const { catalog, runGroup, runExecution, runInteractiveTurn } = deps;
   const launchWorkspacePath = canonicalizeWorkspacePath(
     deps.launchWorkspacePath,
   );
@@ -238,27 +315,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // the in-memory latest state, the AbortController that stops its execution
   // (cancel-run and process signals abort it), the settlement promise a cancel
   // awaits, and the streams watching it (#98).
-  const runs = new Map<
-    string,
-    {
-      readonly digest: string;
-      readonly routing: readonly RoutingNode[];
-      readonly name: string;
-      readonly id: string;
-      readonly version: string;
-      state: string;
-      owner?: RunOwner;
-      done: boolean;
-      readonly abort: AbortController;
-      promise?: Promise<OperationOutcome>;
-      readonly takeover?: boolean;
-      readonly observers: Set<UpdateStream>;
-      // The live overlay of the Run's current Agent Turn (#117), ephemeral and
-      // never stored. `generation` bumps whenever the outstanding set changes, so a
-      // client answer formed against an older generation is stale.
-      readonly live: LiveOverlayState;
-    }
-  >();
+  const runs = new Map<string, TrackedRun>();
   const workspaceObservers = new Set<UpdateStream>();
   const bundleCatalogObservers = new Set<UpdateStream>();
   const runListObservers = new Set<{
@@ -1778,6 +1835,411 @@ export function createApplication(deps: ApplicationDependencies): Application {
     return { admitted: true, operationId, runId: input.runId };
   }
 
+  // --- Interactive-agent turn-taking (#122) --------------------------------
+  //
+  // An interactive-agent Step rests the Run `blocked` and hands its Session to the
+  // human. `send-interactive-turn` drives one human Turn against that Session (the
+  // Run stays blocked between Turns); `end-interactive-step` settles the Step's
+  // Attempt `succeeded` at a Turn boundary and advances the Run. Both reuse the M2
+  // blocked-under-owner machinery: the owner is held through `blocked`, so a Turn
+  // drives against the held owner; a reopened blocked Run is resumed and re-acquired
+  // like the answer path (ADR 0031). Neither branches on Bundle identity.
+
+  /** Claim the owner of a Run blocked at the named interactive-agent Step and prove
+   *  the Run currently rests there (#122). Reuses the held owner when the Run is live
+   *  in this process; otherwise resumes and acquires it and creates a tracking entry,
+   *  mirroring the answer path. Returns everything a Turn or End needs, or a Problem. */
+  function beginInteractive(
+    runId: string,
+    stepId: string,
+  ): InteractiveContext | { readonly problem: Problem } {
+    if (runGroup === undefined || runProjection === undefined) {
+      return { problem: runSupportUnavailable() };
+    }
+    const read = runGroup.readRun(runId);
+    if (!read.ok) {
+      return {
+        problem:
+          read.problem.kind === "unknown-run"
+            ? runNotFound(runId)
+            : runStoreDamaged(runId),
+      };
+    }
+    const record = read.run;
+    const foreign = liveElsewhere(runId);
+    if (foreign !== undefined) {
+      return { problem: runLiveElsewhere(runId, foreign.ownerPid) };
+    }
+    const derivedFacts = deriveRunFacts(
+      runProjection,
+      record.bundleSnapshotDigest,
+    );
+    if ("problem" in derivedFacts) return { problem: derivedFacts.problem };
+    const facts = derivedFacts.facts;
+    const step = flattenSteps(facts.routing).find(
+      (candidate): candidate is AgentStep =>
+        candidate.id === stepId && candidate.kind === "interactive-agent",
+    );
+    if (step === undefined) {
+      return { problem: interactiveStepNotActive(runId, stepId, record.state) };
+    }
+    // Reject a clearly non-blocked record before touching coordination, so acting on
+    // a Run that is not blocked toggles no claim and bumps no epoch. (A `running`
+    // record still needs the owner to tell blocked from a live mid-execution Run.)
+    if (
+      record.state !== "blocked" &&
+      record.state !== "running" &&
+      record.state !== "created"
+    ) {
+      return { problem: interactiveStepNotActive(runId, stepId, record.state) };
+    }
+    let tracking = runs.get(runId);
+    let owner =
+      tracking !== undefined && !tracking.done ? tracking.owner : undefined;
+    const ownershipWasHeld = owner !== undefined;
+    if (owner === undefined) {
+      const claim = runGroup.resumeRun(runId);
+      if (claim.outcome === "run-live-elsewhere") {
+        return { problem: runLiveElsewhere(runId, claim.ownerPid) };
+      }
+      if (claim.outcome === "unknown-run") {
+        return { problem: runNotFound(runId) };
+      }
+      owner = runGroup.acquireRun(runId);
+      if (owner === undefined) return { problem: runStoreDamaged(runId) };
+      tracking = {
+        digest: record.bundleSnapshotDigest,
+        routing: facts.routing,
+        name: facts.name,
+        id: facts.id,
+        version: facts.version,
+        state: record.state,
+        owner,
+        done: false,
+        abort: new AbortController(),
+        observers: new Set<UpdateStream>(),
+        live: freshLive(),
+      };
+      runs.set(runId, tracking);
+    }
+    if (tracking === undefined || owner === undefined) {
+      return { problem: runStoreDamaged(runId) };
+    }
+    // Confirm the Run derives to `blocked` at this exact interactive Step — not a
+    // derived checkpoint, an authored gate, or a Step it has moved past.
+    const derived = deriveRun(
+      facts.routing,
+      owner.attemptLog(),
+      record.state,
+      runId,
+      owner,
+      owner.gateAnswers(),
+    );
+    const current = derived.statuses[derived.position];
+    // `blocked` is the boundary (between Turns); `running` is a live human Turn, which
+    // runs under `running` so a crash reconciles it via the #118 path (#122). Both are
+    // "at the Step"; the caller's Turn-live check then tells a boundary from a live Turn.
+    const atStep =
+      (derived.state === "blocked" || derived.state === "running") &&
+      derived.checkpoint === undefined &&
+      derived.pendingGate === undefined &&
+      current?.id === stepId &&
+      current.kind === "interactive-agent";
+    if (!atStep) {
+      // Release an owner freshly acquired for this refusal; a held owner stays live.
+      if (!ownershipWasHeld) {
+        tracking.owner = undefined;
+        tracking.done = true;
+        owner.release();
+        owner.close();
+        runs.delete(runId);
+      }
+      return {
+        problem: interactiveStepNotActive(runId, stepId, derived.state),
+      };
+    }
+    return { tracking, owner, ownershipWasHeld, step, record, facts };
+  }
+
+  /** Whether a Turn is currently live for this Run: a settlement promise in flight
+   *  here, or an admitted Turn with no settled result. */
+  function interactiveTurnLive(tracking: TrackedRun, owner: RunOwner): boolean {
+    return (
+      tracking.promise !== undefined ||
+      owner.turns().some((turn) => turn.resultKind === undefined)
+    );
+  }
+
+  // Send one human Turn to the interactive-agent Step the Run is blocked at (#122).
+  // Blank/whitespace-only text is refused at admission, before any stdin is sent.
+  function submitSendInteractiveTurn(
+    operationId: string,
+    input: SendInteractiveTurnInput,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === sendInteractiveTurnReplayKey(input)) {
+        return { admitted: true, operationId, runId: input.runId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (
+      runGroup === undefined ||
+      runInteractiveTurn === undefined ||
+      runProjection === undefined
+    ) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    // Secant authors nothing: a blank Turn is refused before it is admitted, so no
+    // Turn is recorded and no stdin is ever written (AC1).
+    if (input.text.trim() === "") {
+      return { admitted: false, problem: interactiveTurnBlank(input.runId) };
+    }
+    operations.set(operationId, {
+      replayKey: sendInteractiveTurnReplayKey(input),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId: input.runId,
+      settle: () => startSendInteractiveTurn(operationId, input),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId: input.runId };
+  }
+
+  // Decide send synchronously, then run the Turn asynchronously. A refusal (support
+  // unavailable, not blocked at the Step, or a Turn already live) returns WITHOUT
+  // setting `tracking.promise`, so it never clobbers a genuinely live Turn's promise —
+  // the signal cancel-run/interrupt-turn read to know when the Run has actually rested.
+  // Only the going-live path records the promise, mirroring `startRun`'s guard.
+  function startSendInteractiveTurn(
+    operationId: string,
+    input: SendInteractiveTurnInput,
+  ): Promise<OperationOutcome> {
+    if (
+      runGroup === undefined ||
+      runInteractiveTurn === undefined ||
+      runProjection === undefined
+    ) {
+      return Promise.resolve({
+        status: "not-applied",
+        problem: runSupportUnavailable(),
+      });
+    }
+    const begun = beginInteractive(input.runId, input.stepId);
+    if ("problem" in begun) {
+      return Promise.resolve({ status: "not-applied", problem: begun.problem });
+    }
+    // One Turn at a time: a live Turn refuses a new one as a value (the offer is
+    // suppressed then). Checked here, so the refusal leaves `tracking.promise` intact.
+    if (interactiveTurnLive(begun.tracking, begun.owner)) {
+      return Promise.resolve({
+        status: "not-applied",
+        problem: interactiveTurnBusy(input.runId),
+      });
+    }
+    const promise = runInteractiveSend(operationId, input, begun);
+    begun.tracking.promise = promise;
+    return promise;
+  }
+
+  async function runInteractiveSend(
+    operationId: string,
+    input: SendInteractiveTurnInput,
+    begun: InteractiveContext,
+  ): Promise<OperationOutcome> {
+    const { tracking, owner, record, step } = begun;
+    const runInteractiveTurnFn = runInteractiveTurn!;
+    const attemptId = interactiveStepAttemptId(step.id);
+    const turnId = `${attemptId}#human:${operationId}`;
+    const observed = observedOwner(owner, input.runId);
+    // The Run stays `blocked` between Turns, so the claim is retained on the normal
+    // path; only an interrupt/cancel releases it.
+    let leaveClaimLive = true;
+    try {
+      // A live human Turn is running work, so the Run reads `running` while it runs and
+      // returns to `blocked` at the next boundary. This is what makes a crash mid-Turn
+      // reconcile through the #118 path (a `running` record with an unsettled Turn is
+      // rested `halted`, its Session detached), rather than strand the Run blocked with
+      // a Turn that can never settle (#122).
+      observed.writeState("running");
+      const report = await runInteractiveTurnFn({
+        runId: input.runId,
+        digest: record.bundleSnapshotDigest,
+        owner,
+        session: step.session,
+        attemptId,
+        turnId,
+        text: input.text,
+        cancelSignal: tracking.abort.signal,
+        requestChannel: makeRequestChannel(input.runId),
+      });
+      if (report.outcome === "interrupted" || report.outcome === "lost") {
+        // An interrupt-turn (or OS signal) stopped the human Turn: rest the Run
+        // `halted`, resumable, through the held owner so observers see it (#118).
+        observed.writeState("halted");
+        leaveClaimLive = false;
+        return { status: "applied" };
+      }
+      // completed or failed: the Turn is recorded; back to the boundary for the next
+      // Turn. `writeState` pushes the fresh snapshot (with the new transcript entry),
+      // which the Turn's own writes bypass observedOwner and would not push.
+      observed.writeState("blocked");
+      return { status: "applied" };
+    } catch (error) {
+      // Our own AbortController firing is the only cause of an abort; the reason tells
+      // a cancel from a signal, keeping the Application execution-agnostic.
+      if (tracking.abort.signal.aborted) {
+        if (tracking.abort.signal.reason === CANCEL_ABORT) {
+          observed.writeState("cancelled");
+          leaveClaimLive = false;
+          return { status: "applied" };
+        }
+        leaveClaimLive = true;
+        return { status: "applied" };
+      }
+      return {
+        status: "not-applied",
+        problem: runExecutionFault(input.runId, error),
+      };
+    } finally {
+      tracking.promise = undefined;
+      if (leaveClaimLive) {
+        tracking.done = false;
+      } else {
+        tracking.owner = undefined;
+        tracking.done = true;
+        owner.release();
+        owner.close();
+        pushRunUpdate(input.runId);
+      }
+    }
+  }
+
+  // End the interactive-agent Step the Run is blocked at (#122). Admitted at once;
+  // at settle time it is refused mid-Turn, else it settles the Step's Attempt
+  // succeeded and drives the Run to its next rest. Idempotent per operation id.
+  function submitEndInteractiveStep(
+    operationId: string,
+    input: EndInteractiveStepInput,
+  ): SubmissionAdmission {
+    const existing = operations.get(operationId);
+    if (existing !== undefined) {
+      if (existing.replayKey === endInteractiveStepReplayKey(input)) {
+        return { admitted: true, operationId, runId: input.runId };
+      }
+      return { admitted: false, problem: operationIdReused(operationId) };
+    }
+    if (
+      runGroup === undefined ||
+      runExecution === undefined ||
+      runProjection === undefined
+    ) {
+      return { admitted: false, problem: runSupportUnavailable() };
+    }
+    operations.set(operationId, {
+      replayKey: endInteractiveStepReplayKey(input),
+      outcome: { status: "pending" },
+      observers: new Set<UpdateStream>(),
+      runId: input.runId,
+      settle: () => startEndInteractiveStep(input),
+    });
+    scheduleSettlement(() => settleOperation(operationId));
+    return { admitted: true, operationId, runId: input.runId };
+  }
+
+  // Decide End synchronously (as send does), so a refusal — support unavailable, not
+  // at the Step, or mid-Turn — never overwrites a live Turn's `tracking.promise`.
+  function startEndInteractiveStep(
+    input: EndInteractiveStepInput,
+  ): Promise<OperationOutcome> {
+    if (
+      runGroup === undefined ||
+      runExecution === undefined ||
+      runProjection === undefined
+    ) {
+      return Promise.resolve({
+        status: "not-applied",
+        problem: runSupportUnavailable(),
+      });
+    }
+    const begun = beginInteractive(input.runId, input.stepId);
+    if ("problem" in begun) {
+      return Promise.resolve({ status: "not-applied", problem: begun.problem });
+    }
+    // End Step is admitted only at a Turn boundary: a live Turn refuses it precisely,
+    // changing nothing (AC1). Checked here, so the refusal leaves the live Turn's
+    // `tracking.promise` intact.
+    if (interactiveTurnLive(begun.tracking, begun.owner)) {
+      return Promise.resolve({
+        status: "not-applied",
+        problem: interactiveStepMidTurn(input.runId, begun.step.id),
+      });
+    }
+    const promise = runInteractiveEnd(input, begun);
+    begun.tracking.promise = promise;
+    return promise;
+  }
+
+  async function runInteractiveEnd(
+    input: EndInteractiveStepInput,
+    begun: InteractiveContext,
+  ): Promise<OperationOutcome> {
+    const { tracking, owner, record, facts, step } = begun;
+    const runExecutionFn = runExecution!;
+    const observed = observedOwner(owner, input.runId);
+    const attemptId = interactiveStepAttemptId(step.id);
+    let leaveClaimLive = false;
+    try {
+      // Settle the interactive Step's Attempt succeeded (no outputs — an Agent Step
+      // produces no Artifacts in M3), then drive the Run to its next rest. The empty
+      // succeeded Attempt stages no commit (store/AGENTS), and a resume skips the Step.
+      publishGateAttemptOrThrow(
+        observed.publishAttempt({
+          attemptId,
+          outcome: "succeeded",
+          required: [],
+          outputs: [],
+          at: new Date(),
+          advanceState: "running",
+        }),
+      );
+      const report = await runExecutionFn({
+        routing: facts.routing,
+        digest: record.bundleSnapshotDigest,
+        owner: observed,
+        cancelSignal: tracking.abort.signal,
+        requestChannel: makeRequestChannel(input.runId),
+      });
+      leaveClaimLive = report.outcome === "blocked";
+      return { status: "applied" };
+    } catch (error) {
+      if (tracking.abort.signal.aborted) {
+        if (tracking.abort.signal.reason === CANCEL_ABORT) {
+          observedOwner(owner, input.runId).writeState("cancelled");
+          leaveClaimLive = false;
+          return { status: "applied" };
+        }
+        leaveClaimLive = true;
+        return { status: "applied" };
+      }
+      return {
+        status: "not-applied",
+        problem: runExecutionFault(input.runId, error),
+      };
+    } finally {
+      tracking.promise = undefined;
+      if (leaveClaimLive) {
+        tracking.done = false;
+      } else {
+        tracking.owner = undefined;
+        tracking.done = true;
+        owner.release();
+        owner.close();
+        pushRunUpdate(input.runId);
+      }
+    }
+  }
+
   // Cancel a live Run (#87). Admitted at once; the cancel is decided and applied
   // at settle time (inline by default). Idempotent per operation id via the
   // operations map.
@@ -1985,6 +2447,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
           return submitInterruptTurn(submission.operationId, submission.input);
         case "steer-turn":
           return submitSteerTurn(submission.operationId, submission.input);
+        case "send-interactive-turn":
+          return submitSendInteractiveTurn(
+            submission.operationId,
+            submission.input,
+          );
+        case "end-interactive-step":
+          return submitEndInteractiveStep(
+            submission.operationId,
+            submission.input,
+          );
         case "cancel-run":
           return submitCancel(submission.operationId, submission.input.runId);
         case "delete-run":
@@ -2188,6 +2660,22 @@ function interruptTurnReplayKey(input: InterruptTurnInput): string {
 /** A stable replay key for a steer-turn: the Run, the Turn, and the text (#118). */
 function steerTurnReplayKey(input: SteerTurnInput): string {
   return JSON.stringify(["steer-turn", input.runId, input.turnId, input.text]);
+}
+
+/** A stable replay key for a human interactive Turn: the Run, the Step, and the
+ *  verbatim text (#122). A re-submitted operation id with an equal key replays. */
+function sendInteractiveTurnReplayKey(input: SendInteractiveTurnInput): string {
+  return JSON.stringify([
+    "send-interactive-turn",
+    input.runId,
+    input.stepId,
+    input.text,
+  ]);
+}
+
+/** A stable replay key for ending an interactive Step: the Run and the Step (#122). */
+function endInteractiveStepReplayKey(input: EndInteractiveStepInput): string {
+  return JSON.stringify(["end-interactive-step", input.runId, input.stepId]);
 }
 
 /** A stable replay key for a cancel: the Run id. A re-submitted operation id with

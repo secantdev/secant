@@ -357,8 +357,8 @@ test("a headless launch refuses an interactive-agent Bundle with interactive-ste
   const f = fixture(t, plainDirectory());
   // An interactive-agent Bundle authored directly (no command-bundle helper covers
   // it): the headless client cannot relay human turn-taking, so Preflight refuses
-  // it with the TUI remedy before the generic not-executable check and before any
-  // Harness discovery.
+  // it with the TUI remedy — the only kind-based refusal now that every kind
+  // dispatches (#122) — before any Harness discovery.
   const folder = makeTempDir("secant-interactive-bundle-");
   writeFileSync(join(folder, "grill.md"), "Grill me.\n");
   const manifest = {

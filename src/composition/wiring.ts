@@ -5,7 +5,9 @@ import {
   canonicalizeWorkspacePath,
   createApplication,
   type Application,
+  type InteractiveTurnReport,
   type RunExecution,
+  type RunInteractiveTurn,
 } from "../application/application.js";
 import { openCatalog, type Catalog } from "../catalog/catalog.js";
 import {
@@ -14,6 +16,7 @@ import {
   readBundleAssets,
 } from "../bundle/bundle.js";
 import {
+  driveInteractiveTurn,
   executeRouting,
   type AssetResolver,
   type HarnessExecutionDeps,
@@ -71,6 +74,10 @@ export interface WiringOverrides {
    *  Production constructs the Claude Code Adapter here; a test injects one wired
    *  over the replayer (a fixed session id, a temp-PATH executable). */
   readonly harnessAdapter?: HarnessAdapter;
+  /** Whether the launching client can relay human turn-taking (#116, #122). The TUI
+   *  root sets this true; the headless root leaves it false so an interactive-agent
+   *  Bundle is refused at Preflight. Defaults to false. */
+  readonly supportsInteractiveTurns?: boolean;
 }
 
 export interface Wiring extends Application {
@@ -109,6 +116,10 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
       canonicalizeWorkspacePath(launchWorkspacePath),
     );
     try {
+      // One Harness Adapter drives both the autonomous Agent Step and the human
+      // interactive Turn (#116, #122); production builds the Claude Code Adapter, a
+      // test injects one over the replayer.
+      const adapter = overrides.harnessAdapter ?? createClaudeCodeAdapter();
       const application = createApplication({
         catalog,
         launchWorkspacePath,
@@ -116,13 +127,10 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
         ...(host !== undefined ? { hostPlatform: host } : {}),
         runGroup,
         // The headless client cannot relay human turn-taking; an interactive-agent
-        // Bundle is refused at Preflight (#116). The TUI root sets this true later.
-        supportsInteractiveTurns: false,
-        runExecution: makeRunExecution(
-          catalog,
-          host ?? "linux",
-          overrides.harnessAdapter ?? createClaudeCodeAdapter(),
-        ),
+        // Bundle is refused at Preflight (#116). The TUI root sets this true.
+        supportsInteractiveTurns: overrides.supportsInteractiveTurns ?? false,
+        runExecution: makeRunExecution(catalog, host ?? "linux", adapter),
+        runInteractiveTurn: makeRunInteractiveTurn(adapter),
       });
       return { catalog, runGroup, ...application };
     } catch (error) {
@@ -186,6 +194,68 @@ function makeRunExecution(
       await prepared.harness.close();
     }
   };
+}
+
+// How one human interactive Turn is driven (#122): prepare a Harness against the
+// Run's Workspace, drive one Turn (origin `human`) with the verbatim text in the
+// named Session — resuming it when detached — and close the Harness, then report the
+// mechanical outcome. Preflight proved the executable resolves, so a prepare failure
+// here is an environment fault. A full cancel-run makes `driveInteractiveTurn` throw
+// `RunCancelledError`, which propagates past the `finally` for the Application's cancel
+// path to own, exactly as an aborted `runExecution` does.
+function makeRunInteractiveTurn(adapter: HarnessAdapter): RunInteractiveTurn {
+  return async ({
+    owner,
+    session,
+    attemptId,
+    turnId,
+    text,
+    cancelSignal,
+    requestChannel,
+  }) => {
+    const prepared = await adapter.prepare({
+      workspace: owner.record.workspacePath,
+    });
+    if (!prepared.ok) {
+      throw new Error(
+        `composition: could not prepare the Harness: ${prepared.failure.category}.`,
+      );
+    }
+    try {
+      const result = await driveInteractiveTurn({
+        owner,
+        prepared: prepared.harness,
+        session,
+        attemptId,
+        turnId,
+        text,
+        ...(cancelSignal !== undefined ? { cancelSignal } : {}),
+        ...(requestChannel !== undefined ? { requestChannel } : {}),
+      });
+      return { outcome: interactiveOutcome(result.kind) };
+    } finally {
+      await prepared.harness.close();
+    }
+  };
+}
+
+/** Map a Turn result kind to the normalized interactive outcome the Application maps
+ *  to a resting state (#122): `not-started` joins `failed` (both leave the Run blocked
+ *  for a retry); `interrupted`/`lost` rest it halted. */
+function interactiveOutcome(
+  kind: "not-started" | "completed" | "failed" | "interrupted" | "lost",
+): InteractiveTurnReport["outcome"] {
+  switch (kind) {
+    case "completed":
+      return "completed";
+    case "not-started":
+    case "failed":
+      return "failed";
+    case "interrupted":
+      return "interrupted";
+    case "lost":
+      return "lost";
+  }
 }
 
 /** Whether a Routing node carries a Step kind that needs a Harness (an Agent or

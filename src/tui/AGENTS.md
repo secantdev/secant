@@ -40,6 +40,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   dispatch, and small-width/resize relayout without overflow. A lone Escape is held briefly by OpenTUI key disambiguation — poll in real time, not by
   frame count.
 
+- The interactive-agent input (`run-workbench.tsx`, #122) is a text field driven by the raw-key pipeline, not an OpenTUI `<input>`: while `focus` is `interactive` it owns
+  every key, so `q`/`r`/`c`/`x`/`t` type rather than fire their bare-letter commands (only Ctrl+C still exits). Text accumulates from the key `name` (a single-char name types,
+  `space`/`backspace` map through) — capitals and punctuation the Renderer Port does not name are out of reach until it carries the printable value. Enter dispatches
+  `send-interactive-turn` (blank/whitespace refused before dispatch); Ctrl+E arms `end-interactive-step`, offered — and so armable — only at a Turn boundary (no live Turn),
+  reusing the same `pending` arm-and-confirm. The Step is "active" whenever the Run is blocked at an `interactive-agent` Step (independent of a live Turn), so focus stays on
+  the input across the whole Step and returns to the timeline when it ends.
 - A destructive Run Action (cancel or delete) arms a confirming keypress before it dispatches (`run-workbench.tsx` `pending`): `y` confirms, Escape backs out.
   An ordinary resume dispatches at once; a resume Offer carrying a takeover form first confirms once and names the foreign owner process.
 - The quit confirmation (`app.tsx` `GuardedExitProvider`/`QuitConfirmation`) lives on the vendored dialog stack, not a bare `<Show>` overlay: every screen's bindings are

@@ -120,8 +120,11 @@ function runViewOf(run: RunView): RunWorkbenchView {
         possibleEffects: "none",
       },
     }),
-    // These tests never reach the checkpoint interaction; a stub satisfies the seam.
+    // These tests never reach the checkpoint or interactive interaction; stubs
+    // satisfy the seam.
     answer: () => () => ({ kind: "applied" }),
+    sendInteractiveTurn: () => () => ({ kind: "applied" }),
+    endInteractiveStep: () => () => ({ kind: "applied" }),
   };
 }
 

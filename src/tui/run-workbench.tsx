@@ -14,6 +14,7 @@ import type {
   AnswerHumanGateOffer,
   CancelRunOffer,
   DeleteRunOffer,
+  EndInteractiveStepOffer,
   Problem,
   ResumeRunOffer,
   RunCheckpointView,
@@ -21,6 +22,7 @@ import type {
   RunStepProgress,
   RunStepStatus,
   RunView,
+  SendInteractiveTurnOffer,
 } from "../application/projection-port.js";
 import type { RendererKeyEvent, RendererPort } from "./renderer/renderer.js";
 import { clip } from "./clip.js";
@@ -76,6 +78,10 @@ const DETAILS_HEIGHT = 8;
  *  their consequence, and a status/hint line. Fixed so the timeline viewport
  *  shrinks to fit and nothing overflows. */
 const CHECKPOINT_HEIGHT = 8;
+/** Rows the interactive-agent input occupies when it replaces the footer (#122):
+ *  a label, the draft input line, and a hint/status line, plus one for a refusal.
+ *  Fixed so the timeline viewport shrinks to fit and nothing overflows. */
+const INTERACTIVE_HEIGHT = 4;
 
 const STEP_GLYPH: Record<RunStepStatus, string> = {
   pending: "·",
@@ -85,7 +91,7 @@ const STEP_GLYPH: Record<RunStepStatus, string> = {
   blocked: "⏸",
 };
 
-type Focus = "timeline" | "details" | "checkpoint";
+type Focus = "timeline" | "details" | "checkpoint" | "interactive";
 
 export function RunWorkbench(props: {
   runId: string;
@@ -169,7 +175,7 @@ export function RunWorkbench(props: {
   });
   const [actionRefusal, setActionRefusal] = createSignal<Problem | undefined>();
   const [pending, setPending] = createSignal<
-    "takeover" | "cancel" | "delete" | undefined
+    "takeover" | "cancel" | "delete" | "end-step" | undefined
   >();
   // A dispatched Run Action followed to settlement: resume drives execution and a
   // cancel-as-abort aborts a live Run, both asynchronous now (#98), so the outcome
@@ -225,6 +231,73 @@ export function RunWorkbench(props: {
       count +
       (pending() !== undefined ? 1 : 0) +
       (actionRefusal() !== undefined ? 1 : 0)
+    );
+  };
+
+  // Interactive-agent turn-taking (#122): the Workbench hands the bottom input to
+  // the human while the Run rests `blocked` at an interactive-agent Step. The Step is
+  // active whenever the Run is blocked there (not a gate/checkpoint), independent of
+  // whether a Turn is live, so focus stays on the input across the whole Step. `send`
+  // and `end` offers are present only at a Turn boundary (no live Turn), so they gate
+  // whether Enter dispatches and whether End Step is armable.
+  const interactiveStepActive = () => {
+    const current = run();
+    // `blocked` is the boundary (between Turns); `running` is a live human Turn (the
+    // Run runs under `running` while a Turn is in flight, #122). Focus stays on the
+    // input across both. Guarded on the Step kind, so ordinary agent-step execution
+    // (also `running`, but kind `agent`) never shows the input.
+    return (
+      (current?.state === "blocked" || current?.state === "running") &&
+      current.checkpoint === undefined &&
+      current.pendingGate === undefined &&
+      current.progress[current.position]?.kind === "interactive-agent"
+    );
+  };
+  const interactiveOffers = createMemo(() => {
+    const list = run()?.actionOffers ?? [];
+    return {
+      send: list.find(
+        (offer): offer is SendInteractiveTurnOffer =>
+          offer.action === "send-interactive-turn",
+      ),
+      end: list.find(
+        (offer): offer is EndInteractiveStepOffer =>
+          offer.action === "end-interactive-step",
+      ),
+    };
+  });
+  // A Turn is live (working) when the Step is active but the boundary offers are gone.
+  const interactiveTurnLive = () =>
+    interactiveStepActive() && interactiveOffers().send === undefined;
+  const [draft, setDraft] = createSignal("");
+  const [interactiveOutcome, setInteractiveOutcome] =
+    createSignal<Accessor<AnswerOutcome>>();
+  const [interactiveRefusal, setInteractiveRefusal] = createSignal<
+    Problem | undefined
+  >();
+  const interactivePending = () => {
+    const accessor = interactiveOutcome();
+    return accessor !== undefined && accessor().kind === "pending";
+  };
+
+  const dispatchSend = () => {
+    const offer = interactiveOffers().send;
+    if (offer === undefined || interactivePending()) return;
+    // Secant authors nothing: a blank or whitespace-only Turn is not sent (AC1).
+    if (draft().trim() === "") return;
+    setInteractiveRefusal(undefined);
+    const text = draft();
+    setDraft("");
+    setInteractiveOutcome(() =>
+      view.sendInteractiveTurn(offer.runId, offer.stepId, text),
+    );
+  };
+  const confirmEndStep = () => {
+    const offer = interactiveOffers().end;
+    if (offer === undefined || interactivePending()) return;
+    setInteractiveRefusal(undefined);
+    setInteractiveOutcome(() =>
+      view.endInteractiveStep(offer.runId, offer.stepId),
     );
   };
 
@@ -295,7 +368,9 @@ export function RunWorkbench(props: {
     1 /*timeline label*/ +
     (checkpointActive()
       ? CHECKPOINT_HEIGHT
-      : 1); /*footer, or the checkpoint interaction that replaces it*/
+      : interactiveStepActive()
+        ? INTERACTIVE_HEIGHT
+        : 1); /*footer, or the checkpoint / interactive input that replaces it*/
   // The details panel needs both room across (its width breakpoint) and room
   // down: DETAILS_HEIGHT rows plus at least one timeline row. On a short terminal
   // it stays hidden rather than clipping the panel and footer off the bottom.
@@ -384,11 +459,46 @@ export function RunWorkbench(props: {
     lastGateKey = active ? key : "";
   });
 
-  // Tab cycles the focusable regions in a stable order: the checkpoint (while its
-  // offer is live), the timeline, then the details panel (while shown).
+  // Focus lands on the interactive input while the Run rests at an interactive Step
+  // and returns to the timeline when the Step ends (#122 AC), keyed on the Step so a
+  // fresh interactive Step re-focuses and clears the draft. It does not yank focus
+  // back while the user has tabbed away during the same Step.
+  let lastInteractiveStep = "";
+  createEffect(() => {
+    const active = interactiveStepActive();
+    const current = run();
+    const stepId =
+      active && current !== undefined
+        ? (current.progress[current.position]?.id ?? "")
+        : "";
+    if (active && stepId !== lastInteractiveStep) {
+      setFocus("interactive");
+      setDraft("");
+      setInteractiveRefusal(undefined);
+    } else if (!active && focus() === "interactive") {
+      setFocus("timeline");
+    }
+    lastInteractiveStep = active ? stepId : "";
+  });
+
+  // Follow a sent Turn / End Step to settlement: a refusal (a Turn still live, a
+  // stale Step) surfaces in the input and re-enables it; an applied outcome just
+  // clears local state — the live snapshot carries the new transcript / advance in.
+  createEffect(() => {
+    const accessor = interactiveOutcome();
+    if (accessor === undefined) return;
+    const settled = accessor();
+    if (settled.kind === "pending") return;
+    if (settled.kind === "refused") setInteractiveRefusal(settled.problem);
+    setInteractiveOutcome(undefined);
+  });
+
+  // Tab cycles the focusable regions in a stable order: the checkpoint or interactive
+  // input (while active), the timeline, then the details panel (while shown).
   const focusOrder = (): Focus[] => {
     const order: Focus[] = [];
     if (checkpointActive()) order.push("checkpoint");
+    if (interactiveStepActive()) order.push("interactive");
     order.push("timeline");
     if (detailsShown()) order.push("details");
     return order;
@@ -427,10 +537,54 @@ export function RunWorkbench(props: {
     if (target !== undefined) inspection.open(target);
   };
 
+  // Accumulate the human's Turn text and drive the interactive controls (#122). The
+  // input owns every key while it holds focus (tui/AGENTS: a text field binds no bare
+  // letter), so `name` is treated as literal text unless it is a control key: Enter
+  // sends, Ctrl+E arms End Step (only at a boundary), Escape leaves, Backspace edits.
+  // ponytail: text comes from the key `name`, so a single character types and a few
+  // named keys (space) map through; capitals and punctuation the Renderer Port does
+  // not name are out of reach until it carries the printable value. Enough to prove
+  // the handoff, Enter dispatch, and blank guard the ticket asks for.
+  const handleInteractiveKey = (key: RendererKeyEvent) => {
+    const name = key.name ?? "";
+    if (name === "e" && key.ctrl) {
+      // End Step is offered only at a Turn boundary; arm the confirming keypress.
+      if (interactiveOffers().end !== undefined) {
+        setInteractiveRefusal(undefined);
+        setPending("end-step");
+      }
+      return;
+    }
+    if (name === "return") {
+      dispatchSend();
+      return;
+    }
+    if (name === "escape") {
+      props.onLeave();
+      return;
+    }
+    if (name === "backspace") {
+      setDraft((text) => text.slice(0, -1));
+      return;
+    }
+    if (name === "space") {
+      setDraft((text) => `${text} `);
+      return;
+    }
+    if (name.length === 1) setDraft((text) => text + name);
+  };
+
   const handleKey = (key: RendererKeyEvent) => {
     if (dialog.stack.length > 0) return;
     const name = key.name ?? "";
-    if (name === "q" || (name === "c" && key.ctrl)) {
+    // Ctrl+C always exits, even while the interactive input has focus.
+    if (name === "c" && key.ctrl) {
+      exit();
+      return;
+    }
+    const typing = focus() === "interactive" && interactiveStepActive();
+    // `q` quits, except while typing a Turn — then it is text (tui/AGENTS).
+    if (name === "q" && !typing) {
       exit();
       return;
     }
@@ -441,24 +595,33 @@ export function RunWorkbench(props: {
       if (name === "escape") props.onLeave();
       return;
     }
-    if (name === "t") {
+    if (name === "t" && !typing) {
       const target = transcriptTarget();
       if (target !== undefined) inspection.open(target);
       return;
     }
-    // A pending takeover/Cancel/Delete waits for its confirming keypress: `y` confirms and
-    // Escape backs out (without dispatching or leaving); any other key is ignored
-    // while the confirmation stays armed, so a stray keystroke never dispatches it.
+    // A pending takeover/Cancel/Delete/End-Step waits for its confirming keypress:
+    // `y` confirms and Escape backs out (without dispatching or leaving); any other
+    // key is ignored while the confirmation stays armed, so a stray keystroke never
+    // dispatches it. (It sits ahead of the interactive input so End Step's own
+    // confirm suspends typing.)
     if (pending() !== undefined) {
       if (name === "y") {
         const action = pending();
         setPending(undefined);
         if (action === "takeover") dispatchResume();
         else if (action === "cancel") confirmCancel();
-        else confirmDelete();
+        else if (action === "delete") confirmDelete();
+        else confirmEndStep();
       } else if (name === "escape") {
         setPending(undefined);
       }
+      return;
+    }
+    // While the interactive input holds focus it owns every remaining key as text or
+    // an interactive control, ahead of the bare-letter Run Actions below (#122).
+    if (typing) {
+      handleInteractiveKey(key);
       return;
     }
     // Run Actions from any focus, gated on the Offer being present. A local resume
@@ -616,7 +779,24 @@ export function RunWorkbench(props: {
               actionOffers={offers}
               anyActionOffer={anyActionOffer}
               actionRefusal={actionRefusal}
-              actionPending={pending}
+              // End Step's confirm renders in the interactive input, not the Actions
+              // box, so the Actions box never sees the `end-step` pending state.
+              actionPending={() => {
+                const armed = pending();
+                return armed === "end-step" ? undefined : armed;
+              }}
+              interactiveActive={interactiveStepActive}
+              interactiveTurnLive={interactiveTurnLive}
+              interactiveEndOffered={() =>
+                interactiveOffers().end !== undefined
+              }
+              interactiveSendOffered={() =>
+                interactiveOffers().send !== undefined
+              }
+              draft={draft}
+              endStepArmed={() => pending() === "end-step"}
+              interactivePending={interactivePending}
+              interactiveRefusal={interactiveRefusal}
               theme={theme}
             />
           )}
@@ -700,6 +880,14 @@ function Workbench(props: {
   anyActionOffer: Accessor<boolean>;
   actionRefusal: Accessor<Problem | undefined>;
   actionPending: Accessor<"takeover" | "cancel" | "delete" | undefined>;
+  interactiveActive: Accessor<boolean>;
+  interactiveTurnLive: Accessor<boolean>;
+  interactiveEndOffered: Accessor<boolean>;
+  interactiveSendOffered: Accessor<boolean>;
+  draft: Accessor<string>;
+  endStepArmed: Accessor<boolean>;
+  interactivePending: Accessor<boolean>;
+  interactiveRefusal: Accessor<Problem | undefined>;
   theme: Theme;
 }) {
   const { theme } = props;
@@ -905,14 +1093,34 @@ function Workbench(props: {
         />
       </Show>
 
-      {/* While the answer-human-gate offer is live the interaction replaces the
-          footer input rather than sharing a permanent rail (#92). */}
+      {/* While the answer-human-gate offer is live the checkpoint interaction, and
+          while an interactive-agent Step is blocked the human input, replace the
+          footer input rather than sharing a permanent rail (#92, #122). A Run rests
+          at only one of the two, so they never render together. */}
       <Show
         when={props.checkpointActive() ? run().checkpoint : undefined}
         fallback={
-          <text fg={theme.textMuted} flexShrink={0}>
-            {clip(footer(), w())}
-          </text>
+          <Show
+            when={props.interactiveActive()}
+            fallback={
+              <text fg={theme.textMuted} flexShrink={0}>
+                {clip(footer(), w())}
+              </text>
+            }
+          >
+            <InteractiveInput
+              draft={props.draft}
+              turnLive={props.interactiveTurnLive}
+              endOffered={props.interactiveEndOffered}
+              sendOffered={props.interactiveSendOffered}
+              endArmed={props.endStepArmed}
+              pending={props.interactivePending}
+              refusal={props.interactiveRefusal}
+              focused={() => props.focus() === "interactive"}
+              width={props.innerW}
+              theme={theme}
+            />
+          </Show>
         }
       >
         {(checkpoint) => (
@@ -927,6 +1135,64 @@ function Workbench(props: {
             width={props.innerW}
             theme={theme}
           />
+        )}
+      </Show>
+    </box>
+  );
+}
+
+/** The interactive-agent human input (#122): a label, the draft Turn text (with a
+ *  caret while focused), and a hint/status line — a Turn in progress, the Enter/End
+ *  Step controls at a boundary, or the End Step confirm. Every line is plain text so
+ *  interactive Turns read distinctly from an agent's without colour (AC2). */
+function InteractiveInput(props: {
+  draft: Accessor<string>;
+  turnLive: Accessor<boolean>;
+  endOffered: Accessor<boolean>;
+  sendOffered: Accessor<boolean>;
+  endArmed: Accessor<boolean>;
+  pending: Accessor<boolean>;
+  refusal: Accessor<Problem | undefined>;
+  focused: Accessor<boolean>;
+  width: Accessor<number>;
+  theme: Theme;
+}) {
+  const { theme } = props;
+  const w = () => props.width();
+  const caret = () => (props.focused() ? "▌" : "");
+  const hint = () => {
+    if (props.endArmed())
+      return "  ⚠ End this interactive Step? Press y to confirm · esc to keep";
+    if (props.pending()) return "  … sending…";
+    if (props.turnLive()) return "  … a Turn is running — interrupt it to stop";
+    if (props.sendOffered())
+      return "  enter send Turn · ^E end step · esc back";
+    return "  esc back";
+  };
+  return (
+    <box flexDirection="column" flexShrink={0}>
+      <text
+        fg={props.focused() ? theme.text : theme.textMuted}
+        attributes={props.focused() ? TextAttributes.BOLD : 0}
+        flexShrink={0}
+      >
+        {clip("◇ Your Turn — you are driving this Session", w())}
+      </text>
+      <text fg={theme.text} flexShrink={0}>
+        {clip(`> ${props.draft()}${caret()}`, w())}
+      </text>
+      <Show
+        when={props.refusal()}
+        fallback={
+          <text fg={theme.textMuted} flexShrink={0}>
+            {clip(hint(), w())}
+          </text>
+        }
+      >
+        {(problem) => (
+          <text fg={theme.error} flexShrink={0}>
+            {clip(`  ✗ ${problem().explanation}`, w())}
+          </text>
         )}
       </Show>
     </box>

@@ -221,6 +221,62 @@ export function steerUnavailable(runId: string, reason: string): Problem {
   };
 }
 
+/** A human interactive Turn was sent with blank or whitespace-only text (#122):
+ *  Secant authors nothing, so an empty Turn is rejected before any stdin is sent. */
+export function interactiveTurnBlank(runId: string): Problem {
+  return {
+    code: "interactive-turn-blank",
+    explanation: `Run ${runId} was sent an interactive Turn with no text; a human Turn must carry text.`,
+    remediation:
+      "Type the Turn's text, then send it; blank Turns are not sent.",
+    possibleEffects: "none",
+    details: { runId },
+  };
+}
+
+/** A second interactive Turn was sent while one is still live (#122): the Step
+ *  takes one Turn at a time, and between Turns the Run stays blocked. */
+export function interactiveTurnBusy(runId: string): Problem {
+  return {
+    code: "interactive-turn-busy",
+    explanation: `Run ${runId} already has a live interactive Turn; a new Turn is sent only at a Turn boundary.`,
+    remediation:
+      "Wait for the live Turn to settle (or interrupt it), then send the next Turn.",
+    possibleEffects: "none",
+    details: { runId },
+  };
+}
+
+/** An interactive-agent Step cannot be ended: the Run is not blocked at that Step
+ *  (it never reached it, or it has already advanced past it) (#122). */
+export function interactiveStepNotActive(
+  runId: string,
+  stepId: string,
+  state: string,
+): Problem {
+  return {
+    code: "interactive-step-not-active",
+    explanation: `Run ${runId} is ${state}, not blocked at interactive Step "${stepId}"; there is no interactive Step to act on.`,
+    remediation:
+      "Open the Run to read its current state and the Step it rests at.",
+    possibleEffects: "none",
+    details: { runId, stepId, state },
+  };
+}
+
+/** End Step was submitted while a Turn is still live (#122): a Step ends only at a
+ *  Turn boundary, so the End is refused without changing anything. */
+export function interactiveStepMidTurn(runId: string, stepId: string): Problem {
+  return {
+    code: "interactive-step-mid-turn",
+    explanation: `Run ${runId} has a live Turn on interactive Step "${stepId}"; the Step ends only at a Turn boundary.`,
+    remediation:
+      "Wait for the live Turn to settle (or interrupt it), then end the Step.",
+    possibleEffects: "none",
+    details: { runId, stepId },
+  };
+}
+
 /** A live Run cannot be deleted: its store is in use (#87). */
 export function runIsLive(runId: string): Problem {
   return {

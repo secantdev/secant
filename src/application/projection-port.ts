@@ -45,6 +45,8 @@ export type Submission =
   | AnswerHarnessRequestSubmission
   | InterruptTurnSubmission
   | SteerTurnSubmission
+  | SendInteractiveTurnSubmission
+  | EndInteractiveStepSubmission
   | CancelRunSubmission
   | DeleteRunSubmission;
 
@@ -188,6 +190,44 @@ export interface SteerTurnInput {
   readonly runId: string;
   readonly turnId: string;
   readonly text: string;
+}
+
+/** Send one human Turn to the Session an interactive-agent Step handed the human
+ *  (spec stories 6, 21, 22; #122). The Run is `blocked` at the Step; each submission
+ *  is one Turn with origin `human` whose verbatim `text` is the transcript input —
+ *  Secant authors nothing. Blank or whitespace-only text is rejected before any stdin
+ *  is sent. Between Turns the Run stays `blocked`; a submission while a Turn is still
+ *  live, or against a Run not blocked at this Step, is rejected as a value. Idempotent
+ *  per operation id. */
+export interface SendInteractiveTurnSubmission {
+  readonly operationId: string;
+  readonly operation: "send-interactive-turn";
+  readonly input: SendInteractiveTurnInput;
+}
+export interface SendInteractiveTurnInput {
+  readonly runId: string;
+  /** The interactive-agent Step the Run is blocked at, read from the offer; a Run
+   *  that moved past it is rejected as stale. */
+  readonly stepId: string;
+  /** The human's verbatim Turn text; blank/whitespace-only is rejected. */
+  readonly text: string;
+}
+
+/** End the interactive-agent Step the Run is `blocked` at (spec stories 6, 22; #122).
+ *  Admitted only at a Turn boundary — a submission while a Turn is live is rejected
+ *  with a precise Problem. It settles the Step's Attempt `succeeded` and advances the
+ *  routing (the following Step reuses the same Session). No phrase, marker, or timeout
+ *  ends the Step. Idempotent per operation id. */
+export interface EndInteractiveStepSubmission {
+  readonly operationId: string;
+  readonly operation: "end-interactive-step";
+  readonly input: EndInteractiveStepInput;
+}
+export interface EndInteractiveStepInput {
+  readonly runId: string;
+  /** The interactive-agent Step to end, read from the offer; a Run that moved past
+   *  it is rejected as stale. */
+  readonly stepId: string;
 }
 
 /** Cancel a live Run (#87): end it `cancelled` — the only route to that terminal
@@ -688,6 +728,8 @@ export type ActionOffer =
   | ResumeRunOffer
   | InterruptTurnOffer
   | SteerTurnOffer
+  | SendInteractiveTurnOffer
+  | EndInteractiveStepOffer
   | CancelRunOffer
   | DeleteRunOffer;
 
@@ -763,6 +805,30 @@ export interface SteerTurnOffer {
   readonly turnId: string;
   readonly available: false;
   readonly reason: string;
+}
+
+/** Send one human Turn to an interactive-agent Step (#122). Offered on the `run`
+ *  Projection only while the Run is `blocked` at the Step and no Turn is live (a
+ *  Turn boundary); it carries the Step id so a submission the Run has moved past is
+ *  rejected as stale, and the `basis` names the durability the blocked status reads:
+ *  an interactive Turn, distinct from a durable Human Gate or an ephemeral request. */
+export interface SendInteractiveTurnOffer {
+  readonly action: "send-interactive-turn";
+  readonly runId: string;
+  readonly stepId: string;
+  readonly basis: "interactive Turn";
+  readonly consequence: string;
+}
+
+/** End an interactive-agent Step (#122). Offered on the `run` Projection only while
+ *  the Run is `blocked` at the Step and no Turn is live (a Turn boundary), so a
+ *  client offers End Step only when it can be taken; it carries the Step id so a
+ *  stale submission is rejected. */
+export interface EndInteractiveStepOffer {
+  readonly action: "end-interactive-step";
+  readonly runId: string;
+  readonly stepId: string;
+  readonly consequence: string;
 }
 
 /** Cancel a live Run (#87). Offered on the `run` Projection only while the Run is

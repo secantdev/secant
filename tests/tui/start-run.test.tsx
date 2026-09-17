@@ -168,6 +168,12 @@ function noRunView(): RunWorkbenchView {
     answer() {
       throw new Error("run workbench not opened in this test");
     },
+    sendInteractiveTurn() {
+      throw new Error("run workbench not opened in this test");
+    },
+    endInteractiveStep() {
+      throw new Error("run workbench not opened in this test");
+    },
   };
 }
 
@@ -212,6 +218,12 @@ function succeedingRunView(): RunWorkbenchView {
     },
     answer() {
       throw new Error("no answer dispatched in this test");
+    },
+    sendInteractiveTurn() {
+      throw new Error("no interactive Turn sent in this test");
+    },
+    endInteractiveStep() {
+      throw new Error("no interactive Step ended in this test");
     },
   };
 }

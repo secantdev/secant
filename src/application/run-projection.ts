@@ -166,6 +166,20 @@ function runResult(
     const liveTurn = !liveElsewhere
       ? turns.find((turn) => turn.resultKind === undefined)
       : undefined;
+    // The interactive-agent Step the Run rests `blocked` at, at a Turn boundary
+    // (#122): no derived checkpoint, no authored gate, and no live Turn. The block is
+    // read from the current Step's kind — the same signal the TUI blocked-basis uses —
+    // so it needs no durable gate record.
+    const current = derivedRun.statuses[derivedRun.position];
+    const interactiveStep =
+      !liveElsewhere &&
+      derivedRun.state === "blocked" &&
+      derivedRun.checkpoint === undefined &&
+      derivedRun.pendingGate === undefined &&
+      liveTurn === undefined &&
+      current?.kind === "interactive-agent"
+        ? current
+        : undefined;
     const turnEvents = owner?.turnEvents() ?? [];
     const sessions = owner?.harnessSessions() ?? [];
     const transcript = owner?.transcript() ?? [];
@@ -233,6 +247,16 @@ function runResult(
             ? [
                 interruptTurnOffer(runId, liveTurn.turnId),
                 steerTurnOffer(runId, liveTurn.turnId),
+              ]
+            : []),
+          // Interactive-agent turn-taking (#122): while the Run rests `blocked` at an
+          // interactive-agent Step at a Turn boundary (no gate, no live Turn), the
+          // human can send the next Turn or end the Step. End Step is offered only at
+          // a boundary — a live Turn suppresses both, exactly when interrupt is offered.
+          ...(interactiveStep !== undefined
+            ? [
+                sendInteractiveTurnOffer(runId, interactiveStep.id),
+                endInteractiveStepOffer(runId, interactiveStep.id),
               ]
             : []),
           isLive || derivedRun.state === "blocked"
@@ -448,6 +472,31 @@ function answerHumanGateOffer(
             "text: publish the answer as the gate's output and resume the Run.",
         }
       : {}),
+  };
+}
+
+/** The `send-interactive-turn` offer for a Run blocked at an interactive-agent Step
+ *  at a Turn boundary (#122). */
+function sendInteractiveTurnOffer(runId: string, stepId: string): ActionOffer {
+  return {
+    action: "send-interactive-turn",
+    runId,
+    stepId,
+    basis: "interactive Turn",
+    consequence:
+      "send the typed text as one human Turn in the Step's Session; the Run stays blocked for the next Turn.",
+  };
+}
+
+/** The `end-interactive-step` offer for a Run blocked at an interactive-agent Step
+ *  at a Turn boundary (#122): offered only when it can be taken (no live Turn). */
+function endInteractiveStepOffer(runId: string, stepId: string): ActionOffer {
+  return {
+    action: "end-interactive-step",
+    runId,
+    stepId,
+    consequence:
+      "end the interactive Step succeeded and advance the Run; the following Step reuses the same Session.",
   };
 }
 

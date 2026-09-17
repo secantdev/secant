@@ -287,6 +287,17 @@ export function checkComposition(
             `Step "${step.id}" is a human-gate inside a Repeat group; authored Human Gates are top-level Steps only (a Repeat group's in-loop pause is its Review checkpoint).`,
           );
         }
+        // An interactive-agent Step hands its Session to the human for turn-taking
+        // and rests `blocked` until the human ends it (#122); like an authored gate
+        // it is a top-level pause, not an in-loop one, so reject it inside a Repeat
+        // group rather than let it block with no clean resume.
+        if (step.kind === "interactive-agent") {
+          error(
+            "interactive-agent-in-repeat",
+            `${path}.steps`,
+            `Step "${step.id}" is an interactive-agent inside a Repeat group; interactive-agent Steps hand the Session to the human and are top-level Steps only (a Repeat group's in-loop pause is its Review checkpoint).`,
+          );
+        }
       }
       // Steps inside the group start from the pre-entry bindings and accrue in
       // order; the group's producers then bind for the Steps that follow it.

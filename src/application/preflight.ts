@@ -8,9 +8,7 @@ import {
   type CompositionFinding,
   type LaunchInput,
   type Platform,
-  type Step,
 } from "../workflow/workflow.js";
-import { EXECUTABLE_STEP_KINDS } from "../run/execution/execution.js";
 import { CLAUDE_CODE_EXECUTABLE_ENV } from "../harness/harness.js";
 import { resolveExecutable } from "../process/process.js";
 import { isolatedGitEnvironment } from "../run/store/store.js";
@@ -31,8 +29,8 @@ const HARNESS_SERVED_CAPABILITIES: ReadonlySet<string> = new Set([
 // at launch, before a Run exists, after the pinned bytes are read and inspected
 // and before `runGroup.createRun`, so a failed Preflight leaves no Run directory,
 // record, or Trust grant. It checks — in order — that the pinned Snapshot still
-// composes, that every Step kind can be dispatched in this release, that every
-// declared Launch input is present and valid for its Artifact type, that the
+// composes, that a headless client is not handed an interactive-agent Step, that
+// every declared Launch input is present and valid for its Artifact type, that the
 // union of authored Workspace prerequisites holds, and that each selected Command
 // step's executable resolves on `PATH`.
 //
@@ -78,8 +76,9 @@ export function preflight(request: PreflightRequest): PreflightResult {
   }
 
   // 2. An `interactive-agent` Step needs human turn-taking the headless client
-  // cannot relay (#116): refuse it with the TUI remedy before the generic
-  // not-executable check, so a headless launch never pretends to relay turns.
+  // cannot relay (#116): refuse it with the TUI remedy. Every Step kind is now
+  // dispatchable (the closed table has all four kinds, #122), so this is the only
+  // kind-based Preflight refusal — the generic not-executable check is retired.
   if (request.supportsInteractiveTurns !== true) {
     const interactive = steps.find((step) => step.kind === "interactive-agent");
     if (interactive !== undefined) {
@@ -87,16 +86,7 @@ export function preflight(request: PreflightRequest): PreflightResult {
     }
   }
 
-  // 3. Every Step kind must be dispatchable in this release. A kind with no
-  // executor is an intrinsic precondition failure.
-  const dispatchable = new Set<string>(EXECUTABLE_STEP_KINDS);
-  for (const step of steps) {
-    if (!dispatchable.has(step.kind)) {
-      return { problem: stepKindNotExecutable(step) };
-    }
-  }
-
-  // 4. Harness discovery and the capability-need union (#116). Only when the
+  // 3. Harness discovery and the capability-need union (#116). Only when the
   // routing needs a Harness (a Step kind declaring capability needs). The union
   // must be a subset of what the Harness serves, and the executable must resolve
   // (configured command first, then the PATH name), or the launch is refused
@@ -398,17 +388,6 @@ function bundleSnapshotCorrupt(digest: string): Problem {
       "Reinstall the Bundle to restore an intact copy, then launch again.",
     possibleEffects: "none",
     details: { digest },
-  };
-}
-
-function stepKindNotExecutable(step: Step): Problem {
-  return {
-    code: "step-kind-not-executable",
-    explanation: `Step "${step.id}" is a ${step.kind} Step, which has no headless execution in this release.`,
-    remediation:
-      "Run this Bundle from the interactive terminal (available in a later milestone); this release runs Command-only Bundles.",
-    possibleEffects: "none",
-    details: { step: step.id, kind: step.kind },
   };
 }
 

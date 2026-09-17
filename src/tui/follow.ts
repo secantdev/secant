@@ -2,6 +2,7 @@ import { createSignal, onCleanup, type Accessor } from "solid-js";
 import type {
   OpenedProjection,
   ProjectionSnapshot,
+  ProjectionUpdate,
 } from "../application/projection-port.js";
 
 // The one follow-snapshot helper the per-screen view seams share (A22): seed a
@@ -23,17 +24,31 @@ import type {
 export function followProjection<S extends ProjectionSnapshot>(
   opened: OpenedProjection<S>,
 ): Accessor<S> {
-  const [snapshot, setSnapshot] = createSignal(opened.snapshot);
+  return followProjectionUpdates(opened, opened.snapshot, (snapshot, update) =>
+    update.kind === "durable" ? update.snapshot : snapshot,
+  );
+}
+
+/** Follow one Projection update stream while a caller-owned reducer decides how
+ * every update lane changes its reactive state. Iteration, disposal ordering,
+ * late-update suppression, and closing remain centralized here; specialized
+ * views own only their semantic reduction. */
+export function followProjectionUpdates<S extends ProjectionSnapshot, State>(
+  opened: OpenedProjection<S>,
+  initial: State,
+  reduce: (state: State, update: ProjectionUpdate<S>) => State,
+): Accessor<State> {
+  const [state, setState] = createSignal<State>(initial);
   let closed = false;
   void (async () => {
     for await (const update of opened.updates) {
       if (closed) break;
-      if (update.kind === "durable") setSnapshot(() => update.snapshot);
+      setState((current) => reduce(current, update));
     }
   })();
   onCleanup(() => {
     closed = true;
     opened.close();
   });
-  return snapshot;
+  return state;
 }

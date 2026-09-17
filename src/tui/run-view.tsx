@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
   createContext,
-  createSignal,
-  onCleanup,
   useContext,
   type Accessor,
   type ParentProps,
@@ -11,12 +9,14 @@ import type {
   DiagnosticReference,
   OpenedProjection,
   ProjectionPort,
+  ProjectionUpdate,
   ResourceRead,
   ResourceReference,
   RunLiveOverlay,
   RunGateReference,
   RunSnapshot,
 } from "../application/projection-port.js";
+import { followProjectionUpdates } from "./follow.js";
 import { submitAndSettle, type SettleOutcome } from "./submit-and-settle.js";
 
 // The view-state the Run Workbench renders, mirroring bundle-view.tsx: it opens
@@ -118,43 +118,58 @@ export function createLiveRunWorkbenchView(
 function followRunProjection(
   opened: OpenedProjection<RunSnapshot>,
 ): RunWorkbenchProjection {
-  const [snapshot, setSnapshot] = createSignal(opened.snapshot);
-  const [live, setLive] = createSignal<RunLiveOverlay>();
-  const [preview, setPreview] = createSignal<string>();
-  let closed = false;
-  let settledCountAtSettling: number | undefined;
-  void (async () => {
-    for await (const update of opened.updates) {
-      if (closed) break;
-      if (update.kind === "durable") {
-        setSnapshot(() => update.snapshot);
-        const settledCount = settledTurnCount(update.snapshot);
-        if (
-          live()?.phase === "settling" &&
-          settledCountAtSettling !== undefined &&
-          settledCount > settledCountAtSettling
-        ) {
-          setLive(undefined);
-          setPreview(undefined);
-          settledCountAtSettling = undefined;
-        }
-      } else if (update.kind === "live") {
-        setLive(update.overlay);
-        setPreview(update.overlay.preview);
-        settledCountAtSettling =
-          update.overlay.phase === "settling"
-            ? settledTurnCount(snapshot())
-            : undefined;
-      } else if (update.kind === "preview") {
-        setPreview(update.text.length > 0 ? update.text : undefined);
-      }
+  const followed = followProjectionUpdates<RunSnapshot, FollowedRun>(
+    opened,
+    { snapshot: opened.snapshot },
+    reduceRunUpdate,
+  );
+  return {
+    snapshot: () => followed().snapshot,
+    live: () => followed().live,
+    preview: () => followed().preview,
+  };
+}
+
+interface FollowedRun {
+  readonly snapshot: RunSnapshot;
+  readonly live?: RunLiveOverlay;
+  readonly preview?: string;
+  readonly settledCountAtSettling?: number;
+}
+
+function reduceRunUpdate(
+  state: FollowedRun,
+  update: ProjectionUpdate<RunSnapshot>,
+): FollowedRun {
+  if (update.kind === "durable") {
+    const settledCount = settledTurnCount(update.snapshot);
+    if (
+      state.live?.phase === "settling" &&
+      state.settledCountAtSettling !== undefined &&
+      settledCount > state.settledCountAtSettling
+    ) {
+      return { snapshot: update.snapshot };
     }
-  })();
-  onCleanup(() => {
-    closed = true;
-    opened.close();
-  });
-  return { snapshot, live, preview };
+    return { ...state, snapshot: update.snapshot };
+  }
+  if (update.kind === "live") {
+    return {
+      ...state,
+      live: update.overlay,
+      preview: update.overlay.preview,
+      settledCountAtSettling:
+        update.overlay.phase === "settling"
+          ? settledTurnCount(state.snapshot)
+          : undefined,
+    };
+  }
+  if (update.kind === "preview") {
+    return {
+      ...state,
+      preview: update.text.length > 0 ? update.text : undefined,
+    };
+  }
+  return state;
 }
 
 function settledTurnCount(snapshot: RunSnapshot): number {

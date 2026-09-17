@@ -50,7 +50,11 @@ import {
   type TimelineAction,
   type TimelineScroll,
 } from "./run-timeline.js";
-import { buildTimelineRows, type TimelineRow } from "./run-timeline-rows.js";
+import {
+  buildTimelineRows,
+  oneLine,
+  type TimelineRow,
+} from "./run-timeline-rows.js";
 import { useExit } from "./vendor/exit.js";
 import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
@@ -1726,11 +1730,6 @@ function FreeTextGateControl(props: {
       </text>
     </box>
   );
-}
-
-/** Collapse whitespace so a serialized tool input or usage string stays one line. */
-function oneLine(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
 }
 
 /** The human label for an approval decision (spec story 13). */

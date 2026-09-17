@@ -36,6 +36,14 @@ import which from "which";
  *   unresolvable.
  * - `unsupported-shim`: a Windows `.cmd`/`.bat` that is not an npm-style node shim;
  *   Preflight refuses it and asks the author to name the interpreter.
+ *
+ * Growth limit (D16): the shim parser recognises only the npm `%_prog%` template.
+ * A pnpm, yarn-berry, or Bun shim, or a `.ps1`/`.bat` wrapper, falls to
+ * `unsupported-shim` rather than gaining a branch here. The hand-rolled parser is
+ * kept over a library because none parses a shim (`cmd-shim` only writes them) and
+ * cross-spawn was rejected for routing `.cmd` through `cmd.exe` (#21); a second
+ * shim format that must actually run is the trigger to revisit that call, not a
+ * reason to keep adding branches.
  */
 export type ExecutableResolution =
   | {

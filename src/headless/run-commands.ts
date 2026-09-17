@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import stripAnsi from "strip-ansi";
 import type { Command } from "commander";
 import type {
   AnswerHumanGateOffer,
@@ -45,7 +46,9 @@ export function registerRunCommands(
     );
   run
     .command("launch")
-    .description("launch an installed Command-only Bundle")
+    .description(
+      "launch an installed Bundle (Interactive agent Steps are TUI-only)",
+    )
     .argument("[id@version]", "Bundle id, optionally with @version")
     .option(
       "--trust <digest>",
@@ -947,7 +950,8 @@ function renderTranscriptEntries(
   return entries
     .map(
       (entry) =>
-        `${entry.role === "user" ? "user" : "assistant"}: ${entry.content}`,
+        // Strip ANSI so the transcript reads clean, matching the TUI (D12).
+        `${entry.role === "user" ? "user" : "assistant"}: ${stripAnsi(entry.content)}`,
     )
     .join("\n")
     .concat("\n");

@@ -1,14 +1,14 @@
 # Milestones
 
 Read this before opening or closing a milestone, gate, or spec issue. The migration runs as seven milestones, M0 to M6, fixed by
-[the sequencing decision](https://github.com/DevFlow-HQ/devflow-cli/issues/20#issuecomment-5568202859). Tracker mechanics, Starting context, and the
+[the sequencing decision](https://github.com/secantdev/secant/issues/20#issuecomment-5568202859). Tracker mechanics, Starting context, and the
 implementation-ticket packet are in [issue tracker](./issue-tracker.md); this file owns only the milestone loop.
 
 ## Spine
 
 - The spine is the sequencing resolution above: the milestone table, hard ordering constraints, slicing rulebook, refactoring gates, and disposition.
-- Later comments titled `Amendment` on [#20](https://github.com/DevFlow-HQ/devflow-cli/issues/20) and the
-  [handoff approval](https://github.com/DevFlow-HQ/devflow-cli/issues/22#issuecomment-5569253373) supersede the resolution text where they differ.
+- Later comments titled `Amendment` on [#20](https://github.com/secantdev/secant/issues/20) and the
+  [handoff approval](https://github.com/secantdev/secant/issues/22#issuecomment-5569253373) supersede the resolution text where they differ.
 - An ADR at `HEAD` supersedes any ticket wording. Read the ADR, not the ticket, for identifiers, gates, and contracts.
 - A milestone may list a preceding human Task (for example the pre-cut rename) as an input, never as its own work.
 
@@ -16,7 +16,7 @@ implementation-ticket packet are in [issue tracker](./issue-tracker.md); this fi
 
 1. List issues titled `M<n>:`. The next milestone is the lowest `n` without an issue; no issue at all means M0. Open it only when the previous
    milestone is closed or the human says otherwise. A milestone whose curation the spine says is blocked (M6 by
-   [#41](https://github.com/DevFlow-HQ/devflow-cli/issues/41)) waits for that blocker.
+   [#41](https://github.com/secantdev/secant/issues/41)) waits for that blocker.
 2. Title `M<n>: <spine title>`. Body sections, in order: **Delivers** (the spine row plus amendments), **Hard constraints** that apply,
    **Gate introduced**, **Done when** (every ticket closed and the gate green on the three-OS matrix). No file paths in the body.
 3. Curate one `## Starting context` comment per the issue-tracker rules. M0 and M1 inputs are listed in the resolution and its amendment; later

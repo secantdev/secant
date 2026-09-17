@@ -119,6 +119,7 @@ function liveTimelineRows(
   return rows;
 }
 
-function oneLine(text: string): string {
+/** Collapse whitespace so a serialized tool input or usage string stays one line. */
+export function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }

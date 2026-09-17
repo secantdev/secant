@@ -32,3 +32,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 - The exit-code and `--json` contracts above are the CI acceptance seam; `tests/cli` does not exist (the tiny entry branches in `cli/main.ts` are
   covered by the package smoke and a child-process spawn), so assert headless behaviour here and in the package smoke, not through a separate CLI suite.
+  Named gap (testing.md "Behavioral Completeness", A64): three `cli/main.ts` behaviours are covered **only** by the compiled-binary smoke, never the
+  deterministic suite — the bare-argv branch that lazily imports the TUI so Solid and OpenTUI never load on a headless path (`:19-25`); `isMainEntry`'s
+  `Bun.main` separator normalisation, the #62 Windows entry quirk (`:48-53`); and the top-level error handler that prints a stack and sets exit 1
+  (`:55-62`). The file records at `:40-47` why it cannot be unit-tested as written; if a fourth branch appears, revisit a small `tests/cli` rather than
+  widening the smoke.

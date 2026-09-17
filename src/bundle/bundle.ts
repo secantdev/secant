@@ -19,24 +19,22 @@ import {
 import { readZip, writeZip, type Budgets, type ZipEntry } from "./zip.js";
 
 // The Bundle Module's ZIP writer and budgets are public through this entry; the
-// constrained reader stays private (install goes through `readBundle`, which
-// returns the identical findings).
+// constrained reader (`readZip`/`ZipReadResult`) stays private (install goes
+// through `readBundle`, which returns the identical findings).
 export {
   DEFAULT_BUDGETS,
-  readZip,
   writeZip,
   type Budgets,
   type ZipEntry,
-  type ZipReadResult,
 } from "./zip.js";
 
 // The finding shape Application translates into a Problem; re-exported so callers
 // name it from the Module entry rather than reaching into `manifest.ts`.
 export type { BundleFinding } from "./manifest.js";
 
-// The Execution summary is a private submodule re-exported by the entry.
+// The Execution summary is a private submodule re-exported by the entry; the
+// warning string it embeds as `summary.warning` stays private to that submodule.
 export {
-  EXECUTION_AUTHORITY_WARNING,
   generateExecutionSummary,
   type BundleExecutionCommand,
   type BundleExecutionSummary,

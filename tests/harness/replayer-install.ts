@@ -23,6 +23,15 @@ const MCP_CLIENT_MODULE = import.meta
 const MCP_TRANSPORT_MODULE = import.meta
   .resolve("@modelcontextprotocol/sdk/client/streamableHttp.js");
 
+/** Read the replayer's newline-delimited JSON log (D13): the one reader both the
+ *  invocation and bridge views parse. An empty log yields no entries. The entries
+ *  stay `JSON.parse`-loose, as both call sites read them by hand. */
+function readLogEntries(logPath: string) {
+  const text = readFileSync(logPath, "utf8").trim();
+  if (text.length === 0) return [];
+  return text.split("\n").map((line) => JSON.parse(line));
+}
+
 export interface BridgeRecord {
   id: string;
   tool_name: string;
@@ -130,9 +139,7 @@ export function installReplayerAt(
       return current;
     },
     invocations() {
-      const text = readFileSync(logPath, "utf8").trim();
-      if (text.length === 0) return [];
-      const entries = text.split("\n").map((line) => JSON.parse(line));
+      const entries = readLogEntries(logPath);
       const invocations = new Map<
         string,
         {
@@ -161,11 +168,7 @@ export function installReplayerAt(
       return [...invocations.values()];
     },
     bridges() {
-      const text = readFileSync(logPath, "utf8").trim();
-      if (text.length === 0) return [];
-      return text
-        .split("\n")
-        .map((line) => JSON.parse(line))
+      return readLogEntries(logPath)
         .filter((entry) => entry.type === "bridge")
         .map((entry) => ({
           id: entry.id,

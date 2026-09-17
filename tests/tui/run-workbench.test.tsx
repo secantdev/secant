@@ -12,10 +12,7 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import type {
-  RendererKeyEvent,
-  RendererPort,
-} from "../../src/tui/renderer/renderer.js";
+import { makeFakeRenderer, type FakeRenderer } from "./renderer-fixture.js";
 import type {
   AnswerHumanGateOffer,
   BundleCatalogSnapshot,
@@ -48,38 +45,7 @@ import type {
 
 const WORKSPACE = "/tmp/secant-workbench-ws";
 
-// --- a fake Renderer Port we can drive -------------------------------------
-
-function makeRenderer(width: number, height: number) {
-  let w = width;
-  let h = height;
-  const keys = new Set<(event: RendererKeyEvent) => void>();
-  const resizes = new Set<(width: number, height: number) => void>();
-  const port: RendererPort = {
-    size: () => ({ width: w, height: h }),
-    onKey: (fn) => {
-      keys.add(fn);
-      return () => keys.delete(fn);
-    },
-    onResize: (fn) => {
-      resizes.add(fn);
-      return () => resizes.delete(fn);
-    },
-    destroy() {},
-    destroyed: false,
-  };
-  return {
-    port,
-    key: (name: string, mods: { ctrl?: boolean } = {}) => {
-      for (const fn of keys) fn({ name, ...mods });
-    },
-    resize: (nw: number, nh: number) => {
-      w = nw;
-      h = nh;
-      for (const fn of resizes) fn(nw, nh);
-    },
-  };
-}
+// --- a fake Renderer Port we can drive (shared fixture, A52) ----------------
 
 // --- fake App seams the flow needs to reach the Workbench ------------------
 
@@ -380,7 +346,7 @@ function blockedRunOf(over: Partial<RunView> = {}): RunView {
 // injected fake Renderer Port, which we then drive with `renderer.key`.
 async function mountApp(
   control: ReturnType<typeof makeRunView>,
-  renderer: ReturnType<typeof makeRenderer>,
+  renderer: FakeRenderer,
   launchRunId: string,
   width: number,
   height: number,
@@ -419,7 +385,7 @@ async function mountWorkbench(
   actions?: RunActionsView,
 ) {
   const control = makeRunView(snapshotOf(run));
-  const renderer = makeRenderer(width, height);
+  const renderer = makeFakeRenderer(width, height);
   const { t, exits } = await mountApp(
     control,
     renderer,
@@ -434,7 +400,7 @@ async function mountWorkbench(
 
 async function press(
   t: { renderOnce: () => Promise<void> },
-  renderer: ReturnType<typeof makeRenderer>,
+  renderer: FakeRenderer,
   name: string,
   mods: { ctrl?: boolean } = {},
 ) {
@@ -648,7 +614,7 @@ test("launching transitions to the Workbench before the Run rests, and progress 
       }),
     ),
   );
-  const renderer = makeRenderer(100, 20);
+  const renderer = makeFakeRenderer(100, 20);
   const { t } = await mountApp(control, renderer, "run-1", 100, 20);
   await t.waitForFrame((f) => f.includes("Timeline"));
   assert.match(t.captureCharFrame(), /RUNNING/); // reached the Workbench, still live
@@ -1695,7 +1661,7 @@ test("a Run that is not found shows the Problem and Escape leaves", async () => 
       },
     },
   });
-  const renderer = makeRenderer(80, 24);
+  const renderer = makeFakeRenderer(80, 24);
   const { t } = await mountApp(control, renderer, "ghost", 80, 24);
   await t.waitForFrame((f) => f.includes("not found"));
   assert.match(t.captureCharFrame(), /No such Run/);
@@ -1753,7 +1719,7 @@ test("resume dispatches and the Workbench follows into the running Run", async (
   const control = makeRunView(
     snapshotOf(runOf({ state: "halted", actionOffers: [RESUME_OFFER] })),
   );
-  const renderer = makeRenderer(100, 40);
+  const renderer = makeFakeRenderer(100, 40);
   const actions = okActions({
     resume: () => {
       // Production drives the Run and the read seam observes it; model that here:
@@ -1806,7 +1772,7 @@ test("delete confirms then dispatches and leaves the Workbench", async () => {
   const control = makeRunView(
     snapshotOf(runOf({ state: "failed", actionOffers: [DELETE_OFFER] })),
   );
-  const renderer = makeRenderer(100, 40);
+  const renderer = makeFakeRenderer(100, 40);
   let removed = 0;
   const actions = okActions({
     remove: () => {
@@ -1830,7 +1796,7 @@ test("Escape backs out of an armed delete without dispatching or leaving", async
   const control = makeRunView(
     snapshotOf(runOf({ state: "failed", actionOffers: [DELETE_OFFER] })),
   );
-  const renderer = makeRenderer(100, 40);
+  const renderer = makeFakeRenderer(100, 40);
   let removed = 0;
   const actions = okActions({
     remove: () => {
@@ -1852,7 +1818,7 @@ test("cancel arms a confirmation and dispatches on y", async () => {
   const control = makeRunView(
     snapshotOf(runOf({ state: "running", actionOffers: [CANCEL_OFFER] })),
   );
-  const renderer = makeRenderer(100, 40);
+  const renderer = makeFakeRenderer(100, 40);
   let cancelled = 0;
   const actions = okActions({
     cancel: () => {
@@ -2339,7 +2305,7 @@ test("any other key cancels an armed Interrupt without dispatching or leaving", 
 
 test("interrupt rests the Run halted with the Attempt cancelled and offers resume", async () => {
   const control = makeRunView(snapshotOf(liveTurnRunOf()));
-  const renderer = makeRenderer(100, 40);
+  const renderer = makeFakeRenderer(100, 40);
   const actions = okActions({
     interrupt: () => {
       // The live snapshot carries the halted rest in, exactly as production does.
@@ -2370,7 +2336,7 @@ test("resume on a halted Run dispatches resume-run and live rows resume", async 
   const control = makeRunView(
     snapshotOf(runOf({ state: "halted", actionOffers: [RESUME_OFFER] })),
   );
-  const renderer = makeRenderer(100, 40);
+  const renderer = makeFakeRenderer(100, 40);
   let resumed = 0;
   const actions = okActions({
     resume: () => {

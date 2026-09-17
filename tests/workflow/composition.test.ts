@@ -82,6 +82,49 @@ test("a fully-bound manifest composes with no findings", () => {
   assert.deepEqual(run(manifest()), []);
 });
 
+test("two `fresh` Agent Steps warn that they do not share a Session (A14)", () => {
+  const twoFresh = manifest({
+    routing: [
+      {
+        id: "a1",
+        kind: "agent",
+        session: "fresh",
+        requires: ["doc"],
+        prompt: { asset: "p.md" },
+      },
+      {
+        id: "a2",
+        kind: "agent",
+        session: "fresh",
+        requires: ["doc"],
+        prompt: { asset: "p.md" },
+      },
+    ],
+  });
+  const findings = run(twoFresh);
+  const fresh = findings.filter((f) => f.code === "fresh-session-not-shared");
+  assert.equal(fresh.length, 2);
+  assert.deepEqual(fresh.map((f) => f.target).sort(), ["a1", "a2"]);
+  assert.ok(fresh.every((f) => f.severity === "warning"));
+
+  // A single `fresh` Step is unambiguous and raises nothing.
+  const oneFresh = manifest({
+    routing: [
+      {
+        id: "a1",
+        kind: "agent",
+        session: "fresh",
+        requires: ["doc"],
+        prompt: { asset: "p.md" },
+      },
+    ],
+  });
+  assert.equal(
+    run(oneFresh).some((f) => f.code === "fresh-session-not-shared"),
+    false,
+  );
+});
+
 const cases: ReadonlyArray<{
   readonly title: string;
   readonly manifest: AuthoredManifest;

@@ -11,7 +11,7 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import type { RendererPort } from "../../src/tui/renderer/renderer.js";
+import { makeFakeRenderer, until } from "./renderer-fixture.js";
 import type {
   BundleCatalogSnapshot,
   WorkspaceSnapshot,
@@ -67,20 +67,6 @@ function fakeView(): WorkspaceView & { approvedOnce(): boolean } {
   };
 }
 
-/** Await a bounded readiness condition in real time (a lone Escape is held
- * briefly by OpenTUI's key disambiguation before its binding fires). */
-async function until(
-  predicate: () => boolean,
-  timeoutMs = 1000,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Condition not met within the time budget.");
-}
-
 function noLaunch(): RunLaunchView {
   return { launch: () => () => ({ kind: "pending" }) };
 }
@@ -115,15 +101,6 @@ function noRunView(): RunWorkbenchView {
     },
   };
 }
-function fakeRenderer(): RendererPort {
-  return {
-    size: () => ({ width: 80, height: 24 }),
-    onKey: () => () => {},
-    onResize: () => () => {},
-    destroy() {},
-    destroyed: false,
-  };
-}
 
 async function mount(width = 60, height = 16) {
   const view = fakeView();
@@ -137,7 +114,7 @@ async function mount(width = 60, height = 16) {
         run={noRunView()}
         runList={inertRunListView()}
         actions={inertRunActionsView()}
-        renderer={fakeRenderer()}
+        renderer={makeFakeRenderer().port}
         exit={(reason) => exits.push(reason)}
       />
     ),
@@ -179,7 +156,7 @@ async function mountApproved(liveRunCount: number) {
         run={noRunView()}
         runList={runList}
         actions={inertRunActionsView()}
-        renderer={fakeRenderer()}
+        renderer={makeFakeRenderer().port}
         exit={(reason) => exits.push(reason)}
       />
     ),

@@ -8,7 +8,6 @@ export default tseslint.config(
       ".agent/**",
       ".codex/**",
       ".debug/**",
-      ".devflow/**",
       "dist/**",
       "node_modules/**",
     ],

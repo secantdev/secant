@@ -344,14 +344,6 @@ function conflictView(
   };
 }
 
-/** Whether the coordination record holds this Run's live Workspace claim — some
- *  process is executing it. A reader must not acquire (and fence) such a Run; it
- *  is also the legality test for cancel (live) vs delete (not live) (#87). */
-export function isLiveElsewhere(runGroup: RunGroup, runId: string): boolean {
-  const listing = runListing(runGroup, runId);
-  return listing?.live === true && !listing.ownedByThisProcess;
-}
-
 function runListing(runGroup: RunGroup, runId: string): RunListing | undefined {
   return runGroup.listRuns().find((run) => run.runId === runId);
 }

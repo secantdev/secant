@@ -1,7 +1,7 @@
 # Target Module Topology
 
 Read before creating or moving target source, changing public entrypoints, or crossing a Module's Interface. This is the target of
-[Define the target Module seams and folder topology](https://github.com/DevFlow-HQ/devflow-cli/issues/27); legacy files are migration evidence.
+[Define the target Module seams and folder topology](https://github.com/secantdev/secant/issues/27); legacy files are migration evidence.
 The [Module design](./module-design.md), [dependency](./dependencies.md), and [testing](./testing.md) standards still apply.
 
 ## Ownership

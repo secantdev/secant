@@ -1,7 +1,7 @@
 # Slicing Rulebook
 
 Read this before a `/to-spec` or `/to-tickets` session; both read it, and `/to-tickets` cuts each tracer-bullet slice under it. Fixed by the
-"Secant slicing rulebook" section of [the sequencing decision](https://github.com/DevFlow-HQ/devflow-cli/issues/20#issuecomment-5568202859); the
+"Secant slicing rulebook" section of [the sequencing decision](https://github.com/secantdev/secant/issues/20#issuecomment-5568202859); the
 milestone loop that feeds it is in [milestones](./milestones.md) and the ticket packet it produces is in [issue tracker](./issue-tracker.md).
 
 These eight rules sit on top of the ordinary vertical-slice rules a slice already obeys: a complete path through every layer, demoable, one context

@@ -22,10 +22,7 @@ import {
   type RunLaunchView,
   type WorkspaceView,
 } from "../../src/tui/tui.js";
-import type {
-  RendererKeyEvent,
-  RendererPort,
-} from "../../src/tui/renderer/renderer.js";
+import { makeFakeRenderer } from "./renderer-fixture.js";
 import { installReplayer } from "../harness/replayer.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
@@ -55,28 +52,6 @@ const MATT_FRONT_FIXTURE = join(
 // use the recording's own for a transcript that reads exactly as it was recorded.
 const SESSION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const REPLAYER_VERSION = "2.1.274 (Claude Code)";
-
-function renderer(
-  width: number,
-  height: number,
-): { port: RendererPort; key(name: string): void } {
-  const keys = new Set<(event: RendererKeyEvent) => void>();
-  return {
-    port: {
-      size: () => ({ width, height }),
-      onKey: (listener) => {
-        keys.add(listener);
-        return () => keys.delete(listener);
-      },
-      onResize: () => () => {},
-      destroy() {},
-      destroyed: false,
-    },
-    key: (name) => {
-      for (const listener of keys) listener({ name });
-    },
-  };
-}
 
 function workspaceView(snapshot: WorkspaceSnapshot): WorkspaceView {
   const [value] = createSignal(snapshot);
@@ -196,7 +171,7 @@ test("the Matt front runs in the TUI against the replayer to succeeded (#123)", 
     },
   };
   const runView = createLiveRunWorkbenchView(wired.projectionPort);
-  const fakeRenderer = renderer(120, 40);
+  const fakeRenderer = makeFakeRenderer(120, 40);
   const rendered = await testRender(
     () => (
       <App

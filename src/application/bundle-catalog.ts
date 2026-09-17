@@ -34,6 +34,7 @@ import type {
 } from "./projection-port.js";
 import { bundleBytesCorrupt, bundleBytesMissing } from "./problems.js";
 import { selectInstalledEntry } from "./entry-selection.js";
+import { selectPlatform } from "./select-platform.js";
 
 // The `bundle-catalog` Projection join (#54). It reads Catalog Entries and their
 // managed bytes through the Catalog Interface, asks the Bundle Module to inspect
@@ -212,7 +213,7 @@ function focusOf(
   const summary = summaryOf(entry, inspection, deps);
   const { manifest } = inspection;
   const { bundle } = manifest;
-  const platform = selectPlatform(deps.hostPlatform, inspection.platforms);
+  const platform = selectPlatform(inspection.platforms, deps.hostPlatform);
   const executionCore = generateExecutionSummary(
     manifest,
     inspection.digest,
@@ -319,14 +320,6 @@ function producedView(
     ...(produced.path !== undefined ? { path: produced.path } : {}),
     producedBy,
   };
-}
-
-function selectPlatform(
-  host: Platform | undefined,
-  platforms: readonly Platform[],
-): Platform {
-  if (host !== undefined && platforms.includes(host)) return host;
-  return platforms[0] ?? "linux";
 }
 
 // --- version facts ---------------------------------------------------------

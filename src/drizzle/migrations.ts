@@ -7,51 +7,52 @@ import runTurnKind from "./run/20260917052606_ambiguous_the_hand/migration.sql" 
 import runHarnessIdentity from "./run/20260917061423_easy_iceman/migration.sql" with { type: "text" };
 import type { MigrationsJournal } from "drizzle-orm/migrator";
 
+// A migration's journal `name` and `timestamp` are the two load-bearing fields
+// drizzle applies by: the migrator dedupes on `name` and orders by `timestamp`.
+// Both are derived here from the generated `YYYYMMDDHHmmss_slug` directory name
+// so a journal entry can never drift from the folder it embeds (the hand-typed
+// pairs did: #116's `cooing_squadron_supreme` carried a timestamp 800 s off its
+// directory). `check-migrations.ts` re-derives the same pair and fails on any
+// mismatch, missing entry or extra entry.
+const MIGRATION_DIRECTORY = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})_(.+)$/;
+
+export function journalEntry(
+  directory: string,
+  sql: string,
+): MigrationsJournal[number] {
+  const match = MIGRATION_DIRECTORY.exec(directory);
+  if (!match) {
+    throw new Error(`Malformed migration directory name: ${directory}`);
+  }
+  const [, year, month, day, hour, minute, second, name] = match;
+  const timestamp = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  );
+  return { name: name!, timestamp, sql };
+}
+
 // These first drizzle-kit migrations establish the complete schemas. Their
 // generated CREATE statements are kept idempotent so a home from the immediately
 // preceding release (same tables, no Drizzle journal) can adopt the journal at
 // open; they also retain the STRICT tables that release created. Later schema
 // changes remain ordinary generated diffs.
 export const catalogMigrations: MigrationsJournal = [
-  {
-    name: "chubby_vanisher",
-    timestamp: 1_789_466_328_000,
-    sql: catalogInitial,
-  },
+  journalEntry("20260915095848_chubby_vanisher", catalogInitial),
 ];
 
 export const coordinationMigrations: MigrationsJournal = [
-  {
-    name: "yellow_forge",
-    timestamp: 1_789_466_330_000,
-    sql: coordinationInitial,
-  },
+  journalEntry("20260915095850_yellow_forge", coordinationInitial),
 ];
 
 export const runMigrations: MigrationsJournal = [
-  {
-    name: "hesitant_silverclaw",
-    timestamp: 1_789_466_333_000,
-    sql: runInitial,
-  },
-  {
-    name: "mighty_vivisector",
-    timestamp: 1_789_527_827_000,
-    sql: runPendingGate,
-  },
-  {
-    name: "cooing_squadron_supreme",
-    timestamp: 1_789_557_356_000,
-    sql: runHarnessTurns,
-  },
-  {
-    name: "ambiguous_the_hand",
-    timestamp: 1_789_622_766_000,
-    sql: runTurnKind,
-  },
-  {
-    name: "easy_iceman",
-    timestamp: 1_789_625_663_000,
-    sql: runHarnessIdentity,
-  },
+  journalEntry("20260915095853_hesitant_silverclaw", runInitial),
+  journalEntry("20260916030347_mighty_vivisector", runPendingGate),
+  journalEntry("20260916112916_cooing_squadron_supreme", runHarnessTurns),
+  journalEntry("20260917052606_ambiguous_the_hand", runTurnKind),
+  journalEntry("20260917061423_easy_iceman", runHarnessIdentity),
 ];

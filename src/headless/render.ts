@@ -1,3 +1,4 @@
+import stripAnsi from "strip-ansi";
 import type {
   BundleTrustState,
   EngineRange,
@@ -268,7 +269,10 @@ export function renderRun(run: RunView): string {
     lines.push("", "Transcript:");
     for (const entry of run.transcript) {
       lines.push(`  [${entry.session}] ${entry.role}:`);
-      for (const line of entry.content.split("\n")) lines.push(`    ${line}`);
+      // Strip ANSI and handle CRLF so headless prints the same clean rows the TUI
+      // does (D12); the two clients render one Projection transcript the same way.
+      for (const line of stripAnsi(entry.content).split(/\r?\n/))
+        lines.push(`    ${line}`);
     }
   }
 

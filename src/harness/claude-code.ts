@@ -728,6 +728,13 @@ class ClaudeCodeSession {
     return { ok: true };
   }
 
+  // Hand-rolled NDJSON line splitter, kept over `node:readline` deliberately
+  // (D15). The growth rule points both ways to hand-roll: the framing is frozen
+  // by the stream-json contract (it does not grow), and correctness depends on the
+  // raw bytes — `readline` emits a final unterminated line as an ordinary line,
+  // which would erase the `truncated JSON frame` diagnostic below (:745-747) that a
+  // recorded `protocol-corruption` fixture pins, degrading it to `malformed JSON
+  // frame`. So the builtin is a worse fit here, not a shorter one.
   private async consumeStdout(owned: OwnedProcess): Promise<void> {
     const decoder = new TextDecoder();
     let pending = "";

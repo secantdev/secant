@@ -16,13 +16,28 @@
 // nothing above the Seam decides anything from their contents.
 // ---------------------------------------------------------------------------
 
+/** Build a readonly tuple that must list every member of a string union (A39).
+ *  A bare `readonly X[]` annotation lets an *added* union member compile against
+ *  the old array, so the loud-failure claim only caught renames and deletions.
+ *  Here a missing member turns the argument type into `{ missing: … }`, which the
+ *  array literal cannot be, so adding a variant without extending the tuple fails
+ *  the build; an out-of-union value fails it too. */
+const exhaustive =
+  <Union extends string>() =>
+  <Tuple extends readonly Union[]>(
+    tuple: [Union] extends [Tuple[number]]
+      ? Tuple
+      : { readonly missing: Exclude<Union, Tuple[number]> },
+  ): Tuple =>
+    tuple as Tuple;
+
 /** The three supported operating systems, in canonical order. */
 export type HarnessPlatform = "windows" | "macos" | "linux";
-export const HARNESS_PLATFORMS: readonly HarnessPlatform[] = [
+export const HARNESS_PLATFORMS = exhaustive<HarnessPlatform>()([
   "windows",
   "macos",
   "linux",
-];
+] as const);
 
 /** Crucible's per-Turn correlation key. Opaque, and not an exactly-once
  *  promise, so uncertain submission is never automatically retried. */
@@ -139,7 +154,10 @@ export interface HarnessProfile {
 
 /** Whether a Step's input is authored by Crucible or typed by a human. */
 export type TurnOrigin = "managed" | "human";
-export const TURN_ORIGINS: readonly TurnOrigin[] = ["managed", "human"];
+export const TURN_ORIGINS = exhaustive<TurnOrigin>()([
+  "managed",
+  "human",
+] as const);
 
 /** The content of one Turn. Prompt rendering is Adapter-owned; the caller
  *  supplies the semantic input and never bakes in Harness syntax. */
@@ -197,10 +215,10 @@ export interface TurnRequest {
 
 /** The decisions a tool approval offers. Claude Code offers no "always". */
 export type ApprovalDecision = "allow" | "deny";
-export const APPROVAL_DECISIONS: readonly ApprovalDecision[] = [
+export const APPROVAL_DECISIONS = exhaustive<ApprovalDecision>()([
   "allow",
   "deny",
-];
+] as const);
 
 /** The shape of one Harness Request. */
 export type RequestShape =
@@ -318,7 +336,7 @@ export type TurnEvent =
   | { readonly kind: "activity"; readonly description: string }
   | { readonly kind: "model"; readonly observation: ModelObservation };
 
-export const TURN_EVENT_KINDS: readonly TurnEvent["kind"][] = [
+export const TURN_EVENT_KINDS = exhaustive<TurnEvent["kind"]>()([
   "session",
   "assistant-content",
   "tool-activity",
@@ -330,7 +348,7 @@ export const TURN_EVENT_KINDS: readonly TurnEvent["kind"][] = [
   "usage",
   "activity",
   "model",
-];
+] as const);
 
 /** A listener on the ordered event stream. Removed by its subscription. */
 export type TurnEventListener = (event: TurnEvent) => void;
@@ -355,12 +373,12 @@ export interface SteerInput {
 /** Why a control was rejected. A closed set of expected races. */
 export type ControlRejection =
   "unsupported" | "expired" | "already-settled" | "shape-mismatch";
-export const CONTROL_REJECTIONS: readonly ControlRejection[] = [
+export const CONTROL_REJECTIONS = exhaustive<ControlRejection>()([
   "unsupported",
   "expired",
   "already-settled",
   "shape-mismatch",
-];
+] as const);
 
 /** The value a control returns. Acceptance does not prove final effect. */
 export type ControlReceipt =
@@ -440,11 +458,11 @@ export interface InterruptedDetail {
 
 /** Which terminal truth is unknown after a Turn is lost. */
 export type LostUnknown = "acceptance" | "completion" | "interruption";
-export const LOST_UNKNOWNS: readonly LostUnknown[] = [
+export const LOST_UNKNOWNS = exhaustive<LostUnknown>()([
   "acceptance",
   "completion",
   "interruption",
-];
+] as const);
 
 /** Effects may have started but no terminal truth survived recovery probes. */
 export interface LostDetail {
@@ -463,13 +481,13 @@ export type TurnResult =
   | { readonly kind: "interrupted"; readonly detail: InterruptedDetail }
   | { readonly kind: "lost"; readonly detail: LostDetail };
 
-export const TURN_RESULT_KINDS: readonly TurnResult["kind"][] = [
+export const TURN_RESULT_KINDS = exhaustive<TurnResult["kind"]>()([
   "not-started",
   "completed",
   "failed",
   "interrupted",
   "lost",
-];
+] as const);
 
 // ---------------------------------------------------------------------------
 // Cleanup

@@ -74,6 +74,15 @@ The copyright line above is reproduced from the `LICENSE` file shipped in the
 `@opentui/core@0.4.5` package (the `anomalyco/opentui` project). All three
 `@opentui/*` packages are published at `0.4.5` under the MIT licence.
 
+`@opentui/core@0.4.5` also pulls eight per-platform native packages
+(`@opentui/core-{darwin,linux,win32}-*@0.4.5`, optional dependencies whose Zig
+library is embedded in the compiled binary) and the bundled transitive
+`bun-ffi-structs@0.2.4` (MIT). These are declared transitively, not directly, so
+they are outside the notices-to-dependencies cross-check that guards this file
+(which is scoped to Secant's declared runtime dependencies). Their per-package
+licence text is deferred to the M4 licence gate, which inventories the transitive
+closure of the shipped artifact.
+
 ---
 
 ## Model Context Protocol SDK (`@modelcontextprotocol/sdk`)
@@ -179,7 +188,7 @@ Catalog row validation is bundled into the shipped single-file executable.
 ```
 MIT License
 
-Copyright (c) 2020 Colin McDonnell
+Copyright (c) 2025 Colin McDonnell
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -205,10 +214,10 @@ SOFTWARE.
 ## solid-js
 
 `solid-js` is **not** vendored. It is a real npm dependency pinned at `1.9.12`
-(the version OpenCode carries, and the reactive runtime `@opentui/solid` renders
-through). It is listed here because the vendored presentation code and the shell's
-screens are built as Solid components bundled into the shipped single-file
-executable.
+(the reactive runtime `@opentui/solid` renders through it; OpenCode carries a
+different `1.9.x` from its own catalog, so this pin is Secant's, not a mirror). It
+is listed here because the vendored presentation code and the shell's screens are
+built as Solid components bundled into the shipped single-file executable.
 
 ```
 MIT License
@@ -238,10 +247,10 @@ SOFTWARE.
 
 ## which
 
-`which` is **not** vendored. It is a real npm dependency pinned at `2.0.2`
-(OpenCode's choice for PATH resolution). It is listed here because the executable
-resolver the execution Module shares with Preflight walks PATH through it, bundled
-into the shipped single-file executable.
+`which` is **not** vendored. It is a real npm dependency pinned at `6.0.1`
+(the version OpenCode carries, behind its own `which` helper). It is listed here
+because the executable resolver the execution Module shares with Preflight walks
+PATH through it, bundled into the shipped single-file executable.
 
 ```
 The ISC License
@@ -300,10 +309,10 @@ SOFTWARE.
 ## string-width
 
 `string-width` is **not** vendored. It is a real npm dependency pinned at `7.2.0`
-(the version OpenCode carries, and a transitive dependency of `@opentui/core`).
-It is listed here because the Run Workbench measures display columns through it
-when clipping rows to the terminal width, bundled into the shipped single-file
-executable.
+(a transitive dependency of `@opentui/core`, which is where the pin comes from;
+OpenCode declares it in no package of its own). It is listed here because the Run
+Workbench measures display columns through it when clipping rows to the terminal
+width, bundled into the shipped single-file executable.
 
 ```
 MIT License

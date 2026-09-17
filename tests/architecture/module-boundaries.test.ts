@@ -3,12 +3,45 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { makeTempDir } from "../helpers/tempDir.js";
-import { checkModuleBoundaries } from "./check-module-boundaries.js";
+import {
+  checkModuleBoundaries,
+  checkTestDomainMirror,
+} from "./check-module-boundaries.js";
 import { modules } from "./module-policy.js";
 
 test("production imports and tests respect target Module ownership", () => {
   const result = checkModuleBoundaries(process.cwd());
   assert.deepEqual(result.issues, [], JSON.stringify(result.issues, null, 2));
+});
+
+test("every domain-mirroring test folder imports its own source domain (S1)", () => {
+  const issues = checkTestDomainMirror(process.cwd());
+  assert.deepEqual(issues, [], JSON.stringify(issues, null, 2));
+});
+
+test("a suite filed under the wrong domain folder is flagged (S1)", async () => {
+  const root = makeTempDir("secant-mirror-");
+  await mkdir(join(root, "tests", "headless"), { recursive: true });
+  // A headless-folder suite that crosses only the Application entry mirrors the
+  // wrong domain; the moved #117 suites failed exactly this way before the move.
+  await writeFile(
+    join(root, "tests", "headless", "misfiled.test.ts"),
+    'import type { ProjectionPort } from "../../src/application/application.js";\nvoid (0 as unknown as ProjectionPort);\n',
+  );
+  // A correctly-filed suite that crosses its own domain passes.
+  await writeFile(
+    join(root, "tests", "headless", "ok.test.ts"),
+    'import { runHeadless } from "../../src/headless/headless.js";\nvoid runHeadless;\n',
+  );
+  // A pure-helper suite that imports no owned Module is skipped (zero-import).
+  await writeFile(
+    join(root, "tests", "headless", "pure.test.ts"),
+    'import assert from "node:assert/strict";\nvoid assert;\n',
+  );
+  const issues = checkTestDomainMirror(root);
+  assert.equal(issues.length, 1);
+  assert.match(issues[0]!.message, /tests\/headless\/ must import a Module/);
+  assert.equal(issues[0]!.file, "tests/headless/misfiled.test.ts");
 });
 
 test("the declared ownership graph names existing owners and has no cycles", () => {

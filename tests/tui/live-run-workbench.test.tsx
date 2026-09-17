@@ -23,10 +23,7 @@ import {
   type RunLaunchView,
   type WorkspaceView,
 } from "../../src/tui/tui.js";
-import type {
-  RendererKeyEvent,
-  RendererPort,
-} from "../../src/tui/renderer/renderer.js";
+import { makeFakeRenderer } from "./renderer-fixture.js";
 import { createFake } from "../harness/fake-adapter.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { inertRunActionsView, inertRunListView } from "./inert.js";
@@ -82,31 +79,6 @@ function writeAgentBundle(): { folder: string; id: string } {
     JSON.stringify(manifest, null, 2),
   );
   return { folder, id: manifest.bundle.id };
-}
-
-function renderer(
-  width: number,
-  height: number,
-): {
-  port: RendererPort;
-  key(name: string): void;
-} {
-  const keys = new Set<(event: RendererKeyEvent) => void>();
-  return {
-    port: {
-      size: () => ({ width, height }),
-      onKey: (listener) => {
-        keys.add(listener);
-        return () => keys.delete(listener);
-      },
-      onResize: () => () => {},
-      destroy() {},
-      destroyed: false,
-    },
-    key: (name) => {
-      for (const listener of keys) listener({ name });
-    },
-  };
 }
 
 function workspaceView(snapshot: WorkspaceSnapshot): WorkspaceView {
@@ -242,7 +214,7 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
       return launched;
     },
   };
-  const fakeRenderer = renderer(120, 32);
+  const fakeRenderer = makeFakeRenderer(120, 32);
   const rendered = await testRender(
     () => (
       <App

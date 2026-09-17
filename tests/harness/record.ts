@@ -27,7 +27,7 @@ import {
   spawnSync,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -43,6 +43,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   assertNoCredentials,
+  envSecrets,
   redact,
   type KnownSecret,
   type Redaction,
@@ -50,6 +51,17 @@ import {
 
 const FIXTURES = join(import.meta.dirname, "fixtures", "claude-code");
 const HARNESS = "claude-code";
+
+/** Constant-time bearer comparison (D2), mirroring the production bridge. */
+function bearerMatches(
+  presented: string | undefined,
+  expected: string,
+): boolean {
+  if (presented === undefined) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /** Canonical per-case session ids — the same ids the Adapter tests mint, so the
  *  recorded frames echo exactly what a test's `--session-id`/`--resume` carries. */
@@ -184,7 +196,7 @@ function startBridge(
   };
 
   const http: Server = createServer((req, res) => {
-    if (req.headers.authorization !== authHeader) {
+    if (!bearerMatches(req.headers.authorization, authHeader)) {
       res.writeHead(401).end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
@@ -342,6 +354,9 @@ function hostSecrets(bridgeToken?: string): KnownSecret[] {
   const secrets: KnownSecret[] = [
     { value: homedir(), placeholder: "«HOME»", reason: "home directory" },
     { value: userInfo().username, placeholder: "«USER»", reason: "user name" },
+    // Any secret-shaped environment variable on the recording host, so a value
+    // the scenario never named is still redacted before the bytes are written.
+    ...envSecrets(),
   ];
   if (bridgeToken !== undefined) {
     secrets.push({

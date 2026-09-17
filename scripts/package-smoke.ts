@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
@@ -21,10 +21,9 @@ import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
-// @ts-expect-error JS helper, no types
-import { TARGETS, hostTargetKey } from "./targets.mjs";
-import { installReplayerAt } from "../tests/harness/replayer-install.ts";
-import { seedTestRepairWorkspace } from "../tests/helpers/testRepairWorkspace.ts";
+import { TARGETS, hostTargetKey } from "./targets.js";
+import { installReplayerAt } from "../tests/harness/replayer-install.js";
+import { seedTestRepairWorkspace } from "../tests/helpers/testRepairWorkspace.js";
 
 // Smokes the Bun compiled single-file executable (ADR 0030). It replaces the
 // npm-tarball smoke and keeps its install-then-run shape: copy the standalone
@@ -53,15 +52,21 @@ if (!existsSync(source)) {
   );
 }
 
-function run(command, args, options = {}) {
+type RunOptions = SpawnSyncOptions & { expect?: number };
+
+function run(
+  command: string,
+  args: readonly string[],
+  options: RunOptions = {},
+): string {
   // `expect` is the required exit code (default 0). A Run resting blocked at its
   // checkpoint exits 2 (A36) — a known, deliberate code — so the gate scenarios
   // assert it through this helper instead of dropping to raw spawnSync.
   const { expect = 0, ...spawnOptions } = options;
-  const result = spawnSync(command, args, {
+  const result = spawnSync(command, [...args], {
     cwd: projectRoot,
-    encoding: "utf8",
     ...spawnOptions,
+    encoding: "utf8",
   });
   if (result.error) throw result.error;
   if (result.status !== expect) {
@@ -78,12 +83,16 @@ function run(command, args, options = {}) {
   return result.stdout;
 }
 
-function assertMigrated(databasePath, label, expected = 1) {
+function assertMigrated(
+  databasePath: string,
+  label: string,
+  expected = 1,
+): void {
   const database = new Database(databasePath);
   try {
     const row = database
       .query("SELECT COUNT(*) AS count FROM __drizzle_migrations")
-      .get();
+      .get() as { count: number } | null;
     if (row?.count !== expected) {
       throw new Error(
         `Compiled binary did not record the embedded ${label} migrations ` +
@@ -95,10 +104,11 @@ function assertMigrated(databasePath, label, expected = 1) {
   }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
 
 /** Poll for a file to appear, up to a deadline. */
-async function waitForFile(path, deadlineMs) {
+async function waitForFile(path: string, deadlineMs: number): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < deadlineMs) {
     if (existsSync(path)) return true;
@@ -164,7 +174,7 @@ try {
   // The runtime's directory is on PATH so a launched Command Step can spawn it by
   // bare name (the #88 materialization scenario below runs `-e` scripts).
   const runtimeDir = dirname(process.execPath);
-  const workspaceEnv = {
+  const workspaceEnv: NodeJS.ProcessEnv = {
     ...process.env,
     SECANT_HOME: secantHome,
     PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
@@ -349,7 +359,7 @@ try {
     }),
   );
   const listed = (listSnapshot.result?.bundles ?? []).find(
-    (bundle) => bundle.id === "dev.secant.test-repair",
+    (bundle: { id: string }) => bundle.id === "dev.secant.test-repair",
   );
   if (
     !listed ||
@@ -368,7 +378,7 @@ try {
     }),
   );
   const errorFindings = (focus.compositionFindings ?? []).filter(
-    (finding) => finding.severity === "error",
+    (finding: { severity: string }) => finding.severity === "error",
   );
   if (
     focus.id !== "dev.secant.test-repair" ||
@@ -404,7 +414,7 @@ try {
     const proofWorkspace = join(smokeRoot, "test-repair-workspace");
     const { failingTest, baselineCommit } =
       seedTestRepairWorkspace(proofWorkspace);
-    const proofEnv = {
+    const proofEnv: NodeJS.ProcessEnv = {
       ...workspaceEnv,
       PATH: `${replayer.dir}${delimiter}${workspaceEnv.PATH}`,
     };
@@ -447,12 +457,12 @@ try {
       proofRun.pendingGate?.gate?.stepId !== "approve-commit" ||
       proofRun.effectiveModel !== "claude-opus-5[1m]" ||
       !proofRun.timeline.some(
-        (event) =>
+        (event: { event: string; detail?: string }) =>
           event.event === "request-raised" &&
           /^Edit .*sum\.mjs/.test(event.detail ?? ""),
       ) ||
       !proofRun.timeline.some(
-        (event) =>
+        (event: { event: string; detail?: string }) =>
           event.event === "request-answered" &&
           event.detail === "answered by client policy (allow)",
       )
@@ -530,10 +540,11 @@ try {
   // Run error paths from the compiled binary (issue #82, AC7): `run show` on an
   // unknown Run id and `run launch` on an uninstalled Bundle each exit non-zero
   // with the precise Problem, before any Run directory exists.
-  for (const [args, code] of [
+  const notFoundCases: [string[], string][] = [
     [["run", "show", "no-such-run"], "run-not-found"],
     [["run", "launch", "io.example.absent"], "bundle-not-installed"],
-  ]) {
+  ];
+  for (const [args, code] of notFoundCases) {
     const result = spawnSync(binary, args, {
       cwd: workspaceDirectory,
       encoding: "utf8",
@@ -663,13 +674,14 @@ try {
     }
   }
 
-  for (const [args, needle] of [
+  const preflightCases: [string[], string][] = [
     [
       ["run", "launch", "dev.secant.smoke-interactive"],
       "interactive-step-needs-tui",
     ],
     [["run", "launch", "dev.secant.git-guard"], "git-worktree-root"],
-  ]) {
+  ];
+  for (const [args, needle] of preflightCases) {
     const result = spawnSync(binary, args, {
       cwd: workspaceDirectory,
       encoding: "utf8",
@@ -763,7 +775,7 @@ try {
       env: workspaceEnv,
     });
     const installed = JSON.parse(listJson).result.bundles.find(
-      (bundle) => bundle.id === id,
+      (bundle: { id: string }) => bundle.id === id,
     );
     if (installed === undefined) {
       throw new Error(`Materialization Bundle was not installed: ${listJson}`);
@@ -895,7 +907,7 @@ try {
       env: workspaceEnv,
     });
     const installed = JSON.parse(listJson).result.bundles.find(
-      (bundle) => bundle.id === id,
+      (bundle: { id: string }) => bundle.id === id,
     );
     if (installed === undefined) {
       throw new Error(`Answer Bundle was not installed: ${listJson}`);
@@ -948,7 +960,8 @@ try {
     // local-midnight sensitive between the Runs' creation and this list).
     if (
       listed.rows.some(
-        (row) => !["today", "yesterday", "older"].includes(row.group),
+        (row: { group: string; runId: string; live: boolean }) =>
+          !["today", "yesterday", "older"].includes(row.group),
       )
     ) {
       throw new Error(
@@ -970,7 +983,12 @@ try {
         env: workspaceEnv,
       }),
     );
-    if (afterDelete.rows.some((row) => row.runId === victim.runId)) {
+    if (
+      afterDelete.rows.some(
+        (row: { group: string; runId: string; live: boolean }) =>
+          row.runId === victim.runId,
+      )
+    ) {
       throw new Error(
         `The deleted Run still appears in run list: ${JSON.stringify(afterDelete)}`,
       );
@@ -1017,7 +1035,7 @@ try {
     const startedMarker = join(markerDir, "started");
     const proceedMarker = join(markerDir, "proceed");
     const lastMarker = join(markerDir, "last");
-    const q = (value) => JSON.stringify(value);
+    const q = (value: unknown) => JSON.stringify(value);
     const id = "dev.secant.sigint-smoke";
     const manifest = {
       formatVersion: 1,
@@ -1079,7 +1097,7 @@ try {
         cwd: sigintWorkspace,
         env: sigintEnv,
       }),
-    ).result.bundles.find((bundle) => bundle.id === id);
+    ).result.bundles.find((bundle: { id: string }) => bundle.id === id);
     if (installed === undefined) {
       throw new Error("SIGINT smoke Bundle was not installed.");
     }
@@ -1090,10 +1108,12 @@ try {
       ["run", "launch", id, "--trust", installed.digest],
       { cwd: sigintWorkspace, env: sigintEnv },
     );
-    const childErr = [];
+    const childErr: string[] = [];
     child.stderr.on("data", (d) => childErr.push(d.toString()));
     child.stdout.on("data", () => {});
-    const exited = new Promise((resolve) => child.on("exit", () => resolve()));
+    const exited = new Promise<void>((resolve) =>
+      child.on("exit", () => resolve()),
+    );
 
     const started = await waitForFile(startedMarker, 20000);
     if (!started) {
@@ -1174,10 +1194,10 @@ try {
       ["run", "launch", id, "--trust", installed.digest],
       { cwd: sigintWorkspace, env: sigintEnv },
     );
-    const ownedErr = [];
+    const ownedErr: string[] = [];
     ownedChild.stderr.on("data", (data) => ownedErr.push(data.toString()));
     ownedChild.stdout.on("data", () => {});
-    const ownedExited = new Promise((resolve) =>
+    const ownedExited = new Promise<void>((resolve) =>
       ownedChild.on("exit", () => resolve()),
     );
     if (!(await waitForFile(startedMarker, 20000))) {
@@ -1192,7 +1212,10 @@ try {
         env: sigintEnv,
       }),
     ).rows;
-    const ownedRun = liveRows.find((row) => row.live === true);
+    const ownedRun = liveRows.find(
+      (row: { group: string; runId: string; live: boolean }) =>
+        row.live === true,
+    );
     if (ownedRun === undefined || typeof ownedRun.ownerPid !== "number") {
       throw new Error(
         `Takeover smoke did not list the owned Run live: ${JSON.stringify(liveRows)}`,
@@ -1275,7 +1298,7 @@ try {
         cwd: smokeRoot,
         env: workspaceEnv,
       }),
-    ).result.bundles.find((bundle) => bundle.id === gateId);
+    ).result.bundles.find((bundle: { id: string }) => bundle.id === gateId);
     if (gate === undefined) {
       throw new Error("The gate Bundle was not installed.");
     }
@@ -1373,7 +1396,12 @@ try {
         env: workspaceEnv,
       }),
     );
-    if (!gateList.rows.some((row) => row.runId === gateRunId)) {
+    if (
+      !gateList.rows.some(
+        (row: { group: string; runId: string; live: boolean }) =>
+          row.runId === gateRunId,
+      )
+    ) {
       throw new Error(
         `The gate Run does not appear in run list: ${JSON.stringify(gateList)}`,
       );
@@ -1445,7 +1473,7 @@ try {
       PATH: `${shimDir}${delimiter}${workspaceEnv.PATH ?? ""}`,
     };
 
-    const shimBundle = (id, name, executable) => ({
+    const shimBundle = (id: string, name: string, executable: string) => ({
       formatVersion: 1,
       bundle: { id, version: "1.0.0", name, description: `${name} smoke.` },
       platforms: ["windows", "macos", "linux"],
@@ -1461,7 +1489,10 @@ try {
       ],
     });
 
-    const buildAndInstall = async (folderName, manifest) => {
+    const buildAndInstall = async (
+      folderName: string,
+      manifest: { bundle: { id: string } },
+    ) => {
       const folder = join(smokeRoot, folderName);
       await mkdir(folder, { recursive: true });
       await writeFile(
@@ -1477,7 +1508,9 @@ try {
           cwd: workspaceDirectory,
           env: shimEnv,
         }),
-      ).result.bundles.find((bundle) => bundle.id === manifest.bundle.id);
+      ).result.bundles.find(
+        (bundle: { id: string }) => bundle.id === manifest.bundle.id,
+      );
       if (installed === undefined) {
         throw new Error(`${folderName} Bundle was not installed.`);
       }

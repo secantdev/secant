@@ -96,7 +96,8 @@ export const pendingGates = sqliteTable("pending_gate", {
 });
 
 // One named Harness Session a Run opens (#116). `session_key` is the Bundle's
-// named `session` (or a per-Attempt `fresh-<attempt>` key for `fresh`); the native
+// named `session` (or a per-Attempt `fresh-<attempt>` key for the reserved
+// `FRESH_SESSION` name the Workflow Module owns); the native
 // conversation id crosses the Seam only as the opaque recovery coordinate stored
 // here. `availability` is the last observed Session state (`open`/`detached`/
 // `unusable`); `availability_detail` carries a detached coordinate or an unusable

@@ -342,6 +342,10 @@ export interface TurnRecord {
   readonly input: string;
   readonly admittedAt: string; // ISO 8601
   readonly resultKind?: string;
+  /** The settled result's flattened detail as JSON (the failure category and
+   *  native exit code for a lost/failed/not-started Turn); absent until settle.
+   *  Read through this member rather than a raw `run.db` query. */
+  readonly resultDetail?: string;
   readonly settledAt?: string;
 }
 
@@ -379,7 +383,9 @@ export interface SequencedTranscriptEntry extends TranscriptEntryRecord {
 
 /** A bounded, ordered request for one Session's transcript, newest-first paging.
  *  `before` is an exclusive upper bound on the store sequence (absent = newest
- *  page); `limit` bounds the page so the whole transcript is never materialized. */
+ *  page); `limit` bounds the page so the whole transcript is never materialized.
+ *  A non-positive `limit` is clamped to one entry, so a page always carries a
+ *  cursor. */
 export interface TranscriptPageRequest {
   readonly session: string;
   readonly before?: number;

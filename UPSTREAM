@@ -51,12 +51,12 @@ commit 1ead9e3d7f.
        upsertTheme / hasTheme / setCustomThemes / setSystemTheme functions.
      - The syntax-rule list is trimmed to a representative subset.
      - The never-called exports selectedForeground, terminalMode, generateSystem,
-       generateSyntax, generateSubtleSyntax, and the SyntaxStyleOverrides type are
-       removed along with their private helpers (generateGrayScale,
+       generateSyntax, generateSubtleSyntax, tint, and the SyntaxStyleOverrides
+       type are removed along with their private helpers (generateGrayScale,
        generateMutedTextColor, getSyntaxRules); no picker or highlighter uses them
-       yet (#71 audit A12).
+       yet (#71 audit A12; tint removed #127 audit A37).
    Faithful (unchanged) parts: the pure computation kept is carried over
-     unchanged -- the Theme type, the resolver, ANSI-to-RGBA conversion, and tint.
+     unchanged -- the Theme type, the resolver, and ANSI-to-RGBA conversion.
 
 2. src/tui/vendor/themes/*.ts   (25 files)
    Copied from: packages/tui/src/theme/assets/<name>.json

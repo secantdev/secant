@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   assertNoCredentials,
   CredentialLeak,
+  envSecrets,
   findCredentials,
   redact,
 } from "./redact.js";
@@ -55,6 +56,31 @@ test("a bearer token is caught even when it survives host redaction", () => {
       ),
     CredentialLeak,
   );
+});
+
+test("a lower-case bearer token is caught too (case-insensitive, D5)", () => {
+  assert.throws(
+    () =>
+      assertNoCredentials(
+        "authorization: bearer 0123456789abcdef0123456789abcdef",
+      ),
+    CredentialLeak,
+  );
+});
+
+test("envSecrets substitutes secret-shaped variables and skips ordinary config", () => {
+  const secrets = envSecrets({
+    MY_API_KEY: "supersecretvalue123",
+    ANTHROPIC_AUTH_TOKEN: "tok_abcdefghijklmnop",
+    HOME: "/home/ada",
+    NODE_ENV: "test",
+    SHORT_KEY: "abc",
+    SAFE_API_KEY: "fixture",
+  });
+  const names = secrets.map((secret) => secret.value).sort();
+  // Only the two long, secret-named values are swept; the home path, the short
+  // value, and the explicitly safe "fixture" value are left alone.
+  assert.deepEqual(names, ["supersecretvalue123", "tok_abcdefghijklmnop"]);
 });
 
 test("assertNoCredentials passes a redacted, secret-free recording", () => {

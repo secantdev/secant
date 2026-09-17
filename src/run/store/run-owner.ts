@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   and,
@@ -160,6 +166,7 @@ const turnRow = z.object({
   input: z.string(),
   admitted_at: z.string(),
   result_kind: z.string().nullable(),
+  result_detail: z.string().nullable(),
   settled_at: z.string().nullable(),
 });
 const turnEventRow = z.object({
@@ -708,8 +715,15 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
       if (params.fenced()) return { ok: false, reason: "fenced" };
       const diagnosticId = randomUUID();
       mkdirSync(diagnosticsDir, { recursive: true });
-      writeFileSync(join(diagnosticsDir, diagnosticId), request.diagnostic);
-      if (params.fenced()) return { ok: false, reason: "fenced" };
+      const diagnosticPath = join(diagnosticsDir, diagnosticId);
+      writeFileSync(diagnosticPath, request.diagnostic);
+      // A fence acquired between staging the bytes and committing the row refuses
+      // the write; the contract is "nothing is written", so the staged diagnostic
+      // must not survive as an orphan until the 90-day prune (A10).
+      if (params.fenced()) {
+        rmSync(diagnosticPath, { force: true });
+        return { ok: false, reason: "fenced" };
+      }
       recordConflict({ db, runId: params.runId, request, diagnosticId });
       return { ok: true, diagnosticId };
     },
@@ -867,6 +881,7 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
           input: turns.input,
           admitted_at: turns.admitted_at,
           result_kind: turns.result_kind,
+          result_detail: turns.result_detail,
           settled_at: turns.settled_at,
         })
         .from(turns)
@@ -887,6 +902,9 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
             admittedAt: parsed.admitted_at,
             ...(parsed.result_kind !== null
               ? { resultKind: parsed.result_kind }
+              : {}),
+            ...(parsed.result_detail !== null
+              ? { resultDetail: parsed.result_detail }
               : {}),
             ...(parsed.settled_at !== null
               ? { settledAt: parsed.settled_at }
@@ -963,6 +981,10 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
       // Read only the newest `limit` retained entries below the cursor (one extra
       // to detect older history), so a page read never touches the whole
       // transcript. `seq` is the monotonic append order; `before` pages upward.
+      // A page must hold at least one entry to carry a cursor forward, so a
+      // non-positive limit is clamped at this ingress Seam — otherwise `limit: 0`
+      // reads one row and reports `hasOlder` over an empty page (A11).
+      const limit = Math.max(1, request.limit);
       const where =
         request.before === undefined
           ? eq(transcriptEntries.session_key, request.session)
@@ -982,10 +1004,10 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         .from(transcriptEntries)
         .where(where)
         .orderBy(desc(transcriptEntries.seq))
-        .limit(request.limit + 1)
+        .limit(limit + 1)
         .all();
-      const hasOlder = rows.length > request.limit;
-      const page = hasOlder ? rows.slice(0, request.limit) : rows;
+      const hasOlder = rows.length > limit;
+      const page = hasOlder ? rows.slice(0, limit) : rows;
       // Rows come newest-first for the bound; reverse so a page reads oldest-first.
       const entries = page.reverse().map((row): SequencedTranscriptEntry => {
         const parsed = sequencedTranscriptRow.parse(row);

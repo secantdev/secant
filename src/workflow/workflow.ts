@@ -45,6 +45,17 @@ export type AttemptOutcome =
 export type SessionNeed = "none" | "named";
 
 /**
+ * The one reserved Session name (ADR 0020, spec #107 story 8). An Agent Step
+ * whose `session` is `fresh` opens an isolated Session per Attempt
+ * (`fresh-<attempt>`) rather than joining a shared one; two Steps both naming
+ * `fresh` do NOT continue one conversation. The word is authored vocabulary, so
+ * it lives here — the executor keys `fresh-<attempt>` off this constant and the
+ * Composition check names the non-sharing semantics from it, rather than either
+ * re-typing the literal.
+ */
+export const FRESH_SESSION = "fresh";
+
+/**
  * One Step kind's uniform contract, stated as the same seven facts for every
  * kind (#13). The orchestrator learns nothing per kind; adding a kind means
  * stating these facts, never branching on identity. `authored` marks a fact the
@@ -121,14 +132,24 @@ export type Reference =
   { readonly asset: string } | { readonly artifact: string };
 
 /**
- * Parse the Prompt slot grammar `{{artifact:name}}` out of prompt text. It is
- * substitution only: no conditionals, loops, includes, or expressions. Returns
+ * The Prompt slot grammar `{{artifact:name}}` as a fresh global RegExp. It is
+ * substitution only: no conditionals, loops, includes, or expressions. This is
+ * the single owner of the grammar — Composition validates prompts with it and
+ * the executor substitutes with it, so the two can never diverge by a character
+ * (a divergence used to pass Composition and fail at render). A fresh instance
+ * per call keeps `lastIndex` state from leaking between `matchAll` and `replace`.
+ */
+export function promptSlotPattern(): RegExp {
+  return /\{\{artifact:([a-zA-Z0-9._-]+)\}\}/g;
+}
+
+/**
+ * Parse the Prompt slot grammar `{{artifact:name}}` out of prompt text. Returns
  * the referenced artifact names in order of appearance (with duplicates).
  */
 export function promptSlotReferences(text: string): string[] {
   const names: string[] = [];
-  const slot = /\{\{artifact:([a-zA-Z0-9._-]+)\}\}/g;
-  for (const match of text.matchAll(slot)) {
+  for (const match of text.matchAll(promptSlotPattern())) {
     names.push(match[1]);
   }
   return names;

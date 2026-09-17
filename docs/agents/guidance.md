@@ -1,7 +1,7 @@
 # Guidance Design
 
 Read this before adding, moving, splitting, or materially expanding agent guidance. Decided in
-[Define Crucible's progressive engineering guidance and quality ratchet](https://github.com/DevFlow-HQ/devflow-cli/issues/25); Harness loading
+[Define Crucible's progressive engineering guidance and quality ratchet](https://github.com/secantdev/secant/issues/25); Harness loading
 mechanics and reliability evidence are in [agent-guidance progressive disclosure](../research/agent-guidance-progressive-disclosure.md).
 
 ## Shape

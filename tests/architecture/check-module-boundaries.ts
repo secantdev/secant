@@ -10,6 +10,102 @@ export interface BoundaryIssue {
   message: string;
 }
 
+// Test folders that do not mirror a source domain (S1): the architecture checks,
+// shared helpers, shared fixtures, the human release checks, and the real-terminal
+// suite. Every other `tests/<prefix>/` folder mirrors `src/<prefix>/`.
+const NON_MIRRORING_TEST_FOLDERS = new Set([
+  "architecture",
+  "helpers",
+  "fixtures",
+  "release-checks",
+  "terminal",
+]);
+
+/** Mechanise the prose rule "tests mirror their source domain" (S1): a test under
+ *  `tests/<prefix>/` that imports any owned Module must import at least one whose
+ *  root starts with `src/<prefix>/`. A test importing no target source at all (a
+ *  pure-helper suite such as `tests/headless/resume.test.ts` when it touches only
+ *  helpers) is skipped; the non-mirroring folders above are skipped wholesale.
+ *  This catches a suite filed by ticket rather than by the Interface it crosses. */
+export function checkTestDomainMirror(root: string): BoundaryIssue[] {
+  const issues: BoundaryIssue[] = [];
+  const testsRoot = join(root, "tests");
+  if (!existsSync(testsRoot)) return issues;
+  const pathOf = (path: string) => relative(root, path).split(sep).join("/");
+  const files: string[] = [];
+  const discover = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) discover(path);
+      else if (/\.(?:[cm]?[jt]s|[jt]sx)$/.test(entry.name)) files.push(path);
+    }
+  };
+  discover(testsRoot);
+
+  for (const file of files.sort()) {
+    const relPath = pathOf(file);
+    const segments = relPath.split("/");
+    // tests/<prefix>/…; a file directly under tests/ has no domain to mirror.
+    if (segments.length < 3) continue;
+    const prefix = segments[1]!;
+    if (NON_MIRRORING_TEST_FOLDERS.has(prefix)) continue;
+
+    const source = ts.createSourceFile(
+      file,
+      readFileSync(file, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const importedModules: string[] = [];
+    const record = (specifier: string) => {
+      if (!specifier.startsWith(".")) return;
+      const target = pathOf(resolve(dirname(file), specifier));
+      const owner = ownerOf(target);
+      if (owner) importedModules.push(owner.root);
+    };
+    const visit = (node: ts.Node) => {
+      if (
+        (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+        node.moduleSpecifier &&
+        ts.isStringLiteralLike(node.moduleSpecifier)
+      ) {
+        record(node.moduleSpecifier.text);
+      } else if (
+        ts.isImportTypeNode(node) &&
+        ts.isLiteralTypeNode(node.argument) &&
+        ts.isStringLiteralLike(node.argument.literal)
+      ) {
+        record(node.argument.literal.text);
+      } else if (
+        ts.isCallExpression(node) &&
+        node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        node.arguments[0] &&
+        ts.isStringLiteralLike(node.arguments[0])
+      ) {
+        record(node.arguments[0].text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+
+    // Zero-import skip: a suite that touches no owned Module is not mirroring
+    // anything and is left alone (the declared exception for such tests).
+    if (importedModules.length === 0) continue;
+    if (
+      !importedModules.some((moduleRoot) =>
+        moduleRoot.startsWith(`src/${prefix}/`),
+      )
+    ) {
+      issues.push({
+        file: relPath,
+        line: 1,
+        message: `Test under tests/${prefix}/ must import a Module rooted at src/${prefix}/ (it imports ${[...new Set(importedModules)].join(", ")}); move it to the folder mirroring its domain (S1)`,
+      });
+    }
+  }
+  return issues;
+}
+
 /** Uses the project's resolver and real source graph; does not load or execute any production Module. */
 export function checkModuleBoundaries(root: string): {
   issues: BoundaryIssue[];

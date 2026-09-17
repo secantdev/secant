@@ -13,6 +13,7 @@ import { CLAUDE_CODE_EXECUTABLE_ENV } from "../harness/harness.js";
 import { resolveExecutable } from "../process/process.js";
 import { isolatedGitEnvironment } from "../run/store/store.js";
 import type { FieldViolation, Problem } from "./projection-port.js";
+import { selectPlatform } from "./select-platform.js";
 
 // The Harness capability needs Secant's one M3 Harness (Claude Code) serves. A
 // Step kind declares its needs (`agent-turn`, `interactive-turns`); Preflight
@@ -315,16 +316,6 @@ function discoverHarness(): PreflightResult {
  *  `resolveInvocation` and the trust summary's platform selection). */
 function selectExecutable(command: CommandParams, platform: Platform): string {
   return command.platforms?.[platform]?.executable ?? command.executable;
-}
-
-/** The platform whose invocation will run: the host when the Bundle supports it,
- *  else the first declared platform (mirrors `bundleTrustRequired`). */
-function selectPlatform(
-  platforms: readonly Platform[],
-  host: Platform | undefined,
-): Platform {
-  if (host !== undefined && platforms.includes(host)) return host;
-  return platforms[0] ?? "linux";
 }
 
 // --- Problems --------------------------------------------------------------

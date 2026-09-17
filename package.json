@@ -15,7 +15,7 @@
     "migrations:check": "bun scripts/check-migrations.ts",
     "migrations:generate": "bun drizzle-kit generate --config drizzle.catalog.config.ts && bun drizzle-kit generate --config drizzle.coordination.config.ts && bun drizzle-kit generate --config drizzle.run.config.ts",
     "test": "bun test --timeout 30000",
-    "test:package": "bun scripts/package-smoke.mjs",
+    "test:package": "bun scripts/package-smoke.ts",
     "test:terminal": "bun tests/terminal/lifecycle.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -65,7 +65,7 @@
     "solid-js": "1.9.12",
     "string-width": "7.2.0",
     "strip-ansi": "7.1.2",
-    "which": "2.0.2",
+    "which": "6.0.1",
     "zod": "4.1.8"
   }
 }

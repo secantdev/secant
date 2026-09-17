@@ -12,10 +12,7 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import type {
-  RendererKeyEvent,
-  RendererPort,
-} from "../../src/tui/renderer/renderer.js";
+import { makeFakeRenderer, until } from "./renderer-fixture.js";
 import type {
   BundleCatalogSnapshot,
   RunListRow,
@@ -34,38 +31,7 @@ import type {
 
 const WORKSPACE = "/tmp/secant-previous-runs";
 
-// --- a fake Renderer Port we can drive (the Workbench reads its keys) ----------
-
-function makeRenderer(width: number, height: number) {
-  let w = width;
-  let h = height;
-  const keys = new Set<(event: RendererKeyEvent) => void>();
-  const resizes = new Set<(width: number, height: number) => void>();
-  const port: RendererPort = {
-    size: () => ({ width: w, height: h }),
-    onKey: (fn) => {
-      keys.add(fn);
-      return () => keys.delete(fn);
-    },
-    onResize: (fn) => {
-      resizes.add(fn);
-      return () => resizes.delete(fn);
-    },
-    destroy() {},
-    destroyed: false,
-  };
-  return {
-    port,
-    key: (name: string, mods: { ctrl?: boolean } = {}) => {
-      for (const fn of keys) fn({ name, ...mods });
-    },
-    resize: (nw: number, nh: number) => {
-      w = nw;
-      h = nh;
-      for (const fn of resizes) fn(nw, nh);
-    },
-  };
-}
+// --- a fake Renderer Port we can drive (shared fixture, A52) -------------------
 
 // --- App seams --------------------------------------------------------------
 
@@ -246,7 +212,7 @@ interface MountOptions {
 async function mountHome(options: MountOptions = {}) {
   const width = options.width ?? 80;
   const height = options.height ?? 40;
-  const renderer = makeRenderer(width, height);
+  const renderer = makeFakeRenderer(width, height);
   const exits: unknown[] = [];
   const t = await testRender(
     () => (
@@ -289,19 +255,6 @@ function selectedLine(frame: string): string {
 
 function firstRunLine(frame: string): string {
   return frame.split("\n").find((line) => /run-\S+/.test(line)) ?? "";
-}
-
-/** Poll in real time (a lone Escape is held briefly by OpenTUI key disambiguation). */
-async function until(
-  predicate: () => boolean,
-  timeoutMs = 1000,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Condition not met within the time budget.");
 }
 
 // --- AC1: ordering, grouping, three facts, empty ----------------------------

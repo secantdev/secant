@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import {
   flattenSteps,
+  FRESH_SESSION,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
+  promptSlotPattern,
   type AgentStep,
   type ArtifactType,
   type AssetKind,
@@ -28,6 +30,7 @@ import type {
 } from "../store/store.js";
 import type {
   DurableTurnRecorder,
+  HarnessFailure,
   HarnessProfile,
   PreparedHarness,
   RecoveryCoordinate,
@@ -57,7 +60,7 @@ import {
 // The scheduler learns nothing per Step kind — it looks a kind up in the closed
 // table (#13) and never branches on Bundle identity (id, name, asset path). Adding
 // a kind means adding a row here, never a new branch; the table holds `command`,
-// `human-gate`, and `agent`.
+// `human-gate`, `agent`, and `interactive-agent` (#122).
 //
 // The deterministic-Verdict split (ADR 0020) is the load-bearing invariant: a
 // Command step's exit status is a *value* (exit 0 -> `pass`, non-zero -> `fail`),
@@ -198,8 +201,9 @@ export interface ExecutionDeps {
 
 /** Thrown by `executeRouting` when the caller's cancel signal aborts a Command
  *  mid-run: the child's process group is killed and the walk unwinds without
- *  publishing an Attempt or resting the Run, so `cancel-run` (T4) owns the
- *  `cancelled` rest. Production never passes a cancel signal until T4 wires it. */
+ *  publishing an Attempt or resting the Run, so `cancel-run` owns the `cancelled`
+ *  rest. The Application drives that cancel signal in production (`wiring.ts`
+ *  passes the signal; `application.ts` aborts with `RUN_CANCEL_ABORT`, #87/#98). */
 export class RunCancelledError extends Error {
   constructor() {
     super("execution: the Run was cancelled mid-command.");
@@ -476,8 +480,11 @@ async function runStep(
  * condition is evaluated before every iteration, so an already-`pass` Verdict
  * runs zero iterations. On completing the review cadence — the authored interval,
  * clamped to the engine ceiling so a Bundle cannot disable review — without a
- * pass, the Run rests `blocked`: nothing is written, so the block is derived from
- * the current Step Attempt (a reopened home re-derives it with no new Attempt).
+ * pass, the Run rests `blocked`. This Review-checkpoint block is the *derived*
+ * mechanism: nothing is written, so a reopened home re-derives it from the current
+ * Step Attempt with no new Attempt. (An authored Human Gate is the other, durable
+ * mechanism — `recordPendingGate` writes `state = "blocked"` in one transaction,
+ * #108 — so `blocked` is not a single mechanism; A63.)
  *
  * A `continue`-answered Run resumes here in the answering process (#85): the block
  * released its Workspace claim, so a fresh process re-walks the Routing. Iterations
@@ -1057,10 +1064,6 @@ function renderGateMessage(step: HumanGateStep, context: StepContext): string {
 
 // --- Agent step (a Harness Turn dispatch entry, #116) ----------------------
 
-/** The Prompt slot grammar, matching `promptSlotReferences` in the Workflow
- *  Module: substitution only, `{{artifact:name}}`. */
-const PROMPT_SLOT = /\{\{artifact:([a-zA-Z0-9._-]+)\}\}/g;
-
 /**
  * Run one autonomous Turn in the Step's named Session and map its result to an
  * Attempt outcome (#116). The rendered prompt is admitted as the Turn's transcript
@@ -1088,7 +1091,9 @@ async function runAgent(
   // group, since the Attempt id encodes both); any other name is reused, so
   // successive Agent Steps naming it share one live process.
   const session =
-    step.session === "fresh" ? `fresh-${attemptId}` : step.session;
+    step.session === FRESH_SESSION
+      ? `${FRESH_SESSION}-${attemptId}`
+      : step.session;
   // One Turn per Agent Step Attempt in M3. The id keys the durable Turn record.
   const turnId = `${attemptId}#turn`;
 
@@ -1411,7 +1416,7 @@ function renderAgentPrompt(
   harness: HarnessExecutionDeps,
 ): string {
   const base = readPromptText(step.prompt, context);
-  const filled = base.replace(PROMPT_SLOT, (_match, name: string) =>
+  const filled = base.replace(promptSlotPattern(), (_match, name: string) =>
     resolvePromptSlot(name, context, harness),
   );
   const skillLines: string[] = [];
@@ -1633,7 +1638,7 @@ function settleTurnResult(
     turnId,
     session,
     resultKind: result.kind,
-    resultDetail: JSON.stringify({ kind: result.kind }),
+    resultDetail: turnResultDetail(result),
     availability: availability.state,
     ...(availability.detail !== undefined
       ? { availabilityDetail: availability.detail }
@@ -1643,6 +1648,56 @@ function settleTurnResult(
       : {}),
     at: new Date(),
   });
+}
+
+/** The settled result's detail, flattened to JSON for the durable Turn row. A
+ *  failure-bearing kind carries its category, phase, and native exit code (spec
+ *  #107 asks `lost`/`failed` to carry them, not just the bare kind); the crash
+ *  reconciler writes its own `{kind, unknown}` for an abandoned Turn. */
+function turnResultDetail(result: TurnResult): string {
+  switch (result.kind) {
+    case "completed":
+      return JSON.stringify({ kind: "completed" });
+    case "not-started":
+      return JSON.stringify({
+        kind: "not-started",
+        failure: flattenFailure(result.detail.failure),
+      });
+    case "failed":
+      return JSON.stringify({
+        kind: "failed",
+        failure: flattenFailure(result.detail.failure),
+      });
+    case "interrupted":
+      return JSON.stringify({
+        kind: "interrupted",
+        mode: result.detail.interruption.mode,
+      });
+    case "lost":
+      return JSON.stringify({
+        kind: "lost",
+        unknown: result.detail.unknown,
+        ...(result.detail.failure !== undefined
+          ? { failure: flattenFailure(result.detail.failure) }
+          : {}),
+      });
+  }
+}
+
+/** The failure fields the durable row keeps: the stable category, the phase, and
+ *  the native exit/error code when one exists. Never a raw frame or cause. */
+function flattenFailure(failure: HarnessFailure): {
+  category: string;
+  phase: string;
+  nativeCode?: string;
+} {
+  return {
+    category: failure.category,
+    phase: failure.phase,
+    ...(failure.nativeCode !== undefined
+      ? { nativeCode: failure.nativeCode }
+      : {}),
+  };
 }
 
 /** The post-Turn Session availability a result carries, flattened for the Store. */

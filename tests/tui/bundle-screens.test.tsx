@@ -10,7 +10,7 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import type { RendererPort } from "../../src/tui/renderer/renderer.js";
+import { makeFakeRenderer, until } from "./renderer-fixture.js";
 import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
@@ -194,15 +194,6 @@ function noRunView(): RunWorkbenchView {
     },
   };
 }
-function fakeRenderer(): RendererPort {
-  return {
-    size: () => ({ width: 80, height: 24 }),
-    onKey: () => () => {},
-    onResize: () => () => {},
-    destroy() {},
-    destroyed: false,
-  };
-}
 
 async function mount(rows = ROWS, width = 80, height = 40) {
   const exits: unknown[] = [];
@@ -215,7 +206,7 @@ async function mount(rows = ROWS, width = 80, height = 40) {
         run={noRunView()}
         runList={inertRunListView()}
         actions={inertRunActionsView()}
-        renderer={fakeRenderer()}
+        renderer={makeFakeRenderer().port}
         exit={(reason) => exits.push(reason)}
       />
     ),
@@ -227,20 +218,6 @@ async function mount(rows = ROWS, width = 80, height = 40) {
 /** The single list line carrying the focus glyph identifies the selected row. */
 function selectedLine(frame: string): string {
   return frame.split("\n").find((line) => line.includes("› ")) ?? "";
-}
-
-/** Poll a condition in real time (a lone Escape is held briefly by OpenTUI's
- * key disambiguation before its binding fires). */
-async function until(
-  predicate: () => boolean,
-  timeoutMs = 1000,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Condition not met within the time budget.");
 }
 
 test("Home opens the Bundle list showing every summary fact, sorted", async () => {
@@ -311,7 +288,7 @@ test("a trusted Bundle reads as trusted in the list and inspection", async () =>
         run={noRunView()}
         runList={inertRunListView()}
         actions={inertRunActionsView()}
-        renderer={fakeRenderer()}
+        renderer={makeFakeRenderer().port}
         exit={() => {}}
       />
     ),
@@ -366,7 +343,7 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
         run={noRunView()}
         runList={inertRunListView()}
         actions={inertRunActionsView()}
-        renderer={fakeRenderer()}
+        renderer={makeFakeRenderer().port}
         exit={() => {}}
       />
     ),

@@ -1,19 +1,10 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
-import { readdirSync } from "node:fs";
 import test from "node:test";
-import { Database } from "bun:sqlite";
 import { openRunGroup } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
 
 const WORKSPACE = "/work/reconcile-turn-project";
 const AT = new Date("2026-09-16T12:00:00.000Z");
-
-/** The group directory Secant home resolves for the test Workspace. */
-function groupDirOf(home: string): string {
-  const runs = join(home, "runs");
-  return join(runs, readdirSync(runs)[0]!);
-}
 
 test("startup reconciliation settles an admitted-but-unsettled Turn as lost/completion-unknown (#118)", (t) => {
   const home = makeTempDir("secant-reconcile-turn-");
@@ -76,20 +67,11 @@ test("startup reconciliation settles an admitted-but-unsettled Turn as lost/comp
     },
   ]);
 
-  // The lost detail records completion-unknown. `turns()` does not expose the raw
-  // result_detail, so read the row directly — the same byte-faithful store the
-  // owner wrote.
-  const runDb = new Database(join(groupDirOf(home), created.runId, "run.db"));
-  try {
-    const row = runDb
-      .query("SELECT result_kind, result_detail FROM turn LIMIT 1")
-      .get() as { result_kind: string; result_detail: string };
-    assert.equal(row.result_kind, "lost");
-    assert.deepEqual(JSON.parse(row.result_detail), {
-      kind: "lost",
-      unknown: "completion",
-    });
-  } finally {
-    runDb.close();
-  }
+  // The lost detail records completion-unknown, read back through the Store's
+  // `TurnRecord.resultDetail` member rather than a raw `run.db` query.
+  assert.ok(turns[0]?.resultDetail !== undefined);
+  assert.deepEqual(JSON.parse(turns[0]!.resultDetail!), {
+    kind: "lost",
+    unknown: "completion",
+  });
 });

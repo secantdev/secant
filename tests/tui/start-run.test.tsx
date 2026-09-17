@@ -11,7 +11,7 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import type { RendererPort } from "../../src/tui/renderer/renderer.js";
+import { makeFakeRenderer, until } from "./renderer-fixture.js";
 import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
@@ -50,18 +50,6 @@ function approvedWorkspace(): WorkspaceView {
     actionOffers: [],
   });
   return { snapshot, approve() {} };
-}
-
-async function until(
-  predicate: () => boolean,
-  timeoutMs = 1000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Condition not met within the time budget.");
 }
 
 // --- fake bundle-catalog ---------------------------------------------------
@@ -246,18 +234,6 @@ function succeedingRunView(): RunWorkbenchView {
   };
 }
 
-// The Workbench sizes itself from the Renderer Port; a fixed fake matching the
-// flow's terminal keeps it consistent. No key input is exercised through here.
-function flowRenderer(width: number, height: number): RendererPort {
-  return {
-    size: () => ({ width, height }),
-    onKey: () => () => {},
-    onResize: () => () => {},
-    destroy() {},
-    destroyed: false,
-  };
-}
-
 async function mountFlow(
   bundlesView: BundleCatalogView,
   launchView: RunLaunchView,
@@ -275,7 +251,7 @@ async function mountFlow(
         run={runView}
         runList={inertRunListView()}
         actions={inertRunActionsView()}
-        renderer={flowRenderer(width, height)}
+        renderer={makeFakeRenderer(width, height).port}
         exit={(reason) => exits.push(reason)}
       />
     ),

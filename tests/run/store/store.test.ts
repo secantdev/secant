@@ -1338,6 +1338,16 @@ test("transcriptPage reads bounded, ordered pages and flags older history (#124)
   );
   assert.equal(final.hasOlder, false);
 
+  // A non-positive limit is clamped to one entry so the page always carries a
+  // cursor, rather than reporting older history over an empty page (A11). At HEAD
+  // this returned `{ entries: [], hasOlder: true }`, which a pager cannot advance.
+  const clamped = owner.transcriptPage({ session: "s", limit: 0 });
+  assert.deepEqual(
+    clamped.entries.map((e) => e.content),
+    ["input 4"],
+  );
+  assert.equal(clamped.hasOlder, true);
+
   // An empty Session pages to nothing without throwing.
   assert.deepEqual(owner.transcriptPage({ session: "missing", limit: 2 }), {
     entries: [],

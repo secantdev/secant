@@ -1,6 +1,9 @@
 // The closed vocabulary the Harness Interface fixes. These sets are the contract
 // every Adapter and every caller is written against; pinning them here fails
-// loudly if a variant is added or dropped without a decision.
+// loudly if a variant is added or dropped without a decision. Adding a variant is
+// caught at compile time too: each array is built through `exhaustive<Union>()`,
+// which fails the build when a new union member is not listed (A39) — this runtime
+// pin then fixes the exact members and their order.
 
 import assert from "node:assert/strict";
 import test from "node:test";

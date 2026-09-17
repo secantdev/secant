@@ -33,10 +33,10 @@ import zenburn from "./themes/zenburn.js";
 // OpenCode's runtime theme-management surface (plugin/custom themes,
 // subscription, `allThemes`/`isTheme`/`addTheme`/…) is dropped because Secant
 // ships a fixed default with no picker. The kept pure computation — the Theme
-// type, the resolver, ANSI-to-RGBA, and `tint` — is unchanged; the never-called
-// `selectedForeground`, `terminalMode`, `generateSystem`, and syntax-style
-// generators are dropped too (audit A12), since no picker or highlighter uses
-// them yet.
+// type, the resolver, and ANSI-to-RGBA — is unchanged; the never-called
+// `selectedForeground`, `terminalMode`, `generateSystem`, `tint`, and
+// syntax-style generators are dropped too (audit A12 and #127 A37), since no
+// picker or highlighter uses them yet.
 
 export type Theme = {
   readonly primary: RGBA;
@@ -244,15 +244,4 @@ function ansiToRgba(code: number): RGBA {
     return RGBA.fromInts(gray, gray, gray);
   }
   return RGBA.fromInts(0, 0, 0);
-}
-
-export function tint(base: RGBA, overlay: RGBA, alpha: number): RGBA {
-  const r = base.r + (overlay.r - base.r) * alpha;
-  const g = base.g + (overlay.g - base.g) * alpha;
-  const b = base.b + (overlay.b - base.b) * alpha;
-  return RGBA.fromInts(
-    Math.round(r * 255),
-    Math.round(g * 255),
-    Math.round(b * 255),
-  );
 }

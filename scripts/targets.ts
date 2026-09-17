@@ -3,7 +3,12 @@
 // truth. Plain data with no Bun dependency, so both the Bun build and the Bun
 // smoke can import it. `outfile` is the basename under dist/.
 
-export const TARGETS = {
+export interface CompileTarget {
+  readonly triple: Bun.Build.CompileTarget;
+  readonly outfile: string;
+}
+
+export const TARGETS: Record<string, CompileTarget> = {
   "windows-x64": {
     triple: "bun-windows-x64",
     outfile: "secant-windows-x64.exe",
@@ -16,7 +21,10 @@ export const TARGETS = {
 };
 
 /** The gated target key for this host, or undefined when it is not one of the three. */
-export function hostTargetKey(platform, arch) {
+export function hostTargetKey(
+  platform: string,
+  arch: string,
+): string | undefined {
   const os = platform === "win32" ? "windows" : platform;
   const key = `${os}-${arch}`;
   return key in TARGETS ? key : undefined;

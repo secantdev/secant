@@ -4,6 +4,7 @@ import {
   type AuthoredManifest,
   type CommandInvocation,
   type CommandParams,
+  FRESH_SESSION,
   hasOnlyValidPromptSlots,
   type PlatformOverride,
   promptSlotReferences,
@@ -65,6 +66,9 @@ export function checkComposition(
   const error = (code: string, target: string, explanation: string): void => {
     findings.push({ code, severity: "error", target, explanation });
   };
+  const warn = (code: string, target: string, explanation: string): void => {
+    findings.push({ code, severity: "warning", target, explanation });
+  };
   const assetKinds = new Map<string, AssetKind>(
     manifest.assets.map((asset) => [asset.path, asset.kind]),
   );
@@ -81,6 +85,25 @@ export function checkComposition(
       );
     } else {
       seenIds.add(step.id);
+    }
+  }
+
+  // The reserved `fresh` Session opens an isolated Session per Attempt, so two
+  // Agent Steps both naming it read as sharing a conversation but do not. Name
+  // that at build time (there is no runtime signal) rather than let the author
+  // discover it from behaviour; a single `fresh` Step is unambiguous.
+  const freshSteps = flattenSteps(manifest.routing).filter(
+    (step) =>
+      (step.kind === "agent" || step.kind === "interactive-agent") &&
+      step.session === FRESH_SESSION,
+  );
+  if (freshSteps.length > 1) {
+    for (const step of freshSteps) {
+      warn(
+        "fresh-session-not-shared",
+        step.id,
+        `Step "${step.id}" names the reserved "${FRESH_SESSION}" Session; each "${FRESH_SESSION}" Agent Step opens its own isolated Session per Attempt and does not share one with the other "${FRESH_SESSION}" Steps (${freshSteps.map((other) => other.id).join(", ")}). Name a shared Session explicitly to continue one conversation.`,
+      );
     }
   }
 

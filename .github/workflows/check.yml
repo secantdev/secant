@@ -81,7 +81,7 @@ jobs:
       - name: Restore the executable bit
         if: runner.os != 'Windows'
         run: chmod +x "dist/${{ matrix.binary }}"
-      - run: bun scripts/package-smoke.mjs "dist/${{ matrix.binary }}"
+      - run: bun scripts/package-smoke.ts "dist/${{ matrix.binary }}"
 
   # The real-terminal lifecycle suite (#56), a separate blocking three-OS job
   # outside `bun run check` (ADR 0027 / ADR 0030). It drives the cross-compiled

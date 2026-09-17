@@ -4,17 +4,53 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { checkMigrationRegistry } from "../../scripts/check-migrations.js";
+import {
+  DEFAULT_TARGETS,
+  checkMigrationJournal,
+  checkMigrationRegistry,
+} from "../../scripts/check-migrations.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
-test("every declared database schema has generated migrations", () => {
-  const result = spawnSync(process.execPath, ["run", "migrations:check"], {
-    cwd: process.cwd(),
-    encoding: "utf8",
-  });
+// Assert the registry embed and the journal derivation in-process against the
+// real migration tree. The whole-gate `bun run migrations:check` also runs
+// drizzle-kit's schema diff, but that is the gate's own first step; re-spawning
+// it here cost 12.7 s and blew Bun's default 5 s test timeout under a bare
+// `bun test tests/architecture`, so the deterministic checks run in-process and
+// the subprocess is left to the gate.
+test("every declared database schema embeds and journals its migrations", () => {
+  for (const target of DEFAULT_TARGETS) {
+    assert.deepEqual(
+      checkMigrationRegistry({
+        migrationsDirectory: target.migrationsDirectory,
+        registryPath: target.registryPath,
+      }),
+      [],
+      target.migrationsDirectory,
+    );
+    assert.deepEqual(
+      checkMigrationJournal({
+        migrationsDirectory: target.migrationsDirectory,
+        journal: target.journal,
+      }),
+      [],
+      target.migrationsDirectory,
+    );
+  }
+});
 
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /Migrations are up to date/);
+test("a journal timestamp that drifts from its directory name fails", () => {
+  const temp = makeTempDir("secant-migration-journal-");
+  const directory = "20260915092407_initial";
+  mkdirSync(join(temp, directory));
+  writeFileSync(join(temp, directory, "migration.sql"), "SELECT 1;");
+
+  const errors = checkMigrationJournal({
+    migrationsDirectory: temp,
+    // A hand-typed timestamp 800 s off the folder name is the #116 drift shape.
+    journal: [{ name: "initial", timestamp: 1_789_466_000_000, sql: "" }],
+  });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /does not match its directory name/);
 });
 
 test("an ungenerated schema change fails with the regeneration message", () => {

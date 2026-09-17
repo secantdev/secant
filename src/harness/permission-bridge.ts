@@ -21,7 +21,7 @@
 // argv and this server's auth check, and `redactSecret` scrubs it from any spawn
 // error whose argv would otherwise carry it back as a diagnostic.
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { Socket } from "node:net";
 import { z } from "zod";
@@ -41,6 +41,19 @@ export const EXPIRED_MESSAGE = "request expired";
 
 /** The placeholder a redacted bearer token leaves behind in a diagnostic. */
 const REDACTED = "«redacted-bearer-token»";
+
+/** Constant-time bearer comparison (D2): the 256-bit per-Run token must not be
+ *  recoverable by timing an early-exit `!==` byte compare. `timingSafeEqual`
+ *  requires equal-length buffers, so a length mismatch is rejected before it. */
+function bearerMatches(
+  presented: string | undefined,
+  expected: string,
+): boolean {
+  if (presented === undefined) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /** Error properties Node's `child_process` populates that can carry the launch
  *  argv (and thus the bearer token) into a diagnostic. */
@@ -100,7 +113,7 @@ export function startPermissionBridge(
   const sockets = new Set<Socket>();
 
   const http: Server = createServer((req, res) => {
-    if (req.headers.authorization !== authHeader) {
+    if (!bearerMatches(req.headers.authorization, authHeader)) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;

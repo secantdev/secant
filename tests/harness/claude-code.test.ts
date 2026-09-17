@@ -67,6 +67,49 @@ const FORBIDDEN_FLAGS = [
   "--resume",
 ];
 
+// The full launch argv the Adapter builds (`claude-code.ts` `launch`), pinned as
+// one golden so adding, dropping or reordering a flag fails a test (A23). The two
+// per-Run dynamic slots — the inline `--mcp-config` path and the bridge tool name
+// — are read from the captured invocation and plugged in; every fixed flag and
+// its order, and the session flag/value, are asserted exactly.
+function goldenLaunchArgs(
+  sessionFlag: "--session-id" | "--resume",
+  sessionValue: string,
+  mcpConfig: string,
+  toolName: string,
+): string[] {
+  return [
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    sessionFlag,
+    sessionValue,
+    "--mcp-config",
+    mcpConfig,
+    "--permission-prompt-tool",
+    toolName,
+  ];
+}
+
+/** The full launch argv the golden pins, reading the two dynamic slots from the
+ *  captured invocation itself. */
+function assertGoldenLaunch(
+  args: string[],
+  sessionFlag: "--session-id" | "--resume",
+  sessionValue: string,
+): void {
+  const mcpConfig = args[args.indexOf("--mcp-config") + 1]!;
+  const toolName = args[args.indexOf("--permission-prompt-tool") + 1]!;
+  assert.deepEqual(
+    args,
+    goldenLaunchArgs(sessionFlag, sessionValue, mcpConfig, toolName),
+  );
+}
+
 // --- Shared conformance cases over the real replayer -------------------------
 
 const conformanceReplayer = installReplayer(VERSION);
@@ -700,6 +743,22 @@ test("a resumed Turn spawns with --resume and not --session-id", async () => {
   const flag = resumeInvocation.args.indexOf("--resume");
   assert.equal(
     resumeInvocation.args[flag + 1],
+    "55555555-5555-4555-8555-555555555555",
+  );
+  // Golden: the full launch argv in both forms (A23). The fresh Turn minted with
+  // --session-id and the resume Turn with --resume are the two launch shapes.
+  const freshInvocation = replayer
+    .invocations()
+    .find((i) => i.args.includes("--session-id"));
+  assert.ok(freshInvocation, "the first Turn spawned a --session-id process");
+  assertGoldenLaunch(
+    freshInvocation.args,
+    "--session-id",
+    "55555555-5555-4555-8555-555555555555",
+  );
+  assertGoldenLaunch(
+    resumeInvocation.args,
+    "--resume",
     "55555555-5555-4555-8555-555555555555",
   );
 });

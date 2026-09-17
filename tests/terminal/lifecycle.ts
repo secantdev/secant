@@ -149,22 +149,33 @@ async function waitForReady(logPath: string, label: string): Promise<void> {
   }
 }
 
-/** Approve the Workspace headlessly so the launched shell reaches interactive Home. */
+/** Approve the Workspace headlessly so the launched shell reaches interactive Home.
+ *  This is the suite's first spawn of the freshly-downloaded binary, and on Windows
+ *  the very first execution of a just-written `.exe` can transiently fail while
+ *  Defender scans and briefly locks it (spawn reports no exit status and empty
+ *  output) — the same lingering-lock class removeTempDir already retries here (#64).
+ *  `workspace approve` is idempotent (ADR 0021), so retrying a partial run is safe;
+ *  the failing status/error/output is surfaced only after the bounded retries. */
 function approveWorkspace(
   binary: string,
   cwd: string,
   env: Record<string, string | undefined>,
 ): void {
-  const result = spawnSync(binary, ["workspace", "approve"], {
-    cwd,
-    env,
-    encoding: "utf8",
-  });
-  if (result.status !== 0) {
-    throw new Error(
-      `workspace approve failed (status ${result.status}):\n${result.stdout}\n${result.stderr}`,
-    );
+  let last: ReturnType<typeof spawnSync> | undefined;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const result = spawnSync(binary, ["workspace", "approve"], {
+      cwd,
+      env,
+      encoding: "utf8",
+    });
+    if (result.status === 0) return;
+    last = result;
+    Bun.sleepSync(50);
   }
+  throw new Error(
+    `workspace approve failed after retries (status ${last?.status}):\n` +
+      `${last?.error?.message ?? ""}\n${last?.stdout}\n${last?.stderr}`,
+  );
 }
 
 type Drive = (proc: PtyProcess) => void;

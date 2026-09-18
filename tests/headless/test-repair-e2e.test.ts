@@ -131,6 +131,8 @@ test("the Test Repair Proof Bundle runs headlessly through the approve-commit ga
     `failing-test=${f.failingTest}`,
     "--trust",
     f.digest,
+    "--harness",
+    "claude-code",
     "--harness-requests",
     "allow",
   ]);

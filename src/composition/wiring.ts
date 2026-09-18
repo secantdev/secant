@@ -24,8 +24,8 @@ import {
 } from "../run/execution/execution.js";
 import { openRunGroup, type RunGroup } from "../run/store/store.js";
 import {
-  createClaudeCodeAdapter,
   type ClaudeCodeDiscovery,
+  type CodexDiscovery,
   type HarnessAdapter,
   type PreparedHarness,
 } from "../harness/harness.js";
@@ -35,6 +35,7 @@ import {
   type Platform,
   routingNeedsHarness,
 } from "../workflow/workflow.js";
+import { HarnessRegistry } from "./harness-registry.js";
 
 // The one wiring path both composition roots take (#74 A1, A2, A6). Before this,
 // the headless root and the TUI root each resolved the Secant home, opened the
@@ -73,10 +74,11 @@ export interface WiringOverrides {
   readonly launchCwd?: string;
   readonly engineVersion?: string;
   readonly hostPlatform?: Platform;
-  /** The Harness Adapter the Run execution drives an Agent Step through (#116).
-   *  Production constructs the Claude Code Adapter here; a test injects one wired
-   *  over the replayer (a fixed session id, a temp-PATH executable). */
+  /** The Claude Code Adapter registry entry (#116). Production constructs the
+   * native Adapter; tests inject one over the replayer. */
   readonly harnessAdapter?: HarnessAdapter;
+  /** A Codex Adapter test seam. Production constructs the native Adapter. */
+  readonly codexHarnessAdapter?: HarnessAdapter;
   /** Whether the launching client can relay human turn-taking (#116, #122). The TUI
    *  root sets this true; the headless root leaves it false so an interactive-agent
    *  Bundle is refused at Preflight. Defaults to false. */
@@ -84,6 +86,8 @@ export interface WiringOverrides {
   /** Deterministic Harness discovery for tests. Production leaves this absent and
    *  Preflight uses the Harness-owned environment/PATH discovery. */
   readonly discoverClaudeCode?: () => ClaudeCodeDiscovery;
+  /** Deterministic Codex discovery for tests. */
+  readonly discoverCodex?: () => CodexDiscovery;
 }
 
 export interface Wiring extends Application {
@@ -122,10 +126,12 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
       canonicalizeWorkspacePath(launchWorkspacePath),
     );
     try {
-      // One Harness Adapter drives both the autonomous Agent Step and the human
-      // interactive Turn (#116, #122); production builds the Claude Code Adapter, a
-      // test injects one over the replayer.
-      const adapter = overrides.harnessAdapter ?? createClaudeCodeAdapter();
+      const harnessRegistry = new HarnessRegistry({
+        claudeCodeAdapter: overrides.harnessAdapter,
+        codexAdapter: overrides.codexHarnessAdapter,
+        discoverClaudeCode: overrides.discoverClaudeCode,
+        discoverCodex: overrides.discoverCodex,
+      });
       const application = createApplication({
         catalog,
         launchWorkspacePath,
@@ -135,11 +141,14 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
         // The headless client cannot relay human turn-taking; an interactive-agent
         // Bundle is refused at Preflight (#116). The TUI root sets this true.
         supportsInteractiveTurns: overrides.supportsInteractiveTurns ?? false,
-        ...(overrides.discoverClaudeCode !== undefined
-          ? { discoverClaudeCode: overrides.discoverClaudeCode }
-          : {}),
-        runExecution: makeRunExecution(catalog, host ?? "linux", adapter),
-        prepareRunInteractiveStep: makePrepareRunInteractiveStep(adapter),
+        harnessRegistry: harnessRegistry.applicationRegistrations(),
+        runExecution: makeRunExecution({
+          catalog,
+          platform: host ?? "linux",
+          harnessRegistry,
+        }),
+        prepareRunInteractiveStep:
+          makePrepareRunInteractiveStep(harnessRegistry),
       });
       return { catalog, runGroup, ...application };
     } catch (error) {
@@ -160,11 +169,14 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
 // Catalog when missing (#100, A8). A Run copies nothing. `run read` returns only
 // `text`/`verdict` in M2 (execution's file-materialization gap is a documented
 // `ponytail:`).
-function makeRunExecution(
-  catalog: Catalog,
-  platform: Platform,
-  adapter: HarnessAdapter,
-): RunExecution {
+interface TMakeRunExecutionParams {
+  readonly catalog: Catalog;
+  readonly platform: Platform;
+  readonly harnessRegistry: HarnessRegistry;
+}
+
+function makeRunExecution(params: TMakeRunExecutionParams): RunExecution {
+  const { catalog, platform, harnessRegistry } = params;
   return async ({
     routing,
     digest,
@@ -187,17 +199,26 @@ function makeRunExecution(
     // A Command-only Run needs no Harness. A Bundle carrying an Agent Step prepares
     // one once, reused across every Agent Step of the Run, and closes it when the
     // Run rests — the ownership ADR 0022 requires to transfer exactly once to the
-    // Run (#116). Preflight already proved the executable resolves, so a prepare
-    // failure here is an environment fault that surfaces as a run-execution fault.
+    // Run (#116). A typed preparation failure is returned to Application so it can
+    // rest the created Run halted and project a selected-Harness Problem.
     if (!routingNeedsHarness(routing)) return executeRouting(routing, deps);
+    const selectedHarness = owner.record.selectedHarness;
+    if (selectedHarness === undefined) {
+      throw new Error(
+        "composition: an Agent-bearing Run has no selected Harness.",
+      );
+    }
+    const adapter = harnessRegistry.adapter(selectedHarness);
     const facts = harnessFacts(catalog, digest);
     const prepared = await adapter.prepare({
       workspace: owner.record.workspacePath,
     });
     if (!prepared.ok) {
-      throw new Error(
-        `composition: could not prepare the Harness: ${prepared.failure.category}.`,
+      const harnessFailure = harnessRegistry.preparationFailure(
+        selectedHarness,
+        prepared.failure,
       );
+      return { outcome: "halted", harnessFailure };
     }
     observeSteer?.(prepared.harness.profile.steer);
     const harness: HarnessExecutionDeps = {
@@ -227,18 +248,32 @@ function makeRunExecution(
 // already blocked at an interactive Step. The Application owns its lifetime without
 // learning a Harness type, and the driver closes the prepared Harness exactly once.
 function makePrepareRunInteractiveStep(
-  adapter: HarnessAdapter,
+  harnessRegistry: HarnessRegistry,
 ): PrepareRunInteractiveStep {
   return async ({ owner }) => {
+    const selectedHarness = owner.record.selectedHarness;
+    if (selectedHarness === undefined) {
+      throw new Error(
+        "composition: an Interactive-agent Run has no selected Harness.",
+      );
+    }
+    const adapter = harnessRegistry.adapter(selectedHarness);
     const prepared = await adapter.prepare({
       workspace: owner.record.workspacePath,
     });
     if (!prepared.ok) {
-      throw new Error(
-        `composition: could not prepare the Harness: ${prepared.failure.category}.`,
-      );
+      return {
+        ok: false,
+        failure: harnessRegistry.preparationFailure(
+          selectedHarness,
+          prepared.failure,
+        ),
+      };
     }
-    return interactiveStepDriver(prepared.harness);
+    return {
+      ok: true,
+      interactiveStep: interactiveStepDriver(prepared.harness),
+    };
   };
 }
 

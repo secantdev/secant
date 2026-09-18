@@ -53,7 +53,7 @@ function create(
   overrides: {
     digest?: string;
     launch?: unknown;
-    selectedHarness?: "claude-code";
+    selectedHarness?: "claude-code" | "codex";
   } = {},
 ) {
   return group.createRun({
@@ -177,6 +177,8 @@ test("[new-run-harness-selection] create, replay, and reopen preserve selected H
 
   const commandOnly = create(group, "op-command");
   assert.equal(commandOnly.record.selectedHarness, undefined);
+  const codex = create(group, "op-codex", { selectedHarness: "codex" });
+  assert.equal(codex.record.selectedHarness, "codex");
   group.close();
 
   const reopened = openRunGroup(home, WORKSPACE);
@@ -187,6 +189,9 @@ test("[new-run-harness-selection] create, replay, and reopen preserve selected H
   const reopenedCommand = reopened.readRun(commandOnly.runId);
   assert.ok(reopenedCommand.ok);
   assert.equal(reopenedCommand.run.selectedHarness, undefined);
+  const reopenedCodex = reopened.readRun(codex.runId);
+  assert.ok(reopenedCodex.ok);
+  assert.equal(reopenedCodex.run.selectedHarness, "codex");
 });
 
 test("an unknown persisted selected Harness makes the Run record unreadable", (t) => {

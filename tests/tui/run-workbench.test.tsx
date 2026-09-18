@@ -55,6 +55,7 @@ function approvedWorkspace(): WorkspaceView {
     path: WORKSPACE,
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
     installedBundleCount: 1,
+    harnesses: [],
     actionOffers: [],
   });
   return { snapshot, approve() {} };
@@ -269,6 +270,7 @@ function runOf(over: Partial<RunView> = {}): RunView {
       ? { pendingGate: over.pendingGate }
       : {}),
     ...(over.conflict !== undefined ? { conflict: over.conflict } : {}),
+    problem: over.problem,
     ...(over.sessions !== undefined ? { sessions: over.sessions } : {}),
     ...(over.effectiveModel !== undefined
       ? { effectiveModel: over.effectiveModel }
@@ -1333,6 +1335,29 @@ test("a halted Run shows the materialization conflict path as a top-level line, 
   await t.renderOnce();
   const frame = t.captureCharFrame();
   assert.match(frame, /restore sub\/out\.txt/); // still shown at 40 columns
+  noOverflow(frame, 40);
+});
+
+test("a selected-Harness preparation Problem is visible without colour and survives narrow resize", async () => {
+  const run = runOf({
+    state: "halted",
+    problem: {
+      code: "selected-harness-unavailable",
+      explanation: "Codex could not be prepared (authentication).",
+      remediation: "Log in separately through Codex, then resume the Run.",
+      possibleEffects: "none",
+      details: { harness: "codex" },
+    },
+  });
+  const { t, renderer } = await mountWorkbench(run, 100, 30);
+  let frame = t.captureCharFrame();
+  assert.match(frame, /selected-harness-unavailable/);
+  assert.match(frame, /authentication/);
+  assert.match(frame, /Log in separately through Codex/);
+  renderer.resize(40, 24);
+  await t.renderOnce();
+  frame = t.captureCharFrame();
+  assert.match(frame, /selected-harness-unavailable/);
   noOverflow(frame, 40);
 });
 

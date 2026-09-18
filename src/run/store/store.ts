@@ -61,7 +61,7 @@ export { isolatedGitEnvironment };
 
 /** A closed semantic Harness selection pinned by a Run. This is deliberately not
  *  an executable, Adapter revision, observed version, or effective model. */
-export type SelectedHarnessId = "claude-code";
+export type SelectedHarnessId = "claude-code" | "codex";
 
 /** A Run's canonical record, read back from its own `run.db`. */
 export interface RunRecord {

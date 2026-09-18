@@ -5,7 +5,6 @@ import {
   type Budgets,
 } from "../bundle/bundle.js";
 import type { Catalog } from "../catalog/catalog.js";
-import type { ClaudeCodeDiscovery } from "../harness/harness.js";
 import {
   flattenSteps,
   routingNeedsHarness,
@@ -73,6 +72,7 @@ import {
   runOutputMissing,
   runStoreDamaged,
   runSupportUnavailable,
+  selectedHarnessUnavailable,
   steerUnavailable,
   trustDigestMismatch,
   turnControlRejected,
@@ -131,6 +131,15 @@ import type {
   SubmissionAdmission,
   WorkspaceSnapshot,
 } from "./projection-port.js";
+import type {
+  ApplicationHarnessRegistration,
+  RunHarnessPreparationFailure,
+} from "./harness-registry.js";
+export type {
+  ApplicationHarnessRegistration,
+  RunHarnessPreparationFailure,
+  THarnessDiscovery,
+} from "./harness-registry.js";
 
 /** How composition drives one acquired Run to rest. It constructs the Run
  *  execution (the `{asset}` resolver, host platform, and bounds) and calls the
@@ -160,6 +169,9 @@ export interface RunExecutionReport extends RunReport {
    *  when execution rests at an interactive Step. The Application treats it as
    *  opaque and closes it when that Step ends or the Run releases ownership. */
   readonly interactiveStep?: RunInteractiveStep;
+  /** A selected Adapter's typed preparation failure, normalized by composition.
+   * No Adapter object, native protocol value, or executable target crosses. */
+  readonly harnessFailure?: RunHarnessPreparationFailure;
 }
 
 /** The opaque Step-scoped interactive driver composition transfers to a tracked
@@ -184,9 +196,13 @@ export interface RunInteractiveStep {
   close(): Promise<void>;
 }
 
+export type TRunInteractiveStepPreparation =
+  | { readonly ok: true; readonly interactiveStep: RunInteractiveStep }
+  | { readonly ok: false; readonly failure: RunHarnessPreparationFailure };
+
 export type PrepareRunInteractiveStep = (context: {
   readonly owner: RunOwner;
-}) => Promise<RunInteractiveStep>;
+}) => Promise<TRunInteractiveStepPreparation>;
 
 /** The mechanical outcome of one human interactive Turn (#122), normalized so the
  *  Application stays Harness-agnostic. `completed`/`failed` leave the Run `blocked`
@@ -224,6 +240,7 @@ interface TrackedRun {
   readonly live: LiveOverlayState;
   interactiveStep?: RunInteractiveStep;
   steer?: RunSteerCapability;
+  problem?: Problem;
 }
 
 /** What `beginInteractive` returns once a Run is confirmed to rest at the named
@@ -288,9 +305,9 @@ export interface ApplicationDependencies {
    *  cannot, so it refuses an `interactive-agent` Bundle at Preflight; the TUI sets
    *  this true. Defaults to false. */
   readonly supportsInteractiveTurns?: boolean;
-  /** Harness-owned synchronous discovery used by Preflight. Tests inject the
-   *  outcome so parallel suites never coordinate through process.env. */
-  readonly discoverClaudeCode?: () => ClaudeCodeDiscovery;
+  /** Closed semantic Harness registry. Composition strips Adapter instances and
+   * native discovery targets before handing these entries to Application. */
+  readonly harnessRegistry?: readonly ApplicationHarnessRegistration[];
 }
 
 export interface Application {
@@ -306,15 +323,6 @@ export interface Application {
 // strings); the resume path validates the opaque run.db payload against this
 // before Preflight (A10).
 const launchInputMap = z.record(z.string(), z.string());
-
-/** The semantic Harness pinned by a newly created Run. Client choice has not
- *  landed yet, so every Agent-bearing routing selects the sole production
- *  Adapter while Command-only routing remains unselected. */
-function selectedHarnessFor(
-  routing: readonly RoutingNode[],
-): SelectedHarnessId | undefined {
-  return routingNeedsHarness(routing) ? "claude-code" : undefined;
-}
 
 export function createApplication(deps: ApplicationDependencies): Application {
   const { catalog, runGroup, runExecution, prepareRunInteractiveStep } = deps;
@@ -367,6 +375,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
       ? { hostPlatform: deps.hostPlatform }
       : {}),
   };
+  const harnessChoices = (deps.harnessRegistry ?? []).map(
+    (registration) => registration.choice,
+  );
   const runProjection: RunProjectionDependencies | undefined =
     runGroup === undefined
       ? undefined
@@ -396,6 +407,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         ? { state: "approved", approvedAt: approval.approvedAt }
         : { state: "unapproved" },
       installedBundleCount: catalog.countInstalledBundles(),
+      harnesses: harnessChoices,
       actionOffers: approval
         ? []
         : [
@@ -489,6 +501,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
                 ? { liveOwner: tracking.owner }
                 : {}),
               state: tracking.state,
+              problem: tracking.problem,
               ...(tracking.steer !== undefined
                 ? { steer: tracking.steer }
                 : {}),
@@ -827,6 +840,18 @@ export function createApplication(deps: ApplicationDependencies): Application {
           routing: tracking.routing,
           digest: tracking.digest,
         });
+        if (report.harnessFailure !== undefined) {
+          const problem = selectedHarnessUnavailable(
+            runId,
+            report.harnessFailure,
+          );
+          tracking.problem = problem;
+          observed.writeState("halted");
+          return {
+            status: "not-applied",
+            problem,
+          };
+        }
         leaveClaimLive = report.outcome === "blocked";
         return { status: "applied" };
       },
@@ -1073,6 +1098,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
               ? { liveOwner: tracking.owner }
               : {}),
             state: tracking.state,
+            problem: tracking.problem,
             ...(tracking.steer !== undefined ? { steer: tracking.steer } : {}),
           },
     );
@@ -1198,9 +1224,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
       hostPlatform: deps.hostPlatform,
       digest: entry.digest,
       supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
-      ...(deps.discoverClaudeCode !== undefined
-        ? { discoverClaudeCode: deps.discoverClaudeCode }
-        : {}),
+      harnessSelection: input.harness,
+      harnessRegistry: deps.harnessRegistry ?? [],
     });
     if ("problem" in pre) {
       return { admitted: false, problem: pre.problem };
@@ -1235,12 +1260,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
       }
     }
 
-    const selectedHarness = selectedHarnessFor(manifest.routing);
     const created = runGroup.createRun({
       operationId,
       bundleSnapshotDigest: entry.digest,
       launch: input.launchInputs,
-      ...(selectedHarness !== undefined ? { selectedHarness } : {}),
+      selectedHarness: pre.selectedHarness,
       at: new Date(),
     });
     if (needsGrant) {
@@ -1282,10 +1306,16 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // still hold (ADR 0021, #86). A removed or replaced install surfaces as a
   // reinstall Problem, so a resume never runs a Bundle that could not be launched
   // fresh. Returns the manifest (its facts drive the resumed Run) or a Problem.
+  interface TResumePreconditionsParams {
+    readonly digest: string;
+    readonly launchInputs: Readonly<Record<string, string>>;
+    readonly storedHarness?: SelectedHarnessId;
+  }
+
   function resumePreconditions(
-    digest: string,
-    launchInputs: Readonly<Record<string, string>>,
+    params: TResumePreconditionsParams,
   ): { manifest: AuthoredManifest } | { problem: Problem } {
+    const { digest, launchInputs, storedHarness } = params;
     const entry = catalog.listEntries().find((e) => e.digest === digest);
     if (entry === undefined) {
       // The exact digest is no longer installed (uninstalled, or replaced by a
@@ -1303,6 +1333,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
       };
     }
     const manifest = inspected.inspection.manifest;
+    const harnessSelection = routingNeedsHarness(manifest.routing)
+      ? (storedHarness ?? "claude-code")
+      : undefined;
     const pre = preflight({
       manifest,
       composition: inspected.inspection.composition,
@@ -1311,9 +1344,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
       hostPlatform: deps.hostPlatform,
       digest,
       supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
-      ...(deps.discoverClaudeCode !== undefined
-        ? { discoverClaudeCode: deps.discoverClaudeCode }
-        : {}),
+      harnessSelection,
+      harnessRegistry: deps.harnessRegistry ?? [],
     });
     if ("problem" in pre) return { problem: pre.problem };
     const grant = catalog.getTrustGrant(digest, entry.installationGeneration);
@@ -1402,10 +1434,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
     if (!launchInputs.success) {
       return { admitted: false, problem: runStoreDamaged(input.runId) };
     }
-    const runnable = resumePreconditions(
-      record.bundleSnapshotDigest,
-      launchInputs.data,
-    );
+    const runnable = resumePreconditions({
+      digest: record.bundleSnapshotDigest,
+      launchInputs: launchInputs.data,
+      storedHarness: record.selectedHarness,
+    });
     if ("problem" in runnable) {
       return { admitted: false, problem: runnable.problem };
     }
@@ -2204,9 +2237,20 @@ export function createApplication(deps: ApplicationDependencies): Application {
       owner,
       drive: async () => {
         if (tracking.interactiveStep === undefined) {
-          tracking.interactiveStep = await prepareRunInteractiveStep!({
+          const prepared = await prepareRunInteractiveStep!({
             owner,
           });
+          if (!prepared.ok) {
+            const problem = selectedHarnessUnavailable(
+              input.runId,
+              prepared.failure,
+            );
+            tracking.problem = problem;
+            observed.writeState("halted");
+            leaveClaimLive = false;
+            return { status: "not-applied", problem };
+          }
+          tracking.interactiveStep = prepared.interactiveStep;
           tracking.steer = tracking.interactiveStep.steer;
         }
         // A live human Turn is running work, so the Run reads `running` while it runs and

@@ -9,15 +9,14 @@ import {
   type LaunchInput,
   type Platform,
 } from "../workflow/workflow.js";
-import {
-  CLAUDE_CODE_EXECUTABLE_ENV,
-  CLAUDE_CODE_SERVED_CAPABILITIES,
-  discoverClaudeCode,
-  type ClaudeCodeDiscovery,
-} from "../harness/harness.js";
 import { resolveExecutable } from "../process/process.js";
 import { isolatedGitEnvironment } from "../run/store/store.js";
-import type { FieldViolation, Problem } from "./projection-port.js";
+import type { ApplicationHarnessRegistration } from "./harness-registry.js";
+import type {
+  FieldViolation,
+  HarnessChoice,
+  Problem,
+} from "./projection-port.js";
 import { selectPlatform } from "./select-platform.js";
 
 // Preflight: the Application-owned precondition gate that refuses to create a Run
@@ -53,19 +52,24 @@ export interface PreflightRequest {
    *  client cannot, so it refuses an `interactive-agent` routing with the TUI
    *  remedy; the TUI sets this true. Defaults to false. */
   readonly supportsInteractiveTurns?: boolean;
-  /** Discovery of the selected Harness. Composition uses the Harness-owned
-   *  implementation; tests inject a deterministic outcome without mutating the
-   *  process-wide environment shared by concurrently discovered test files. */
-  readonly discoverClaudeCode?: () => ClaudeCodeDiscovery;
+  /** The caller's semantic Harness selection. Required only when the routing's
+   * Step kinds declare Harness capability needs. */
+  readonly harnessSelection?: string;
+  /** Closed registry entries with native state already normalized away. */
+  readonly harnessRegistry: readonly ApplicationHarnessRegistration[];
 }
 
 export type PreflightResult =
-  { readonly ok: true } | { readonly problem: Problem };
+  | {
+      readonly ok: true;
+      readonly selectedHarness?: HarnessChoice["id"];
+    }
+  | { readonly problem: Problem };
 
 /** Run Preflight against a pinned Snapshot. Returns the first failing check as a
  *  Problem, or `ok` when every prerequisite holds. */
 export function preflight(request: PreflightRequest): PreflightResult {
-  const { manifest, composition, launchInputs, workspacePath } = request;
+  const { manifest, composition } = request;
   const steps = flattenSteps(manifest.routing);
 
   // 1. The pinned Snapshot must still compose. A launch re-checks it because a Run
@@ -97,34 +101,66 @@ export function preflight(request: PreflightRequest): PreflightResult {
       capabilityNeeds.add(need);
     }
   }
-  if (capabilityNeeds.size > 0) {
-    const unmet = [...capabilityNeeds].filter(
-      (need) => CLAUDE_CODE_SERVED_CAPABILITIES[need] !== true,
+  if (capabilityNeeds.size === 0) {
+    if (request.harnessSelection !== undefined) {
+      return { problem: harnessSelectionIrrelevant(request.harnessSelection) };
+    }
+  } else {
+    const selected = selectHarness(request);
+    if ("problem" in selected) return selected;
+    const served = new Set(selected.registration.servedCapabilities);
+    const unmet = Array.from(capabilityNeeds).filter(
+      (need) => !served.has(need),
     );
     if (unmet.length > 0) {
-      return { problem: harnessCapabilityUnmet(unmet) };
+      return {
+        problem: harnessCapabilityUnmet(
+          selected.registration.choice.name,
+          unmet,
+        ),
+      };
     }
-    const discovery = (request.discoverClaudeCode ?? discoverClaudeCode)();
+    const discovery = selected.registration.discover();
     if (discovery.kind === "unsupported-shim") {
       return {
-        problem: harnessUnsupportedShim(discovery.attempt.name, discovery.path),
+        problem: harnessUnsupportedShim({
+          harness: selected.registration.choice,
+          name: discovery.name,
+          path: discovery.path,
+          executableEnvironmentVariable:
+            discovery.executableEnvironmentVariable,
+        }),
       };
     }
     if (discovery.kind === "not-found") {
       return {
-        problem: harnessNotFound(
-          discovery.attempts.map((attempt) => {
-            const source =
-              attempt.source === "configured"
-                ? `configured command (${CLAUDE_CODE_EXECUTABLE_ENV})`
-                : attempt.description;
-            return `${source}: "${attempt.name}"`;
-          }),
-        ),
+        problem: harnessNotFound({
+          harness: selected.registration.choice,
+          searched: discovery.searched,
+          executableEnvironmentVariable:
+            discovery.executableEnvironmentVariable,
+        }),
       };
     }
+    return finishPreflight({
+      request,
+      steps,
+      selectedHarness: selected.registration.choice.id,
+    });
   }
 
+  return finishPreflight({ request, steps });
+}
+
+interface TFinishPreflightParams {
+  readonly request: PreflightRequest;
+  readonly steps: ReturnType<typeof flattenSteps>;
+  readonly selectedHarness?: HarnessChoice["id"];
+}
+
+function finishPreflight(params: TFinishPreflightParams): PreflightResult {
+  const { request, steps, selectedHarness } = params;
+  const { manifest, launchInputs, workspacePath } = request;
   // 5. Every declared Launch input is required and validated by its Artifact type;
   // one field violation per input, valid inputs pin to the Run unchanged (AC4).
   const violations = inputViolations(manifest.inputs, launchInputs);
@@ -169,7 +205,31 @@ export function preflight(request: PreflightRequest): PreflightResult {
     }
   }
 
-  return { ok: true };
+  if (selectedHarness === undefined) return { ok: true };
+  return { ok: true, selectedHarness };
+}
+
+type TSelectedHarness =
+  | { readonly registration: ApplicationHarnessRegistration }
+  | { readonly problem: Problem };
+
+function selectHarness(request: PreflightRequest): TSelectedHarness {
+  const selection = request.harnessSelection;
+  if (selection === undefined) {
+    return { problem: harnessSelectionRequired(request.harnessRegistry) };
+  }
+  const registration = request.harnessRegistry.find((candidate) => {
+    return candidate.choice.id === selection;
+  });
+  if (registration === undefined) {
+    return {
+      problem: harnessSelectionUnknown(selection, request.harnessRegistry),
+    };
+  }
+  if (registration.choice.availability === "unavailable") {
+    return { problem: harnessSelectionUnavailable(registration.choice) };
+  }
+  return { registration };
 }
 
 // --- Launch input validation -----------------------------------------------
@@ -303,41 +363,117 @@ function selectExecutable(command: CommandParams, platform: Platform): string {
 
 // --- Problems --------------------------------------------------------------
 
-// A Bundle carrying an Agent Step needs a Harness on this system, but neither the
-// configured command nor the PATH name `claude` resolved. Names exactly what was
-// searched so the user can fix their environment (#116, spec story 29).
-function harnessNotFound(searched: readonly string[]): Problem {
+function harnessSelectionRequired(
+  registry: readonly ApplicationHarnessRegistration[],
+): Problem {
+  const choices = registry.map((entry) => entry.choice.id).join(", ");
   return {
-    code: "harness-not-found",
-    explanation: `This Bundle runs an agent through Claude Code, which could not be found. Searched: ${searched.join("; ")}.`,
-    remediation: `Install Claude Code and make sure it is on PATH, or set ${CLAUDE_CODE_EXECUTABLE_ENV} to its executable, then launch again.`,
+    code: "harness-selection-required",
+    explanation:
+      "This Bundle contains an Agent step and needs a Harness selection.",
+    remediation: `Choose one registered Harness before launching: ${choices || "none are available"}.`,
     possibleEffects: "none",
-    details: { searched: searched.join("; ") },
+    correction: "harness-selection",
+    details: { choices },
   };
 }
 
-// The configured Harness command or `claude` resolved to a Windows script shim
-// Secant will not run through a shell; the user must name the real interpreter.
-function harnessUnsupportedShim(name: string, path: string): Problem {
+function harnessSelectionUnknown(
+  selection: string,
+  registry: readonly ApplicationHarnessRegistration[],
+): Problem {
+  const choices = registry.map((entry) => entry.choice.id).join(", ");
+  return {
+    code: "harness-selection-unknown",
+    explanation: `Harness "${selection}" is not registered in this Secant build.`,
+    remediation: `Choose one registered Harness: ${choices || "none are available"}.`,
+    possibleEffects: "none",
+    correction: "harness-selection",
+    details: { harness: selection, choices },
+  };
+}
+
+function harnessSelectionIrrelevant(selection: string): Problem {
+  return {
+    code: "harness-selection-irrelevant",
+    explanation: `This Bundle is Command-only, so Harness "${selection}" would never be used.`,
+    remediation: "Launch the Bundle again without a Harness selection.",
+    possibleEffects: "none",
+    correction: "harness-selection",
+    details: { harness: selection },
+  };
+}
+
+function harnessSelectionUnavailable(choice: HarnessChoice): Problem {
+  const reason =
+    choice.unavailableReason === undefined
+      ? "This Secant build cannot launch it."
+      : choice.unavailableReason;
+  return {
+    code: "harness-selection-unavailable",
+    explanation: `${choice.name} is registered but unavailable. ${reason}`,
+    remediation: "Choose an available registered Harness, then launch again.",
+    possibleEffects: "none",
+    correction: "harness-selection",
+    details: { harness: choice.id },
+  };
+}
+
+interface THarnessNotFoundParams {
+  readonly harness: HarnessChoice;
+  readonly searched: readonly string[];
+  readonly executableEnvironmentVariable: string;
+}
+
+// A Bundle carrying an Agent Step needs the selected Harness on this system.
+// Names exactly what was searched so the user can fix their environment.
+function harnessNotFound(params: THarnessNotFoundParams): Problem {
+  const { harness, searched, executableEnvironmentVariable } = params;
+  return {
+    code: "harness-not-found",
+    explanation: `This Bundle runs an agent through ${harness.name}, which could not be found. Searched: ${searched.join("; ")}.`,
+    remediation: `Install ${harness.name} and make sure it is on PATH, or set ${executableEnvironmentVariable} to its executable, then launch again.`,
+    possibleEffects: "none",
+    correction: "harness-selection",
+    details: { harness: harness.id, searched: searched.join("; ") },
+  };
+}
+
+interface THarnessUnsupportedShimParams {
+  readonly harness: HarnessChoice;
+  readonly name: string;
+  readonly path: string;
+  readonly executableEnvironmentVariable: string;
+}
+
+function harnessUnsupportedShim(
+  params: THarnessUnsupportedShimParams,
+): Problem {
+  const { harness, name, path, executableEnvironmentVariable } = params;
   return {
     code: "harness-unsupported-shim",
-    explanation: `Claude Code "${name}" resolves to the Windows script shim "${path}", which Secant will not run through a shell.`,
-    remediation: `Point ${CLAUDE_CODE_EXECUTABLE_ENV} at the real Claude Code executable (not a .cmd/.bat shim), then launch again.`,
+    explanation: `${harness.name} "${name}" resolves to the Windows script shim "${path}", which Secant will not run through a shell.`,
+    remediation: `Point ${executableEnvironmentVariable} at the real ${harness.name} executable (not a .cmd/.bat shim), then launch again.`,
     possibleEffects: "none",
-    details: { name, path },
+    correction: "harness-selection",
+    details: { harness: harness.id, name, path },
   };
 }
 
 // The routing's Step kinds need a Harness capability the selected Harness does not
 // serve. Refused before a Run exists so the gap is never discovered mid-Run (#116,
 // spec story 9). Inert for M3's Claude Code, which serves both known needs.
-function harnessCapabilityUnmet(unmet: readonly string[]): Problem {
+function harnessCapabilityUnmet(
+  harnessName: string,
+  unmet: readonly string[],
+): Problem {
   return {
     code: "harness-capability-unmet",
-    explanation: `The selected Harness cannot meet this Bundle's capability needs: ${unmet.join(", ")}.`,
+    explanation: `${harnessName} cannot meet this Bundle's capability needs: ${unmet.join(", ")}.`,
     remediation:
       "Use a Harness that serves these capabilities, or a Bundle whose Steps do not need them.",
     possibleEffects: "none",
+    correction: "harness-selection",
     details: { unmet: unmet.join(", ") },
   };
 }

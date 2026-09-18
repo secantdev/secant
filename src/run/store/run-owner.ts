@@ -87,7 +87,7 @@ interface TAcquireRunOwnerParams {
   readonly trackHandle: (database: TRunDatabaseHandle) => () => void;
 }
 
-const selectedHarnessId = z.literal("claude-code");
+const selectedHarnessId = z.enum(["claude-code", "codex"]);
 const runRecordRow = z.object({
   run_id: z.string(),
   workspace_path: z.string(),

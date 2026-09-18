@@ -80,6 +80,10 @@ export interface LaunchRunInput {
   readonly bundle: { readonly id: string; readonly version?: string };
   /** Launch inputs by name, as plain strings; stored opaque on the Run. */
   readonly launchInputs: Readonly<Record<string, string>>;
+  /** Required for an Agent-bearing routing and irrelevant for a Command-only
+   * routing. Application validates the semantic id against the closed registry;
+   * callers pass a string so unknown external input becomes a typed Problem. */
+  readonly harness?: string;
   /** The exact installed digest the caller acknowledges trusting. Required only
    *  when the installed digest is not yet trusted (ADR 0021). */
   readonly trustDigest?: string;
@@ -291,7 +295,21 @@ export interface WorkspaceSnapshot {
   readonly path: string;
   readonly approval: WorkspaceApprovalState;
   readonly installedBundleCount: number;
+  /** The closed semantic Harness choices this Secant build can launch. Adapter
+   *  objects, native capabilities, executable paths, and native identifiers stay
+   *  behind composition; clients receive only stable choice facts. */
+  readonly harnesses: readonly HarnessChoice[];
   readonly actionOffers: readonly ActionOffer[];
+}
+
+/** One semantic Harness selection exposed to both clients. `availability` is
+ *  registry availability, not executable discovery: Preflight discovers only
+ *  the Harness the user actually selects. */
+export interface HarnessChoice {
+  readonly id: "claude-code" | "codex";
+  readonly name: string;
+  readonly availability: "available" | "unavailable";
+  readonly unavailableReason?: string;
 }
 export type WorkspaceApprovalState =
   | { readonly state: "approved"; readonly approvedAt: string } // ISO 8601
@@ -665,6 +683,10 @@ export interface RunView {
   readonly workspacePath: string;
   readonly launchedAt: string; // ISO 8601
   readonly state: RunStateName;
+  /** A transient selected-Harness preparation Problem for a Run created in this
+   * process and halted before Turn content. The Operation carries the same
+   * Problem; this copy lets an already-open TUI Workbench surface it. */
+  readonly problem?: Problem;
   readonly liveness:
     | { readonly state: "not-live" }
     | { readonly state: "live-here"; readonly ownerPid: number }
@@ -953,8 +975,14 @@ export interface Problem {
   readonly explanation: string;
   readonly remediation: string;
   readonly possibleEffects: "none" | "partial" | "unknown";
+  /** A typed correction surface presentation may route to without classifying
+   * Problem codes or inspecting free-form details. */
+  readonly correction?: "harness-selection";
   readonly details?: Readonly<Record<string, string>>;
   readonly fieldViolations?: readonly FieldViolation[];
+  /** Preserved operational cause. Clients format the normalized Problem fields;
+   * the owning caller may retain this for diagnostics. */
+  readonly cause?: unknown;
 }
 export interface FieldViolation {
   readonly field: string;

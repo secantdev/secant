@@ -7,10 +7,13 @@ import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
   createClaudeCodeAdapter,
+  type HarnessAdapter,
+  type HarnessProfile,
 } from "../../src/harness/harness.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import type { RunView } from "../../src/application/projection-port.js";
 import { installReplayer } from "../harness/replayer.js";
+import { createFake } from "../harness/fake-adapter.js";
 import { ensureRuntimeOnPath, RUNTIME_NAME } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
@@ -30,6 +33,29 @@ ensureRuntimeOnPath();
 // acknowledged and the recording replays.
 const PLAIN_SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const REPLAYER_VERSION = "2.1.273 (Claude Code)";
+
+function codexProfile(): HarnessProfile {
+  return {
+    harness: "Codex",
+    executable: "/usr/bin/codex",
+    executableVersion: "1.2.3",
+    platform: "linux",
+    adapterRevision: "fake-codex-1",
+    configurationPosture: "user-compatible",
+    recovery: { mode: "native-reattach", evidence: "scripted fake" },
+    interruption: { mode: "active-turn", evidence: "scripted fake" },
+    approvals: { available: true, evidence: "scripted fake" },
+    clarifications: { available: false, evidence: "scripted fake" },
+    steer: { available: true, evidence: "scripted fake" },
+    modelSelection: { at: "unavailable", evidence: "scripted fake" },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "scripted fake",
+    },
+    skillDelivery: { mode: "plain-path", evidence: "scripted fake" },
+    fileDelivery: { mode: "plain-path", evidence: "scripted fake" },
+  };
+}
 
 function fixtureCase(name: string): string {
   return join(
@@ -174,6 +200,7 @@ async function launchAgentRun(t: TestContext): Promise<{
       bundle: { id: bundleId },
       launchInputs: { doc: docPath },
       trustDigest: digest,
+      harness: "claude-code",
     },
   });
   assert.ok(admission.admitted, JSON.stringify(admission));
@@ -190,6 +217,175 @@ async function launchAgentRun(t: TestContext): Promise<{
     opened.close();
   }
 }
+
+test("[both-client-harness-selection] headless launch requires and accepts the shared semantic Harness choice", async (t) => {
+  const { wired, bundleId, digest, docPath } = wireAgent(t);
+  const out: string[] = [];
+  const err: string[] = [];
+  const io: HeadlessIO = {
+    out: (text) => out.push(text),
+    err: (text) => err.push(text),
+    cwd: () => process.cwd(),
+  };
+  const base = [
+    "run",
+    "launch",
+    bundleId,
+    "--trust",
+    digest,
+    "--input",
+    `doc=${docPath}`,
+  ];
+
+  assert.equal(await runHeadless(wired, base, io), 1);
+  assert.match(err.join(""), /harness-selection-required/);
+  err.length = 0;
+
+  assert.equal(
+    await runHeadless(wired, base.concat("--harness", "gemini"), io),
+    1,
+  );
+  assert.match(err.join(""), /harness-selection-unknown/);
+  err.length = 0;
+
+  const selectedCode = await runHeadless(
+    wired,
+    base.concat("--harness", "claude-code"),
+    io,
+  );
+  assert.equal(selectedCode, 0, `${out.join("")}\n${err.join("")}`);
+  const runId = /^Run (\S+)$/m.exec(out.join(""))?.[1];
+  assert.ok(runId);
+  const record = wired.runGroup.readRun(runId);
+  assert.ok(record.ok);
+  assert.equal(record.run.selectedHarness, "claude-code");
+});
+
+test("headless Codex preparation failure keeps JSON stable and resume reuses the durable selection", async (t) => {
+  const workspace = makeTempDir("secant-headless-codex-ws-");
+  const successful = createFake({
+    profile: codexProfile(),
+    turns: [
+      {
+        result: {
+          kind: "completed",
+          detail: {
+            finalContent: "done",
+            effectiveModel: { known: true, model: "gpt-6" },
+            session: { state: "open" },
+          },
+        },
+      },
+    ],
+  })();
+  let prepareCount = 0;
+  const adapter: HarnessAdapter = {
+    async prepare(options) {
+      prepareCount++;
+      if (prepareCount === 1) {
+        return {
+          ok: false,
+          failure: {
+            phase: "prepare",
+            category: "authentication",
+            possibleEffects: "none",
+            nativeCode: "login-required",
+            retryEvidence: "safe after separate login",
+            diagnostics: "Codex is not authenticated.",
+          },
+        };
+      }
+      return successful.prepare(options);
+    },
+  };
+  const wired = wireApplication({
+    secantHome: makeTempDir("secant-headless-codex-home-"),
+    launchCwd: workspace,
+    codexHarnessAdapter: adapter,
+    discoverCodex: () => ({
+      kind: "found",
+      attempt: {
+        source: "path",
+        name: "codex",
+        description: "PATH name 'codex'",
+      },
+    }),
+  });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+  const bundle = writeAgentBundle();
+  assert.ok(
+    wired.bundleManagement.build(bundle.folder, { noInstall: false }).ok,
+  );
+  const entry = wired.catalog.listEntries().find((candidate) => {
+    return candidate.id === bundle.id;
+  });
+  assert.ok(entry);
+  assert.ok(
+    wired.projectionPort.submit({
+      operationId: "approve-headless-codex",
+      operation: "approve-workspace",
+      input: { path: workspace },
+    }).admitted,
+  );
+  const docPath = join(makeTempDir("secant-codex-doc-"), "failing.test.ts");
+  writeFileSync(docPath, "test('x', () => {});\n");
+  const out: string[] = [];
+  const err: string[] = [];
+  const io: HeadlessIO = {
+    out: (text) => out.push(text),
+    err: (text) => err.push(text),
+    cwd: () => workspace,
+  };
+
+  const launchCode = await runHeadless(
+    wired,
+    [
+      "run",
+      "launch",
+      bundle.id,
+      "--trust",
+      entry.digest,
+      "--input",
+      `doc=${docPath}`,
+      "--harness",
+      "codex",
+      "--json",
+    ],
+    io,
+  );
+  assert.equal(launchCode, 1, err.join(""));
+  const problem = JSON.parse(out.join(""));
+  assert.equal(problem.code, "selected-harness-unavailable");
+  assert.equal(problem.details.harness, "codex");
+  assert.equal(problem.details.nativeCode, "login-required");
+  const runId = problem.details.runId;
+  assert.equal(typeof runId, "string");
+  out.length = 0;
+
+  const resumeCode = await runHeadless(
+    wired,
+    ["run", "resume", runId, "--json"],
+    io,
+  );
+  assert.equal(resumeCode, 0, err.join(""));
+  const snapshot = JSON.parse(out.join(""));
+  assert.equal(snapshot.family, "run");
+  assert.equal(snapshot.runId, runId);
+  assert.equal(snapshot.result.found, true);
+  assert.equal(snapshot.result.run.state, "succeeded");
+  assert.ok(Array.isArray(snapshot.result.run.progress));
+  assert.ok(Array.isArray(snapshot.result.run.timeline));
+  assert.ok(Array.isArray(snapshot.result.run.outputs));
+  assert.ok(Array.isArray(snapshot.result.run.actionOffers));
+  assert.equal(snapshot.result.run.harness.name, "Codex");
+  const record = wired.runGroup.readRun(runId);
+  assert.ok(record.ok);
+  assert.equal(record.run.selectedHarness, "codex");
+  assert.equal(prepareCount, 2);
+});
 
 /** Run one headless command against the wired clients and capture its stdout. */
 async function runShow(wired: Wiring, runId: string): Promise<string> {

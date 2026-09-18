@@ -20,6 +20,22 @@ async function fixture(
   const { projectionPort } = createApplication({
     catalog,
     launchWorkspacePath: workspace,
+    harnessRegistry: [
+      {
+        choice: {
+          id: "claude-code",
+          name: "Claude Code",
+          availability: "available",
+        },
+        servedCapabilities: ["agent-turn", "interactive-turns"],
+        discover: () => ({ kind: "found" }),
+      },
+      {
+        choice: { id: "codex", name: "Codex", availability: "available" },
+        servedCapabilities: ["agent-turn", "interactive-turns"],
+        discover: () => ({ kind: "found" }),
+      },
+    ],
   });
   return { port: projectionPort, workspace };
 }
@@ -61,6 +77,10 @@ test("workspace opens unapproved with the approve-workspace offer", async (t) =>
   assert.equal(snapshot.family, "workspace");
   assert.equal(snapshot.path, workspace);
   assert.equal(snapshot.approval.state, "unapproved");
+  assert.deepEqual(snapshot.harnesses, [
+    { id: "claude-code", name: "Claude Code", availability: "available" },
+    { id: "codex", name: "Codex", availability: "available" },
+  ]);
   assert.deepEqual(snapshot.actionOffers, [
     { action: "approve-workspace", input: { path: workspace } },
   ]);

@@ -7,10 +7,10 @@ import test, { type TestContext } from "node:test";
 import {
   createApplication,
   type Application,
+  type ApplicationHarnessRegistration,
   type RunExecution,
 } from "../../src/application/application.js";
 import { buildBundle, writeZip } from "../../src/bundle/bundle.js";
-import { CLAUDE_CODE_EXECUTABLE_ENV } from "../../src/harness/harness.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
 import { openRunGroup, type RunGroup } from "../../src/run/store/store.js";
@@ -57,7 +57,11 @@ interface Fixture {
 
 // A fixture whose launch Workspace is the given path (a real Git worktree, or a
 // plain/bare directory), approved so the launch reaches Preflight.
-function fixture(t: TestContext, workspace: string): Fixture {
+function fixture(
+  t: TestContext,
+  workspace: string,
+  harnessRegistry: readonly ApplicationHarnessRegistration[] = [],
+): Fixture {
   const catalog = openCatalog(makeTempDir("secant-pf-home-"));
   t.after(() => catalog.close());
   const runGroup = openRunGroup(makeTempDir("secant-pf-store-"), workspace);
@@ -68,6 +72,7 @@ function fixture(t: TestContext, workspace: string): Fixture {
     hostPlatform: hostPlatform(),
     runGroup,
     runExecution,
+    harnessRegistry,
   });
   catalog.approveWorkspace(workspace, new Date());
   return { app, catalog, runGroup, workspace };
@@ -85,6 +90,44 @@ function install(
   return { id: cmd.id, digest: entry.digest };
 }
 
+function installAgentBundle(f: Fixture): { id: string; digest: string } {
+  const folder = makeTempDir("secant-pf-agent-");
+  mkdirSync(join(folder, "prompts"));
+  writeFileSync(join(folder, "prompts", "work.md"), "Do the work.\n");
+  const manifest = {
+    formatVersion: 1,
+    bundle: {
+      id: "dev.secant.preflight-agent",
+      version: "1.0.0",
+      name: "Preflight Agent",
+      description: "Exercises semantic Harness selection.",
+    },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [{ path: "prompts/work.md", kind: "prompt" }],
+    routing: [
+      {
+        id: "work",
+        kind: "agent",
+        session: "work",
+        retry: 0,
+        prompt: { asset: "prompts/work.md" },
+      },
+    ],
+  };
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  const built = f.app.bundleManagement.build(folder, { noInstall: false });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = f.catalog.listEntries().find((candidate) => {
+    return candidate.id === manifest.bundle.id;
+  });
+  assert.ok(entry);
+  return { id: entry.id, digest: entry.digest };
+}
+
 /** Await a launched Run's async settlement, so its execution finishes before the
  *  test's fixture closes the Run Store (execution spawns and settles off-thread). */
 async function settled(f: Fixture, operationId: string): Promise<void> {
@@ -97,6 +140,7 @@ function launch(
   extra: {
     trustDigest?: string;
     launchInputs?: Record<string, string>;
+    harness?: string;
   } = {},
 ) {
   return f.app.projectionPort.submit({
@@ -105,11 +149,33 @@ function launch(
     input: {
       bundle: { id },
       launchInputs: extra.launchInputs ?? {},
-      ...(extra.trustDigest !== undefined
-        ? { trustDigest: extra.trustDigest }
-        : {}),
+      harness: extra.harness,
+      trustDigest: extra.trustDigest,
     },
   });
+}
+
+function registeredHarness(params: {
+  id: "claude-code" | "codex";
+  name: string;
+  discover: ApplicationHarnessRegistration["discover"];
+  availability?: "available" | "unavailable";
+  unavailableReason?: string;
+  servedCapabilities?: readonly string[];
+}): ApplicationHarnessRegistration {
+  return {
+    choice: {
+      id: params.id,
+      name: params.name,
+      availability: params.availability ?? "available",
+      unavailableReason: params.unavailableReason,
+    },
+    servedCapabilities: params.servedCapabilities ?? [
+      "agent-turn",
+      "interactive-turns",
+    ],
+    discover: params.discover,
+  };
 }
 
 // --- git-worktree-root probe ----------------------------------------------
@@ -313,10 +379,177 @@ test("a Snapshot failing the Composition re-check is refused as corrupted, no Ru
   assert.deepEqual(f.runGroup.listRuns(), []);
 });
 
+// --- semantic Harness selection -------------------------------------------
+
+test("[both-client-harness-selection] Agent launches require one known semantic Harness and discover only that choice", async (t) => {
+  let claudeDiscoveries = 0;
+  let codexDiscoveries = 0;
+  const registry = [
+    registeredHarness({
+      id: "claude-code",
+      name: "Claude Code",
+      discover: () => {
+        claudeDiscoveries++;
+        return { kind: "found" };
+      },
+    }),
+    registeredHarness({
+      id: "codex",
+      name: "Codex",
+      discover: () => {
+        codexDiscoveries++;
+        return { kind: "found" };
+      },
+    }),
+  ];
+  const f = fixture(t, plainDirectory(), registry);
+  const { id, digest } = installAgentBundle(f);
+
+  const missing = launch(f, id, { trustDigest: digest });
+  assert.equal(missing.admitted, false);
+  if (missing.admitted) throw new Error("unreachable");
+  assert.equal(missing.problem.code, "harness-selection-required");
+
+  const unknown = launch(f, id, {
+    trustDigest: digest,
+    harness: "gemini",
+  });
+  assert.equal(unknown.admitted, false);
+  if (unknown.admitted) throw new Error("unreachable");
+  assert.equal(unknown.problem.code, "harness-selection-unknown");
+
+  const selected = launch(f, id, {
+    trustDigest: digest,
+    harness: "codex",
+  });
+  assert.ok(selected.admitted, JSON.stringify(selected));
+  assert.equal(claudeDiscoveries, 0);
+  assert.equal(codexDiscoveries, 1);
+  const record = f.runGroup.readRun(selected.runId!);
+  assert.ok(record.ok);
+  assert.equal(record.run.selectedHarness, "codex");
+
+  const changedReplay = f.app.projectionPort.submit({
+    operationId: "op-1",
+    operation: "launch-run",
+    input: {
+      bundle: { id },
+      launchInputs: {},
+      trustDigest: digest,
+      harness: "claude-code",
+    },
+  });
+  assert.equal(changedReplay.admitted, false);
+  if (changedReplay.admitted) throw new Error("unreachable");
+  assert.equal(changedReplay.problem.code, "operation-id-reused");
+  await settled(f, "op-1");
+});
+
+test("[both-client-harness-selection] Command-only launches reject a Harness without discovering one", (t) => {
+  let discoveries = 0;
+  const registry = [
+    registeredHarness({
+      id: "codex",
+      name: "Codex",
+      discover: () => {
+        discoveries++;
+        return { kind: "found" };
+      },
+    }),
+  ];
+  const f = fixture(t, plainDirectory(), registry);
+  const { id, digest } = install(f);
+  const admission = launch(f, id, {
+    trustDigest: digest,
+    harness: "codex",
+  });
+  assert.equal(admission.admitted, false);
+  if (admission.admitted) throw new Error("unreachable");
+  assert.equal(admission.problem.code, "harness-selection-irrelevant");
+  assert.equal(discoveries, 0);
+  assert.deepEqual(f.runGroup.listRuns(), []);
+});
+
+test("an unavailable registered Harness is refused before discovery", (t) => {
+  let discoveries = 0;
+  const f = fixture(t, plainDirectory(), [
+    registeredHarness({
+      id: "codex",
+      name: "Codex",
+      availability: "unavailable",
+      unavailableReason: "disabled for this build",
+      discover: () => {
+        discoveries++;
+        return { kind: "found" };
+      },
+    }),
+  ]);
+  const { id, digest } = installAgentBundle(f);
+  const admission = launch(f, id, { trustDigest: digest, harness: "codex" });
+  assert.equal(admission.admitted, false);
+  if (admission.admitted) throw new Error("unreachable");
+  assert.equal(admission.problem.code, "harness-selection-unavailable");
+  assert.match(admission.problem.explanation, /disabled for this build/);
+  assert.equal(discoveries, 0);
+});
+
+test("selected capability mismatch is refused before discovery", (t) => {
+  let discoveries = 0;
+  const f = fixture(t, plainDirectory(), [
+    registeredHarness({
+      id: "codex",
+      name: "Codex",
+      servedCapabilities: [],
+      discover: () => {
+        discoveries++;
+        return { kind: "found" };
+      },
+    }),
+  ]);
+  const { id, digest } = installAgentBundle(f);
+  const admission = launch(f, id, { trustDigest: digest, harness: "codex" });
+  assert.equal(admission.admitted, false);
+  if (admission.admitted) throw new Error("unreachable");
+  assert.equal(admission.problem.code, "harness-capability-unmet");
+  assert.equal(discoveries, 0);
+});
+
+test("selected unsupported shim names the Harness and configured executable", (t) => {
+  const f = fixture(t, plainDirectory(), [
+    registeredHarness({
+      id: "codex",
+      name: "Codex",
+      discover: () => ({
+        kind: "unsupported-shim",
+        name: "codex",
+        path: "C:\\bin\\codex.cmd",
+        executableEnvironmentVariable: "SECANT_CODEX",
+      }),
+    }),
+  ]);
+  const { id, digest } = installAgentBundle(f);
+  const admission = launch(f, id, { trustDigest: digest, harness: "codex" });
+  assert.equal(admission.admitted, false);
+  if (admission.admitted) throw new Error("unreachable");
+  assert.equal(admission.problem.code, "harness-unsupported-shim");
+  assert.equal(admission.problem.details?.harness, "codex");
+  assert.match(admission.problem.remediation, /SECANT_CODEX/);
+});
+
 // --- intrinsic Step-kind precondition (the Proof Bundle) -------------------
 
 test("the Proof Bundle's Agent Step is dispatchable and refused at Preflight when no Harness is found (#116)", (t) => {
-  const f = fixture(t, plainDirectory());
+  const f = fixture(t, plainDirectory(), [
+    registeredHarness({
+      id: "claude-code",
+      name: "Claude Code",
+      discover: () => ({
+        kind: "not-found",
+        searched: ["PATH name 'claude': \"claude\""],
+        executableEnvironmentVariable: "SECANT_CLAUDE_CODE",
+      }),
+    }),
+  ]);
   const proofFolder = join(
     dirname(fileURLToPath(import.meta.url)),
     "..",
@@ -330,26 +563,14 @@ test("the Proof Bundle's Agent Step is dispatchable and refused at Preflight whe
     .listEntries()
     .find((e) => e.id === "dev.secant.test-repair")!;
 
-  // The Agent Step is now executable (#116), so the Routing is no longer refused
-  // for its kind; instead, with no Claude Code discoverable, the launch is refused
-  // at Preflight before a Run exists. Point discovery at a directory with no
-  // `claude` so the refusal is deterministic regardless of the dev environment.
-  const savedPath = process.env.PATH;
-  const savedClaude = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-  process.env.PATH = makeTempDir("secant-no-claude-");
-  delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-  try {
-    const admission = launch(f, entry.id, { trustDigest: entry.digest });
-    assert.equal(admission.admitted, false);
-    if (admission.admitted) throw new Error("unreachable");
-    assert.equal(admission.problem.code, "harness-not-found");
-    assert.match(admission.problem.remediation, /claude code/i);
-  } finally {
-    process.env.PATH = savedPath;
-    if (savedClaude === undefined)
-      delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-    else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedClaude;
-  }
+  const admission = launch(f, entry.id, {
+    trustDigest: entry.digest,
+    harness: "claude-code",
+  });
+  assert.equal(admission.admitted, false);
+  if (admission.admitted) throw new Error("unreachable");
+  assert.equal(admission.problem.code, "harness-not-found");
+  assert.match(admission.problem.remediation, /claude code/i);
   assert.deepEqual(f.runGroup.listRuns(), []);
 });
 

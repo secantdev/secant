@@ -47,6 +47,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Exactly one screen mounts at a time (`app.tsx`), so a screen's key bindings exist only while it is active and cannot conflict with another's. And
   `useBindings({ enabled })` must be gated off while a dialog overlays a screen (the approval dialog over Home, `home.tsx`), or the overlaid screen's
   bindings fire under the dialog.
+- Start a Run inserts one keyboard-only Harness screen for Agent-bearing Bundles and skips it for Command-only Bundles. Choices and worded availability come from the
+  Workspace Projection; changing a Harness preserves input/trust drafts, review names the selection, and no model picker or silent fallback exists. A typed preparation
+  failure rides the Run Projection into the already-open Workbench, which shows its code, explanation, and remediation without relying on colour (#146).
 - `clip()` (`clip.ts`) is not the horizontal-overflow guard — a container's `overflow="hidden"` already clips at width. It is the ellipsis affordance:
   call it only on a row that should _advertise_ its truncation with a trailing `…` (a name, path, or status that can exceed the inner width), not on
   every row. It measures **display columns** with `string-width`, not `.length` (D5): a wide glyph is two columns, so a code-unit count would overflow.

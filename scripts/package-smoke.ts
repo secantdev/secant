@@ -539,6 +539,8 @@ try {
         `failing-test=${failingTest}`,
         "--trust",
         listed.digest,
+        "--harness",
+        "claude-code",
         "--harness-requests",
         "allow",
         "--json",

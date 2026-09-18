@@ -1,5 +1,6 @@
 import { generateExecutionSummary } from "../bundle/bundle.js";
 import type { AuthoredManifest, Platform } from "../workflow/workflow.js";
+import type { RunHarnessPreparationFailure } from "./harness-registry.js";
 import type {
   DiagnosticReference,
   Problem,
@@ -129,6 +130,56 @@ export function runExecutionFault(
         ? { runId }
         : { operationId: operationId ?? "unknown" },
   };
+}
+
+export function selectedHarnessUnavailable(
+  runId: string,
+  failure: RunHarnessPreparationFailure,
+): Problem {
+  const details: Record<string, string> = {
+    runId,
+    harness: failure.selectedHarness,
+    phase: failure.phase,
+    category: failure.category,
+    harnessPossibleEffects: failure.possibleEffects,
+  };
+  if (failure.partialOutput !== undefined) {
+    details.partialOutput = failure.partialOutput;
+  }
+  if (failure.nativeCode !== undefined) details.nativeCode = failure.nativeCode;
+  if (failure.retryEvidence !== undefined) {
+    details.retryEvidence = failure.retryEvidence;
+  }
+  const explanation = `${failure.harnessName} could not be prepared (${failure.category}).`;
+  const remediation =
+    failure.category === "authentication"
+      ? `Log in separately through ${failure.harnessName}, then resume Run ${runId}.`
+      : `Check the installed ${failure.harnessName} version and configuration, then resume Run ${runId}.`;
+  return {
+    code: "selected-harness-unavailable",
+    explanation:
+      failure.diagnostics === undefined
+        ? explanation
+        : `${explanation} ${failure.diagnostics}`,
+    remediation,
+    possibleEffects: problemEffectScope(failure.possibleEffects),
+    correction: "harness-selection",
+    details,
+    cause: failure.cause,
+  };
+}
+
+function problemEffectScope(
+  scope: RunHarnessPreparationFailure["possibleEffects"],
+): Problem["possibleEffects"] {
+  switch (scope) {
+    case "none":
+      return "none";
+    case "possible":
+      return "unknown";
+    case "committed":
+      return "partial";
+  }
 }
 
 export function runLiveElsewhere(runId: string, ownerPid?: number): Problem {

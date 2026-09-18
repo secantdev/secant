@@ -184,6 +184,8 @@ test("run launch --harness-requests allow answers the Edit approval and succeeds
     bundleId,
     "--trust",
     digest,
+    "--harness",
+    "claude-code",
     "--harness-requests",
     "allow",
   ]);
@@ -209,6 +211,8 @@ test("run launch --harness-requests deny denies the approval and follows the rec
     bundleId,
     "--trust",
     digest,
+    "--harness",
+    "claude-code",
     "--harness-requests",
     "deny",
   ]);
@@ -232,7 +236,12 @@ test("run show names the ephemeral Harness Request from the live overlay while a
   const admission = wired.projectionPort.submit({
     operationId: "op-launch-a15",
     operation: "launch-run",
-    input: { bundle: { id: bundleId }, launchInputs: {}, trustDigest: digest },
+    input: {
+      bundle: { id: bundleId },
+      launchInputs: {},
+      trustDigest: digest,
+      harness: "claude-code",
+    },
   });
   assert.ok(
     admission.admitted && admission.runId !== undefined,

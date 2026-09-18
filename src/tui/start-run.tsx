@@ -13,6 +13,7 @@ import {
 import { createStore, reconcile } from "solid-js/store";
 import type {
   FieldViolation,
+  HarnessChoice,
   InstalledBundleFocus,
   InstalledBundleSummary,
   LaunchRunInput,
@@ -25,6 +26,7 @@ import { useRunLaunchView, type LaunchOutcome } from "./run-launch-view.js";
 import { useExit } from "./vendor/exit.js";
 import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
+import { useWorkspaceView } from "./workspace-view.js";
 
 // The Start-a-Run flow (#90): from Home, one decision per screen — choose an
 // Installed Bundle (with a read-only side panel and, for an untrusted digest, an
@@ -40,7 +42,7 @@ import { useTheme } from "./vendor/theme-context.js";
 // it. Exactly one step renders at a time (a Solid <Switch>), so each step's key
 // bindings exist only while it is active and cannot conflict.
 
-type Step = "choose" | "inputs" | "review" | "pending";
+type Step = "choose" | "harness" | "inputs" | "review" | "pending";
 
 const NARROW_BREAKPOINT = 60;
 
@@ -49,6 +51,7 @@ export function StartRun(props: {
   onStarted: (runId: string) => void;
 }) {
   const bundles = useBundleCatalogView();
+  const workspace = useWorkspaceView();
   const launch = useRunLaunchView();
   const list = bundles.openList();
 
@@ -63,6 +66,7 @@ export function StartRun(props: {
 
   const [step, setStep] = createSignal<Step>("choose");
   const [selected, setSelected] = createSignal(0);
+  const [selectedHarnessIndex, setSelectedHarnessIndex] = createSignal(0);
   // Every digest the user has acknowledged trust for. A set (not one slot) so an
   // acknowledgement survives moving to another Bundle and back (trust is
   // digest-scoped, ADR 0021).
@@ -82,6 +86,15 @@ export function StartRun(props: {
 
   const active = () => Math.min(selected(), Math.max(0, rows().length - 1));
   const selectedSummary = () => rows()[active()];
+  const harnessChoices = () => workspace.snapshot().harnesses;
+  const selectedHarness = (): HarnessChoice | undefined => {
+    const choices = harnessChoices();
+    const index = Math.min(
+      selectedHarnessIndex(),
+      Math.max(0, choices.length - 1),
+    );
+    return choices[index];
+  };
 
   // The focus for the selected Bundle, re-opened when the selection changes: the
   // memo owns each openFocus subscription and disposes the previous one on
@@ -132,8 +145,23 @@ export function StartRun(props: {
     const bundle = focusBundle();
     if (bundle === undefined || !canContinue()) return;
     setChooserProblem(undefined);
-    // A Bundle with no declared inputs skips the inputs screen (AC2).
-    setStep(bundle.launchInputs.length === 0 ? "review" : "inputs");
+    setStep(
+      routingNeedsHarness(bundle.routing) ? "harness" : nextDraftStep(bundle),
+    );
+  };
+
+  const continueFromHarness = () => {
+    const bundle = focusBundle();
+    const harness = selectedHarness();
+    if (
+      bundle === undefined ||
+      harness === undefined ||
+      harness.availability !== "available"
+    ) {
+      return;
+    }
+    setChooserProblem(undefined);
+    setStep(nextDraftStep(bundle));
   };
 
   const declaredValues = (): Record<string, string> => {
@@ -155,9 +183,11 @@ export function StartRun(props: {
     const input: LaunchRunInput = {
       bundle: { id: bundle.id, version: bundle.version },
       launchInputs: declaredValues(),
-      ...(bundle.trust.state === "not-yet-trusted"
-        ? { trustDigest: bundle.digest }
-        : {}),
+      harness: routingNeedsHarness(bundle.routing)
+        ? selectedHarness()?.id
+        : undefined,
+      trustDigest:
+        bundle.trust.state === "not-yet-trusted" ? bundle.digest : undefined,
     };
     setFieldFindings(undefined);
     setChooserProblem(undefined);
@@ -191,6 +221,9 @@ export function StartRun(props: {
     if (problem.fieldViolations !== undefined) {
       setFieldFindings(problem.fieldViolations);
       setStep("inputs");
+    } else if (problem.correction === "harness-selection") {
+      setChooserProblem(problem);
+      setStep("harness");
     } else {
       setChooserProblem(problem);
       setStep("choose");
@@ -201,7 +234,9 @@ export function StartRun(props: {
     const bundle = focusBundle();
     setStep(
       bundle !== undefined && bundle.launchInputs.length === 0
-        ? "choose"
+        ? routingNeedsHarness(bundle.routing)
+          ? "harness"
+          : "choose"
         : "inputs",
     );
   };
@@ -224,6 +259,16 @@ export function StartRun(props: {
           problem={chooserProblem}
         />
       </Match>
+      <Match when={step() === "harness"}>
+        <HarnessStep
+          choices={harnessChoices}
+          selected={selectedHarnessIndex}
+          setSelected={setSelectedHarnessIndex}
+          problem={chooserProblem}
+          onContinue={continueFromHarness}
+          onBack={() => setStep("choose")}
+        />
+      </Match>
       <Match when={step() === "inputs"}>
         <InputsStep
           bundle={focusBundle}
@@ -231,12 +276,15 @@ export function StartRun(props: {
           setValue={(name, value) => setValues(name, value)}
           findings={fieldFindings}
           onContinue={() => setStep("review")}
-          onBack={() => setStep("choose")}
+          onBack={() =>
+            setStep(focusNeedsHarness(focusBundle()) ? "harness" : "choose")
+          }
         />
       </Match>
       <Match when={step() === "review"}>
         <ReviewStep
           bundle={focusBundle}
+          harness={selectedHarness}
           values={values}
           onStart={startLaunch}
           onBack={backFromReview}
@@ -260,6 +308,23 @@ function formatRouting(routing: readonly RoutingNodeView[]): string {
         : `repeat until ${node.until}`,
     )
     .join(" → ");
+}
+
+function routingNeedsHarness(routing: readonly RoutingNodeView[]): boolean {
+  return routing.some((node) => {
+    const steps = node.node === "step" ? [node.step] : node.steps;
+    return steps.some((step) => {
+      return step.kind === "agent" || step.kind === "interactive-agent";
+    });
+  });
+}
+
+function nextDraftStep(bundle: InstalledBundleFocus): Step {
+  return bundle.launchInputs.length === 0 ? "review" : "inputs";
+}
+
+function focusNeedsHarness(bundle: InstalledBundleFocus | undefined): boolean {
+  return bundle !== undefined && routingNeedsHarness(bundle.routing);
 }
 
 // --- choose ----------------------------------------------------------------
@@ -516,6 +581,116 @@ function SidePanel(props: {
   );
 }
 
+// --- Harness selection ----------------------------------------------------
+
+function HarnessStep(props: {
+  choices: Accessor<readonly HarnessChoice[]>;
+  selected: Accessor<number>;
+  setSelected: (index: number) => void;
+  problem: Accessor<Problem | undefined>;
+  onContinue: () => void;
+  onBack: () => void;
+}) {
+  const { theme } = useTheme();
+  const exit = useExit();
+  const dialog = useDialog();
+  const dimensions = useTerminalDimensions();
+  const move = (delta: number) => {
+    const count = props.choices().length;
+    if (count === 0) return;
+    const next = Math.max(0, Math.min(props.selected() + delta, count - 1));
+    props.setSelected(next);
+  };
+  const active = () => props.choices()[props.selected()];
+  const canContinue = () => active()?.availability === "available";
+
+  useBindings(() => ({
+    enabled: dialog.stack.length === 0,
+    bindings: [
+      {
+        key: "up",
+        desc: "Previous Harness",
+        group: "Harness",
+        cmd: () => move(-1),
+      },
+      {
+        key: "down",
+        desc: "Next Harness",
+        group: "Harness",
+        cmd: () => move(1),
+      },
+      {
+        key: "return",
+        desc: "Continue",
+        group: "Harness",
+        cmd: () => props.onContinue(),
+      },
+      {
+        key: "escape",
+        desc: "Back",
+        group: "Harness",
+        cmd: () => props.onBack(),
+      },
+      { key: "q", desc: "Quit", group: "Harness", cmd: () => exit() },
+      { key: "ctrl+c", desc: "Quit", group: "Harness", cmd: () => exit() },
+    ],
+  }));
+
+  return (
+    <box
+      width={dimensions().width}
+      height={dimensions().height}
+      flexDirection="column"
+      padding={1}
+      gap={1}
+      overflow="hidden"
+      backgroundColor={theme.background}
+    >
+      <text attributes={TextAttributes.BOLD} fg={theme.text} flexShrink={0}>
+        Choose a Harness
+      </text>
+      <Show when={props.problem()}>
+        {(problem) => (
+          <box flexDirection="column" flexShrink={0}>
+            <text attributes={TextAttributes.BOLD} fg={theme.error}>
+              {`Launch refused: ${problem().code}`}
+            </text>
+            <text fg={theme.textMuted}>{problem().explanation}</text>
+            <text fg={theme.textMuted}>{problem().remediation}</text>
+          </box>
+        )}
+      </Show>
+      <box flexDirection="column" flexGrow={1} overflow="hidden">
+        <For each={props.choices()}>
+          {(choice, index) => (
+            <box flexDirection="column" flexShrink={0}>
+              <text
+                fg={index() === props.selected() ? theme.text : theme.textMuted}
+                attributes={
+                  index() === props.selected() ? TextAttributes.BOLD : 0
+                }
+                flexShrink={0}
+              >
+                {`${index() === props.selected() ? "› " : "  "}${choice.name} (${choice.id}) — ${choice.availability}`}
+              </text>
+              <Show when={choice.unavailableReason}>
+                {(reason) => (
+                  <text fg={theme.textMuted} flexShrink={0}>
+                    {`  ${reason()}`}
+                  </text>
+                )}
+              </Show>
+            </box>
+          )}
+        </For>
+      </box>
+      <text fg={canContinue() ? theme.text : theme.textMuted} flexShrink={0}>
+        ↑/↓ move · enter continue · esc back · q quit
+      </text>
+    </box>
+  );
+}
+
 // --- inputs ----------------------------------------------------------------
 
 function isTextLike(type: string): boolean {
@@ -698,6 +873,7 @@ function InputsStep(props: {
 
 function ReviewStep(props: {
   bundle: Accessor<InstalledBundleFocus | undefined>;
+  harness: Accessor<HarnessChoice | undefined>;
   values: Record<string, string>;
   onStart: () => void;
   onBack: () => void;
@@ -755,6 +931,11 @@ function ReviewStep(props: {
                 fg={theme.textMuted}
               >{`digest: sha256:${bundle().digest}`}</text>
             </box>
+            <Show when={routingNeedsHarness(bundle().routing)}>
+              <text fg={theme.text} flexShrink={0}>
+                {`Harness: ${props.harness()?.name ?? "(not selected)"} (${props.harness()?.id ?? "none"})`}
+              </text>
+            </Show>
             <Show
               when={bundle().launchInputs.length > 0}
               fallback={<text fg={theme.textMuted}>No launch inputs.</text>}

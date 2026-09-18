@@ -264,6 +264,8 @@ test("an Agent Bundle prepares exactly one Harness and closes it once the Run re
     bundleId,
     "--trust",
     digest,
+    "--harness",
+    "claude-code",
     "--harness-requests",
     "allow",
   ]);
@@ -284,6 +286,8 @@ test("the default --harness-requests policy is deny and an agent Run still termi
     bundleId,
     "--trust",
     digest,
+    "--harness",
+    "claude-code",
   ]);
   assert.equal(launched.code, 0, launched.out + launched.err);
   const runId = runIdOf(launched.out);
@@ -302,6 +306,8 @@ test("an invalid --harness-requests policy is refused precisely", async (t) => {
     bundleId,
     "--trust",
     digest,
+    "--harness",
+    "claude-code",
     "--harness-requests",
     "bogus",
   ]);

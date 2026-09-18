@@ -149,7 +149,12 @@ test("the live overlay shows the outstanding request; answering is accepted, sta
   const admission = port.submit({
     operationId: "op-launch",
     operation: "launch-run",
-    input: { bundle: { id: bundleId }, launchInputs: {}, trustDigest: digest },
+    input: {
+      bundle: { id: bundleId },
+      launchInputs: {},
+      trustDigest: digest,
+      harness: "claude-code",
+    },
   });
   assert.ok(admission.admitted, JSON.stringify(admission));
   const runId = admission.runId!;

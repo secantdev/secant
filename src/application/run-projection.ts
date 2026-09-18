@@ -96,6 +96,7 @@ export interface RunReadContext {
   readonly liveOwner?: RunOwner; // present while live in this process
   readonly state?: string; // the in-memory latest state while tracked
   readonly steer?: RunSteerCapability; // current prepared profile evidence
+  readonly problem?: Problem; // transient selected-Harness preparation refusal
 }
 
 /** Build the bounded `run` snapshot for one Run id. */
@@ -210,6 +211,7 @@ function runResult(
         workspacePath: record.workspacePath,
         launchedAt: record.createdAt,
         state: derivedRun.state,
+        problem: context.problem,
         liveness: runLiveness(listing),
         progress: derivedRun.statuses,
         position: derivedRun.position,

@@ -34,6 +34,7 @@ test("approve then show --json reports approved with the canonical path", async 
         .approvedAt,
     },
     installedBundleCount: 0,
+    harnesses: [],
     actionOffers: [],
   });
 });

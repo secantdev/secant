@@ -6,6 +6,7 @@ import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
   type HarnessAdapter,
+  type HarnessFailure,
   type HarnessProfile,
 } from "../../src/harness/harness.js";
 import type {
@@ -112,7 +113,11 @@ function writeInteractiveBundle(): { folder: string; id: string } {
 async function launchInteractive(
   t: TestContext,
   script: FakeScript,
-  counts?: { prepares: number; readonly closes: number[] },
+  counts?: {
+    prepares: number;
+    readonly closes: number[];
+    readonly failureAfterLaunch?: HarnessFailure;
+  },
 ): Promise<{ wired: Wiring; runId: string; run: RunView }> {
   const savedExecutable = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
   // A resolvable executable so Preflight's Harness discovery passes; the fake
@@ -132,6 +137,12 @@ async function launchInteractive(
       : {
           async prepare(options) {
             counts.prepares += 1;
+            if (
+              counts.prepares > 1 &&
+              counts.failureAfterLaunch !== undefined
+            ) {
+              return { ok: false, failure: counts.failureAfterLaunch };
+            }
             const index = counts.closes.push(0) - 1;
             const prepared = await fake.prepare(options);
             if (!prepared.ok) return prepared;
@@ -182,6 +193,7 @@ async function launchInteractive(
       bundle: { id: bundle.id },
       launchInputs: {},
       trustDigest: entry.digest,
+      harness: "claude-code",
     },
   });
   assert.ok(admission.admitted, JSON.stringify(admission));
@@ -428,6 +440,46 @@ test("shutdown closes the Step-scoped Harness once and leaves the interactive re
     wired.runGroup.listRuns().find((run) => run.runId === runId)?.live,
     false,
   );
+});
+
+test("reopened interactive preparation failure halts with a selected-Harness Problem before a Turn", async (t) => {
+  const closes: number[] = [];
+  const counts = {
+    prepares: 0,
+    closes,
+    failureAfterLaunch: {
+      phase: "prepare",
+      category: "protocol-incompatible",
+      possibleEffects: "none",
+      diagnostics: "Pinned protocol subset did not qualify.",
+    } satisfies HarnessFailure,
+  };
+  const { wired, runId } = await launchInteractive(
+    t,
+    { profile: profile(), turns: [COMPLETED_DETACHED] },
+    counts,
+  );
+  await wired.shutdown();
+
+  const sent = wired.projectionPort.submit({
+    operationId: "op-send-prepare-failure",
+    operation: "send-interactive-turn",
+    input: { runId, stepId: "discuss", text: "Continue the discussion" },
+  });
+  assert.ok(sent.admitted, JSON.stringify(sent));
+  const outcome = await awaitSettled(wired.projectionPort, sent.operationId);
+  assert.equal(outcome.status, "not-applied");
+  if (outcome.status === "not-applied") {
+    assert.equal(outcome.problem.code, "selected-harness-unavailable");
+    assert.equal(outcome.problem.details?.harness, "claude-code");
+  }
+  const run = readRun(wired, runId);
+  assert.equal(run.state, "halted");
+  assert.equal(run.problem?.code, "selected-harness-unavailable");
+  const owner = wired.runGroup.acquireRun(runId);
+  assert.ok(owner);
+  assert.deepEqual(owner.turns(), []);
+  owner.close();
 });
 
 test("interrupt closes the Step-scoped Harness after one qualification (#134 A17)", async (t) => {

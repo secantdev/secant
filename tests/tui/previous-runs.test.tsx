@@ -41,6 +41,7 @@ function approvedWorkspace(): WorkspaceView {
     path: WORKSPACE,
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
     installedBundleCount: 1,
+    harnesses: [],
     actionOffers: [],
   });
   return { snapshot, approve() {} };

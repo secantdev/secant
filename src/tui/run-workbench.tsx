@@ -445,6 +445,7 @@ export function RunWorkbench(props: {
     interiorH,
   });
   const hasConflict = () => run()?.conflict !== undefined;
+  const hasRunProblem = () => run()?.problem !== undefined;
   const compactHeader = () => dims().width < HEADER_COMPACT_WIDTH;
   const headerRows = () => {
     // The Harness identity line renders exactly when the durable `harness` view is
@@ -472,6 +473,7 @@ export function RunWorkbench(props: {
     headerRows() +
     (hasGateLine() ? 1 : 0) +
     (hasConflict() ? 1 : 0) /*top-level conflict line (A13)*/ +
+    (hasRunProblem() ? 3 : 0) /*selected-Harness Problem*/ +
     1 /*progress*/ +
     actionLines() +
     1 /*timeline label*/ +
@@ -1139,6 +1141,22 @@ function Workbench(props: {
           <text fg={theme.warning} flexShrink={0}>
             {clip(`✗ conflict — restore ${conflict().path}`, w())}
           </text>
+        )}
+      </Show>
+
+      <Show when={run().problem}>
+        {(problem) => (
+          <box flexDirection="column" flexShrink={0}>
+            <text fg={theme.error} flexShrink={0}>
+              {clip(`✗ ${problem().code}`, w())}
+            </text>
+            <text fg={theme.text} flexShrink={0}>
+              {clip(problem().explanation, w())}
+            </text>
+            <text fg={theme.textMuted} flexShrink={0}>
+              {clip(problem().remediation, w())}
+            </text>
+          </box>
         )}
       </Show>
 

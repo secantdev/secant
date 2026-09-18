@@ -22,9 +22,9 @@ ensureRuntimeOnPath();
 // Command-only Run (no identity at all). The live case is covered by the Run Workbench
 // live suite (tests/tui/live-run-workbench.test.tsx).
 
-function profile(): HarnessProfile {
+function profile(harness = "Claude Code"): HarnessProfile {
   return {
-    harness: "Claude Code",
+    harness,
     executable: "/usr/bin/claude",
     executableVersion: "1.2.3",
     platform: "linux",
@@ -47,9 +47,12 @@ function profile(): HarnessProfile {
 
 /** A single-Turn script that completes; `model` controls whether the Turn observed an
  *  effective model (missing-observation ⇒ undefined). */
-function completedScript(model: string | undefined): FakeScript {
+function completedScript(
+  model: string | undefined,
+  harness = "Claude Code",
+): FakeScript {
   return {
-    profile: profile(),
+    profile: profile(harness),
     turns: [
       {
         result: {
@@ -93,10 +96,12 @@ function failedScript(): FakeScript {
 }
 
 /** Author a single-`agent`-step Bundle (session "s"). */
-function writeAgentBundle(): {
+function writeAgentBundle(
+  selectedHarness: "claude-code" | "codex" = "claude-code",
+): {
   folder: string;
   id: string;
-  selectedHarness: "claude-code";
+  selectedHarness: "claude-code" | "codex";
   expectedPrepareCount: 1;
 } {
   const folder = makeTempDir("secant-harness-id-bundle-");
@@ -130,7 +135,7 @@ function writeAgentBundle(): {
   return {
     folder,
     id: manifest.bundle.id,
-    selectedHarness: "claude-code",
+    selectedHarness,
     expectedPrepareCount: 1,
   };
 }
@@ -289,7 +294,7 @@ async function launch(
   bundle: {
     folder: string;
     id: string;
-    selectedHarness?: "claude-code";
+    selectedHarness?: "claude-code" | "codex";
     expectedPrepareCount: 0 | 1;
     isolateHarnessDiscovery?: true;
     supportsInteractiveTurns?: true;
@@ -330,19 +335,34 @@ async function launch(
 
   const adapter = createFake(script)();
   let prepareCount = 0;
-  const wired = wireApplication({
-    secantHome: home,
-    launchCwd: workspace,
-    harnessAdapter: {
-      prepare(options) {
-        prepareCount++;
-        return adapter.prepare(options);
-      },
+  const countedAdapter = {
+    prepare(options: Parameters<typeof adapter.prepare>[0]) {
+      prepareCount++;
+      return adapter.prepare(options);
     },
-    ...(bundle.supportsInteractiveTurns === true
-      ? { supportsInteractiveTurns: true }
-      : {}),
-  });
+  };
+  const wired =
+    bundle.selectedHarness === "codex"
+      ? wireApplication({
+          secantHome: home,
+          launchCwd: workspace,
+          codexHarnessAdapter: countedAdapter,
+          discoverCodex: () => ({
+            kind: "found",
+            attempt: {
+              source: "path",
+              name: "codex",
+              description: "PATH name 'codex'",
+            },
+          }),
+          supportsInteractiveTurns: bundle.supportsInteractiveTurns,
+        })
+      : wireApplication({
+          secantHome: home,
+          launchCwd: workspace,
+          harnessAdapter: countedAdapter,
+          supportsInteractiveTurns: bundle.supportsInteractiveTurns,
+        });
   t.after(() => {
     wired.runGroup.close();
     wired.catalog.close();
@@ -369,6 +389,7 @@ async function launch(
       bundle: { id: bundle.id },
       launchInputs: {},
       trustDigest: entry.digest,
+      harness: bundle.selectedHarness,
     },
   });
   assert.ok(admission.admitted, JSON.stringify(admission));
@@ -390,6 +411,7 @@ async function launch(
       bundle: { id: bundle.id },
       launchInputs: {},
       trustDigest: entry.digest,
+      harness: bundle.selectedHarness,
     },
   });
   assert.deepEqual(replay, admission);
@@ -429,6 +451,167 @@ test("[new-run-harness-selection] a new Agent Run pins Claude Code separately fr
     executableVersion: "1.2.3",
   });
   assert.equal(run.effectiveModel, "fake-sonnet");
+});
+
+test("[both-client-harness-selection] a Codex selection prepares only the Codex registry entry", async (t) => {
+  const home = makeTempDir("secant-harness-id-home-");
+  const { run, runId, wired } = await launch(
+    t,
+    completedScript("fake-codex", "Codex"),
+    writeAgentBundle("codex"),
+    home,
+    makeTempDir("secant-harness-id-ws-"),
+  );
+  const record = wired.runGroup.readRun(runId);
+  assert.ok(record.ok);
+  assert.equal(record.run.selectedHarness, "codex");
+  assert.equal(run.state, "succeeded");
+  assert.deepEqual(run.harness, {
+    name: "Codex",
+    executable: "/usr/bin/claude",
+    executableVersion: "1.2.3",
+  });
+});
+
+test("[both-client-harness-selection] selected Harness authentication and protocol failures halt before content; resume reuses the durable id", async (t) => {
+  const home = makeTempDir("secant-harness-failure-home-");
+  const workspace = makeTempDir("secant-harness-failure-ws-");
+  const prepareCause = new Error("redacted native preparation cause");
+  let prepareCount = 0;
+  const wired = wireApplication({
+    secantHome: home,
+    launchCwd: workspace,
+    codexHarnessAdapter: {
+      async prepare() {
+        prepareCount++;
+        const authentication = prepareCount === 1;
+        return {
+          ok: false,
+          failure: {
+            phase: "prepare",
+            category: authentication
+              ? "authentication"
+              : "protocol-incompatible",
+            possibleEffects: authentication ? "possible" : "committed",
+            partialOutput: "qualification stopped before a Turn",
+            nativeCode: "not-ready",
+            retryEvidence: "safe after remediation",
+            diagnostics: authentication
+              ? "Authentication required for Codex."
+              : "The installed protocol does not match the pinned subset.",
+            cause: prepareCause,
+          },
+        };
+      },
+    },
+    discoverCodex: () => ({
+      kind: "found",
+      attempt: {
+        source: "path",
+        name: "codex",
+        description: "PATH name 'codex'",
+      },
+    }),
+  });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+  const bundle = writeAgentBundle("codex");
+  assert.ok(
+    wired.bundleManagement.build(bundle.folder, { noInstall: false }).ok,
+  );
+  const entry = wired.catalog.listEntries().find((candidate) => {
+    return candidate.id === bundle.id;
+  });
+  assert.ok(entry);
+  const approval = wired.projectionPort.submit({
+    operationId: "op-approve-prepare-failure",
+    operation: "approve-workspace",
+    input: { path: workspace },
+  });
+  assert.ok(approval.admitted);
+  const admission = wired.projectionPort.submit({
+    operationId: "op-prepare-failure",
+    operation: "launch-run",
+    input: {
+      bundle: { id: bundle.id },
+      launchInputs: {},
+      trustDigest: entry.digest,
+      harness: "codex",
+    },
+  });
+  assert.ok(admission.admitted, JSON.stringify(admission));
+  assert.ok(admission.runId);
+  const outcome = await awaitSettled(
+    wired.projectionPort,
+    admission.operationId,
+  );
+  assert.equal(outcome.status, "not-applied");
+  if (outcome.status === "not-applied") {
+    assert.equal(outcome.problem.code, "selected-harness-unavailable");
+    assert.equal(outcome.problem.details?.harness, "codex");
+    assert.equal(outcome.problem.details?.category, "authentication");
+    assert.equal(outcome.problem.details?.nativeCode, "not-ready");
+    assert.equal(
+      outcome.problem.details?.partialOutput,
+      "qualification stopped before a Turn",
+    );
+    assert.equal(
+      outcome.problem.details?.retryEvidence,
+      "safe after remediation",
+    );
+    assert.equal(outcome.problem.details?.harnessPossibleEffects, "possible");
+    assert.equal(outcome.problem.possibleEffects, "unknown");
+    assert.match(outcome.problem.explanation, /Authentication required/);
+    assert.equal(outcome.problem.cause, prepareCause);
+    assert.match(
+      outcome.problem.remediation,
+      /log in separately through Codex/i,
+    );
+  }
+  const haltedAfterAuthentication = readRun(wired, admission.runId);
+  assert.equal(haltedAfterAuthentication.state, "halted");
+  assert.equal(
+    haltedAfterAuthentication.problem?.code,
+    "selected-harness-unavailable",
+  );
+  const resume = wired.projectionPort.submit({
+    operationId: "op-resume-protocol-failure",
+    operation: "resume-run",
+    input: { runId: admission.runId },
+  });
+  assert.ok(resume.admitted, JSON.stringify(resume));
+  const resumeOutcome = await awaitSettled(
+    wired.projectionPort,
+    resume.operationId,
+  );
+  assert.equal(resumeOutcome.status, "not-applied");
+  if (resumeOutcome.status === "not-applied") {
+    assert.equal(resumeOutcome.problem.code, "selected-harness-unavailable");
+    assert.equal(
+      resumeOutcome.problem.details?.category,
+      "protocol-incompatible",
+    );
+    assert.equal(resumeOutcome.problem.details?.harness, "codex");
+    assert.equal(
+      resumeOutcome.problem.details?.harnessPossibleEffects,
+      "committed",
+    );
+    assert.equal(resumeOutcome.problem.possibleEffects, "partial");
+    assert.match(resumeOutcome.problem.remediation, /installed Codex version/i);
+  }
+  assert.equal(prepareCount, 2);
+  const haltedAfterProtocol = readRun(wired, admission.runId);
+  assert.equal(haltedAfterProtocol.state, "halted");
+  assert.equal(
+    haltedAfterProtocol.problem?.details?.category,
+    "protocol-incompatible",
+  );
+  const owner = wired.runGroup.acquireRun(admission.runId);
+  assert.ok(owner);
+  assert.deepEqual(owner.turns(), []);
+  owner.close();
 });
 
 test("[new-run-harness-selection] a new Interactive-agent Run pins Claude Code before its first Turn", async (t) => {

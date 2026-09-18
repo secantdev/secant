@@ -199,6 +199,8 @@ test("the Matt front runs in the TUI against the replayer to succeeded (#123)", 
   rendered.mockInput.pressKey("a");
   await rendered.waitForFrame((frame) => frame.includes("Trust acknowledged"));
   rendered.mockInput.pressEnter();
+  await rendered.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  rendered.mockInput.pressEnter();
   await rendered.waitForFrame((frame) => frame.includes("Review"));
   rendered.mockInput.pressEnter();
 

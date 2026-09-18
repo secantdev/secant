@@ -41,12 +41,20 @@ import type {
 
 const WORKSPACE = "/tmp/secant-launch-workspace";
 
-function approvedWorkspace(): WorkspaceView {
+const DEFAULT_HARNESSES: WorkspaceSnapshot["harnesses"] = [
+  { id: "claude-code", name: "Claude Code", availability: "available" },
+  { id: "codex", name: "Codex", availability: "available" },
+];
+
+function approvedWorkspace(
+  harnesses: WorkspaceSnapshot["harnesses"] = DEFAULT_HARNESSES,
+): WorkspaceView {
   const [snapshot] = createSignal<WorkspaceSnapshot>({
     family: "workspace",
     path: WORKSPACE,
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
     installedBundleCount: 2,
+    harnesses,
     actionOffers: [],
   });
   return { snapshot, approve() {} };
@@ -240,12 +248,13 @@ async function mountFlow(
   width = 100,
   height = 40,
   runView: RunWorkbenchView = noRunView(),
+  harnesses: WorkspaceSnapshot["harnesses"] = DEFAULT_HARNESSES,
 ) {
   const exits: unknown[] = [];
   const t = await testRender(
     () => (
       <App
-        view={approvedWorkspace()}
+        view={approvedWorkspace(harnesses)}
         bundles={bundlesView}
         launch={launchView}
         run={runView}
@@ -274,6 +283,15 @@ const ALPHA = focus({
   trust: { state: "app-release" },
   launchInputs: [],
 });
+const AGENT_ALPHA = focus({
+  id: "dev.agent-alpha",
+  name: "Agent Alpha",
+  description: "The agent-bearing one",
+  digest: "agentalpha000",
+  trust: { state: "app-release" },
+  launchInputs: [],
+  routing: [{ node: "step", step: { id: "work", kind: "agent" } }],
+});
 const BETA = focus({
   id: "dev.beta",
   name: "Beta",
@@ -289,6 +307,17 @@ const BETA = focus({
       choices: ["fast", "slow"],
     },
   ],
+});
+const AGENT_BETA = focus({
+  id: "dev.agent-beta",
+  name: "Agent Beta",
+  description: "An agent Bundle with draft input.",
+  digest: "agentbeta111",
+  trust: { state: "app-release" },
+  launchInputs: [
+    { name: "target", type: "text", description: "What to build" },
+  ],
+  routing: [{ node: "step", step: { id: "work", kind: "agent" } }],
 });
 
 // Two trusted Bundles that both declare an input named `target`, for the
@@ -361,6 +390,99 @@ test("a Bundle with no declared inputs skips the inputs screen and reaches revie
     1,
     "digest shown exactly once",
   );
+});
+
+test("[both-client-harness-selection] an Agent Bundle chooses a colour-independent Harness status and reviews the semantic selection", async () => {
+  const launch = fakeLaunch();
+  const { t } = await mountFlow(catalog([AGENT_ALPHA]), launch.view, 40, 20);
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  let frame = t.captureCharFrame();
+  assert.match(frame, /Claude Code/);
+  assert.match(frame, /Codex/);
+  assert.equal(frame.match(/available/g)?.length, 2);
+  for (const line of frame.split("\n")) {
+    assert.ok(line.length <= 40, `overflow at 40: ${JSON.stringify(line)}`);
+  }
+
+  t.mockInput.pressArrow("down");
+  t.mockInput.pressEnter();
+  await t.waitForFrame((candidate) => candidate.includes("Review"));
+  frame = t.captureCharFrame();
+  assert.match(frame, /Harness: Codex \(codex\)/);
+
+  t.mockInput.pressEnter();
+  await t.waitForFrame((candidate) => candidate.includes("Launching"));
+  assert.equal(launch.calls[0]?.harness, "codex");
+});
+
+test("changing a Harness after a selected-Harness refusal preserves unrelated input drafts", async () => {
+  const launch = fakeLaunch();
+  const { t } = await mountFlow(catalog([AGENT_BETA]), launch.view);
+  t.mockInput.pressEnter(); // Bundle → Harness
+  await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  t.mockInput.pressArrow("down"); // Codex
+  t.mockInput.pressEnter(); // Harness → inputs
+  await t.waitForFrame((frame) => frame.includes("Launch inputs"));
+  t.mockInput.pressKey("h");
+  t.mockInput.pressKey("i");
+  await t.waitForFrame((frame) => frame.includes("hi"));
+  t.mockInput.pressEnter(); // inputs → review
+  await t.waitForFrame((frame) => frame.includes("Harness: Codex"));
+  t.mockInput.pressEnter(); // Start
+  await t.waitForFrame((frame) => frame.includes("Launching"));
+  launch.resolve({
+    kind: "refused",
+    problem: {
+      code: "harness-not-found",
+      explanation: "Codex could not be found.",
+      remediation: "Install Codex.",
+      possibleEffects: "none",
+      correction: "harness-selection",
+      details: { harness: "codex" },
+    },
+  });
+  await t.waitForFrame((frame) => frame.includes("harness-not-found"));
+  t.mockInput.pressArrow("up"); // Claude Code
+  t.mockInput.pressEnter(); // back to inputs
+  await t.waitForFrame((frame) => frame.includes("Launch inputs"));
+  assert.match(t.captureCharFrame(), /hi/);
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Harness: Claude Code"));
+  assert.match(t.captureCharFrame(), /target: hi/);
+});
+
+test("an unavailable Harness names its reason, cannot continue, and relayouts after resize", async () => {
+  const choices: WorkspaceSnapshot["harnesses"] = [
+    { id: "claude-code", name: "Claude Code", availability: "available" },
+    {
+      id: "codex",
+      name: "Codex",
+      availability: "unavailable",
+      unavailableReason: "Codex support is disabled in this build.",
+    },
+  ];
+  const { t } = await mountFlow(
+    catalog([AGENT_ALPHA]),
+    fakeLaunch().view,
+    50,
+    20,
+    noRunView(),
+    choices,
+  );
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  t.mockInput.pressArrow("down");
+  await t.waitForFrame((frame) => frame.includes("disabled in this build"));
+  t.mockInput.pressEnter();
+  await t.renderOnce();
+  assert.match(t.captureCharFrame(), /Choose a Harness/);
+  assert.doesNotMatch(t.captureCharFrame(), /Review/);
+  t.resize(30, 20);
+  await t.renderOnce();
+  for (const line of t.captureCharFrame().split("\n")) {
+    assert.ok(line.length <= 30, `overflow at 30: ${JSON.stringify(line)}`);
+  }
 });
 
 test("pending feedback then a transition into the Workbench for the Run id; a trusted launch carries no trustDigest", async () => {

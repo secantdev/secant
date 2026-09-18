@@ -178,6 +178,7 @@ test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Sessi
       bundle: { id: "dev.secant.interrupt-e2e" },
       launchInputs: {},
       trustDigest: digest,
+      harness: "claude-code",
     },
   });
   assert.ok(launch.admitted, JSON.stringify(launch));
@@ -243,6 +244,7 @@ test("steer-turn is rejected as a value when submitted (#118)", async (t) => {
       bundle: { id: "dev.secant.interrupt-e2e" },
       launchInputs: {},
       trustDigest: digest,
+      harness: "claude-code",
     },
   });
   assert.ok(launch.admitted);
@@ -285,6 +287,7 @@ test("resume-run continues a detached Session in the same Claude Code Session vi
       bundle: { id: "dev.secant.interrupt-e2e" },
       launchInputs: {},
       trustDigest: digest,
+      harness: "claude-code",
     },
   });
   assert.ok(launch.admitted);
@@ -330,6 +333,7 @@ test("a signal (Ctrl+C) mid-Turn interrupts the Turn and rests the Run halted, n
       bundle: { id: "dev.secant.interrupt-e2e" },
       launchInputs: {},
       trustDigest: digest,
+      harness: "claude-code",
     },
   });
   assert.ok(launch.admitted);
@@ -357,6 +361,7 @@ test("a resume the Harness does not acknowledge fails the Attempt and never crea
       bundle: { id: "dev.secant.interrupt-e2e" },
       launchInputs: {},
       trustDigest: digest,
+      harness: "claude-code",
     },
   });
   assert.ok(launch.admitted);

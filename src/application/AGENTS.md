@@ -20,8 +20,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - The Trust grant is written only after `createRun` succeeds: any refusal reached before creation (a mismatching trust acknowledgement, a failed
   Preflight) returns without a grant, so it never leaves a dangling one. (`createRun` itself no longer refuses — ADR 0031 admits any number of live
   Runs.) Preflight runs before the Trust gate, so a Run whose preconditions fail is refused before trust is ever asked for.
-- New Agent/Interactive-agent Runs pin the semantic `claude-code` selection in `createRun`; Command-only Runs omit it. The Store returns that same
-  immutable selection on an Operation replay, so Application never derives it from later Attempt evidence or rewrites it after creation (#138).
+- New Agent/Interactive-agent Runs require one known, available registry id and pin it in `createRun`; Command-only Runs reject a selection as irrelevant.
+  The launch replay key includes the choice, and resume automatically reuses the immutable stored id without deriving it from Attempt evidence (#138, #146).
 - A pre-M4 Run with no selection upgrades only after its still-installed pinned Snapshot proves the routing needs a Harness. Reopen and direct resume
   write `claude-code` once through `observedOwner.selectHarness`; Command-only Runs and missing/corrupt Snapshot Problems remain unselected (#139).
 - Never `acquireRun` a Run merely to read it when it is live in another process: acquiring bumps the owner-fencing epoch and would abort the process
@@ -60,11 +60,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   refuses it too; `listRuns` throwing on a malformed row is caught in cancel/delete so nothing throws out of `submit` (A4).
 - The client `RunStateName` has no `created` and gains `cancelled` (A7); the Run Store still records `created` internally, and `toRunState` maps it to `running` for the
   Projection — a launched Run reads `running` from admission.
-- The prepared Harness lives in composition, not the Application (#116): `makeRunExecution` prepares one for an Agent-bearing drive; if it reaches an interactive Step,
+- The closed registry and prepared Harnesses live in composition, not Application (#116, #146): the Port sees normalized choices/availability, while selected-only
+  Preflight sees normalized discovery and capabilities. `makeRunExecution` resolves the durable id and prepares only that Adapter; if it reaches an interactive Step,
   composition transfers an opaque Step driver onto the tracked Run. Every human Turn reuses it, and End, interrupt, cancel, or shutdown closes it exactly once. Preflight
-  does the _synchronous_ Harness discovery (configured command then the
-  `claude` PATH name, via the `process` resolver) and the capability-need union, so a `not-found`/`unsupported-shim`/`interactive-step-needs-tui` refusal lands before a Run
-  exists; the async `prepare` (spawning `claude --version`) runs only at execution. `supportsInteractiveTurns` is a client fact the Application forwards to Preflight.
+  refuses discovery/capability failures before creation. A typed qualification/authentication/protocol `prepare` failure writes the created Run `halted` before content
+  and settles the Operation with `selected-harness-unavailable`. `supportsInteractiveTurns` remains the client fact Application forwards to Preflight.
 - The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no **durable**
   snapshot; the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`). The live lane is
   separate — Turn activity reaches an open client through the live overlay below (#117), not through this durable write.

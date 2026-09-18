@@ -238,6 +238,8 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
   rendered.mockInput.pressKey("a");
   await rendered.waitForFrame((frame) => frame.includes("Trust acknowledged"));
   rendered.mockInput.pressEnter();
+  await rendered.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  rendered.mockInput.pressEnter();
   await rendered.waitForFrame((frame) => frame.includes("Review"));
   rendered.mockInput.pressEnter();
   await rendered.waitForFrame((frame) =>

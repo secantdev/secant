@@ -68,6 +68,10 @@ export function registerRunCommands(
       "a Launch input (repeatable)",
       (pair: string, prev: string[]) => [...prev, pair],
       [],
+    )
+    .option(
+      "--harness <id>",
+      "select claude-code or codex for an Agent-bearing Bundle",
     );
   addHarnessRequestsOption(launch)
     .option("--json", "print the Run snapshot as JSON")
@@ -77,6 +81,7 @@ export function registerRunCommands(
         options: {
           trust?: string;
           input: string[];
+          harness?: string;
           harnessRequests?: string;
           json?: boolean;
         },
@@ -98,16 +103,17 @@ export function registerRunCommands(
         if ("problem" in policy) return settle(fail(io, json, policy.problem));
         return settle(
           execute((clients) =>
-            launchRun(
-              clients.projectionPort,
+            launchRun({
+              port: clients.projectionPort,
               io,
               fail,
               json,
               selector,
-              options.trust,
-              inputs.values,
-              policy.policy,
-            ),
+              trust: options.trust,
+              inputs: inputs.values,
+              harness: options.harness,
+              harnessRequests: policy.policy,
+            }),
           ),
         );
       },
@@ -507,24 +513,29 @@ function answerHint(run: RunView): readonly string[] {
 
 // --- command implementations -----------------------------------------------
 
-async function launchRun(
-  port: ProjectionPort,
-  io: HeadlessIO,
-  fail: RunCommandDeps["fail"],
-  json: boolean,
-  selector: string,
-  trust: string | undefined,
-  inputs: Record<string, string>,
-  harnessRequests: HarnessRequestPolicy,
-): Promise<number> {
+interface TLaunchRunParams {
+  readonly port: ProjectionPort;
+  readonly io: HeadlessIO;
+  readonly fail: RunCommandDeps["fail"];
+  readonly json: boolean;
+  readonly selector: string;
+  readonly trust?: string;
+  readonly inputs: Record<string, string>;
+  readonly harness?: string;
+  readonly harnessRequests: HarnessRequestPolicy;
+}
+
+async function launchRun(params: TLaunchRunParams): Promise<number> {
+  const { port, io, fail, json, selector, inputs, harnessRequests } = params;
   const { id, version } = splitSelector(selector);
   const admission = port.submit({
     operationId: randomUUID(),
     operation: "launch-run",
     input: {
-      bundle: { id, ...(version !== undefined ? { version } : {}) },
+      bundle: { id, version },
       launchInputs: inputs,
-      ...(trust !== undefined ? { trustDigest: trust } : {}),
+      trustDigest: params.trust,
+      harness: params.harness,
     },
   });
   if (!admission.admitted) return fail(io, json, admission.problem);

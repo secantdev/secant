@@ -96,6 +96,22 @@ test("run launch --trust runs to succeeded, and a second launch needs no trust",
   assert.match(h.stdout(), /^State: succeeded$/m);
 });
 
+test("[both-client-harness-selection] run launch rejects --harness for a Command-only Bundle", async (t) => {
+  const h = await harness(t);
+  const { id, digest } = await h.install();
+  h.approve();
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "launch", id, "--trust", digest, "--harness", "codex"],
+      h.io,
+    ),
+    1,
+  );
+  assert.match(h.stderr(), /harness-selection-irrelevant/);
+  assert.equal(h.runGroup?.listRuns().length, 0);
+});
+
 test("run launch on an uninstalled Bundle exits non-zero with a Problem", async (t) => {
   const h = await harness(t);
   h.approve();

@@ -254,14 +254,19 @@ test("the Matt front runs in the TUI against the replayer to succeeded (#123)", 
 
   const afterGrill = readRun();
   assert.equal(afterGrill.state, "blocked");
-  const humanTurns = (afterGrill.transcript ?? [])
+  const transcriptReference = afterGrill.sessions?.[0]?.transcriptPage;
+  assert.ok(transcriptReference);
+  const transcript = wired.projectionPort.readTranscript(transcriptReference);
+  assert.ok(transcript.found);
+  if (!transcript.found) throw new Error("unreachable");
+  const humanTurns = transcript.entries
     .filter((entry) => entry.role === "user")
     .map((entry) => entry.content);
   assert.deepEqual(humanTurns, [
     "Interview me about a feature.",
     "That is enough context.",
   ]);
-  const assistantText = (afterGrill.transcript ?? [])
+  const assistantText = transcript.entries
     .filter((entry) => entry.role === "assistant")
     .map((entry) => entry.content)
     .join("\n");

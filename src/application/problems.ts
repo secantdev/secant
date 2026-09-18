@@ -108,15 +108,26 @@ export function runStoreDamaged(runId: string): Problem {
   };
 }
 
-export function runExecutionFault(runId: string, error: unknown): Problem {
+export function runExecutionFault(
+  runId: string | undefined,
+  error: unknown,
+  operationId?: string,
+): Problem {
   const message = error instanceof Error ? error.message : String(error);
+  const subject =
+    runId !== undefined
+      ? `Run ${runId}`
+      : `Operation ${operationId ?? "unknown"}`;
   return {
     code: "run-execution-fault",
-    explanation: `Run ${runId} could not be driven to rest: ${message}`,
+    explanation: `${subject} could not be driven to rest: ${message}`,
     remediation:
       "This is a coordination or environment fault; check the Run store and retry the launch.",
     possibleEffects: "unknown",
-    details: { runId },
+    details:
+      runId !== undefined
+        ? { runId }
+        : { operationId: operationId ?? "unknown" },
   };
 }
 
@@ -238,7 +249,7 @@ export function turnControlRejected(
 export function steerUnavailable(runId: string, reason: string): Problem {
   return {
     code: "steer-unavailable",
-    explanation: `Run ${runId} cannot be steered: ${reason}.`,
+    explanation: `Run ${runId} cannot be steered: ${reason}`,
     remediation:
       "Interrupt the Turn to stop it, or let it run; same-Turn steer is not available for this Harness.",
     possibleEffects: "none",
@@ -424,6 +435,23 @@ export function harnessRequestRejected(
       "The request settled before the answer landed; nothing was applied. Watch the live overlay for the next request.",
     possibleEffects: "none",
     details: { runId, requestId, reason },
+  };
+}
+
+/** The Harness accepted an answer but could not prove whether its effect landed.
+ *  The Operation stays within the Port's applied/not-applied vocabulary while the
+ *  Problem preserves the Seam's unknown possible effects (#134 A20). */
+export function harnessRequestIndeterminate(
+  runId: string,
+  requestId: string,
+): Problem {
+  return {
+    code: "harness-request-indeterminate",
+    explanation: `The Harness could not determine whether request ${requestId} on Run ${runId} was answered.`,
+    remediation:
+      "The request may or may not have been answered; inspect the live Turn before attempting another action.",
+    possibleEffects: "unknown",
+    details: { runId, requestId },
   };
 }
 

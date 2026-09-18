@@ -77,8 +77,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   durable truth independent of `origin` (`managed`/`human`). The column is nullable so a row admitted before it existed reads its kind back **null** (undefined in
   `TurnRecord`) — a legacy row whose kind is genuinely unknown, never fabricated to a guess. Unlike the enum columns domain logic branches on here, the store returns `kind`
   raw; the Projection narrows it to the client union at its read ingress (D7).
-- The `attempt` row also carries the normalized Harness identity of an Agent-step Attempt (#125): `harness`/`executable`/`executable_version`, written
-  together by `publishAttempt` from the prepared profile (all null for a Command/Gate Attempt). `harnessIdentity()` returns the latest Attempt with a
+- The `attempt` row also carries the normalized Harness identity and steer evidence of an Agent-step Attempt (#125, #134):
+  `harness`/`executable`/`executable_version` plus `steer_available`/`steer_evidence`, written together by `publishAttempt` from the prepared profile (all null for a
+  Command/Gate Attempt). `harnessIdentity()` returns the latest Attempt with a
   non-null `harness` — so `harness` non-null is what marks an Agent-step Attempt, independent of `effective_model` (which stays null when the Turn observed
   no model). It is recorded on every autonomous Agent Step outcome, including `cancelled`/`indeterminate` and the recovery-refused failure; the interactive-agent
   Step's synthetic Attempt (#122) records neither identity nor effective model, so a purely-interactive Run projects no identity — the same scope both facts share.

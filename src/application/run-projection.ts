@@ -22,6 +22,7 @@ import type {
   TurnEventRecord,
   TurnRecord,
 } from "../run/store/store.js";
+import { interactiveStepAttemptId } from "../run/execution/execution.js";
 import type {
   ActionOffer,
   Problem,
@@ -81,6 +82,11 @@ export interface RunFacts {
   readonly digest: string;
 }
 
+export interface RunSteerCapability {
+  readonly available: boolean;
+  readonly evidence: string;
+}
+
 /** How the join reaches a Run's canonical record and outputs. When the Run is
  *  live in this process the launch use case passes its held owner, so a snapshot
  *  read never fences the executing owner; otherwise the join acquires a
@@ -89,6 +95,7 @@ export interface RunReadContext {
   readonly facts?: RunFacts; // present for a Run launched in this process
   readonly liveOwner?: RunOwner; // present while live in this process
   readonly state?: string; // the in-memory latest state while tracked
+  readonly steer?: RunSteerCapability; // current prepared profile evidence
 }
 
 /** Build the bounded `run` snapshot for one Run id. */
@@ -183,13 +190,13 @@ function runResult(
         : undefined;
     const turnEvents = owner?.turnEvents() ?? [];
     const sessions = owner?.harnessSessions() ?? [];
-    const transcript = owner?.transcript() ?? [];
     const effectiveModel = owner?.effectiveModel();
     // The normalized Harness identity of the latest Agent-step Attempt (#125): durable
     // profile facts read back through the owner, empty for a Command-only Run (and for a
     // Run live elsewhere, read without an owner), so the frozen `--json` stays unchanged
     // for those.
     const harnessIdentity = owner?.harnessIdentity();
+    const steer = context.steer ?? harnessIdentity?.steer;
     return {
       found: true,
       run: {
@@ -217,6 +224,7 @@ function runResult(
           gateAnswers,
           turns,
           turnEvents,
+          facts.routing,
         ),
         outputs,
         ...(derivedRun.checkpoint !== undefined
@@ -247,12 +255,14 @@ function runResult(
               : []),
           // Turn-scoped controls (#118): while a Turn is live in this process, a
           // user can interrupt it (rests the Run `halted`, resumable) without
-          // cancelling the Run; steer is offered unavailable because Claude Code
-          // has no same-Turn steer.
+          // cancelling the Run; an unavailable steer Offer carries the prepared or
+          // persisted profile evidence rather than Adapter-specific prose here.
           ...(isLive && liveTurn !== undefined
             ? [
                 interruptTurnOffer(runId, liveTurn.turnId),
-                steerTurnOffer(runId, liveTurn.turnId),
+                ...(steer?.available === false
+                  ? [steerTurnOffer(runId, liveTurn.turnId, steer.evidence)]
+                  : []),
               ]
             : []),
           // Interactive-agent turn-taking (#122): while the Run rests `blocked` at an
@@ -278,7 +288,8 @@ function runResult(
                 sessionView(
                   runId,
                   s,
-                  transcript.some((entry) => entry.session === s.session),
+                  (owner?.transcriptPage({ session: s.session, limit: 1 })
+                    .entries.length ?? 0) > 0,
                 ),
               ),
             }
@@ -294,9 +305,6 @@ function runResult(
             }
           : {}),
         ...(turns.length > 0 ? { turnPosition: turns.length } : {}),
-        ...(transcript.length > 0
-          ? { transcript: transcript.map(transcriptView) }
-          : {}),
       },
     };
   };
@@ -475,6 +483,7 @@ function answerHumanGateOffer(
   return {
     action: "answer-human-gate",
     gate,
+    basis: "durable Human Gate",
     // An authored gate approves/advances a single pause; only a derived Review
     // checkpoint grants an interval of the Repeat cadence (#108).
     continueConsequence: authored
@@ -527,11 +536,6 @@ function cancelRunOffer(runId: string): ActionOffer {
   };
 }
 
-/** The fixed reason Claude Code's steer offer carries (#118): the Harness has no
- *  same-Turn steer. ponytail: hardcoded because M3 ships only Claude Code — thread
- *  the live Harness profile's steer reason through when a second Harness lands. */
-export const STEER_UNAVAILABLE_REASON = "Claude Code has no same-Turn steer";
-
 /** The `interrupt-turn` offer for a Run with a live Turn (#118): it carries the
  *  live Turn's id so a control targets exactly that generation. */
 function interruptTurnOffer(runId: string, turnId: string): ActionOffer {
@@ -544,15 +548,18 @@ function interruptTurnOffer(runId: string, turnId: string): ActionOffer {
   };
 }
 
-/** The `steer-turn` offer for a Run with a live Turn (#118): always unavailable
- *  for Claude Code, so a client shows it disabled with the reason. */
-function steerTurnOffer(runId: string, turnId: string): ActionOffer {
+/** An evidence-backed unavailable `steer-turn` offer for a live Turn (#118). */
+function steerTurnOffer(
+  runId: string,
+  turnId: string,
+  reason: string,
+): ActionOffer {
   return {
     action: "steer-turn",
     runId,
     turnId,
     available: false,
-    reason: STEER_UNAVAILABLE_REASON,
+    reason,
   };
 }
 
@@ -1113,6 +1120,7 @@ function buildTimeline(
   gateAnswers: readonly GateAnswerRecord[],
   turns: readonly TurnRecord[],
   turnEvents: readonly TurnEventRecord[],
+  routing: readonly RoutingNode[],
 ): RunTimelineEvent[] {
   const events: RunTimelineEvent[] = [{ at: createdAt, event: "run-created" }];
   const entry = deps.catalog.listEntries().find((e) => e.digest === digest);
@@ -1129,10 +1137,17 @@ function buildTimeline(
       });
     }
   }
+  const interactiveEndAttempts = new Set(
+    flattenSteps(routing)
+      .filter((step) => step.kind === "interactive-agent")
+      .map((step) => interactiveStepAttemptId(step.id)),
+  );
   for (const attempt of log) {
     events.push({
       at: attempt.at,
-      event: "attempt-settled",
+      event: interactiveEndAttempts.has(attempt.attemptId)
+        ? "interactive-step-ended"
+        : "attempt-settled",
       detail: attempt.outcome,
     });
   }
@@ -1223,11 +1238,12 @@ const TIMELINE_CATEGORY_RANK: Record<RunTimelineKind, number> = {
   "request-answered": 6,
   "request-expired": 7,
   "turn-settled": 8,
-  "attempt-settled": 9,
-  iteration: 10,
-  "checkpoint-blocked": 11,
-  "gate-answered": 12,
-  "materialization-conflict": 13,
+  "interactive-step-ended": 9,
+  "attempt-settled": 10,
+  iteration: 11,
+  "checkpoint-blocked": 12,
+  "gate-answered": 13,
+  "materialization-conflict": 14,
 };
 
 // --- entry selection -------------------------------------------------------

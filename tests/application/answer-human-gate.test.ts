@@ -150,6 +150,10 @@ test("continue grants an interval, resolves succeeded, and records a readable an
   const f = fixture(t);
   const runId = await launchBlocked(f, { interval: 2, passAt: 3 });
   const gate = gateOf(f.app, runId);
+  const offer = runOf(f.app, runId).actionOffers.find(
+    (candidate) => candidate.action === "answer-human-gate",
+  );
+  assert.equal(offer?.basis, "durable Human Gate");
 
   const admission = f.app.projectionPort.submit({
     operationId: "answer-1",
@@ -201,6 +205,38 @@ test("a blocked Run stays durably blocked and owned until its Human Gate answer 
   assert.equal(
     f.runGroup.listRuns().find((run) => run.runId === runId)?.live,
     false,
+  );
+});
+
+test("shutdown releases a blocked Run without changing its rest or answer offer (#134 A21)", async (t) => {
+  const f = fixture(t);
+  const runId = await launchBlocked(f, { interval: 2, passAt: 3 });
+  assert.equal(runOf(f.app, runId).state, "blocked");
+  assert.equal(
+    f.runGroup.listRuns().find((run) => run.runId === runId)?.live,
+    true,
+  );
+
+  await f.app.shutdown();
+
+  const read = f.runGroup.readRun(runId);
+  assert.ok(read.ok);
+  if (read.ok) assert.equal(read.run.state, "blocked");
+  assert.equal(
+    f.runGroup.listRuns().find((run) => run.runId === runId)?.live,
+    false,
+  );
+  const reopened = createApplication({
+    catalog: f.catalog,
+    launchWorkspacePath: f.workspace,
+    hostPlatform: hostPlatform(),
+    runGroup: f.runGroup,
+    runExecution,
+  });
+  const run = runOf(reopened, runId);
+  assert.equal(run.state, "blocked");
+  assert.ok(
+    run.actionOffers.some((offer) => offer.action === "answer-human-gate"),
   );
 });
 
@@ -515,6 +551,10 @@ test("an authored free-text gate blocks, then a text answer publishes the output
   assert.equal(blocked.state, "blocked");
   assert.equal(blocked.checkpoint, undefined);
   assert.equal(blocked.pendingGate?.gate.shape, "free-text");
+  const offer = blocked.actionOffers.find(
+    (candidate) => candidate.action === "answer-human-gate",
+  );
+  assert.equal(offer?.basis, "durable Human Gate");
   assert.equal(blocked.pendingGate?.message, "name the release");
   assert.equal(blocked.pendingGate?.outputArtifactName, "answer");
   const gate = pendingGateOf(f.app, runId);
@@ -689,4 +729,38 @@ test("the same free-text answer operation id twice publishes the output once (#1
   const read = f.app.projectionPort.readResource(answer!.reference);
   assert.ok(read.found);
   if (read.found) assert.equal(read.content, "final");
+});
+
+test("reusing a free-text answer operation id with different text is refused (#134 A4)", async (t) => {
+  const f = fixture(t);
+  const runId = await launchGateBlocked(f, { shape: "free-text" });
+  const gate = pendingGateOf(f.app, runId);
+
+  const first = f.app.projectionPort.submit({
+    operationId: "answer-reused",
+    operation: "answer-human-gate",
+    input: { runId, gate, text: "first" },
+  });
+  assert.ok(first.admitted);
+  assert.deepEqual(await settleOutcome(f.app, first.operationId), {
+    status: "applied",
+  });
+
+  const reused = f.app.projectionPort.submit({
+    operationId: "answer-reused",
+    operation: "answer-human-gate",
+    input: { runId, gate, text: "second" },
+  });
+  assert.equal(reused.admitted, false);
+  if (!reused.admitted) {
+    assert.equal(reused.problem.code, "operation-id-reused");
+  }
+
+  const answer = runOf(f.app, runId).outputs.find(
+    (output) => output.name === "answer",
+  );
+  assert.ok(answer);
+  const read = f.app.projectionPort.readResource(answer.reference);
+  assert.ok(read.found);
+  if (read.found) assert.equal(read.content, "first");
 });

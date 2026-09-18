@@ -14,6 +14,7 @@ import { drizzle, type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import type { MigrationsJournal } from "drizzle-orm/migrator";
 import { z } from "zod";
+import type { SteerCapability } from "../../harness/harness.js";
 import type {
   ArtifactType,
   AttemptOutcome,
@@ -175,6 +176,9 @@ export interface HarnessIdentityRecord {
   readonly harness: string;
   readonly executable: string;
   readonly executableVersion: string;
+  /** Evidence the qualified profile supplied for native same-Turn steer. Absent
+   *  only on an Attempt written before the capability was persisted. */
+  readonly steer?: SteerCapability;
 }
 
 /** The outcome of a publication attempt. A fenced owner or an unstageable set

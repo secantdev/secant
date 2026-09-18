@@ -161,6 +161,8 @@ function runView(port: ProjectionPort, runId: string): RunView {
 // `lost` with interruption unknown (ADR 0022); the Run still rests `halted` with
 // the Session detached, and resume still works.
 const INTERRUPTED_KIND = process.platform === "win32" ? "lost" : "interrupted";
+const STEER_EVIDENCE =
+  "Claude Code's stream-json print mode has no same-Turn guidance frame: a further user message queues as the next Turn, so steer is rejected unsupported and never emulated.";
 
 test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Session, and settles the Turn interrupted (#118)", async (t) => {
   const { wired, digest } = wire(
@@ -189,7 +191,7 @@ test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Sessi
   );
   assert.ok(steer, "expected a steer-turn offer while the Turn is live");
   assert.equal(steer!.available, false);
-  assert.equal(steer!.reason, "Claude Code has no same-Turn steer");
+  assert.equal(steer!.reason, STEER_EVIDENCE);
 
   const interrupt = port.submit({
     operationId: "op-interrupt",
@@ -257,7 +259,7 @@ test("steer-turn is rejected as a value when submitted (#118)", async (t) => {
   assert.equal(outcome.status, "not-applied");
   if (outcome.status === "not-applied") {
     assert.equal(outcome.problem.code, "steer-unavailable");
-    assert.match(outcome.problem.explanation, /no same-Turn steer/);
+    assert.match(outcome.problem.explanation, /stream-json print mode/);
   }
 
   // Interrupt so the Run rests and the wired process does not leak a live child.

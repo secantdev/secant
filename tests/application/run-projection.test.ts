@@ -584,6 +584,121 @@ test("a fresh Application (no in-process tracking) reads a Run back from its sto
   if (read.found) assert.match(read.content, /persisted-output/);
 });
 
+test("a run Projection opened after its tracking entry is done follows a later resume (#134 A1)", async (t) => {
+  const f = fixture(t);
+  const { id, digest } = installCommandBundle(f, {
+    id: "dev.secant.follow-done",
+  });
+  f.catalog.approveWorkspace(f.workspace, new Date());
+  let drive = 0;
+  const app = createApplication({
+    catalog: f.catalog,
+    launchWorkspacePath: f.workspace,
+    hostPlatform: hostPlatform(),
+    runGroup: f.runGroup,
+    runExecution: async ({ owner }) => {
+      drive += 1;
+      owner.writeState(drive === 1 ? "failed" : "succeeded");
+      return { outcome: drive === 1 ? "failed" : "succeeded" };
+    },
+  });
+  const launched = app.projectionPort.submit({
+    operationId: "launch-follow-done",
+    operation: "launch-run",
+    input: { bundle: { id }, launchInputs: {}, trustDigest: digest },
+  });
+  assert.ok(launched.admitted);
+  await settled(app, launched.operationId);
+
+  const opened = app.projectionPort.openProjection({
+    family: "run",
+    runId: launched.runId!,
+  });
+  assert.ok(opened.snapshot.result.found);
+  if (opened.snapshot.result.found) {
+    assert.equal(opened.snapshot.result.run.state, "failed");
+  }
+  const seen: string[] = [];
+  const draining = (async () => {
+    for await (const update of opened.updates) {
+      if (update.kind === "durable" && update.snapshot.result.found) {
+        seen.push(update.snapshot.result.run.state);
+      }
+    }
+  })();
+
+  const resumed = app.projectionPort.submit({
+    operationId: "resume-follow-done",
+    operation: "resume-run",
+    input: { runId: launched.runId! },
+  });
+  assert.ok(resumed.admitted);
+  await settled(app, resumed.operationId);
+  opened.close();
+  await draining;
+  assert.ok(seen.includes("succeeded"));
+});
+
+test("a run Projection opened without a tracking entry follows a later resume (#134 A1)", async (t) => {
+  const f = fixture(t);
+  const { digest } = installCommandBundle(f, {
+    id: "dev.secant.follow-untracked",
+  });
+  f.catalog.approveWorkspace(f.workspace, new Date());
+  f.catalog.grantTrust({
+    operationId: "grant-follow-untracked",
+    digest,
+    installationGeneration: 1,
+    grantedAt: new Date(),
+  });
+  const created = f.runGroup.createRun({
+    operationId: "seed-follow-untracked",
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date(),
+  });
+  assert.equal(created.outcome, "created");
+  if (created.outcome !== "created") throw new Error("unreachable");
+  const owner = f.runGroup.acquireRun(created.runId)!;
+  assert.ok(owner.writeState("failed").ok);
+  assert.ok(owner.release().ok);
+  owner.close();
+
+  const app = createApplication({
+    catalog: f.catalog,
+    launchWorkspacePath: f.workspace,
+    hostPlatform: hostPlatform(),
+    runGroup: f.runGroup,
+    runExecution: async ({ owner: activeOwner }) => {
+      activeOwner.writeState("succeeded");
+      return { outcome: "succeeded" };
+    },
+  });
+  const opened = app.projectionPort.openProjection({
+    family: "run",
+    runId: created.runId,
+  });
+  const seen: string[] = [];
+  const draining = (async () => {
+    for await (const update of opened.updates) {
+      if (update.kind === "durable" && update.snapshot.result.found) {
+        seen.push(update.snapshot.result.run.state);
+      }
+    }
+  })();
+
+  const resumed = app.projectionPort.submit({
+    operationId: "resume-follow-untracked",
+    operation: "resume-run",
+    input: { runId: created.runId },
+  });
+  assert.ok(resumed.admitted);
+  await settled(app, resumed.operationId);
+  opened.close();
+  await draining;
+  assert.ok(seen.includes("succeeded"));
+});
+
 // --- Repeat groups (#84, ADR 0020) -----------------------------------------
 
 /** Build+install a Repeat-group Bundle and return its installed digest. */

@@ -6,8 +6,9 @@ import {
   createApplication,
   type Application,
   type InteractiveTurnReport,
+  type PrepareRunInteractiveStep,
   type RunExecution,
-  type RunInteractiveTurn,
+  type RunInteractiveStep,
 } from "../application/application.js";
 import { openCatalog, type Catalog } from "../catalog/catalog.js";
 import {
@@ -25,6 +26,7 @@ import { openRunGroup, type RunGroup } from "../run/store/store.js";
 import {
   createClaudeCodeAdapter,
   type HarnessAdapter,
+  type PreparedHarness,
 } from "../harness/harness.js";
 import {
   type ArtifactType,
@@ -130,7 +132,7 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
         // Bundle is refused at Preflight (#116). The TUI root sets this true.
         supportsInteractiveTurns: overrides.supportsInteractiveTurns ?? false,
         runExecution: makeRunExecution(catalog, host ?? "linux", adapter),
-        runInteractiveTurn: makeRunInteractiveTurn(adapter),
+        prepareRunInteractiveStep: makePrepareRunInteractiveStep(adapter),
       });
       return { catalog, runGroup, ...application };
     } catch (error) {
@@ -156,7 +158,14 @@ function makeRunExecution(
   platform: Platform,
   adapter: HarnessAdapter,
 ): RunExecution {
-  return async ({ routing, digest, owner, cancelSignal, requestChannel }) => {
+  return async ({
+    routing,
+    digest,
+    owner,
+    cancelSignal,
+    requestChannel,
+    observeSteer,
+  }) => {
     const deps = {
       owner,
       platform,
@@ -183,36 +192,37 @@ function makeRunExecution(
         `composition: could not prepare the Harness: ${prepared.failure.category}.`,
       );
     }
+    observeSteer?.(prepared.harness.profile.steer);
     const harness: HarnessExecutionDeps = {
       prepared: prepared.harness,
       inputTypes: facts.inputTypes,
       assetKinds: facts.assetKinds,
     };
+    let transferred = false;
     try {
-      return await executeRouting(routing, { ...deps, harness });
+      const report = await executeRouting(routing, { ...deps, harness });
+      if (report.outcome === "blocked") {
+        transferred = true;
+        return {
+          ...report,
+          interactiveStep: interactiveStepDriver(prepared.harness),
+        };
+      }
+      return report;
     } finally {
-      await prepared.harness.close();
+      if (!transferred) await prepared.harness.close();
     }
   };
 }
 
-// How one human interactive Turn is driven (#122): prepare a Harness against the
-// Run's Workspace, drive one Turn (origin `human`) with the verbatim text in the
-// named Session — resuming it when detached — and close the Harness, then report the
-// mechanical outcome. Preflight proved the executable resolves, so a prepare failure
-// here is an environment fault. A full cancel-run makes `driveInteractiveTurn` throw
-// `RunCancelledError`, which propagates past the `finally` for the Application's cancel
-// path to own, exactly as an aborted `runExecution` does.
-function makeRunInteractiveTurn(adapter: HarnessAdapter): RunInteractiveTurn {
-  return async ({
-    owner,
-    session,
-    attemptId,
-    turnId,
-    text,
-    cancelSignal,
-    requestChannel,
-  }) => {
+// Prepare the opaque Step-scoped interactive driver (#134 A17). A handle transferred
+// from `makeRunExecution` is preferred; this path prepares one after reopening a Run
+// already blocked at an interactive Step. The Application owns its lifetime without
+// learning a Harness type, and the driver closes the prepared Harness exactly once.
+function makePrepareRunInteractiveStep(
+  adapter: HarnessAdapter,
+): PrepareRunInteractiveStep {
+  return async ({ owner }) => {
     const prepared = await adapter.prepare({
       workspace: owner.record.workspacePath,
     });
@@ -221,10 +231,26 @@ function makeRunInteractiveTurn(adapter: HarnessAdapter): RunInteractiveTurn {
         `composition: could not prepare the Harness: ${prepared.failure.category}.`,
       );
     }
-    try {
+    return interactiveStepDriver(prepared.harness);
+  };
+}
+
+function interactiveStepDriver(prepared: PreparedHarness): RunInteractiveStep {
+  let closed = false;
+  return {
+    steer: prepared.profile.steer,
+    async turn({
+      owner,
+      session,
+      attemptId,
+      turnId,
+      text,
+      cancelSignal,
+      requestChannel,
+    }) {
       const result = await driveInteractiveTurn({
         owner,
-        prepared: prepared.harness,
+        prepared,
         session,
         attemptId,
         turnId,
@@ -233,9 +259,12 @@ function makeRunInteractiveTurn(adapter: HarnessAdapter): RunInteractiveTurn {
         ...(requestChannel !== undefined ? { requestChannel } : {}),
       });
       return { outcome: interactiveOutcome(result.kind) };
-    } finally {
-      await prepared.harness.close();
-    }
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      await prepared.close();
+    },
   };
 }
 

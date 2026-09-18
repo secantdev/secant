@@ -1,4 +1,3 @@
-import { realpathSync } from "node:fs";
 import { z } from "zod";
 import {
   DEFAULT_BUDGETS,
@@ -15,9 +14,6 @@ import {
 } from "../workflow/workflow.js";
 import {
   interactiveStepAttemptId,
-  type LiveObservation,
-  type LiveRequestView,
-  type RequestAnswerFn,
   type RequestChannel,
   type RunReport,
   RUN_CANCEL_ABORT as CANCEL_ABORT,
@@ -38,9 +34,9 @@ import {
   GATE_ANSWER_ARTIFACT,
   runSnapshot,
   selectRunEntry,
-  STEER_UNAVAILABLE_REASON,
   type RunFacts,
   type RunProjectionDependencies,
+  type RunSteerCapability,
 } from "./run-projection.js";
 import {
   bundleBytesCorrupt,
@@ -49,6 +45,7 @@ import {
   gateShapeMismatch,
   gateStale,
   harnessRequestExpired,
+  harnessRequestIndeterminate,
   harnessRequestRejected,
   harnessRequestStale,
   interactiveStepMidTurn,
@@ -81,9 +78,23 @@ import { readTranscriptResource } from "./transcript-resource.js";
 // without importing the internal resolver file (module-boundaries).
 export { TRANSCRIPT_PAGE_SIZE } from "./transcript-resource.js";
 import { preflight } from "./preflight.js";
+import { createLiveOverlay, type LiveOverlayState } from "./live-overlay.js";
+import {
+  answerHarnessRequestReplayKey,
+  answerReplayKey,
+  cancelReplayKey,
+  canonicalizeWorkspacePath,
+  deleteReplayKey,
+  endInteractiveStepReplayKey,
+  interruptTurnReplayKey,
+  launchReplayKey,
+  resumeReplayKey,
+  sendInteractiveTurnReplayKey,
+  steerTurnReplayKey,
+} from "./replay-keys.js";
+export { canonicalizeWorkspacePath } from "./replay-keys.js";
 import type {
   AnswerHarnessRequestInput,
-  AnswerHarnessRequestOffer,
   AnswerHumanGateInput,
   BundleCatalogSnapshot,
   BundleFocusSelector,
@@ -108,12 +119,9 @@ import type {
   TranscriptPageReference,
   TranscriptRead,
   RunListSnapshot,
-  RunLiveOverlay,
-  RunOutstandingRequest,
   RunSnapshot,
   Submission,
   SubmissionAdmission,
-  TurnPhase,
   WorkspaceSnapshot,
 } from "./projection-port.js";
 
@@ -135,30 +143,43 @@ export type RunExecution = (context: {
    *  approval requests reach the observing client through it, and a client answers
    *  through `answer-harness-request`. Absent for a Command-only Run. */
   readonly requestChannel?: RequestChannel;
-}) => Promise<RunReport>;
+  /** Current prepared-profile evidence projected while the Attempt is still live;
+   *  the settled Attempt persists the same fact for reopen/resume. */
+  readonly observeSteer?: (capability: RunSteerCapability) => void;
+}) => Promise<RunExecutionReport>;
 
-/** How one human interactive Turn is driven (#122). Composition prepares a Harness,
- *  drives one Turn (origin `human`) with the verbatim text in the named Session —
- *  resuming it when detached, recording it durably — and closes the Harness, then
- *  reports the mechanical outcome. The Application maps it to the Run's next resting
- *  state; between Turns the Run stays `blocked`. A full cancel-run aborts the signal
- *  and the driver throws (composition owns it), which the Application's cancel path
- *  catches by its own AbortController, exactly as `runExecution` does. */
-export type RunInteractiveTurn = (context: {
-  readonly runId: string;
-  readonly digest: string;
+export interface RunExecutionReport extends RunReport {
+  /** An already-qualified Harness whose ownership transfers to the Application
+   *  when execution rests at an interactive Step. The Application treats it as
+   *  opaque and closes it when that Step ends or the Run releases ownership. */
+  readonly interactiveStep?: RunInteractiveStep;
+}
+
+/** The opaque Step-scoped interactive driver composition transfers to a tracked
+ *  Run. It reuses one prepared Harness across human Turns and exposes only the
+ *  normalized control evidence and Turn outcome the Application owns. */
+export interface RunInteractiveStep {
+  readonly steer: RunSteerCapability;
+  turn(context: {
+    readonly runId: string;
+    readonly owner: RunOwner;
+    /** The Step's named Session, reused across the Step's Turns and later Steps. */
+    readonly session: string;
+    /** The interactive Step's pending Attempt id, so every human Turn links to it. */
+    readonly attemptId: string;
+    /** A unique id per human Turn. */
+    readonly turnId: string;
+    /** The human's verbatim Turn text. */
+    readonly text: string;
+    readonly cancelSignal?: AbortSignal;
+    readonly requestChannel?: RequestChannel;
+  }): Promise<InteractiveTurnReport>;
+  close(): Promise<void>;
+}
+
+export type PrepareRunInteractiveStep = (context: {
   readonly owner: RunOwner;
-  /** The Step's named Session, reused across the Step's Turns and later Steps. */
-  readonly session: string;
-  /** The interactive Step's pending Attempt id, so every human Turn links to it. */
-  readonly attemptId: string;
-  /** A unique id per human Turn. */
-  readonly turnId: string;
-  /** The human's verbatim Turn text. */
-  readonly text: string;
-  readonly cancelSignal?: AbortSignal;
-  readonly requestChannel?: RequestChannel;
-}) => Promise<InteractiveTurnReport>;
+}) => Promise<RunInteractiveStep>;
 
 /** The mechanical outcome of one human interactive Turn (#122), normalized so the
  *  Application stays Harness-agnostic. `completed`/`failed` leave the Run `blocked`
@@ -174,22 +195,6 @@ export type InteractiveTurnReport = {
 // interrupts at the Harness Seam and rests `halted` in-process. The reasons live at
 // the execution Seam that interprets them (#98, #118); the Application reads its own
 // AbortController's reason to tell the cases apart.
-
-/** The ephemeral live-overlay state a tracked Run carries while executing an Agent
- *  Turn (#117). Never stored; rebuilt into a `RunLiveOverlay` for observers. */
-interface LiveOverlayState {
-  generation: number;
-  phase: TurnPhase;
-  readonly outstanding: Map<string, RunOutstandingRequest>;
-  answer?: RequestAnswerFn;
-  activity?: string;
-  preview?: string;
-  context?: { readonly usedTokens: number; readonly limitTokens: number };
-  usage?: string;
-  /** True once any Turn event arrived, so a joining observer knows an overlay is
-   *  worth delivering even with no outstanding request. */
-  active: boolean;
-}
 
 /** A launched Run tracked in this process (#98): its routing and Bundle facts, the
  *  owner while live (so a snapshot read never fences the executing owner), the
@@ -210,6 +215,8 @@ interface TrackedRun {
   readonly takeover?: boolean;
   readonly observers: Set<UpdateStream>;
   readonly live: LiveOverlayState;
+  interactiveStep?: RunInteractiveStep;
+  steer?: RunSteerCapability;
 }
 
 /** What `beginInteractive` returns once a Run is confirmed to rest at the named
@@ -266,7 +273,7 @@ export interface ApplicationDependencies {
   /** How one human interactive Turn is driven (#122); composition hands it in.
    *  Absent when a caller wires no interactive support (headless refuses interactive
    *  Bundles at Preflight, so it never reaches this seam). */
-  readonly runInteractiveTurn?: RunInteractiveTurn;
+  readonly prepareRunInteractiveStep?: PrepareRunInteractiveStep;
   /** The clock the `run-list` Projection groups rows by (Today / Yesterday /
    *  Older). Defaults to the wall clock; a test injects a fixed instant (#87). */
   readonly now?: () => Date;
@@ -279,11 +286,9 @@ export interface ApplicationDependencies {
 export interface Application {
   readonly projectionPort: ProjectionPort;
   readonly bundleManagement: BundleManagement;
-  /** Abort every Run live in this process and await its settlement, leaving each
-   *  Workspace claim live so the next open reconciles the Run `halted` via the
-   *  indeterminate path (ADR 0019, #98). Composition calls this from its OS-signal
-   *  handler before teardown, so a killed process never leaves a child running and
-   *  the Run recovers on resume. Idempotent and safe when no Run is live. */
+  /** Release Runs already blocked without changing their rest, then abort every
+   *  running Run and await settlement. Composition calls this from its OS-signal
+   *  handler before teardown, so no prepared Harness or child is left running. */
   shutdown(): Promise<void>;
 }
 
@@ -293,7 +298,7 @@ export interface Application {
 const launchInputMap = z.record(z.string(), z.string());
 
 export function createApplication(deps: ApplicationDependencies): Application {
-  const { catalog, runGroup, runExecution, runInteractiveTurn } = deps;
+  const { catalog, runGroup, runExecution, prepareRunInteractiveStep } = deps;
   const launchWorkspacePath = canonicalizeWorkspacePath(
     deps.launchWorkspacePath,
   );
@@ -323,6 +328,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // (cancel-run and process signals abort it), the settlement promise a cancel
   // awaits, and the streams watching it (#98).
   const runs = new Map<string, TrackedRun>();
+  // A Run's observer set outlives any one live tracking entry. A Projection opened
+  // while the Run rests joins here before a later Operation creates or replaces
+  // tracking, so it receives future updates for its whole lifetime (#134 A1).
+  const runObservers = new Map<string, Set<UpdateStream>>();
+  const liveOverlay = createLiveOverlay((runId) => runs.get(runId));
   const workspaceObservers = new Set<UpdateStream>();
   const bundleCatalogObservers = new Set<UpdateStream>();
   const runListObservers = new Set<{
@@ -349,6 +359,14 @@ export function createApplication(deps: ApplicationDependencies): Application {
             ? { hostPlatform: deps.hostPlatform }
             : {}),
         };
+
+  function observersForRun(runId: string): Set<UpdateStream> {
+    const existing = runObservers.get(runId);
+    if (existing !== undefined) return existing;
+    const observers = new Set<UpdateStream>();
+    runObservers.set(runId, observers);
+    return observers;
+  }
 
   function workspaceSnapshot(): WorkspaceSnapshot {
     const approval = catalog.getWorkspaceApproval(launchWorkspacePath);
@@ -411,9 +429,21 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // cancel-as-abort of an in-process live Run return a Promise, which settles on the
     // stream's first durable update. Keeping the sync path sync preserves every such
     // Operation's synchronous observation.
-    const settled = entry.settle();
-    if (settled instanceof Promise) return settled.then(record);
-    record(settled);
+    const recordFault = (error: unknown): void => {
+      record({
+        status: "not-applied",
+        problem: runExecutionFault(entry.runId, error, operationId),
+      });
+    };
+    try {
+      const settled = entry.settle();
+      if (settled instanceof Promise) {
+        return settled.then(record, recordFault);
+      }
+      record(settled);
+    } catch (error) {
+      recordFault(error);
+    }
   }
 
   // Push the current Run snapshot to every observer watching this Run. Called
@@ -421,19 +451,31 @@ export function createApplication(deps: ApplicationDependencies): Application {
   function pushRunUpdate(runId: string): void {
     if (runProjection === undefined) return;
     const tracking = runs.get(runId);
-    if (tracking !== undefined && tracking.observers.size > 0) {
-      const snapshot = runSnapshot(runProjection, runId, {
-        facts: {
-          routing: tracking.routing,
-          name: tracking.name,
-          id: tracking.id,
-          version: tracking.version,
-          digest: tracking.digest,
-        },
-        ...(tracking.owner !== undefined ? { liveOwner: tracking.owner } : {}),
-        state: tracking.state,
-      });
-      for (const observer of tracking.observers) {
+    const observers = runObservers.get(runId);
+    if (observers !== undefined && observers.size > 0) {
+      const snapshot = runSnapshot(
+        runProjection,
+        runId,
+        tracking === undefined
+          ? {}
+          : {
+              facts: {
+                routing: tracking.routing,
+                name: tracking.name,
+                id: tracking.id,
+                version: tracking.version,
+                digest: tracking.digest,
+              },
+              ...(tracking.owner !== undefined
+                ? { liveOwner: tracking.owner }
+                : {}),
+              state: tracking.state,
+              ...(tracking.steer !== undefined
+                ? { steer: tracking.steer }
+                : {}),
+            },
+      );
+      for (const observer of observers) {
         observer.push({ kind: "durable", snapshot });
       }
     }
@@ -481,143 +523,13 @@ export function createApplication(deps: ApplicationDependencies): Application {
     }
   }
 
-  // The initial live-overlay state a tracked Run starts with (#117): generation 0,
-  // no outstanding request, no bound answer function, not yet active.
-  function freshLive(): LiveOverlayState {
-    return {
-      generation: 0,
-      phase: "working",
-      outstanding: new Map(),
-      active: false,
-    };
-  }
-
-  // Build the current live overlay for a tracked Run, or undefined when it has no
-  // live Turn to describe (#117). The generation and outstanding set drive answer
-  // staleness; the observations are coalesced context for a client to show.
-  function buildOverlay(runId: string): RunLiveOverlay | undefined {
-    const tracking = runs.get(runId);
-    if (tracking === undefined || !tracking.live.active) return undefined;
-    const live = tracking.live;
-    const outstanding = [...live.outstanding.values()];
-    const offers: AnswerHarnessRequestOffer[] = outstanding.map((request) => ({
-      action: "answer-harness-request",
-      runId,
-      requestId: request.requestId,
-      generation: live.generation,
-      decisions: request.decisions,
-      basis: "ephemeral Harness Request",
-    }));
-    return {
-      runId,
-      generation: live.generation,
-      // A blocked status while a request is outstanding reads awaiting-approval;
-      // otherwise the Turn is working (#117 AC4).
-      phase: outstanding.length > 0 ? "awaiting-approval" : live.phase,
-      outstanding,
-      offers,
-      ...(live.activity !== undefined ? { activity: live.activity } : {}),
-      ...(live.preview !== undefined ? { preview: live.preview } : {}),
-      ...(live.context !== undefined ? { context: live.context } : {}),
-      ...(live.usage !== undefined ? { usage: live.usage } : {}),
-    };
-  }
-
-  // Push the current live overlay to every observer watching this Run (#117), and
-  // to one specific observer for a late join. Ephemeral: never stored, never a
-  // durable snapshot — a client joins it with the durable snapshot it already has.
-  function pushLiveOverlay(runId: string, only?: UpdateStream): void {
-    const overlay = buildOverlay(runId);
-    if (overlay === undefined) return;
-    const tracking = runs.get(runId);
-    if (tracking === undefined) return;
-    const targets = only !== undefined ? [only] : tracking.observers;
-    for (const observer of targets) observer.push({ kind: "live", overlay });
-  }
-
-  // The Application's per-Run live request-answer channel handed to execution
-  // (#117). Execution relays the live Turn's approval requests here; each raise or
-  // settle bumps the generation and pushes a fresh overlay, so an answer formed
-  // against a superseded set is refused as stale. Preview is a lighter, coalesced
-  // update that does not bump the generation (an in-flight answer stays valid).
-  function makeRequestChannel(runId: string): RequestChannel {
-    return {
-      raised(request: LiveRequestView): void {
-        const tracking = runs.get(runId);
-        if (tracking === undefined) return;
-        tracking.live.active = true;
-        tracking.live.generation += 1;
-        tracking.live.outstanding.set(request.requestId, {
-          requestId: request.requestId,
-          tool: request.tool,
-          input: request.input,
-          decisions: request.decisions,
-        });
-        pushLiveOverlay(runId);
-      },
-      settled(requestId: string): void {
-        const tracking = runs.get(runId);
-        if (tracking === undefined) return;
-        if (!tracking.live.outstanding.delete(requestId)) return;
-        tracking.live.generation += 1;
-        pushLiveOverlay(runId);
-      },
-      bindAnswer(answer: RequestAnswerFn | undefined): void {
-        const tracking = runs.get(runId);
-        if (tracking === undefined) return;
-        tracking.live.answer = answer;
-        if (answer !== undefined) {
-          tracking.live.active = true;
-          tracking.live.phase = "working";
-        } else {
-          // The Turn ended: clear any residue so a resumed Run starts clean, and
-          // announce the settling overlay (no outstanding request).
-          tracking.live.phase = "settling";
-          if (tracking.live.outstanding.size > 0) {
-            tracking.live.outstanding.clear();
-            tracking.live.generation += 1;
-          }
-          pushLiveOverlay(runId);
-        }
-      },
-      observe(observation: LiveObservation): void {
-        const tracking = runs.get(runId);
-        if (tracking === undefined) return;
-        const live = tracking.live;
-        live.active = true;
-        if (observation.activity !== undefined)
-          live.activity = observation.activity;
-        if (observation.context !== undefined)
-          live.context = observation.context;
-        if (observation.usage !== undefined) live.usage = observation.usage;
-        // A preview-only observation is a coalesced `preview` update that does not
-        // bump the generation; other observations refresh the overlay in place.
-        if (
-          observation.preview !== undefined &&
-          observation.activity === undefined &&
-          observation.context === undefined &&
-          observation.usage === undefined
-        ) {
-          live.preview = observation.preview;
-          for (const observer of tracking.observers) {
-            observer.push({ kind: "preview", text: observation.preview });
-          }
-          return;
-        }
-        if (observation.preview !== undefined)
-          live.preview = observation.preview;
-        pushLiveOverlay(runId);
-      },
-    };
-  }
-
   // Tell every observer watching this Run that its subject is gone (#98): a delete
   // removes the store, so any open `run` Projection is closed rather than left to
   // read a Run that no longer exists. Pushed before the tracking entry is dropped.
   function pushRunClosed(runId: string): void {
-    const tracking = runs.get(runId);
-    if (tracking === undefined) return;
-    for (const observer of tracking.observers) {
+    const observers = runObservers.get(runId);
+    if (observers === undefined) return;
+    for (const observer of observers) {
       observer.push({ kind: "closed", reason: "subject-gone" });
     }
   }
@@ -681,6 +593,126 @@ export function createApplication(deps: ApplicationDependencies): Application {
     };
   }
 
+  function restsAtInteractiveStep(
+    tracking: TrackedRun,
+    owner: RunOwner,
+    runId: string,
+  ): boolean {
+    const derived = deriveRun(
+      tracking.routing,
+      owner.attemptLog(),
+      tracking.state,
+      runId,
+      owner,
+      owner.gateAnswers(),
+    );
+    const current = derived.statuses[derived.position];
+    return (
+      derived.state === "blocked" &&
+      derived.checkpoint === undefined &&
+      derived.pendingGate === undefined &&
+      current?.kind === "interactive-agent"
+    );
+  }
+
+  async function adoptInteractiveStep(
+    report: RunExecutionReport,
+    tracking: TrackedRun,
+    owner: RunOwner,
+    runId: string,
+  ): Promise<void> {
+    if (report.interactiveStep === undefined) return;
+    if (
+      report.outcome === "blocked" &&
+      restsAtInteractiveStep(tracking, owner, runId)
+    ) {
+      tracking.interactiveStep = report.interactiveStep;
+      tracking.steer = report.interactiveStep.steer;
+      return;
+    }
+    await report.interactiveStep.close();
+  }
+
+  async function closeInteractiveStep(tracking: TrackedRun): Promise<void> {
+    const interactiveStep = tracking.interactiveStep;
+    if (interactiveStep === undefined) return;
+    tracking.interactiveStep = undefined;
+    await interactiveStep.close();
+  }
+
+  async function driveWithAbortProtocol(params: {
+    readonly runId: string;
+    readonly tracking: TrackedRun;
+    readonly owner: RunOwner;
+    readonly drive: () => Promise<OperationOutcome>;
+    readonly retainOwner: () => boolean;
+    readonly setRetainOwner: (retain: boolean) => void;
+  }): Promise<OperationOutcome> {
+    const { runId, tracking, owner } = params;
+    try {
+      return await params.drive();
+    } catch (error) {
+      if (tracking.abort.signal.aborted) {
+        if (tracking.abort.signal.reason === CANCEL_ABORT) {
+          observedOwner(owner, runId).writeState("cancelled");
+          params.setRetainOwner(false);
+          return { status: "applied" };
+        }
+        params.setRetainOwner(true);
+        return { status: "applied" };
+      }
+      return {
+        status: "not-applied",
+        problem: runExecutionFault(runId, error),
+      };
+    } finally {
+      tracking.promise = undefined;
+      if (params.retainOwner()) {
+        tracking.done = false;
+      } else {
+        try {
+          await closeInteractiveStep(tracking);
+        } finally {
+          tracking.owner = undefined;
+          tracking.done = true;
+          try {
+            owner.release();
+          } finally {
+            owner.close();
+            pushRunUpdate(runId);
+          }
+        }
+      }
+    }
+  }
+
+  async function executeTrackedRouting(params: {
+    readonly runId: string;
+    readonly tracking: TrackedRun;
+    readonly owner: RunOwner;
+    readonly executionOwner: RunOwner;
+    readonly routing: readonly RoutingNode[];
+    readonly digest: string;
+  }): Promise<RunExecutionReport> {
+    const report = await runExecution!({
+      routing: params.routing,
+      digest: params.digest,
+      owner: params.executionOwner,
+      cancelSignal: params.tracking.abort.signal,
+      requestChannel: liveOverlay.requestChannel(params.runId),
+      observeSteer: (capability) => {
+        params.tracking.steer = capability;
+      },
+    });
+    await adoptInteractiveStep(
+      report,
+      params.tracking,
+      params.owner,
+      params.runId,
+    );
+    return report;
+  }
+
   // Acquire the Run and drive it through the injected execution. The launch
   // Operation is `applied`
   // once the Run reaches rest (succeeded, failed, or a `blocked` pause at a Review
@@ -715,48 +747,27 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // A signal-abort and a blocked pause retain ownership. Every rested outcome
     // releases it in the finally.
     let leaveClaimLive = false;
-    try {
-      const report = await runExecution({
-        routing: tracking.routing,
-        digest: tracking.digest,
-        owner: observed,
-        cancelSignal: tracking.abort.signal,
-        requestChannel: makeRequestChannel(runId),
-      });
-      leaveClaimLive = report.outcome === "blocked";
-      return { status: "applied" };
-    } catch (error) {
-      // Our own AbortController firing is the only cause of an execution abort, so
-      // an aborted signal — not the error's type — tells apart a cancel/signal from
-      // a genuine coordination/environment fault (which keeps the Application
-      // execution-agnostic; see RunExecution).
-      if (tracking.abort.signal.aborted) {
-        if (tracking.abort.signal.reason === CANCEL_ABORT) {
-          // cancel-run: rest the Run `cancelled` through the owner still held here,
-          // which pushes the terminal snapshot to every open `run` Projection.
-          observed.writeState("cancelled");
-          return { status: "applied" };
-        }
-        // A process signal: leave the claim live for reconciliation.
-        leaveClaimLive = true;
+    return driveWithAbortProtocol({
+      runId,
+      tracking,
+      owner,
+      drive: async () => {
+        const report = await executeTrackedRouting({
+          runId,
+          tracking,
+          owner,
+          executionOwner: observed,
+          routing: tracking.routing,
+          digest: tracking.digest,
+        });
+        leaveClaimLive = report.outcome === "blocked";
         return { status: "applied" };
-      }
-      return {
-        status: "not-applied",
-        problem: runExecutionFault(runId, error),
-      };
-    } finally {
-      tracking.promise = undefined;
-      if (leaveClaimLive) {
-        tracking.done = false;
-      } else {
-        tracking.owner = undefined;
-        tracking.done = true;
-        owner.release();
-        owner.close();
-        pushRunUpdate(runId);
-      }
-    }
+      },
+      retainOwner: () => leaveClaimLive,
+      setRetainOwner: (retain) => {
+        leaveClaimLive = retain;
+      },
+    });
   }
 
   // Start a Run's execution promise and record it on the tracking entry so a
@@ -971,22 +982,27 @@ export function createApplication(deps: ApplicationDependencies): Application {
               ? { liveOwner: tracking.owner }
               : {}),
             state: tracking.state,
+            ...(tracking.steer !== undefined ? { steer: tracking.steer } : {}),
           },
     );
-    // Register for durable updates only while the Run is still live in this
-    // process; a settled or foreign Run receives no further publication.
-    if (tracking !== undefined && !tracking.done) {
-      tracking.observers.add(updates);
+    // Every existing Run joins its Run-scoped observer set, even while rested: an
+    // Operation may drive it later, and opening a Projection promises future
+    // updates for the Projection's lifetime (ADR 0024).
+    if (snapshot.result.found) {
+      const observers = observersForRun(runId);
+      observers.add(updates);
       // A late-joining observer catches up on the current live overlay at once, so
       // a headless follower that opens after a request was raised still sees it
       // (#117). No-op when the Run has no live Turn to describe.
-      pushLiveOverlay(runId, updates);
+      if (tracking !== undefined && !tracking.done) {
+        liveOverlay.push(runId, updates);
+      }
       return {
         snapshot,
         catchUp: "fresh",
         updates,
         close() {
-          tracking.observers.delete(updates);
+          observers.delete(updates);
           updates.close();
         },
       };
@@ -1149,8 +1165,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
       state: created.record.state,
       done: false,
       abort: new AbortController(),
-      observers: new Set<UpdateStream>(),
-      live: freshLive(),
+      observers: observersForRun(runId),
+      live: liveOverlay.fresh(),
     });
     pushRunListUpdates();
     operations.set(operationId, {
@@ -1317,8 +1333,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
       done: false,
       abort: new AbortController(),
       ...(takeoverMatches ? { takeover: true } : {}),
-      observers: new Set<UpdateStream>(),
-      live: freshLive(),
+      observers: observersForRun(input.runId),
+      live: liveOverlay.fresh(),
     });
     operations.set(operationId, {
       replayKey: resumeReplayKey(input),
@@ -1466,8 +1482,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
         owner,
         done: false,
         abort: new AbortController(),
-        observers: new Set<UpdateStream>(),
-        live: freshLive(),
+        observers: observersForRun(input.runId),
+        live: liveOverlay.fresh(),
       };
       runs.set(input.runId, tracking);
     }
@@ -1479,189 +1495,173 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // A signal-abort of the granted interval leaves the claim live for the next
     // open to reconcile `halted`; every other exit releases the claim (#98).
     let leaveClaimLive = ownershipWasHeld;
-    try {
-      const observed = observedOwner(activeOwner, input.runId);
-      const log = activeOwner.attemptLog();
-      const priorAnswers = activeOwner.gateAnswers();
-      const derived = deriveRun(
-        facts.routing,
-        log,
-        record.state,
-        input.runId,
-        activeOwner,
-        priorAnswers,
-      );
-      // Idempotent replay of the *same* operation id: settle `applied` without
-      // re-validating the (now-moved) Gate or re-driving execution. Keyed on the
-      // operation id, not on whether the Gate settled — a different operation
-      // answering an already-answered gate must fall through to the staleness check
-      // below and be refused, exactly as a moved derived checkpoint would (#108).
-      // Within one process the operations map already dedupes a repeated operation
-      // id (an authored gate records no `gate_answer` row, so this durable check
-      // only fires for a derived checkpoint's cross-process replay). Process death
-      // after a `continue` but before the interval rests leaves the Run stored
-      // `running` with a live claim, so startup reconciliation (#86) rests it
-      // `halted` and `run resume` re-drives it — the grant is honored, not doubled.
-      const already = priorAnswers.some(
-        (answer) => answer.operationId === operationId,
-      );
-      if (already) return { status: "applied" };
-
-      // The live Gate the Run currently rests at: an authored gate (a durable
-      // pending_gate) takes precedence over a derived Review checkpoint; a blocked
-      // Run derives exactly one of the two (#108).
-      const liveGate = derived.pendingGate?.gate ?? derived.checkpoint?.gate;
-      if (derived.state !== "blocked" || liveGate === undefined) {
-        return {
-          status: "not-applied",
-          problem: runNotBlocked(input.runId, derived.state),
-        };
-      }
-      if (!gateEquals(liveGate, input.gate)) {
-        return {
-          status: "not-applied",
-          problem: gateStale(input.runId, input.gate, liveGate),
-        };
-      }
-      // The answer's form must match the Gate's shape (#108): a `free-text` gate
-      // takes `--text`, an `approve-reject` gate takes `continue`/`stop`. A mismatch
-      // changes nothing.
-      const shapeMatches =
-        liveGate.shape === "free-text"
-          ? input.text !== undefined && input.answer === undefined
-          : input.answer !== undefined && input.text === undefined;
-      if (!shapeMatches) {
-        return {
-          status: "not-applied",
-          problem: gateShapeMismatch(input.runId, liveGate.shape),
-        };
-      }
-
-      // An authored gate settles its producing Attempt (#108): `free-text` publishes
-      // the answer as the gate's declared `text` output and advances; approve advances
-      // with no output; reject settles `failed` and rests the Run failed. All in one
-      // Store boundary; the answering process then drives the Run to its next rest.
-      if (derived.pendingGate !== undefined) {
-        if (liveGate.shape === "free-text") {
-          const outputName = derived.pendingGate.outputArtifactName;
-          if (outputName === undefined) {
-            throw new Error(
-              "application: a free-text gate has no declared output artifact name.",
-            );
-          }
-          publishGateAttemptOrThrow(
-            observed.publishAttempt({
-              attemptId: input.gate.attemptId,
-              outcome: "succeeded",
-              required: [{ name: outputName, type: "text" }],
-              outputs: [
-                {
-                  name: outputName,
-                  type: "text",
-                  content: new TextEncoder().encode(input.text!),
-                },
-              ],
-              at: new Date(),
-              advanceState: "running",
-            }),
-          );
-        } else {
-          const reject = input.answer === "stop";
-          publishGateAttemptOrThrow(
-            observed.publishAttempt({
-              attemptId: input.gate.attemptId,
-              outcome: reject ? "failed" : "succeeded",
-              required: [],
-              outputs: [],
-              at: new Date(),
-              advanceState: reject ? "failed" : "running",
-            }),
-          );
-          if (reject) {
-            leaveClaimLive = false;
-            return { status: "applied" };
-          }
-        }
-        // approve or free-text: drive the resumed Run to its next rest in this process.
-        const report = await runExecution({
-          routing: facts.routing,
-          digest: record.bundleSnapshotDigest,
-          owner: observed,
-          cancelSignal: activeTracking.abort.signal,
-          requestChannel: makeRequestChannel(input.runId),
-        });
-        leaveClaimLive = report.outcome === "blocked";
-        return { status: "applied" };
-      }
-
-      // A derived Review checkpoint: the M2 continue/stop path (unchanged, #85).
-      // The cumulative iteration count this grant/stop resets from: the prior grant
-      // offset plus the iterations completed since it.
-      const answer = input.answer!;
-      const priorOffset =
-        priorAnswers.length === 0
-          ? 0
-          : priorAnswers[priorAnswers.length - 1]!.iterationsAtGrant;
-      const iterationsAtGrant =
-        priorOffset + (derived.checkpoint?.completedIterations ?? 0);
-      const recorded = observed.recordGateAnswer({
-        operationId,
-        gateAttemptId: input.gate.attemptId,
-        answer,
-        iterationsAtGrant,
-        artifactName: GATE_ANSWER_ARTIFACT,
-        at: new Date(),
-        ...(answer === "stop" ? { advanceState: "failed" } : {}),
-      });
-      if (!recorded.ok) {
-        throw new Error(
-          "reason" in recorded
-            ? `cannot record the gate answer: ${recorded.reason}`
-            : `cannot record the gate answer: ${recorded.problem.kind}`,
+    return driveWithAbortProtocol({
+      runId: input.runId,
+      tracking: activeTracking,
+      owner: activeOwner,
+      drive: async () => {
+        const observed = observedOwner(activeOwner, input.runId);
+        const log = activeOwner.attemptLog();
+        const priorAnswers = activeOwner.gateAnswers();
+        const derived = deriveRun(
+          facts.routing,
+          log,
+          record.state,
+          input.runId,
+          activeOwner,
+          priorAnswers,
         );
-      }
-      if (answer === "stop") {
-        leaveClaimLive = false;
-        return { status: "applied" };
-      }
-      // `continue`: the answering process drives the granted interval to rest.
-      const report = await runExecution({
-        routing: facts.routing,
-        digest: record.bundleSnapshotDigest,
-        owner: observed,
-        cancelSignal: activeTracking.abort.signal,
-        requestChannel: makeRequestChannel(input.runId),
-      });
-      leaveClaimLive = report.outcome === "blocked";
-      return { status: "applied" };
-    } catch (error) {
-      // As in runAndSettle: our own abort — not the error's type — distinguishes a
-      // cancel/signal from a genuine fault.
-      if (activeTracking.abort.signal.aborted) {
-        if (activeTracking.abort.signal.reason === CANCEL_ABORT) {
-          observedOwner(activeOwner, input.runId).writeState("cancelled");
+        // Idempotent replay of the *same* operation id: settle `applied` without
+        // re-validating the (now-moved) Gate or re-driving execution. Keyed on the
+        // operation id, not on whether the Gate settled — a different operation
+        // answering an already-answered gate must fall through to the staleness check
+        // below and be refused, exactly as a moved derived checkpoint would (#108).
+        // Within one process the operations map already dedupes a repeated operation
+        // id (an authored gate records no `gate_answer` row, so this durable check
+        // only fires for a derived checkpoint's cross-process replay). Process death
+        // after a `continue` but before the interval rests leaves the Run stored
+        // `running` with a live claim, so startup reconciliation (#86) rests it
+        // `halted` and `run resume` re-drives it — the grant is honored, not doubled.
+        const already = priorAnswers.some(
+          (answer) => answer.operationId === operationId,
+        );
+        if (already) return { status: "applied" };
+
+        // The live Gate the Run currently rests at: an authored gate (a durable
+        // pending_gate) takes precedence over a derived Review checkpoint; a blocked
+        // Run derives exactly one of the two (#108).
+        const liveGate = derived.pendingGate?.gate ?? derived.checkpoint?.gate;
+        if (derived.state !== "blocked" || liveGate === undefined) {
+          return {
+            status: "not-applied",
+            problem: runNotBlocked(input.runId, derived.state),
+          };
+        }
+        if (!gateEquals(liveGate, input.gate)) {
+          return {
+            status: "not-applied",
+            problem: gateStale(input.runId, input.gate, liveGate),
+          };
+        }
+        // The answer's form must match the Gate's shape (#108): a `free-text` gate
+        // takes `--text`, an `approve-reject` gate takes `continue`/`stop`. A mismatch
+        // changes nothing.
+        const shapeMatches =
+          liveGate.shape === "free-text"
+            ? input.text !== undefined && input.answer === undefined
+            : input.answer !== undefined && input.text === undefined;
+        if (!shapeMatches) {
+          return {
+            status: "not-applied",
+            problem: gateShapeMismatch(input.runId, liveGate.shape),
+          };
+        }
+
+        // An authored gate settles its producing Attempt (#108): `free-text` publishes
+        // the answer as the gate's declared `text` output and advances; approve advances
+        // with no output; reject settles `failed` and rests the Run failed. All in one
+        // Store boundary; the answering process then drives the Run to its next rest.
+        if (derived.pendingGate !== undefined) {
+          if (liveGate.shape === "free-text") {
+            const outputName = derived.pendingGate.outputArtifactName;
+            if (outputName === undefined) {
+              throw new Error(
+                "application: a free-text gate has no declared output artifact name.",
+              );
+            }
+            publishGateAttemptOrThrow(
+              observed.publishAttempt({
+                attemptId: input.gate.attemptId,
+                outcome: "succeeded",
+                required: [{ name: outputName, type: "text" }],
+                outputs: [
+                  {
+                    name: outputName,
+                    type: "text",
+                    content: new TextEncoder().encode(input.text!),
+                  },
+                ],
+                at: new Date(),
+                advanceState: "running",
+              }),
+            );
+          } else {
+            const reject = input.answer === "stop";
+            publishGateAttemptOrThrow(
+              observed.publishAttempt({
+                attemptId: input.gate.attemptId,
+                outcome: reject ? "failed" : "succeeded",
+                required: [],
+                outputs: [],
+                at: new Date(),
+                advanceState: reject ? "failed" : "running",
+              }),
+            );
+            if (reject) {
+              leaveClaimLive = false;
+              return { status: "applied" };
+            }
+          }
+          // approve or free-text: drive the resumed Run to its next rest in this process.
+          const report = await executeTrackedRouting({
+            runId: input.runId,
+            tracking: activeTracking,
+            owner: activeOwner,
+            executionOwner: observed,
+            routing: facts.routing,
+            digest: record.bundleSnapshotDigest,
+          });
+          leaveClaimLive = report.outcome === "blocked";
+          return { status: "applied" };
+        }
+
+        // A derived Review checkpoint: the M2 continue/stop path (unchanged, #85).
+        // The cumulative iteration count this grant/stop resets from: the prior grant
+        // offset plus the iterations completed since it.
+        const answer = input.answer!;
+        const priorOffset =
+          priorAnswers.length === 0
+            ? 0
+            : priorAnswers[priorAnswers.length - 1]!.iterationsAtGrant;
+        const iterationsAtGrant =
+          priorOffset + (derived.checkpoint?.completedIterations ?? 0);
+        const recorded = observed.recordGateAnswer({
+          operationId,
+          gateAttemptId: input.gate.attemptId,
+          answer,
+          iterationsAtGrant,
+          artifactName: GATE_ANSWER_ARTIFACT,
+          at: new Date(),
+          ...(answer === "stop" ? { advanceState: "failed" } : {}),
+        });
+        if (!recorded.ok) {
+          throw new Error(
+            "reason" in recorded
+              ? `cannot record the gate answer: ${recorded.reason}`
+              : `cannot record the gate answer: ${recorded.problem.kind}`,
+          );
+        }
+        if (answer === "stop") {
           leaveClaimLive = false;
           return { status: "applied" };
         }
-        leaveClaimLive = true;
+        // `continue`: the answering process drives the granted interval to rest.
+        const report = await executeTrackedRouting({
+          runId: input.runId,
+          tracking: activeTracking,
+          owner: activeOwner,
+          executionOwner: observed,
+          routing: facts.routing,
+          digest: record.bundleSnapshotDigest,
+        });
+        leaveClaimLive = report.outcome === "blocked";
         return { status: "applied" };
-      }
-      return {
-        status: "not-applied",
-        problem: runExecutionFault(input.runId, error),
-      };
-    } finally {
-      activeTracking.promise = undefined;
-      if (leaveClaimLive) {
-        activeTracking.done = false;
-      } else {
-        activeTracking.owner = undefined;
-        activeTracking.done = true;
-        activeOwner.release();
-        activeOwner.close();
-        pushRunUpdate(input.runId);
-      }
-    }
+      },
+      retainOwner: () => leaveClaimLive,
+      setRetainOwner: (retain) => {
+        leaveClaimLive = retain;
+      },
+    });
   }
 
   // Answer one outstanding approval Harness Request on a live Agent Turn (#117).
@@ -1740,9 +1740,12 @@ export function createApplication(deps: ApplicationDependencies): Application {
         ),
       };
     }
-    // accepted, or indeterminate (the answer may have taken effect; do not refuse
-    // it — ponytail: OperationOutcome carries no "indeterminate" and the fixture
-    // path never reaches it, answerRequest settles accepted or a race rejection).
+    if (result.outcome === "indeterminate") {
+      return {
+        status: "not-applied",
+        problem: harnessRequestIndeterminate(input.runId, input.requestId),
+      };
+    }
     return { status: "applied" };
   }
 
@@ -1812,8 +1815,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
     });
   }
 
-  // Steer the live Turn (#118). Claude Code has no same-Turn steer, so a submission
-  // is rejected as a value — never emulated. Settles inline: no execution to drive.
+  // Steer the live Turn (#118). M3 has no available steer Adapter, so a submission
+  // is rejected as a value with the recorded profile evidence — never emulated.
   function submitSteerTurn(
     operationId: string,
     input: SteerTurnInput,
@@ -1833,10 +1836,20 @@ export function createApplication(deps: ApplicationDependencies): Application {
       outcome: { status: "pending" },
       observers: new Set<UpdateStream>(),
       runId: input.runId,
-      settle: (): OperationOutcome => ({
-        status: "not-applied",
-        problem: steerUnavailable(input.runId, STEER_UNAVAILABLE_REASON),
-      }),
+      settle: (): OperationOutcome => {
+        const tracking = runs.get(input.runId);
+        const evidence =
+          tracking?.steer?.evidence ??
+          tracking?.owner?.harnessIdentity()?.steer?.evidence;
+        return {
+          status: "not-applied",
+          problem: steerUnavailable(
+            input.runId,
+            evidence ??
+              "No recorded Harness profile evidence permits same-Turn steer.",
+          ),
+        };
+      },
     });
     scheduleSettlement(() => settleOperation(operationId));
     return { admitted: true, operationId, runId: input.runId };
@@ -1924,8 +1937,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
         owner,
         done: false,
         abort: new AbortController(),
-        observers: new Set<UpdateStream>(),
-        live: freshLive(),
+        observers: observersForRun(runId),
+        live: liveOverlay.fresh(),
       };
       runs.set(runId, tracking);
     }
@@ -1992,7 +2005,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     }
     if (
       runGroup === undefined ||
-      runInteractiveTurn === undefined ||
+      prepareRunInteractiveStep === undefined ||
       runProjection === undefined
     ) {
       return { admitted: false, problem: runSupportUnavailable() };
@@ -2024,7 +2037,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
   ): Promise<OperationOutcome> {
     if (
       runGroup === undefined ||
-      runInteractiveTurn === undefined ||
+      prepareRunInteractiveStep === undefined ||
       runProjection === undefined
     ) {
       return Promise.resolve({
@@ -2054,72 +2067,58 @@ export function createApplication(deps: ApplicationDependencies): Application {
     input: SendInteractiveTurnInput,
     begun: InteractiveContext,
   ): Promise<OperationOutcome> {
-    const { tracking, owner, record, step } = begun;
-    const runInteractiveTurnFn = runInteractiveTurn!;
+    const { tracking, owner, step } = begun;
     const attemptId = interactiveStepAttemptId(step.id);
     const turnId = `${attemptId}#human:${operationId}`;
     const observed = observedOwner(owner, input.runId);
     // The Run stays `blocked` between Turns, so the claim is retained on the normal
     // path; only an interrupt/cancel releases it.
     let leaveClaimLive = true;
-    try {
-      // A live human Turn is running work, so the Run reads `running` while it runs and
-      // returns to `blocked` at the next boundary. This is what makes a crash mid-Turn
-      // reconcile through the #118 path (a `running` record with an unsettled Turn is
-      // rested `halted`, its Session detached), rather than strand the Run blocked with
-      // a Turn that can never settle (#122).
-      observed.writeState("running");
-      const report = await runInteractiveTurnFn({
-        runId: input.runId,
-        digest: record.bundleSnapshotDigest,
-        owner,
-        session: step.session,
-        attemptId,
-        turnId,
-        text: input.text,
-        cancelSignal: tracking.abort.signal,
-        requestChannel: makeRequestChannel(input.runId),
-      });
-      if (report.outcome === "interrupted" || report.outcome === "lost") {
-        // An interrupt-turn (or OS signal) stopped the human Turn: rest the Run
-        // `halted`, resumable, through the held owner so observers see it (#118).
-        observed.writeState("halted");
-        leaveClaimLive = false;
-        return { status: "applied" };
-      }
-      // completed or failed: the Turn is recorded; back to the boundary for the next
-      // Turn. `writeState` pushes the fresh snapshot (with the new transcript entry),
-      // which the Turn's own writes bypass observedOwner and would not push.
-      observed.writeState("blocked");
-      return { status: "applied" };
-    } catch (error) {
-      // Our own AbortController firing is the only cause of an abort; the reason tells
-      // a cancel from a signal, keeping the Application execution-agnostic.
-      if (tracking.abort.signal.aborted) {
-        if (tracking.abort.signal.reason === CANCEL_ABORT) {
-          observed.writeState("cancelled");
+    return driveWithAbortProtocol({
+      runId: input.runId,
+      tracking,
+      owner,
+      drive: async () => {
+        if (tracking.interactiveStep === undefined) {
+          tracking.interactiveStep = await prepareRunInteractiveStep!({
+            owner,
+          });
+          tracking.steer = tracking.interactiveStep.steer;
+        }
+        // A live human Turn is running work, so the Run reads `running` while it runs and
+        // returns to `blocked` at the next boundary. This is what makes a crash mid-Turn
+        // reconcile through the #118 path (a `running` record with an unsettled Turn is
+        // rested `halted`, its Session detached), rather than strand the Run blocked with
+        // a Turn that can never settle (#122).
+        observed.writeState("running");
+        const report = await tracking.interactiveStep.turn({
+          runId: input.runId,
+          owner,
+          session: step.session,
+          attemptId,
+          turnId,
+          text: input.text,
+          cancelSignal: tracking.abort.signal,
+          requestChannel: liveOverlay.requestChannel(input.runId),
+        });
+        if (report.outcome === "interrupted" || report.outcome === "lost") {
+          // An interrupt-turn (or OS signal) stopped the human Turn: rest the Run
+          // `halted`, resumable, through the held owner so observers see it (#118).
+          observed.writeState("halted");
           leaveClaimLive = false;
           return { status: "applied" };
         }
-        leaveClaimLive = true;
+        // completed or failed: the Turn is recorded; back to the boundary for the next
+        // Turn. `writeState` pushes the fresh snapshot (with the new transcript entry),
+        // which the Turn's own writes bypass observedOwner and would not push.
+        observed.writeState("blocked");
         return { status: "applied" };
-      }
-      return {
-        status: "not-applied",
-        problem: runExecutionFault(input.runId, error),
-      };
-    } finally {
-      tracking.promise = undefined;
-      if (leaveClaimLive) {
-        tracking.done = false;
-      } else {
-        tracking.owner = undefined;
-        tracking.done = true;
-        owner.release();
-        owner.close();
-        pushRunUpdate(input.runId);
-      }
-    }
+      },
+      retainOwner: () => leaveClaimLive,
+      setRetainOwner: (retain) => {
+        leaveClaimLive = retain;
+      },
+    });
   }
 
   // End the interactive-agent Step the Run is blocked at (#122). Admitted at once;
@@ -2192,59 +2191,44 @@ export function createApplication(deps: ApplicationDependencies): Application {
     begun: InteractiveContext,
   ): Promise<OperationOutcome> {
     const { tracking, owner, record, facts, step } = begun;
-    const runExecutionFn = runExecution!;
     const observed = observedOwner(owner, input.runId);
     const attemptId = interactiveStepAttemptId(step.id);
     let leaveClaimLive = false;
-    try {
-      // Settle the interactive Step's Attempt succeeded (no outputs — an Agent Step
-      // produces no Artifacts in M3), then drive the Run to its next rest. The empty
-      // succeeded Attempt stages no commit (store/AGENTS), and a resume skips the Step.
-      publishGateAttemptOrThrow(
-        observed.publishAttempt({
-          attemptId,
-          outcome: "succeeded",
-          required: [],
-          outputs: [],
-          at: new Date(),
-          advanceState: "running",
-        }),
-      );
-      const report = await runExecutionFn({
-        routing: facts.routing,
-        digest: record.bundleSnapshotDigest,
-        owner: observed,
-        cancelSignal: tracking.abort.signal,
-        requestChannel: makeRequestChannel(input.runId),
-      });
-      leaveClaimLive = report.outcome === "blocked";
-      return { status: "applied" };
-    } catch (error) {
-      if (tracking.abort.signal.aborted) {
-        if (tracking.abort.signal.reason === CANCEL_ABORT) {
-          observedOwner(owner, input.runId).writeState("cancelled");
-          leaveClaimLive = false;
-          return { status: "applied" };
-        }
-        leaveClaimLive = true;
+    return driveWithAbortProtocol({
+      runId: input.runId,
+      tracking,
+      owner,
+      drive: async () => {
+        await closeInteractiveStep(tracking);
+        // Settle the interactive Step's Attempt succeeded (no outputs — an Agent Step
+        // produces no Artifacts in M3), then drive the Run to its next rest. The empty
+        // succeeded Attempt stages no commit (store/AGENTS), and a resume skips the Step.
+        publishGateAttemptOrThrow(
+          observed.publishAttempt({
+            attemptId,
+            outcome: "succeeded",
+            required: [],
+            outputs: [],
+            at: new Date(),
+            advanceState: "running",
+          }),
+        );
+        const report = await executeTrackedRouting({
+          runId: input.runId,
+          tracking,
+          owner,
+          executionOwner: observed,
+          routing: facts.routing,
+          digest: record.bundleSnapshotDigest,
+        });
+        leaveClaimLive = report.outcome === "blocked";
         return { status: "applied" };
-      }
-      return {
-        status: "not-applied",
-        problem: runExecutionFault(input.runId, error),
-      };
-    } finally {
-      tracking.promise = undefined;
-      if (leaveClaimLive) {
-        tracking.done = false;
-      } else {
-        tracking.owner = undefined;
-        tracking.done = true;
-        owner.release();
-        owner.close();
-        pushRunUpdate(input.runId);
-      }
-    }
+      },
+      retainOwner: () => leaveClaimLive,
+      setRetainOwner: (retain) => {
+        leaveClaimLive = retain;
+      },
+    });
   }
 
   // Cancel a live Run (#87). Admitted at once; the cancel is decided and applied
@@ -2278,10 +2262,12 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // Rest a live Run `cancelled` — the only route to that terminal state (#87, #98).
   // A Run live in THIS process is cancelled as an abort: stop its execution, then
   // await the `cancelled` rest the execution promise writes through the owner it
-  // still holds. A Run live in ANOTHER process is cancelled by the fresh-owner
+  // still holds. A non-live blocked Run is acquired, rested cancelled, and
+  // released: blocked remains resumable work after its prior owner is gone. A Run
+  // live in ANOTHER process is cancelled by the fresh-owner
   // epoch-bump trick, which fences the stale owner so its next canonical write is
   // refused (execution stops), then records `cancelled` and releases the claim,
-  // every Artifact intact. A Run that is not live has no cancel to make.
+  // every Artifact intact. Other resting Runs have no cancel to make.
   function cancelAndSettle(
     runId: string,
   ): OperationOutcome | Promise<OperationOutcome> {
@@ -2296,14 +2282,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
       tracking.promise === undefined
     ) {
       const owner = tracking.owner;
-      observedOwner(owner, runId).writeState("cancelled");
-      tracking.owner = undefined;
-      tracking.done = true;
-      owner.release();
-      owner.close();
-      pushRunUpdate(runId);
-      runs.delete(runId);
-      return { status: "applied" };
+      return cancelOwnedBlockedRun(runId, tracking, owner);
     }
     if (
       tracking !== undefined &&
@@ -2334,7 +2313,32 @@ export function createApplication(deps: ApplicationDependencies): Application {
         return { status: "not-applied", problem: runNotFound(runId) };
       }
       if (!listing.live) {
-        return { status: "not-applied", problem: runNotLive(runId) };
+        const read = runGroup.readRun(runId);
+        if (!read.ok) {
+          return {
+            status: "not-applied",
+            problem:
+              read.problem.kind === "unknown-run"
+                ? runNotFound(runId)
+                : runStoreDamaged(runId),
+          };
+        }
+        if (read.run.state !== "blocked") {
+          return { status: "not-applied", problem: runNotLive(runId) };
+        }
+        const owner = runGroup.acquireRun(runId);
+        if (owner === undefined) {
+          return { status: "not-applied", problem: runStoreDamaged(runId) };
+        }
+        try {
+          observedOwner(owner, runId).writeState("cancelled");
+          owner.release();
+        } finally {
+          owner.close();
+        }
+        pushRunUpdate(runId);
+        runs.delete(runId);
+        return { status: "applied" };
       }
       const owner = runGroup.acquireRun(runId, { takeover: true });
       if (owner === undefined) {
@@ -2344,7 +2348,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         // Our epoch is the freshest, so this write is not fenced. A concurrent
         // second cancel is the only actor that could fence it, and it is resting the
         // same Run cancelled too, so the outcome is unchanged either way.
-        owner.writeState("cancelled");
+        observedOwner(owner, runId).writeState("cancelled");
         owner.release();
       } finally {
         owner.close();
@@ -2357,6 +2361,28 @@ export function createApplication(deps: ApplicationDependencies): Application {
       // way run/answer route an execution fault, so nothing throws out of submit (A4).
       return { status: "not-applied", problem: runStoreDamaged(runId) };
     }
+  }
+
+  async function cancelOwnedBlockedRun(
+    runId: string,
+    tracking: TrackedRun,
+    owner: RunOwner,
+  ): Promise<OperationOutcome> {
+    observedOwner(owner, runId).writeState("cancelled");
+    try {
+      await closeInteractiveStep(tracking);
+    } finally {
+      tracking.owner = undefined;
+      tracking.done = true;
+      try {
+        owner.release();
+      } finally {
+        owner.close();
+        pushRunUpdate(runId);
+        runs.delete(runId);
+      }
+    }
+    return { status: "applied" };
   }
 
   // Delete a resting or terminal Run (#87). Admitted at once; applied at settle
@@ -2558,12 +2584,21 @@ export function createApplication(deps: ApplicationDependencies): Application {
     );
     for (const [runId, tracking] of blocked) {
       const owner = tracking.owner!;
-      const rested = observedOwner(owner, runId).writeState("halted");
-      if (rested.ok) owner.release();
-      tracking.owner = undefined;
-      tracking.done = true;
-      owner.close();
-      pushRunUpdate(runId);
+      // A blocked rest is durable pending work, not interrupted execution. Keep
+      // the state and release only ownership so the gate remains answerable after
+      // restart (ADR 0031's shutdown rule, #134 A21).
+      try {
+        await closeInteractiveStep(tracking);
+      } finally {
+        tracking.owner = undefined;
+        tracking.done = true;
+        try {
+          owner.release();
+        } finally {
+          owner.close();
+          pushRunUpdate(runId);
+        }
+      }
     }
     const live = [...runs.values()].filter(
       (tracking) => !tracking.done && tracking.promise !== undefined,
@@ -2592,33 +2627,6 @@ export function createApplication(deps: ApplicationDependencies): Application {
   };
 }
 
-// The one site that canonicalizes a Workspace path (#74 A6, #98 A20). `.native`
-// fully resolves the path — on Windows it expands 8.3 short names — so equal
-// directories reached by different spellings compare equal for the exact-string
-// comparison Workspace approval relies on. Both the launch path (once, at
-// construction) and every approve input pass through here, and composition wires
-// the Run group's group directory through the same canonicaliser rather than a
-// second `realpathSync.native` site (A20); it throws only when the path does not
-// resolve, which `applyApproval` translates to a Problem.
-export function canonicalizeWorkspacePath(rawPath: string): string {
-  return realpathSync.native(rawPath);
-}
-
-/** A stable replay key for a launch: the identity, the sorted inputs, and any
- *  acknowledged digest. A re-submitted operation id with an equal key replays. */
-function launchReplayKey(input: LaunchRunInput): string {
-  const inputs = Object.entries(input.launchInputs).sort(([a], [b]) =>
-    a.localeCompare(b),
-  );
-  return JSON.stringify([
-    input.bundle.id,
-    input.bundle.version ?? null,
-    inputs,
-    input.trustDigest ?? null,
-  ]);
-}
-
-/** Whether two Gate references name the same Attempt of the same Run (#85). */
 function gateEquals(a: RunGateReference, b: RunGateReference): boolean {
   return (
     a.runId === b.runId &&
@@ -2629,9 +2637,8 @@ function gateEquals(a: RunGateReference, b: RunGateReference): boolean {
 }
 
 /** Settle an authored gate's producing Attempt (#108). A fenced owner or an
- *  unstageable answer is a coordination/environment fault the caller (the answer
- *  use case) owns, so it throws — publication is idempotent per attempt id, so a
- *  replay of an already-settled gate is a silent no-op, not a fault. */
+ *  unstageable answer is a coordination/environment fault the answer use case
+ *  owns; a replay of an already-settled gate remains a silent no-op. */
 function publishGateAttemptOrThrow(
   result: ReturnType<RunOwner["publishAttempt"]>,
 ): void {
@@ -2641,79 +2648,4 @@ function publishGateAttemptOrThrow(
       ? `cannot settle the gate answer: ${result.reason}`
       : `cannot settle the gate answer: ${result.problem.kind}`,
   );
-}
-
-/** A stable replay key for a resume: the Run id. A re-submitted operation id
- *  with an equal key replays; a different key is a conflict. */
-function resumeReplayKey(input: ResumeRunInput): string {
-  return JSON.stringify([
-    "resume",
-    input.runId,
-    input.takeover?.ownerPid ?? null,
-  ]);
-}
-
-/** A stable replay key for a gate answer: the Run, the answered Attempt, and the
- *  answer. A re-submitted operation id with an equal key replays. */
-function answerReplayKey(input: AnswerHumanGateInput): string {
-  return JSON.stringify([
-    "answer",
-    input.runId,
-    input.gate.attemptId,
-    input.answer,
-  ]);
-}
-
-/** A stable replay key for an approval-request answer (#117): the Run, the exact
- *  request, the generation it was formed against, the decision, and the provenance.
- *  A re-submitted operation id with an equal key replays. */
-function answerHarnessRequestReplayKey(
-  input: AnswerHarnessRequestInput,
-): string {
-  return JSON.stringify([
-    "answer-harness-request",
-    input.runId,
-    input.requestId,
-    input.generation,
-    input.decision,
-    input.by,
-  ]);
-}
-
-/** A stable replay key for an interrupt-turn: the Run and the targeted live Turn
- *  (#118). A re-submitted operation id with an equal key replays. */
-function interruptTurnReplayKey(input: InterruptTurnInput): string {
-  return JSON.stringify(["interrupt-turn", input.runId, input.turnId]);
-}
-
-/** A stable replay key for a steer-turn: the Run, the Turn, and the text (#118). */
-function steerTurnReplayKey(input: SteerTurnInput): string {
-  return JSON.stringify(["steer-turn", input.runId, input.turnId, input.text]);
-}
-
-/** A stable replay key for a human interactive Turn: the Run, the Step, and the
- *  verbatim text (#122). A re-submitted operation id with an equal key replays. */
-function sendInteractiveTurnReplayKey(input: SendInteractiveTurnInput): string {
-  return JSON.stringify([
-    "send-interactive-turn",
-    input.runId,
-    input.stepId,
-    input.text,
-  ]);
-}
-
-/** A stable replay key for ending an interactive Step: the Run and the Step (#122). */
-function endInteractiveStepReplayKey(input: EndInteractiveStepInput): string {
-  return JSON.stringify(["end-interactive-step", input.runId, input.stepId]);
-}
-
-/** A stable replay key for a cancel: the Run id. A re-submitted operation id with
- *  an equal key replays; a different key is a conflict (#87). */
-function cancelReplayKey(runId: string): string {
-  return JSON.stringify(["cancel", runId]);
-}
-
-/** A stable replay key for a delete: the Run id (#87). */
-function deleteReplayKey(runId: string): string {
-  return JSON.stringify(["delete", runId]);
 }

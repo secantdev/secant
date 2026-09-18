@@ -20,6 +20,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Terminal ordering is exact and load-bearing: on terminal an Adapter publishes remaining events, expires every still-outstanding request, closes the
   event producer, then settles the one authoritative result. No event is observable after the result settles. The fake enforces this with an
   `emit after result` guard; a real Adapter must hold the same order.
+- A Turn result may settle before its native child emits `close`. Claude Session reuse tracks which Turn owns the child, lets an already-settled close
+  win before the next send, and never attributes an old child's close to the next Turn; a still-live child may accept the next Turn in place.
 - Operational failures are typed values (`HarnessFailure`, `ControlReceipt` rejections, `RecordingReceipt`, `CleanupReport`). Only caller-contract
   violations throw: a second concurrent Turn on one Prepared Harness, a Turn after `close`, or a Turn beyond what an Adapter can serve. Control races
   (`expired`, `already-settled`, `shape-mismatch`, `unsupported`) are rejected receipts, never throws.

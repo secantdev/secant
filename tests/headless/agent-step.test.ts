@@ -234,6 +234,7 @@ test("a command -> agent -> command Bundle runs the plain Turn to succeeded (#11
   });
   assert.match(run.effectiveModel ?? "", /^claude-/);
   assert.equal(run.turnPosition, 1);
+  assert.equal("transcript" in run, false);
 
   // The normalized Harness identity of the latest Agent-step Attempt (#125): the
   // observed name, the resolved executable, and the observed version — never inferred
@@ -273,6 +274,7 @@ test("run show prints the Turn timeline, Session availability, and effective mod
   assert.match(shown, /Harness: claude-code/);
   assert.match(shown, /Executable: .+/);
   assert.match(shown, /Version: 2\.1\.273/);
+  assert.doesNotMatch(shown, /Transcript:/);
 });
 
 test("run show --json gains additive Harness-identity fields (#125)", async (t) => {
@@ -303,9 +305,16 @@ test("run show --json gains additive Harness-identity fields (#125)", async (t) 
 });
 
 test("the rendered prompt carries the file's absolute path and the skill's SKILL.md, no @ (#116)", async (t) => {
-  const { run, docPath } = await launchAgentRun(t);
-  const input = run.transcript?.find((entry) => entry.role === "user")?.content;
-  assert.ok(input !== undefined, JSON.stringify(run.transcript));
+  const { wired, run, docPath } = await launchAgentRun(t);
+  const reference = run.sessions?.[0]?.transcriptPage;
+  assert.ok(reference);
+  const transcript = wired.projectionPort.readTranscript(reference);
+  assert.ok(transcript.found);
+  if (!transcript.found) throw new Error("unreachable");
+  const input = transcript.entries.find(
+    (entry) => entry.role === "user",
+  )?.content;
+  assert.ok(input !== undefined, JSON.stringify(transcript.entries));
   // The `file` slot renders as the file's absolute path; the `skill` in `uses`
   // appends a line naming its SKILL.md at an absolute path; no Harness `@` syntax.
   assert.ok(input.includes(docPath), input);

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
+import { createApplication } from "../../src/application/application.js";
+import { openCatalog } from "../../src/catalog/catalog.js";
+import { openRunGroup } from "../../src/run/store/store.js";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
   createClaudeCodeAdapter,
@@ -18,6 +21,7 @@ import type {
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { installReplayer } from "../harness/replayer.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { hostPlatform, writeCommandBundle } from "../helpers/commandBundle.js";
 
 // #117 AC2: through the Port, the live overlay of a Run executing an Agent Turn
 // shows the outstanding approval request with decisions `allow`/`deny` and a
@@ -252,4 +256,92 @@ test("the live overlay shows the outstanding request; answering is accepted, sta
   } finally {
     final.close();
   }
+});
+
+test("an indeterminate request-answer receipt settles not-applied with unknown effects (#134 A20)", async (t) => {
+  const catalog = openCatalog(makeTempDir("secant-indeterminate-home-"));
+  t.after(() => catalog.close());
+  const workspace = realpathSync.native(
+    makeTempDir("secant-indeterminate-workspace-"),
+  );
+  const runGroup = openRunGroup(
+    makeTempDir("secant-indeterminate-store-"),
+    workspace,
+  );
+  t.after(() => runGroup.close());
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const app = createApplication({
+    catalog,
+    launchWorkspacePath: workspace,
+    hostPlatform: hostPlatform(),
+    runGroup,
+    runExecution: async ({ owner, requestChannel }) => {
+      owner.writeState("running");
+      assert.ok(requestChannel);
+      requestChannel.bindAnswer(async () => ({ outcome: "indeterminate" }));
+      requestChannel.raised({
+        requestId: "request-unknown",
+        tool: "Edit",
+        input: "change file",
+        decisions: ["allow", "deny"],
+      });
+      await finished;
+      requestChannel.settled("request-unknown");
+      requestChannel.bindAnswer(undefined);
+      owner.writeState("succeeded");
+      return { outcome: "succeeded" };
+    },
+  });
+  const bundle = writeCommandBundle({ id: "dev.secant.indeterminate" });
+  assert.ok(app.bundleManagement.build(bundle.folder, { noInstall: false }).ok);
+  const entry = catalog.listEntries().find((item) => item.id === bundle.id)!;
+  catalog.approveWorkspace(workspace, new Date());
+  const launched = app.projectionPort.submit({
+    operationId: "launch-indeterminate",
+    operation: "launch-run",
+    input: {
+      bundle: { id: bundle.id },
+      launchInputs: {},
+      trustDigest: entry.digest,
+    },
+  });
+  assert.ok(launched.admitted, JSON.stringify(launched));
+
+  const opened = app.projectionPort.openProjection({
+    family: "run",
+    runId: launched.runId!,
+  });
+  const raised = await nextOverlay(
+    opened.updates,
+    (overlay) => overlay.outstanding.length === 1,
+  );
+  const answer = app.projectionPort.submit({
+    operationId: "answer-indeterminate",
+    operation: "answer-harness-request",
+    input: {
+      runId: launched.runId!,
+      requestId: "request-unknown",
+      generation: raised.generation,
+      decision: "allow",
+      by: "human",
+    },
+  });
+  assert.ok(answer.admitted);
+  const outcome = await awaitSettled(app.projectionPort, answer.operationId);
+  assert.equal(outcome.status, "not-applied");
+  if (outcome.status === "not-applied") {
+    assert.equal(outcome.problem.code, "harness-request-indeterminate");
+    assert.equal(outcome.problem.possibleEffects, "unknown");
+    assert.match(
+      outcome.problem.remediation,
+      /may or may not have been answered/,
+    );
+  }
+
+  finish();
+  await awaitSettled(app.projectionPort, launched.operationId);
+  opened.close();
 });

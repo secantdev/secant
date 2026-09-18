@@ -144,11 +144,24 @@ const pendingGateRow = z.object({
 });
 
 const effectiveModelRow = z.object({ effective_model: z.string() });
-const harnessIdentityRow = z.object({
-  harness: z.string(),
-  executable: z.string(),
-  executable_version: z.string(),
-});
+const harnessIdentityRow = z
+  .object({
+    harness: z.string(),
+    executable: z.string(),
+    executable_version: z.string(),
+  })
+  .and(
+    z.union([
+      z.object({
+        steer_available: z.null(),
+        steer_evidence: z.null(),
+      }),
+      z.object({
+        steer_available: z.boolean(),
+        steer_evidence: z.string(),
+      }),
+    ]),
+  );
 
 function toPendingGate(row: z.infer<typeof pendingGateRow>): PendingGateRecord {
   return {
@@ -458,6 +471,8 @@ function commitAttempt(params: TCommitAttemptParams): void {
       harness: identity?.harness ?? null,
       executable: identity?.executable ?? null,
       executable_version: identity?.executableVersion ?? null,
+      steer_available: identity?.steer?.available ?? null,
+      steer_evidence: identity?.steer?.evidence ?? null,
     })
     .run();
   params.db
@@ -897,6 +912,8 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
           harness: attempts.harness,
           executable: attempts.executable,
           executable_version: attempts.executable_version,
+          steer_available: attempts.steer_available,
+          steer_evidence: attempts.steer_evidence,
         })
         .from(attempts)
         .where(isNotNull(attempts.harness))
@@ -909,6 +926,14 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         harness: parsed.harness,
         executable: parsed.executable,
         executableVersion: parsed.executable_version,
+        ...(parsed.steer_available !== null && parsed.steer_evidence !== null
+          ? {
+              steer: {
+                available: parsed.steer_available,
+                evidence: parsed.steer_evidence,
+              },
+            }
+          : {}),
       };
     },
     release() {

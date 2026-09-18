@@ -93,6 +93,38 @@ test("run cancel on a resting Run is refused with run-not-live", async (t) => {
   assert.match(h.stderr(), /run-not-live/);
 });
 
+test("run cancel rests a non-live blocked Run cancelled", async (t) => {
+  const h = await harness(t);
+  const { digest } = await (async () => {
+    const cmd = writeCommandBundle();
+    assert.equal(await h.run(["bundle", "build", cmd.folder]), 0);
+    h.reset();
+    const entry = h.catalog.listEntries().find((item) => item.id === cmd.id)!;
+    return { digest: entry.digest };
+  })();
+  const created = h.runGroup!.createRun({
+    operationId: "seed-blocked",
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date(),
+  });
+  assert.equal(created.outcome, "created");
+  if (created.outcome !== "created") throw new Error("unreachable");
+  const owner = h.runGroup!.acquireRun(created.runId)!;
+  assert.ok(owner.writeState("blocked").ok);
+  assert.ok(owner.release().ok);
+  owner.close();
+
+  assert.equal(
+    await runHeadless(h.clients, ["run", "cancel", created.runId], h.io),
+    0,
+  );
+  assert.match(h.stdout(), new RegExp(`Cancelled run ${created.runId}`));
+  const read = h.runGroup!.readRun(created.runId);
+  assert.ok(read.ok);
+  if (read.ok) assert.equal(read.run.state, "cancelled");
+});
+
 test("run cancel and run delete without a Run id exit non-zero", async (t) => {
   const h = await harness(t);
   assert.equal(await runHeadless(h.clients, ["run", "cancel"], h.io), 1);

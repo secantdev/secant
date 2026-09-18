@@ -873,6 +873,7 @@ function profileIdentity(profile: HarnessProfile): HarnessIdentityRecord {
     harness: profile.harness,
     executable: profile.executable,
     executableVersion: profile.executableVersion,
+    steer: profile.steer,
   };
 }
 

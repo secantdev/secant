@@ -5,6 +5,7 @@ import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
+  type HarnessAdapter,
   type HarnessProfile,
 } from "../../src/harness/harness.js";
 import type {
@@ -111,6 +112,7 @@ function writeInteractiveBundle(): { folder: string; id: string } {
 async function launchInteractive(
   t: TestContext,
   script: FakeScript,
+  counts?: { prepares: number; readonly closes: number[] },
 ): Promise<{ wired: Wiring; runId: string; run: RunView }> {
   const savedExecutable = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
   // A resolvable executable so Preflight's Harness discovery passes; the fake
@@ -123,11 +125,35 @@ async function launchInteractive(
   });
 
   const workspace = makeTempDir("secant-interactive-ws-");
+  const fake = createFake(script)();
+  const adapter: HarnessAdapter =
+    counts === undefined
+      ? fake
+      : {
+          async prepare(options) {
+            counts.prepares += 1;
+            const index = counts.closes.push(0) - 1;
+            const prepared = await fake.prepare(options);
+            if (!prepared.ok) return prepared;
+            const harness = prepared.harness;
+            return {
+              ok: true,
+              harness: {
+                profile: harness.profile,
+                startTurn: (request) => harness.startTurn(request),
+                async close() {
+                  counts.closes[index] = counts.closes[index]! + 1;
+                  return harness.close();
+                },
+              },
+            };
+          },
+        };
   const wired = wireApplication({
     secantHome: makeTempDir("secant-interactive-home-"),
     launchCwd: workspace,
     supportsInteractiveTurns: true,
-    harnessAdapter: createFake(script)(),
+    harnessAdapter: adapter,
   });
   t.after(() => {
     wired.runGroup.close();
@@ -202,11 +228,25 @@ async function send(
   assert.equal(outcome.status, "applied", JSON.stringify(outcome));
 }
 
+async function awaitInterruptOffer(wired: Wiring, runId: string) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const interrupt = offer(readRun(wired, runId), "interrupt-turn");
+    if (interrupt !== undefined) return interrupt;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error("the interactive Turn never exposed its interrupt Offer");
+}
+
 test("interactive-agent rests blocked, takes two human Turns, and ends into the same Session (#122)", async (t) => {
-  const { wired, runId, run } = await launchInteractive(t, {
-    profile: profile(),
-    turns: [COMPLETED_DETACHED],
-  });
+  const counts = { prepares: 0, closes: [] as number[] };
+  const { wired, runId, run } = await launchInteractive(
+    t,
+    {
+      profile: profile(),
+      turns: [COMPLETED_DETACHED, COMPLETED_DETACHED, COMPLETED_DETACHED],
+    },
+    counts,
+  );
 
   // Rests `blocked` at the interactive Step with the "interactive Turn" basis, and
   // offers exactly send + end at the boundary; no Attempt has settled yet.
@@ -225,9 +265,16 @@ test("interactive-agent rests blocked, takes two human Turns, and ends into the 
   assert.equal(afterOne.turnPosition, 1);
 
   await send(wired, runId, "op-t2", "discuss", "now the next idea");
+  assert.equal(counts.prepares, 1);
+  assert.deepEqual(counts.closes, [0]);
   const afterTwo = readRun(wired, runId);
   assert.equal(afterTwo.turnPosition, 2);
-  const humanInputs = (afterTwo.transcript ?? [])
+  const transcriptReference = afterTwo.sessions?.[0]?.transcriptPage;
+  assert.ok(transcriptReference);
+  const transcript = wired.projectionPort.readTranscript(transcriptReference);
+  assert.ok(transcript.found);
+  if (!transcript.found) throw new Error("unreachable");
+  const humanInputs = transcript.entries
     .filter((entry) => entry.role === "user")
     .map((entry) => entry.content);
   assert.deepEqual(humanInputs, ["let us start here", "now the next idea"]);
@@ -252,6 +299,8 @@ test("interactive-agent rests blocked, takes two human Turns, and ends into the 
   assert.ok(end.admitted, JSON.stringify(end));
   const endOutcome = await awaitSettled(wired.projectionPort, "op-end");
   assert.equal(endOutcome.status, "applied", JSON.stringify(endOutcome));
+  assert.equal(counts.prepares, 2);
+  assert.deepEqual(counts.closes, [1, 1]);
 
   const done = readRun(wired, runId);
   assert.equal(done.state, "succeeded");
@@ -290,6 +339,10 @@ test("interactive-agent rests blocked, takes two human Turns, and ends into the 
     "interactive-agent",
     "agent",
   ]);
+  assert.ok(
+    done.timeline.some((event) => event.event === "interactive-step-ended"),
+    JSON.stringify(done.timeline),
+  );
 
   // The headless client reads the same reopened history: `run show` prints each
   // historical Turn kind in the same order (AC4), the Interactive Turns before the
@@ -299,6 +352,7 @@ test("interactive-agent rests blocked, takes two human Turns, and ends into the 
   const firstAgent = shown.indexOf("turn-started agent");
   assert.ok(firstInteractive >= 0, shown);
   assert.ok(firstAgent > firstInteractive, shown);
+  assert.match(shown, /interactive-step-ended/);
 });
 
 /** Render the headless `run show` for a Run through the public headless entrypoint,
@@ -343,25 +397,102 @@ test("a blank interactive Turn is refused before any stdin is sent (#122)", asyn
   assert.equal(run.turnPosition, undefined);
 });
 
+test("shutdown closes the Step-scoped Harness once and leaves the interactive rest blocked (#134 A17/A21)", async (t) => {
+  const counts = { prepares: 0, closes: [] as number[] };
+  const { wired, runId } = await launchInteractive(
+    t,
+    { profile: profile(), turns: [COMPLETED_DETACHED] },
+    counts,
+  );
+  assert.equal(counts.prepares, 1);
+  assert.deepEqual(counts.closes, [0]);
+
+  await wired.shutdown();
+
+  assert.deepEqual(counts.closes, [1]);
+  assert.equal(readRun(wired, runId).state, "blocked");
+  assert.equal(
+    wired.runGroup.listRuns().find((run) => run.runId === runId)?.live,
+    false,
+  );
+});
+
+test("interrupt closes the Step-scoped Harness after one qualification (#134 A17)", async (t) => {
+  const counts = { prepares: 0, closes: [] as number[] };
+  const { wired, runId } = await launchInteractive(
+    t,
+    {
+      profile: profile(),
+      turns: [
+        {
+          block: true,
+          result: {
+            kind: "completed",
+            detail: {
+              finalContent: "unused",
+              effectiveModel: { known: false },
+              session: {
+                state: "detached",
+                coordinate: { opaque: "coord-s" },
+              },
+            },
+          },
+        },
+      ],
+    },
+    counts,
+  );
+  const sent = wired.projectionPort.submit({
+    operationId: "op-send-interrupted",
+    operation: "send-interactive-turn",
+    input: { runId, stepId: "discuss", text: "stop this Turn" },
+  });
+  assert.ok(sent.admitted);
+  const interruptOffer = await awaitInterruptOffer(wired, runId);
+  const interrupted = wired.projectionPort.submit({
+    operationId: "op-interrupt-interactive",
+    operation: "interrupt-turn",
+    input: { runId, turnId: interruptOffer.turnId },
+  });
+  assert.ok(interrupted.admitted);
+  assert.equal(
+    (await awaitSettled(wired.projectionPort, interrupted.operationId)).status,
+    "applied",
+  );
+  await awaitSettled(wired.projectionPort, sent.operationId);
+
+  assert.equal(readRun(wired, runId).state, "halted");
+  assert.equal(counts.prepares, 1);
+  assert.deepEqual(counts.closes, [1]);
+});
+
 test("end-interactive-step mid-Turn is rejected with a precise Problem (#122)", async (t) => {
   // A Turn that blocks after admission until it is interrupted or the Harness closes,
   // so a real "mid-Turn" window exists to submit End Step into.
-  const { wired, runId } = await launchInteractive(t, {
-    profile: profile(),
-    turns: [
-      {
-        block: true,
-        result: {
-          kind: "completed",
-          detail: {
-            finalContent: "unused",
-            effectiveModel: { known: false },
-            session: { state: "detached", coordinate: { opaque: "coord-s" } },
+  const counts = { prepares: 0, closes: [] as number[] };
+  const { wired, runId } = await launchInteractive(
+    t,
+    {
+      profile: profile(),
+      turns: [
+        {
+          block: true,
+          result: {
+            kind: "completed",
+            detail: {
+              finalContent: "unused",
+              effectiveModel: { known: false },
+              session: {
+                state: "detached",
+                coordinate: { opaque: "coord-s" },
+              },
+            },
           },
         },
-      },
-    ],
-  });
+      ],
+    },
+    counts,
+  );
 
   // Start a human Turn but do not await it — it blocks mid-Turn.
   const sendAdmission = wired.projectionPort.submit({
@@ -400,4 +531,6 @@ test("end-interactive-step mid-Turn is rejected with a precise Problem (#122)", 
   assert.equal(cancelOutcome.status, "applied", JSON.stringify(cancelOutcome));
   await awaitSettled(wired.projectionPort, "op-send");
   assert.equal(readRun(wired, runId).state, "cancelled");
+  assert.equal(counts.prepares, 1);
+  assert.deepEqual(counts.closes, [1]);
 });

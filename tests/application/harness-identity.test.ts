@@ -66,6 +66,32 @@ function completedScript(model: string | undefined): FakeScript {
   };
 }
 
+function failedScript(): FakeScript {
+  return {
+    profile: profile(),
+    turns: [
+      {
+        result: {
+          kind: "failed",
+          detail: {
+            failure: {
+              phase: "turn",
+              category: "native-failure",
+              possibleEffects: "possible",
+              diagnostics: "scripted failure",
+            },
+            effectiveModel: { known: false },
+            session: {
+              state: "detached",
+              coordinate: { opaque: "s" },
+            },
+          },
+        },
+      },
+    ],
+  };
+}
+
 /** Author a single-`agent`-step Bundle (session "s"). */
 function writeAgentBundle(): { folder: string; id: string } {
   const folder = makeTempDir("secant-harness-id-bundle-");
@@ -86,6 +112,7 @@ function writeAgentBundle(): { folder: string; id: string } {
       {
         id: "work",
         kind: "agent",
+        retry: 0,
         session: "s",
         prompt: { asset: "prompts/go.md" },
       },
@@ -246,6 +273,97 @@ test("the Harness identity is identical after the Run is reopened (#125)", async
     executableVersion: "1.2.3",
   });
   assert.equal(run.effectiveModel, "fake-sonnet");
+});
+
+test("a reopened Run's steer Offer uses the recorded profile evidence (#134 A12)", async (t) => {
+  const home = makeTempDir("secant-harness-id-home-");
+  const workspace = makeTempDir("secant-harness-id-ws-");
+  const { runId } = await launch(
+    t,
+    failedScript(),
+    writeAgentBundle(),
+    home,
+    workspace,
+  );
+
+  const resumedScript: FakeScript = {
+    profile: profile(),
+    turns: [
+      {
+        requests: [
+          {
+            id: "hold-resumed-turn",
+            shape: {
+              kind: "approval",
+              tool: "Edit",
+              input: "edit after reopen",
+              decisions: ["allow", "deny"],
+            },
+            awaited: true,
+          },
+        ],
+        result: {
+          kind: "completed",
+          detail: {
+            finalContent: "done",
+            effectiveModel: { known: false },
+            session: { state: "open" },
+          },
+        },
+      },
+    ],
+  };
+  const reopened = wireApplication({
+    secantHome: home,
+    launchCwd: workspace,
+    harnessAdapter: createFake(resumedScript)(),
+  });
+  t.after(() => {
+    reopened.runGroup.close();
+    reopened.catalog.close();
+  });
+  const resume = reopened.projectionPort.submit({
+    operationId: "op-resume",
+    operation: "resume-run",
+    input: { runId },
+  });
+  assert.ok(resume.admitted, JSON.stringify(resume));
+  const opened = reopened.projectionPort.openProjection({
+    family: "run",
+    runId,
+  });
+  let requestGeneration: number | undefined;
+  for await (const update of opened.updates) {
+    if (update.kind === "live" && update.overlay.outstanding.length > 0) {
+      requestGeneration = update.overlay.generation;
+      break;
+    }
+  }
+  opened.close();
+  assert.ok(requestGeneration !== undefined);
+
+  const steer = readRun(reopened, runId).actionOffers.find(
+    (offer) => offer.action === "steer-turn",
+  );
+  assert.ok(steer);
+  if (steer?.action === "steer-turn") {
+    assert.equal(steer.reason, profile().steer.evidence);
+  }
+
+  const answer = reopened.projectionPort.submit({
+    operationId: "answer-resumed-request",
+    operation: "answer-harness-request",
+    input: {
+      runId,
+      requestId: "hold-resumed-turn",
+      generation: requestGeneration,
+      decision: "allow",
+      by: "human",
+    },
+  });
+  assert.ok(answer.admitted);
+  await awaitSettled(reopened.projectionPort, answer.operationId);
+  await awaitSettled(reopened.projectionPort, resume.operationId);
 });
 
 test("a Turn that observed no model keeps the Harness identity but omits the model (#125)", async (t) => {

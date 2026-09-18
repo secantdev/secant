@@ -270,6 +270,24 @@ test("cancel-run on a resting Run is refused and offers no cancel", async (t) =>
   if (read.ok) assert.equal(read.run.state, "succeeded");
 });
 
+test("cancel-run acquires a non-live blocked Run and rests it cancelled (#134 A2)", (t) => {
+  const f = fixture(t);
+  const runId = seedRun(f, "blocked", false);
+  assert.deepEqual(offers(f.app, runId), ["cancel-run"]);
+
+  const outcome = submit(f.app, "cancel-run", runId, "op-cancel-blocked");
+  assert.equal(outcome.status, "applied");
+
+  const read = f.runGroup.readRun(runId);
+  assert.ok(read.ok);
+  if (read.ok) assert.equal(read.run.state, "cancelled");
+  assert.equal(
+    f.runGroup.listRuns().find((run) => run.runId === runId)?.live,
+    false,
+  );
+  assert.deepEqual(offers(f.app, runId), ["delete-run"]);
+});
+
 test("delete-run removes a resting Run's store and is idempotent per operation id", async (t) => {
   const f = fixture(t);
   const runId = seedRun(f, "failed", false);

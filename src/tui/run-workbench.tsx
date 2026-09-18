@@ -154,8 +154,11 @@ export function RunWorkbench(props: {
     if ((live()?.outstanding.length ?? 0) > 0)
       return "ephemeral Harness Request";
     if (current?.state !== "blocked") return undefined;
-    if (current.pendingGate !== undefined || current.checkpoint !== undefined)
-      return "durable Human Gate";
+    const gateOffer = current.actionOffers.find(
+      (offer): offer is AnswerHumanGateOffer =>
+        offer.action === "answer-human-gate",
+    );
+    if (gateOffer !== undefined) return gateOffer.basis;
     if (current.progress[current.position]?.kind === "interactive-agent")
       return "interactive Turn";
     return undefined;

@@ -434,6 +434,10 @@ type SessionCloseOutcome = {
 class ClaudeCodeSession {
   readonly coordinate: RecoveryCoordinate;
   private process: OwnedProcess | undefined;
+  /** The Turn that owns `process`. A later Turn may be admitted before the prior
+   *  child-close callback runs, so process ownership cannot be inferred from the
+   *  Session's current `active` Turn (#134 A17). */
+  private processTurn: ClaudeCodeTurn | undefined;
   private launchPromise:
     | Promise<
         | { readonly ok: true }
@@ -522,6 +526,7 @@ class ClaudeCodeSession {
     // the same child, so the two never report divergent closes. `onClosed` sees
     // `this.process !== owned` and yields the result to this interrupt.
     this.process = undefined;
+    this.processTurn = undefined;
     this.active = undefined;
     const outcome = await owned.interrupt(DEFAULT_CLEANUP_TIMEOUT_MS);
     if (turn.settled) return;
@@ -610,6 +615,7 @@ class ClaudeCodeSession {
       const owned = this.process;
       if (owned !== undefined) {
         this.process = undefined;
+        this.processTurn = undefined;
         this.active = undefined;
         await owned.closeStdin(DEFAULT_CLEANUP_TIMEOUT_MS);
       }
@@ -628,6 +634,25 @@ class ClaudeCodeSession {
         );
       }
       return;
+    }
+
+    // A terminal result can settle just before that Turn's child process emits
+    // close, while some Harnesses keep the same process alive for another Turn.
+    // Give an already-settled close one event-loop turn to win; otherwise retain
+    // the live process and send the next frame to it.
+    const prior =
+      this.process !== undefined && this.processTurn !== turn
+        ? this.process
+        : undefined;
+    if (prior !== undefined) {
+      const closed = await Promise.race([
+        prior.closed().then(() => true as const),
+        new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+      ]);
+      if (closed && this.process === prior) {
+        this.process = undefined;
+        this.processTurn = undefined;
+      }
     }
 
     if (this.process === undefined) {
@@ -650,8 +675,10 @@ class ClaudeCodeSession {
     }
 
     if (!this.initialized) turn.armHandshake(DEFAULT_HANDSHAKE_TIMEOUT_MS);
+    const acceptingProcess = this.process!;
     try {
-      await this.process!.writeStdin(encodeTurn(turn.request));
+      await acceptingProcess.writeStdin(encodeTurn(turn.request));
+      if (this.process === acceptingProcess) this.processTurn = turn;
     } catch (error) {
       turn.settleLost("acceptance", "stdin write failed", {
         phase: "turn",
@@ -726,6 +753,7 @@ class ClaudeCodeSession {
 
     const owned = launched.process;
     this.process = owned;
+    this.processTurn = turn;
     void this.consumeStdout(owned).catch((error) => {
       const redacted = this.redact(error);
       this.active?.protocolCorruption(
@@ -800,9 +828,10 @@ class ClaudeCodeSession {
     // flight `this.process !== owned` and the interrupt owns the result here.
     if (this.process !== owned) return;
     const result = this.scrub(close);
+    const turn = this.processTurn;
     this.process = undefined;
-    const turn = this.active;
-    this.active = undefined;
+    this.processTurn = undefined;
+    if (this.active === turn) this.active = undefined;
     if (turn === undefined || turn.settled) return;
     if (turn.interrupting) {
       turn.settleInterrupted();

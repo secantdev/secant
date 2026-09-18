@@ -1,4 +1,3 @@
-import stripAnsi from "strip-ansi";
 import type {
   BundleTrustState,
   EngineRange,
@@ -146,9 +145,13 @@ export function renderRun(run: RunView): string {
   // the cadence, the completed-iteration count, the latest fail Verdict, and the
   // Gate's exact durable reference. Output references print under "Outputs:".
   const checkpoint = run.checkpoint;
+  const answerOffer = run.actionOffers.find(
+    (offer) => offer.action === "answer-human-gate",
+  );
   if (checkpoint !== undefined) {
     lines.push(
       "",
+      ...(answerOffer !== undefined ? [`Blocked: ${answerOffer.basis}`] : []),
       "Review checkpoint:",
       `  message: ${checkpoint.message}`,
       `  cadence: every ${checkpoint.interval} iteration(s)`,
@@ -160,14 +163,14 @@ export function renderRun(run: RunView): string {
     );
   }
 
-  // A blocked Run resting at an authored Human Gate (#108): name the basis
-  // (durable Human Gate), the shape, the exact rendered message, the declared
+  // A blocked Run resting at an authored Human Gate (#108): read the basis from
+  // its Offer, then print the shape, exact rendered message, declared
   // free-text output, and the Gate's durable reference.
   const pendingGate = run.pendingGate;
   if (pendingGate !== undefined) {
     lines.push(
       "",
-      "Blocked: durable Human Gate",
+      ...(answerOffer !== undefined ? [`Blocked: ${answerOffer.basis}`] : []),
       "Human Gate:",
       `  shape: ${pendingGate.gate.shape}`,
       `  message: ${pendingGate.message}`,
@@ -260,19 +263,6 @@ export function renderRun(run: RunView): string {
     lines.push("", "Sessions:");
     for (const session of run.sessions) {
       lines.push(`  ${session.session}: ${session.availability}`);
-    }
-  }
-
-  // The readable Session transcript (#116): the exact rendered Turn input and the
-  // authoritative assistant content. Status carried by the role word.
-  if (run.transcript !== undefined && run.transcript.length > 0) {
-    lines.push("", "Transcript:");
-    for (const entry of run.transcript) {
-      lines.push(`  [${entry.session}] ${entry.role}:`);
-      // Strip ANSI and handle CRLF so headless prints the same clean rows the TUI
-      // does (D12); the two clients render one Projection transcript the same way.
-      for (const line of stripAnsi(entry.content).split(/\r?\n/))
-        lines.push(`    ${line}`);
     }
   }
 

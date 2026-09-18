@@ -522,6 +522,7 @@ export type RunTimelineKind =
   | "iteration"
   | "checkpoint-blocked"
   | "gate-answered"
+  | "interactive-step-ended"
   | "materialization-conflict"
   // Harness Turn events (#116): a Turn admitted, its authoritative assistant
   // content and tool activity, and its settled result.
@@ -556,7 +557,9 @@ export interface RunTimelineEvent {
   readonly detail?: string;
   /** The Turn kind of a `turn-started`/`turn-settled` entry (#126), additive to the
    *  frozen `--json`. Present when the durable Turn recorded its kind; absent on
-   *  every other event and on a legacy Turn row whose kind is unknown. */
+   *  every other event and on a legacy Turn row whose kind is unknown. The recorded
+   *  Turn kind supersedes the earlier `interactive-turn-sent` timeline kind;
+   *  `interactive-step-ended` records the distinct End Step action. */
   readonly turnKind?: RunTurnKind;
 }
 
@@ -695,9 +698,6 @@ export interface RunView {
   /** The number of Harness Turns admitted so far — the current Turn position
    *  (#116). Absent for a Command-only Run. */
   readonly turnPosition?: number;
-  /** The readable Session transcript (exact Turn inputs and authoritative
-   *  assistant content, #116). Additive; absent for a Command-only Run. */
-  readonly transcript?: readonly RunTranscriptEntryView[];
 }
 
 export interface RunSnapshot {
@@ -802,6 +802,8 @@ export interface ApproveWorkspaceOffer {
 export interface AnswerHumanGateOffer {
   readonly action: "answer-human-gate";
   readonly gate: RunGateReference;
+  /** The durable pause this Offer answers, for presentation by either client. */
+  readonly basis: "durable Human Gate";
   /** What `continue`/approve does: grants exactly one more review interval. */
   readonly continueConsequence: string;
   /** What `stop`/reject does: ends the Run `failed`, keeping history and Artifacts. */

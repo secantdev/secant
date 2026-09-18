@@ -277,7 +277,6 @@ function runOf(over: Partial<RunView> = {}): RunView {
     ...(over.turnPosition !== undefined
       ? { turnPosition: over.turnPosition }
       : {}),
-    ...(over.transcript !== undefined ? { transcript: over.transcript } : {}),
     actionOffers: over.actionOffers ?? [],
   };
 }
@@ -302,6 +301,7 @@ const GATE: RunGateReference = {
 const ANSWER_OFFER: AnswerHumanGateOffer = {
   action: "answer-human-gate",
   gate: GATE,
+  basis: "durable Human Gate",
   continueConsequence:
     "continue: grant one more review interval and resume the Run.",
   stopConsequence:
@@ -451,6 +451,21 @@ test("header, progress, and timeline render the facts headless run show prints",
   assert.match(frame, /ship/);
   assert.match(frame, /run-created/); // timeline events with detail
   assert.match(frame, /attempt-settled passed/);
+});
+
+test("reopened history renders End Step distinctly from a settled Command Attempt (#134 A19)", async () => {
+  const { t } = await mountWorkbench(
+    runOf({
+      timeline: [
+        {
+          at: "2026-09-18T00:00:00.000Z",
+          event: "interactive-step-ended",
+          detail: "succeeded",
+        },
+      ],
+    }),
+  );
+  assert.match(t.captureCharFrame(), /interactive-step-ended succeeded/);
 });
 
 test("the full header shows the Harness name, executable, version, and model (#125)", async () => {
@@ -888,6 +903,18 @@ test("gate, request, interactive Turn, and agent Turn have colour-independent la
         },
         message: "Approve the change?",
       },
+      actionOffers: [
+        {
+          ...ANSWER_OFFER,
+          gate: {
+            runId: "run-1",
+            stepId: "approve",
+            attemptId: "a1",
+            shape: "approve-reject",
+          },
+          basis: "durable Human Gate",
+        },
+      ],
     }),
   );
   assert.match(gate.t.captureCharFrame(), /BLOCKED · durable Human Gate/);
@@ -2038,6 +2065,7 @@ const FREE_TEXT_GATE: RunGateReference = {
 const FREE_TEXT_OFFER: AnswerHumanGateOffer = {
   action: "answer-human-gate",
   gate: FREE_TEXT_GATE,
+  basis: "durable Human Gate",
   continueConsequence: "",
   stopConsequence: "",
   textConsequence: "publish the text as the gate's output and advance the Run.",

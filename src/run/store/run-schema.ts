@@ -56,6 +56,8 @@ export const attempts = sqliteTable("attempt", {
   harness: text("harness"),
   executable: text("executable"),
   executable_version: text("executable_version"),
+  steer_available: integer("steer_available", { mode: "boolean" }),
+  steer_evidence: text("steer_evidence"),
 });
 
 export const attemptLog = sqliteTable("attempt_log", {

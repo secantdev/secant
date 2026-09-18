@@ -3,14 +3,14 @@
   "turns": [
     {
       "stdout": "grill-1.stdout"
+    },
+    {
+      "stdout": "grill-2.stdout"
     }
   ],
   "resume": {
     "exitCode": 0,
     "turns": [
-      {
-        "stdout": "grill-2.stdout"
-      },
       {
         "steps": [
           {

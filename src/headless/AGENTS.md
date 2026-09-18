@@ -19,7 +19,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   the gate shape: a `--text` answer to an approve-reject gate (or vice versa) is forwarded and the Application refuses it as `gate-shape-mismatch`.
 - A Run that rests `blocked` at a gate names its follow-up answer command in the plain-text tail (`settleAndReportRun`'s `answerHint`, #108): a free-text
   gate names `--text`, an approve-reject gate names `--continue`/`--stop`. `run show` renders the authored pending gate (shape, message, output) under a
-  "durable Human Gate" basis line, alongside the derived Review-checkpoint block; both are driven off `RunView` fields, additive to the frozen `--json`.
+  basis carried by its `answer-human-gate` Offer, alongside the derived Review-checkpoint block; both are driven off `RunView` fields, additive to the frozen `--json`.
 - `run show` renders the Harness identity of the latest Agent-step Attempt (#125) — `Harness:`/`Executable:`/`Version:` lines beside `Effective model:` — from the additive
   `run.harness` view; the version prints unadorned (no `v` prefix, matching the TUI header) since a real version string can itself contain parentheses. The existing top-level
   `effectiveModel` `--json` field is untouched and the new `harness` object is purely additive, so a Command-only Run's frozen shape is unchanged.
@@ -33,7 +33,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   started before settlement is awaited, so an Agent Turn that pauses on approval is unblocked and the Run can rest; it is harmless for a Command-only Run.
 - `run read --transcript` (#124) selects the Session from `<run-id>/<session>` then `--session`; with neither it takes the sole Session that has a recorded
   transcript. It refuses `run-session-not-found` when the named Session has no transcript, when the Run has none at all, or when more than one Session exists
-  and none was named (`readTranscript`).
+  and none was named (`readTranscript`). `run show` never inlines transcript entries; the Session's page/export References are the only read path.
 - `render.ts` ignores an unknown action-offer kind on purpose: each offer kind is rendered by its own filtered loop, so an offer kind the client does not
   recognise falls through every loop and prints nothing rather than erroring — the client never enumerates a closed set of offers.
 - The `--json` shapes are frozen: the three-OS CI gate parses specific fields (`.result.run.state`, `.checkpoint.completedIterations`, …), so renaming

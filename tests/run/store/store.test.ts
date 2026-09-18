@@ -1395,6 +1395,7 @@ test("the latest Agent-step Attempt's Harness identity is durable across reopeni
         harness: "Claude Code",
         executable: "/old/claude",
         executableVersion: "0.9.0",
+        steer: { available: false, evidence: "old profile evidence" },
       },
     });
     // The latest Agent Attempt under the profile the identity must report — with an
@@ -1410,12 +1411,14 @@ test("the latest Agent-step Attempt's Harness identity is durable across reopeni
         harness: "Claude Code",
         executable: "/usr/bin/claude",
         executableVersion: "1.2.3",
+        steer: { available: false, evidence: "print mode has no steer" },
       },
     });
     assert.deepEqual(owner.harnessIdentity(), {
       harness: "Claude Code",
       executable: "/usr/bin/claude",
       executableVersion: "1.2.3",
+      steer: { available: false, evidence: "print mode has no steer" },
     });
     assert.equal(owner.effectiveModel(), "claude-opus-5");
     owner.release();
@@ -1434,6 +1437,7 @@ test("the latest Agent-step Attempt's Harness identity is durable across reopeni
     harness: "Claude Code",
     executable: "/usr/bin/claude",
     executableVersion: "1.2.3",
+    steer: { available: false, evidence: "print mode has no steer" },
   });
   assert.equal(owner2.effectiveModel(), "claude-opus-5");
 });
@@ -1454,6 +1458,39 @@ test("a Command-only Run has no Harness identity (#125)", async (t) => {
     at: AT,
   });
   assert.equal(owner.harnessIdentity(), undefined);
+});
+
+test("a partial persisted steer capability is rejected at the Harness-identity read", (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-steer-corrupt");
+  const owner = group.acquireRun(created.runId)!;
+  owner.publishAttempt({
+    attemptId: "0.0:repair",
+    outcome: "succeeded",
+    required: [],
+    outputs: [],
+    at: AT,
+    harnessIdentity: {
+      harness: "Claude Code",
+      executable: "/usr/bin/claude",
+      executableVersion: "1.2.3",
+      steer: { available: false, evidence: "profile evidence" },
+    },
+  });
+  owner.release();
+  owner.close();
+
+  const raw = new Database(join(groupDirOf(home), created.runId, "run.db"));
+  raw
+    .query("UPDATE attempt SET steer_evidence = NULL WHERE attempt_id = ?")
+    .run("0.0:repair");
+  raw.close();
+
+  const corrupted = group.acquireRun(created.runId)!;
+  t.after(() => corrupted.close());
+  assert.throws(() => corrupted.harnessIdentity());
 });
 
 test("Turn kind records both kinds in one Session, and a legacy row reads unknown (#126)", async (t) => {

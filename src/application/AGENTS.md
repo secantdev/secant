@@ -5,7 +5,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 ## Invariants
 
 - Every canonical write to a Run must go through `observedOwner`, not the raw `RunOwner`, or an open client's live `run` Projection never updates.
-  `observedOwner` spreads `...owner` and intercepts only five methods — `writeState`, `publishAttempt`, `recordMaterializationConflict`,
+  `observedOwner` spreads `...owner` and intercepts only six methods — `selectHarness`, `writeState`, `publishAttempt`, `recordMaterializationConflict`,
   `recordGateAnswer`, and `recordPendingGate` (the authored gate, #108, which rests the Run `blocked` in its own transaction) — pushing a fresh snapshot
   after each commits. A `run` Projection registers in the Run-scoped observer set even while rested; every later tracking entry reuses that set, so
   resume, gate-answer, and interactive drivers cannot orphan the stream. A new `RunOwner` write method compiles and silently pushes nothing (A3).
@@ -22,6 +22,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   Runs.) Preflight runs before the Trust gate, so a Run whose preconditions fail is refused before trust is ever asked for.
 - New Agent/Interactive-agent Runs pin the semantic `claude-code` selection in `createRun`; Command-only Runs omit it. The Store returns that same
   immutable selection on an Operation replay, so Application never derives it from later Attempt evidence or rewrites it after creation (#138).
+- A pre-M4 Run with no selection upgrades only after its still-installed pinned Snapshot proves the routing needs a Harness. Reopen and direct resume
+  write `claude-code` once through `observedOwner.selectHarness`; Command-only Runs and missing/corrupt Snapshot Problems remain unselected (#139).
 - Never `acquireRun` a Run merely to read it when it is live in another process: acquiring bumps the owner-fencing epoch and would abort the process
   running it. `readResource`/`runResult` read through the live in-process owner when present, else acquire-and-close a rested Run, else refuse with
   `run-live-elsewhere`.

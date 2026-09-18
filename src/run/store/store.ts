@@ -148,6 +148,13 @@ export type ResumeRunResult =
 export type WriteResult =
   { readonly ok: true } | { readonly ok: false; readonly reason: "fenced" };
 
+/** A legacy Run's one-time semantic Harness upgrade. `already-selected` proves an
+ *  idempotent retry observed the same immutable value and performed no write. */
+export type SelectHarnessResult =
+  | { readonly outcome: "selected" }
+  | { readonly outcome: "already-selected" }
+  | { readonly outcome: "fenced" };
+
 /** A candidate output a producer wrote once, ready to publish together. */
 export interface CandidateOutput {
   readonly name: string;
@@ -423,6 +430,9 @@ export interface TranscriptPage {
 export interface RunOwner {
   readonly runId: string;
   readonly record: RunRecord;
+  /** Durably select the Harness for a pre-M4 Run if it is still absent. The
+   *  selected value is immutable; repeating the same upgrade performs no write. */
+  selectHarness(selectedHarness: SelectedHarnessId): SelectHarnessResult;
   /** Record the Run's canonical state, unless this owner has been fenced. */
   writeState(state: string): WriteResult;
   /**

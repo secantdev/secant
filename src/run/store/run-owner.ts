@@ -24,6 +24,8 @@ import type {
   RecordPendingGateRequest,
   RunOwner,
   RunRecord,
+  SelectedHarnessId,
+  SelectHarnessResult,
   WriteResult,
 } from "./store.js";
 import {
@@ -85,14 +87,18 @@ interface TAcquireRunOwnerParams {
   readonly trackHandle: (database: TRunDatabaseHandle) => () => void;
 }
 
+const selectedHarnessId = z.literal("claude-code");
 const runRecordRow = z.object({
   run_id: z.string(),
   workspace_path: z.string(),
   bundle_snapshot_digest: z.string(),
   launch: z.string(),
-  selected_harness: z.literal("claude-code").nullable(),
+  selected_harness: selectedHarnessId.nullable(),
   state: z.string(),
   created_at: z.string(),
+});
+const selectedHarnessRow = z.object({
+  selected_harness: selectedHarnessId.nullable(),
 });
 const runOwnerRow = z.object({
   ownerEpoch: z.number(),
@@ -595,6 +601,9 @@ type TGuardedWriteResult =
   { readonly kind: "written" } | { readonly kind: "fenced" };
 
 type TCanonicalWrite = (tx: SQLiteBunDatabase) => void;
+type TGuardedTransactionResult<T> =
+  | { readonly kind: "completed"; readonly value: T }
+  | { readonly kind: "fenced" };
 
 type TFencedWriteResult = {
   readonly ok: false;
@@ -617,22 +626,61 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
     return readRunOwnershipRow(db).ownerEpoch !== params.epoch;
   }
 
-  function guardedWrite(write: TCanonicalWrite): TGuardedWriteResult {
+  function guardedTransaction<T>(
+    transaction: (tx: SQLiteBunDatabase) => T,
+  ): TGuardedTransactionResult<T> {
     if (params.database.isClosed()) return { kind: "fenced" };
     return db.transaction(
-      (tx): TGuardedWriteResult => {
+      (tx): TGuardedTransactionResult<T> => {
         const ownership = readRunOwnershipRow(tx);
         if (ownership.ownerEpoch !== params.epoch) return { kind: "fenced" };
-        write(tx);
-        return { kind: "written" };
+        return { kind: "completed", value: transaction(tx) };
       },
       { behavior: "immediate" },
     );
   }
 
+  function guardedWrite(write: TCanonicalWrite): TGuardedWriteResult {
+    const result = guardedTransaction((tx) => write(tx));
+    return result.kind === "fenced" ? result : { kind: "written" };
+  }
+
   return {
     runId: params.runId,
     record: params.record,
+    selectHarness(selectedHarness: SelectedHarnessId): SelectHarnessResult {
+      const result = guardedTransaction(
+        (tx): "selected" | "already-selected" => {
+          const row = tx
+            .select({ selected_harness: runRecord.selected_harness })
+            .from(runRecord)
+            .where(eq(runRecord.run_id, params.runId))
+            .get();
+          if (row === undefined) {
+            throw new Error(
+              `Run Store: Run ${params.runId} has no canonical record.`,
+            );
+          }
+          const current = selectedHarnessRow.parse(row).selected_harness;
+          if (current === selectedHarness) {
+            return "already-selected";
+          }
+          if (current !== null) {
+            throw new Error(
+              `Run Store: Run ${params.runId} already selected an immutable Harness.`,
+            );
+          }
+          tx.update(runRecord)
+            .set({ selected_harness: selectedHarness })
+            .where(eq(runRecord.run_id, params.runId))
+            .run();
+          return "selected";
+        },
+      );
+      return result.kind === "fenced"
+        ? { outcome: "fenced" }
+        : { outcome: result.value };
+    },
     writeState(state) {
       const result = guardedWrite((tx) => {
         updateRunState({ db: tx, runId: params.runId, state });

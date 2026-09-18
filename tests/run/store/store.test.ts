@@ -723,6 +723,33 @@ test("canonical truth survives reopening the same home", async (t) => {
   assert.equal(read.run.bundleSnapshotDigest, "sha256:deadbeef");
 });
 
+test("legacy Harness selection is idempotent and a fenced owner cannot change it", (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "legacy-create");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  assert.deepEqual(owner.selectHarness("claude-code"), {
+    outcome: "selected",
+  });
+  assert.deepEqual(owner.selectHarness("claude-code"), {
+    outcome: "already-selected",
+  });
+  const read = group.readRun(created.runId);
+  assert.ok(read.ok);
+  assert.equal(read.run.selectedHarness, "claude-code");
+
+  const replacement = group.acquireRun(created.runId);
+  assert.ok(replacement);
+  t.after(() => replacement.close());
+  assert.deepEqual(owner.selectHarness("claude-code"), {
+    outcome: "fenced",
+  });
+});
+
 test("a home created by the pre-Drizzle release migrates in place", (t) => {
   const home = makeTempDir("secant-store-migration-");
   const fixtureRuns = fileURLToPath(

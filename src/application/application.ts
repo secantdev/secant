@@ -550,12 +550,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
   }
 
   // Wrap the acquired owner so each canonical write pushes a fresh Run snapshot
-  // to observers. Reads delegate to the raw owner unchanged; only the two
-  // canonical writes are intercepted, after they commit.
+  // to observers. Reads delegate to the raw owner unchanged; write methods are
+  // intercepted and push only after they commit.
   function observedOwner(owner: RunOwner, runId: string): RunOwner {
     const tracking = runs.get(runId);
     return {
       ...owner,
+      selectHarness(selectedHarness) {
+        const result = owner.selectHarness(selectedHarness);
+        if (result.outcome === "selected") pushRunUpdate(runId);
+        return result;
+      },
       writeState(state) {
         const result = owner.writeState(state);
         if (result.ok && tracking !== undefined) {
@@ -606,6 +611,23 @@ export function createApplication(deps: ApplicationDependencies): Application {
         return result;
       },
     };
+  }
+
+  function upgradeLegacyHarnessSelection(
+    owner: RunOwner,
+    routing: readonly RoutingNode[],
+    runId: string,
+  ): "ready" | "fenced" {
+    if (
+      owner.record.selectedHarness !== undefined ||
+      !routingNeedsHarness(routing)
+    ) {
+      return "ready";
+    }
+    return observedOwner(owner, runId).selectHarness("claude-code").outcome !==
+      "fenced"
+      ? "ready"
+      : "fenced";
   }
 
   function restsAtInteractiveStep(
@@ -709,6 +731,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
     readonly routing: readonly RoutingNode[];
     readonly digest: string;
   }): Promise<RunExecutionReport> {
+    if (
+      upgradeLegacyHarnessSelection(
+        params.owner,
+        params.routing,
+        params.runId,
+      ) === "fenced"
+    ) {
+      throw new Error(
+        "application: legacy Harness selection write was fenced.",
+      );
+    }
     const report = await runExecution!({
       routing: params.routing,
       digest: params.digest,
@@ -752,13 +785,28 @@ export function createApplication(deps: ApplicationDependencies): Application {
       return { status: "not-applied", problem: runStoreDamaged(runId) };
     }
     tracking.owner = owner;
+    const observed = observedOwner(owner, runId);
     if (tracking.takeover === true && tracking.state === "blocked") {
+      // This takeover intentionally drives no routing, so it performs the
+      // resume-boundary upgrade here rather than in executeTrackedRouting.
+      if (
+        upgradeLegacyHarnessSelection(owner, tracking.routing, runId) ===
+        "fenced"
+      ) {
+        tracking.owner = undefined;
+        tracking.done = true;
+        try {
+          owner.release();
+        } finally {
+          owner.close();
+        }
+        return { status: "not-applied", problem: runStoreDamaged(runId) };
+      }
       tracking.promise = undefined;
       tracking.done = false;
       pushRunUpdate(runId);
       return { status: "applied" };
     }
-    const observed = observedOwner(owner, runId);
     // A signal-abort and a blocked pause retain ownership. Every rested outcome
     // releases it in the finally.
     let leaveClaimLive = false;
@@ -978,6 +1026,30 @@ export function createApplication(deps: ApplicationDependencies): Application {
           updates.close();
         },
       };
+    }
+    // Reopening is itself an upgrade boundary. Derive only from the still-installed
+    // pinned Snapshot, then perform the one fenced write before projecting the Run.
+    // A missing/corrupt Snapshot is left untouched for `runSnapshot` to translate
+    // into its existing Problem, and a foreign live owner is never fenced by a read.
+    const read = runGroup?.readRun(runId);
+    if (read?.ok && read.run.selectedHarness === undefined) {
+      const derived = deriveRunFacts(
+        runProjection,
+        read.run.bundleSnapshotDigest,
+      );
+      if ("facts" in derived && routingNeedsHarness(derived.facts.routing)) {
+        const tracking = runs.get(runId);
+        const heldOwner =
+          tracking !== undefined && !tracking.done ? tracking.owner : undefined;
+        const owner = heldOwner ?? runProjection.runGroup.acquireRun(runId);
+        if (owner !== undefined) {
+          try {
+            upgradeLegacyHarnessSelection(owner, derived.facts.routing, runId);
+          } finally {
+            if (heldOwner === undefined) owner.close();
+          }
+        }
+      }
     }
     const tracking = runs.get(runId);
     const snapshot = runSnapshot(
@@ -1507,6 +1579,19 @@ export function createApplication(deps: ApplicationDependencies): Application {
     if (tracking === undefined || owner === undefined) {
       return { status: "not-applied", problem: runStoreDamaged(input.runId) };
     }
+    if (
+      upgradeLegacyHarnessSelection(owner, facts.routing, input.runId) ===
+      "fenced"
+    ) {
+      if (!ownershipWasHeld) {
+        tracking.owner = undefined;
+        tracking.done = true;
+        owner.release();
+        owner.close();
+        runs.delete(input.runId);
+      }
+      return { status: "not-applied", problem: runStoreDamaged(input.runId) };
+    }
     const activeTracking = tracking;
     const activeOwner = owner;
     // A signal-abort of the granted interval leaves the claim live for the next
@@ -1960,6 +2045,18 @@ export function createApplication(deps: ApplicationDependencies): Application {
       runs.set(runId, tracking);
     }
     if (tracking === undefined || owner === undefined) {
+      return { problem: runStoreDamaged(runId) };
+    }
+    if (
+      upgradeLegacyHarnessSelection(owner, facts.routing, runId) === "fenced"
+    ) {
+      if (!ownershipWasHeld) {
+        tracking.owner = undefined;
+        tracking.done = true;
+        owner.release();
+        owner.close();
+        runs.delete(runId);
+      }
       return { problem: runStoreDamaged(runId) };
     }
     // Confirm the Run derives to `blocked` at this exact interactive Step — not a

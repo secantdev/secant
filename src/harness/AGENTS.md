@@ -110,6 +110,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - The replayer's `case.json` carries the interrupt/recovery vocabulary: `ignoreSigterm` (swallow SIGTERM → force-kill path; moot on Windows, where every
   live child is force-killed regardless), per-turn `exitAfter` (exit without a result → lost/corruption), and a `resume` section replayed when the launch
   has `--resume`.
+- **Codex timeout split:** `handshakeTimeoutMs` bounds only the one-off `prepare` qualification (spawn → `initialize`/`account`/`model`); `controlTimeoutMs`
+  (defaults to it) bounds post-qualification live exchanges (session start/resume, Turn start/interrupt/steer acks). A stall-then-timeout case squeezes
+  `controlTimeoutMs`, never `handshakeTimeoutMs` — throttling the spawn+handshake there flakes `prepare` on a loaded Windows runner (the #148 CI flake).
 
 ## Read next
 

@@ -109,7 +109,7 @@ runInterruptRecoveryCases({
       createCodexAdapter({
         path: installed.path,
         env: {},
-        handshakeTimeoutMs: 500,
+        controlTimeoutMs: 500,
         cleanupTimeoutMs: 20,
       });
   },
@@ -593,7 +593,7 @@ function exactRecoveryReplayer(threadId: string) {
     createCodexAdapter({
       path: installed.path,
       env: {},
-      handshakeTimeoutMs: 500,
+      controlTimeoutMs: 500,
     });
 }
 
@@ -1136,7 +1136,7 @@ test("codex-live-controls control timeout preserves its cause on the Turn", asyn
   const preparedResult = await createCodexAdapter({
     path: installed.path,
     env: {},
-    handshakeTimeoutMs: 1_000,
+    controlTimeoutMs: 1_000,
   }).prepare({ workspace: process.cwd() });
   assert.equal(preparedResult.ok, true);
   if (!preparedResult.ok) throw new Error("unreachable");
@@ -1173,7 +1173,7 @@ for (const failure of ["malformed", "timeout"] as const) {
     const preparedResult = await createCodexAdapter({
       path: installed.path,
       env: {},
-      handshakeTimeoutMs: 1_000,
+      controlTimeoutMs: 1_000,
     }).prepare({ workspace: process.cwd() });
     assert.equal(preparedResult.ok, true);
     if (!preparedResult.ok) throw new Error("unreachable");
@@ -1231,7 +1231,7 @@ test("codex-live-controls close stays bounded before a native Turn exists", asyn
   const preparedResult = await createCodexAdapter({
     path: installed.path,
     env: {},
-    handshakeTimeoutMs: 5_000,
+    controlTimeoutMs: 5_000,
     cleanupTimeoutMs: 500,
   }).prepare({ workspace: process.cwd() });
   assert.equal(preparedResult.ok, true);
@@ -1270,7 +1270,7 @@ test("codex-live-controls close bounds an already in-flight Interrupt", async ()
   const preparedResult = await createCodexAdapter({
     path: installed.path,
     env: {},
-    handshakeTimeoutMs: 5_000,
+    controlTimeoutMs: 5_000,
     cleanupTimeoutMs: 500,
   }).prepare({ workspace: process.cwd() });
   assert.equal(preparedResult.ok, true);
@@ -1564,7 +1564,7 @@ async function prepareDetachedCodex(
   const preparedResult = await createCodexAdapter({
     path: installed.path,
     env: {},
-    handshakeTimeoutMs: 500,
+    controlTimeoutMs: 500,
   }).prepare({ workspace: process.cwd() });
   assert.equal(preparedResult.ok, true);
   if (!preparedResult.ok) throw new Error("unreachable");

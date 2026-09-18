@@ -83,7 +83,17 @@ export interface CodexAdapterOverrides {
   readonly resolve?: (name: string) => string | undefined;
   readonly probeTimeoutMs?: number;
   readonly launchTimeoutMs?: number;
+  /** Bounds the one-off `prepare` qualification handshake (initialize, account,
+   *  model list). Kept distinct from `controlTimeoutMs` so a test can make live
+   *  controls fast without throttling qualification — spawning a child and running
+   *  the handshake is not reliably fast on a loaded CI runner, so squeezing it
+   *  there makes `prepare` flaky. */
   readonly handshakeTimeoutMs?: number;
+  /** Bounds each post-qualification live exchange against the already-warm child:
+   *  session thread start/resume and the Turn's start/interrupt/steer control
+   *  acknowledgements. Defaults to `handshakeTimeoutMs`. A stall-then-timeout test
+   *  squeezes this to settle a withheld acknowledgement quickly. */
+  readonly controlTimeoutMs?: number;
   readonly cleanupTimeoutMs?: number;
   readonly probeRevision?: () => string;
   readonly spawn?: typeof spawnOwnedProcess;
@@ -169,7 +179,9 @@ class CodexAdapter implements HarnessAdapter {
         live.connection,
         live.diagnostics,
         options.workspace,
-        this.overrides.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
+        this.overrides.controlTimeoutMs ??
+          this.overrides.handshakeTimeoutMs ??
+          DEFAULT_HANDSHAKE_TIMEOUT_MS,
         this.overrides.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
         this.overrides.recordingObserver,
       ),
@@ -391,7 +403,7 @@ class CodexPreparedHarness implements PreparedHarness {
     private readonly connection: CodexJsonlConnection,
     private readonly diagnostics: CodexDiagnosticCapture,
     private readonly workspace: string,
-    private readonly handshakeTimeoutMs: number,
+    private readonly controlTimeoutMs: number,
     private readonly cleanupTimeoutMs: number,
     private readonly observer: CodexRecordingObserver | undefined,
   ) {
@@ -422,7 +434,7 @@ class CodexPreparedHarness implements PreparedHarness {
         request.session,
         this.connection,
         this.workspace,
-        this.handshakeTimeoutMs,
+        this.controlTimeoutMs,
       );
       this.sessions.set(request.session, session);
     }
@@ -431,7 +443,7 @@ class CodexPreparedHarness implements PreparedHarness {
       session,
       steerCapability: this.profile.steer,
       connection: this.connection,
-      controlTimeoutMs: this.handshakeTimeoutMs,
+      controlTimeoutMs: this.controlTimeoutMs,
       onSettled: () => {
         if (this.active === turn) this.active = undefined;
       },
@@ -537,7 +549,7 @@ class CodexSession {
     readonly name: string,
     private readonly connection: CodexJsonlConnection,
     private readonly workspace: string,
-    private readonly handshakeTimeoutMs: number,
+    private readonly controlTimeoutMs: number,
   ) {}
 
   start(turn: CodexTurn): void {
@@ -593,7 +605,7 @@ class CodexSession {
             this.connection.request("thread/resume", {
               threadId: recoveryCoordinate.opaque,
             }),
-          timeoutMs: this.handshakeTimeoutMs,
+          timeoutMs: this.controlTimeoutMs,
           label: "thread/resume runtime exchange",
         });
         const resumed = parseThreadResumeResult(result);
@@ -616,7 +628,7 @@ class CodexSession {
         const result = await boundedCodexExchange({
           operation: () =>
             this.connection.request("thread/start", { cwd: this.workspace }),
-          timeoutMs: this.handshakeTimeoutMs,
+          timeoutMs: this.controlTimeoutMs,
           label: "thread/start runtime exchange",
         });
         const started = parseThreadStartResult(result);
@@ -652,7 +664,7 @@ class CodexSession {
             threadId: coordinate.opaque,
             input: [{ type: "text", text: turn.request.input.text }],
           }),
-        timeoutMs: this.handshakeTimeoutMs,
+        timeoutMs: this.controlTimeoutMs,
         label: "turn/start runtime exchange",
       });
       turn.acceptTurn(parseTurnStartResult(result));

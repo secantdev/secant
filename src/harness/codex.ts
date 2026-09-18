@@ -801,14 +801,21 @@ class CodexTurn implements HarnessTurn {
     input: SteerInput,
     target: TCodexNativeTarget,
   ): Promise<ControlReceipt> {
+    let acceptedWhileLive = false;
     let result: unknown;
     try {
       result = await boundedCodexExchange({
         operation: () =>
-          this.connection.request("turn/steer", {
-            threadId: target.threadId,
-            expectedTurnId: target.turnId,
-            input: [{ type: "text", text: input.text }],
+          this.connection.requestControl({
+            method: "turn/steer",
+            params: {
+              threadId: target.threadId,
+              expectedTurnId: target.turnId,
+              input: [{ type: "text", text: input.text }],
+            },
+            onAccepted: () => {
+              acceptedWhileLive = this.acceptsNewInput();
+            },
           }),
         timeoutMs: this.controlTimeoutMs,
         label: "turn/steer control exchange",
@@ -830,7 +837,7 @@ class CodexTurn implements HarnessTurn {
       });
       return { outcome: "rejected", reason: "expired" };
     }
-    if (!this.acceptsNewInput() || steeredTurnId !== target.turnId) {
+    if (!acceptedWhileLive || steeredTurnId !== target.turnId) {
       return { outcome: "rejected", reason: "expired" };
     }
     return { outcome: "accepted" };

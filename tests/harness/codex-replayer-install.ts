@@ -22,6 +22,14 @@ const fixtureRoot = join(
   "codex",
 );
 const qualificationFixtureDirectory = join(fixtureRoot, "codex-qualification");
+const SCHEMA_FILE = "stable-schema.generated.json";
+const sharedSchemaDirectory = makeTempDir("secant-codex-schema-source-");
+// Stage the immutable schema on the temp volume once. Normal qualification
+// cases then copy temp-to-temp; mutation cases still take an isolated copy.
+copyFileSync(
+  join(qualificationFixtureDirectory, SCHEMA_FILE),
+  join(sharedSchemaDirectory, SCHEMA_FILE),
+);
 
 export interface CodexInvocation {
   readonly args: readonly string[];
@@ -209,7 +217,7 @@ export function installCodexReplayer(
   let versionExitCode: number | undefined;
   // Most cases only read the 689 KB schema. Share those bytes and copy lazily
   // only for drift cases, avoiding per-case Windows filesystem/AV contention.
-  let schemaDirectory = qualificationFixtureDirectory;
+  let schemaDirectory = sharedSchemaDirectory;
   let schemaCopied = false;
   const writeRecording = (): void => {
     writeFileSync(
@@ -223,20 +231,17 @@ export function installCodexReplayer(
         refreshCommand: fixtureRecording.refreshCommand,
         fixtureDirectory: installedFixtureDirectory,
         schemaDirectory,
-        schemaFile: "stable-schema.generated.json",
+        schemaFile: SCHEMA_FILE,
         log: logPath,
         versionExitCode,
       }),
     );
   };
   const mutableSchemaPath = (): string => {
-    const installedSchemaPath = join(
-      installedFixtureDirectory,
-      "stable-schema.generated.json",
-    );
+    const installedSchemaPath = join(installedFixtureDirectory, SCHEMA_FILE);
     if (!schemaCopied) {
       copyFileSync(
-        join(qualificationFixtureDirectory, "stable-schema.generated.json"),
+        join(sharedSchemaDirectory, SCHEMA_FILE),
         installedSchemaPath,
       );
       schemaDirectory = installedFixtureDirectory;

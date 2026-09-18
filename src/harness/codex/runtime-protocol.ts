@@ -22,6 +22,13 @@ interface PendingRequest {
   readonly method: string;
   readonly resolve: (result: unknown) => void;
   readonly reject: (cause: unknown) => void;
+  readonly onAccepted?: () => void;
+}
+
+interface TCodexRequest {
+  readonly method: string;
+  readonly params: object;
+  readonly onAccepted?: () => void;
 }
 
 export interface CodexRuntimeHandlers {
@@ -96,13 +103,30 @@ export class CodexJsonlConnection {
   }
 
   request(method: string, params: object): Promise<unknown> {
+    return this.sendRequest({ method, params });
+  }
+
+  requestControl(options: TCodexRequest): Promise<unknown> {
+    return this.sendRequest(options);
+  }
+
+  private sendRequest(options: TCodexRequest): Promise<unknown> {
     if (!this.runtimeStarted) {
       return Promise.reject(new Error("Codex runtime reader is not started"));
     }
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { method, resolve, reject });
-      void this.write({ id, method, params }).catch((cause) => {
+      this.pending.set(id, {
+        method: options.method,
+        resolve,
+        reject,
+        onAccepted: options.onAccepted,
+      });
+      void this.write({
+        id,
+        method: options.method,
+        params: options.params,
+      }).catch((cause) => {
         const pending = this.pending.get(id);
         if (pending === undefined) return;
         this.pending.delete(id);
@@ -141,7 +165,9 @@ export class CodexJsonlConnection {
     if (pending === undefined) return;
     this.pending.delete(message.id);
     try {
-      pending.resolve(responseResult(pending.method, message));
+      const result = responseResult(pending.method, message);
+      pending.onAccepted?.();
+      pending.resolve(result);
     } catch (cause) {
       pending.reject(cause);
     }

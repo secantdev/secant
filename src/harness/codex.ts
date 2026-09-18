@@ -48,6 +48,7 @@ import {
   CodexProtocolError,
   type CodexRpcEnvelope,
   parseRuntimeNotification,
+  parseThreadResumeResult,
   parseThreadStartResult,
   parseTurnStartResult,
 } from "./codex/runtime-protocol.js";
@@ -506,6 +507,7 @@ class CodexSession {
   private coordinate: RecoveryCoordinate | undefined;
   private model: ModelObservation = { known: false };
   private detached = false;
+  private unusableFailure: HarnessFailure | undefined;
 
   constructor(
     readonly name: string,
@@ -519,6 +521,12 @@ class CodexSession {
   }
 
   availability(): SessionAvailability {
+    if (this.unusableFailure !== undefined) {
+      return {
+        state: "unusable",
+        reason: recoveryFailureDiagnostics(this.unusableFailure),
+      };
+    }
     return this.coordinate === undefined
       ? { state: "unusable", reason: "Codex thread was not created." }
       : { state: "detached", coordinate: this.coordinate };
@@ -529,9 +537,48 @@ class CodexSession {
   }
 
   private async submit(turn: CodexTurn): Promise<void> {
-    if (turn.request.resume !== undefined || this.detached) {
-      turn.settleRecoveryUnavailable();
+    if (this.unusableFailure !== undefined) {
+      turn.settleRecoveryFailure(this.unusableFailure, this.model);
       return;
+    }
+    if (
+      turn.request.resume !== undefined &&
+      this.coordinate !== undefined &&
+      turn.request.resume.opaque !== this.coordinate.opaque
+    ) {
+      this.failRecovery(
+        turn,
+        "Codex recovery requested a different thread than the one mapped to this Session.",
+      );
+      return;
+    }
+    const recoveryCoordinate =
+      turn.request.resume ?? (this.detached ? this.coordinate : undefined);
+    if (recoveryCoordinate !== undefined) {
+      turn.recovering();
+      try {
+        const result = await boundedCodexExchange({
+          operation: () =>
+            this.connection.request("thread/resume", {
+              threadId: recoveryCoordinate.opaque,
+            }),
+          timeoutMs: this.handshakeTimeoutMs,
+          label: "thread/resume runtime exchange",
+        });
+        const resumed = parseThreadResumeResult(result);
+        if (resumed.threadId !== recoveryCoordinate.opaque) {
+          throw new CodexProtocolError(
+            "thread/resume acknowledged a different Codex thread",
+          );
+        }
+        this.coordinate = recoveryCoordinate;
+        this.model = { known: true, model: resumed.model };
+        this.detached = false;
+        turn.recovered();
+      } catch (cause) {
+        this.failRecovery(turn, recoveryFailureReason(cause), cause);
+        return;
+      }
     }
     if (this.coordinate === undefined) {
       try {
@@ -582,6 +629,22 @@ class CodexSession {
       if (!turn.settled) turn.lostAcceptance(cause);
     }
   }
+
+  private failRecovery(
+    turn: CodexTurn,
+    diagnostics: string,
+    cause?: unknown,
+  ): void {
+    const failure: HarnessFailure = {
+      phase: "recovery",
+      category: "recovery-unacknowledged",
+      possibleEffects: "none",
+      diagnostics,
+      ...(cause !== undefined ? { cause } : {}),
+    };
+    this.unusableFailure = failure;
+    turn.settleRecoveryFailure(failure, this.model);
+  }
 }
 
 type RuntimeNotification = NonNullable<
@@ -606,6 +669,7 @@ class CodexTurn implements HarnessTurn {
   private preview = "";
   private previewIndex: number | undefined;
   private lastObservation = "no authoritative Codex Turn observation";
+  private recoveryPending = false;
 
   constructor(
     request: TurnRequest,
@@ -644,6 +708,14 @@ class CodexTurn implements HarnessTurn {
     return Promise.resolve({ outcome: "rejected", reason: "expired" });
   }
 
+  recovering(): void {
+    this.recoveryPending = true;
+  }
+
+  recovered(): void {
+    this.recoveryPending = false;
+  }
+
   async admit(coordinate: RecoveryCoordinate): Promise<
     | { readonly recorded: true }
     | {
@@ -674,7 +746,7 @@ class CodexTurn implements HarnessTurn {
     this.admittedToRuntime = true;
     this.threadId = coordinate.opaque;
     this.model = model;
-    this.lastObservation = "Codex created the fresh thread";
+    this.lastObservation = "Codex acknowledged the Session thread";
     this.emit({
       kind: "session",
       availability: { state: "open" },
@@ -759,6 +831,7 @@ class CodexTurn implements HarnessTurn {
 
   connectionEnded(cause?: unknown): void {
     if (this.settled) return;
+    if (this.recoveryPending) return;
     if (!this.admittedToRuntime) {
       this.settleNotStarted(
         "app-server-closed",
@@ -824,19 +897,16 @@ class CodexTurn implements HarnessTurn {
     });
   }
 
-  settleRecoveryUnavailable(): void {
-    const reason =
-      "Codex thread recovery is not available until the recovery slice lands.";
+  settleRecoveryFailure(
+    failure: HarnessFailure,
+    effectiveModel: ModelObservation,
+  ): void {
+    const reason = recoveryFailureDiagnostics(failure);
     this.settle({
       kind: "failed",
       detail: {
-        failure: {
-          phase: "recovery",
-          category: "recovery-unavailable",
-          possibleEffects: "none",
-          diagnostics: reason,
-        },
-        effectiveModel: { known: false },
+        failure,
+        effectiveModel,
         session: { state: "unusable", reason },
       },
     });
@@ -844,6 +914,7 @@ class CodexTurn implements HarnessTurn {
 
   protocolFailure(diagnostics: string, cause?: unknown): void {
     if (this.settled) return;
+    if (this.recoveryPending) return;
     if (!this.submitted) {
       this.settleNotStarted("protocol-corruption", diagnostics, cause);
       return;
@@ -1041,6 +1112,15 @@ function qualificationCacheKey(options: TCacheKey): string | undefined {
   ].join("\0");
 }
 
+function recoveryFailureReason(cause: unknown): string {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return `Codex could not acknowledge the requested thread during recovery: ${detail}`;
+}
+
+function recoveryFailureDiagnostics(failure: HarnessFailure): string {
+  return failure.diagnostics ?? "Codex thread recovery failed.";
+}
+
 interface TBuildProfile {
   readonly target: TDiscoveredTarget;
   readonly version: string;
@@ -1059,9 +1139,9 @@ function buildProfile(options: TBuildProfile): HarnessProfile {
     configurationPosture:
       "user-compatible: inherits the user's Codex home and environment; experimental API is disabled, while model, reasoning effort, personality, approval policy, and sandbox policy remain unset by Secant.",
     recovery: {
-      mode: "unavailable",
+      mode: "native-reattach",
       evidence:
-        "Fresh Codex threads are durable, but exact native reattachment is not exposed until the recovery slice lands.",
+        "Codex thread/resume must acknowledge the exact requested private thread before durable admission and content submission.",
     },
     interruption: {
       mode: "unavailable",

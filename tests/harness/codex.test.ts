@@ -8,16 +8,21 @@ import {
   type DurableTurnRecorder,
   type HarnessPlatform,
   type PreparedHarness,
+  type RecoveryCoordinate,
   type TurnEvent,
   type TurnRequest,
 } from "../../src/harness/harness.js";
 import type { OwnedProcess } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import {
+  runExactThreadRecoveryCases,
   runPrepareProfileCases,
   runTurnLifecycleCases,
 } from "./conformance.js";
-import { installCodexReplayer } from "./codex-replayer-install.js";
+import {
+  installCodexReplayer,
+  type InstalledCodexReplayer,
+} from "./codex-replayer-install.js";
 
 const replayer = installCodexReplayer();
 
@@ -43,10 +48,28 @@ runTurnLifecycleCases({
     createCodexAdapter({ path: failedTurnReplayer().path, env: {} }),
 });
 
+runExactThreadRecoveryCases({
+  label: "codex-exact-thread-recovery",
+  resumeAcknowledged: () => exactRecoveryReplayer("thread-1"),
+  resumeUnacknowledged: () => exactRecoveryReplayer("different-thread"),
+});
+
 function failedTurnReplayer() {
   const installed = installCodexReplayer();
   installed.failTurn("scripted terminal failure");
   return installed;
+}
+
+function exactRecoveryReplayer(threadId: string) {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ stallFirstTurn: true });
+  installed.configureRecovery({ threadId });
+  return () =>
+    createCodexAdapter({
+      path: installed.path,
+      env: {},
+      handshakeTimeoutMs: 500,
+    });
 }
 
 test("refused durable admission sends no prompt content", async () => {
@@ -238,9 +261,232 @@ test("later fresh Turns reuse one private thread and continue RPC ids", async ()
   await prepared.close();
 });
 
-test("a lost Turn fences its native Session from later ordinary work", async () => {
+test("codex-exact-thread-recovery acknowledges the same thread before admission and prompt", async () => {
   const installed = installCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true });
+  const { prepared, coordinate } = await prepareDetachedCodex(installed);
+  const methodsAtAdmission: string[] = [];
+  const second = await prepared
+    .startTurn({
+      ...turnRequest({
+        admit: () => {
+          const appServer = installed
+            .invocations()
+            .find((invocation) => invocation.args.join(" ") === "app-server");
+          assert.ok(appServer !== undefined);
+          methodsAtAdmission.push(
+            ...appServer.stdinLines.map(
+              (line) => JSON.parse(line).method as string,
+            ),
+          );
+          return Promise.resolve({ recorded: true });
+        },
+        checkpoint: () => Promise.resolve({ recorded: true }),
+      }),
+      resume: coordinate,
+    })
+    .result();
+
+  assert.equal(second.kind, "completed");
+  assert.deepEqual(methodsAtAdmission.slice(-1), ["thread/resume"]);
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const runtimeRequests = appServer.stdinLines
+    .map((line) => JSON.parse(line))
+    .filter((message) =>
+      ["thread/start", "thread/resume", "turn/start"].includes(message.method),
+    );
+  assert.deepEqual(
+    runtimeRequests.map((message) => [message.method, message.params.threadId]),
+    [
+      ["thread/start", undefined],
+      ["turn/start", "thread-1"],
+      ["thread/resume", "thread-1"],
+      ["turn/start", "thread-1"],
+    ],
+  );
+  await prepared.close();
+});
+
+test("a newly materialized Codex Session resumes from the caller coordinate without starting fresh", async () => {
+  const installed = installCodexReplayer();
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared
+    .startTurn({
+      ...turnRequest(),
+      resume: { opaque: "thread-1" },
+    })
+    .result();
+
+  assert.equal(result.kind, "completed");
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const runtimeMethods = appServer.stdinLines
+    .map((line) => JSON.parse(line).method)
+    .filter(
+      (method) => method.startsWith("thread/") || method === "turn/start",
+    );
+  assert.deepEqual(runtimeMethods, ["thread/resume", "turn/start"]);
+  await prepared.close();
+});
+
+test("a detached Codex Session recovers its private coordinate when resume is omitted", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ stallFirstTurn: true });
+  const { prepared } = await prepareDetachedCodex(installed);
+  assert.equal(
+    (await prepared.startTurn(turnRequest()).result()).kind,
+    "completed",
+  );
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  assert.equal(
+    appServer.stdinLines.filter(
+      (line) => JSON.parse(line).method === "thread/resume",
+    ).length,
+    1,
+  );
+  await prepared.close();
+});
+
+test("a mismatched Codex recovery acknowledgement permanently fences the Session", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ stallFirstTurn: true });
+  installed.configureRecovery({ threadId: "different-thread" });
+  const { prepared, coordinate } = await prepareDetachedCodex(installed);
+  let admissions = 0;
+  const recorder: DurableTurnRecorder = {
+    admit: () => {
+      admissions += 1;
+      return Promise.resolve({ recorded: true });
+    },
+    checkpoint: () => Promise.resolve({ recorded: true }),
+  };
+  const second = await prepared
+    .startTurn({
+      ...turnRequest(recorder),
+      resume: coordinate,
+    })
+    .result();
+  assert.equal(second.kind, "failed");
+  if (second.kind !== "failed") throw new Error("unreachable");
+  assert.equal(second.detail.failure.phase, "recovery");
+  assert.equal(second.detail.failure.category, "recovery-unacknowledged");
+  assert.equal(second.detail.failure.possibleEffects, "none");
+  assert.equal(second.detail.session.state, "unusable");
+
+  const third = await prepared.startTurn(turnRequest(recorder)).result();
+  assert.deepEqual(third, second);
+  assert.equal(admissions, 0);
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const runtimeMethods = appServer.stdinLines
+    .map((line) => JSON.parse(line).method)
+    .filter((method) =>
+      ["thread/start", "thread/resume", "turn/start"].includes(method),
+    );
+  assert.deepEqual(runtimeMethods, [
+    "thread/start",
+    "turn/start",
+    "thread/resume",
+  ]);
+  await prepared.close();
+});
+
+test("a Codex recovery response without a thread acknowledgement fails before admission", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ stallFirstTurn: true });
+  installed.configureRecovery({ threadId: null });
+  const { prepared, coordinate } = await prepareDetachedCodex(installed);
+  let admitted = false;
+  const result = await prepared
+    .startTurn({
+      ...turnRequest({
+        admit: () => {
+          admitted = true;
+          return Promise.resolve({ recorded: true });
+        },
+        checkpoint: () => Promise.resolve({ recorded: true }),
+      }),
+      resume: coordinate,
+    })
+    .result();
+
+  assert.equal(result.kind, "failed");
+  if (result.kind !== "failed") throw new Error("unreachable");
+  assert.equal(result.detail.failure.phase, "recovery");
+  assert.equal(result.detail.failure.category, "recovery-unacknowledged");
+  assert.ok(result.detail.failure.cause instanceof Error);
+  assert.equal(result.detail.session.state, "unusable");
+  assert.equal(admitted, false);
+  await prepared.close();
+});
+
+test("malformed transport during Codex recovery is a sticky recovery failure", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ stallFirstTurn: true });
+  installed.configureRecovery({ malformedFrame: true });
+  const { prepared, coordinate } = await prepareDetachedCodex(installed);
+  const failed = await prepared
+    .startTurn({
+      ...turnRequest(),
+      resume: coordinate,
+    })
+    .result();
+
+  assert.equal(failed.kind, "failed");
+  if (failed.kind !== "failed") throw new Error("unreachable");
+  assert.equal(failed.detail.failure.phase, "recovery");
+  assert.equal(failed.detail.failure.category, "recovery-unacknowledged");
+  assert.equal(failed.detail.session.state, "unusable");
+  assert.ok(failed.detail.failure.cause instanceof Error);
+  assert.deepEqual(await prepared.startTurn(turnRequest()).result(), failed);
+  await prepared.close();
+});
+
+test("a detached Codex Session cannot be rebound to another recovery coordinate", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ stallFirstTurn: true, stopAfter: "accepted" });
+  installed.configureRecovery({ threadId: "different-thread" });
+  const { prepared } = await prepareDetachedCodex(installed);
+  const failed = await prepared
+    .startTurn({
+      ...turnRequest(),
+      resume: { opaque: "different-thread" },
+    })
+    .result();
+
+  assert.equal(failed.kind, "failed");
+  if (failed.kind !== "failed") throw new Error("unreachable");
+  assert.equal(failed.detail.failure.phase, "recovery");
+  assert.equal(failed.detail.session.state, "unusable");
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  assert.equal(
+    appServer.stdinLines.some(
+      (line) => JSON.parse(line).method === "thread/resume",
+    ),
+    false,
+  );
+  await prepared.close();
+});
+
+async function prepareDetachedCodex(
+  installed: InstalledCodexReplayer,
+): Promise<{
+  readonly prepared: PreparedHarness;
+  readonly coordinate: RecoveryCoordinate;
+}> {
   const preparedResult = await createCodexAdapter({
     path: installed.path,
     env: {},
@@ -249,26 +495,13 @@ test("a lost Turn fences its native Session from later ordinary work", async () 
   assert.equal(preparedResult.ok, true);
   if (!preparedResult.ok) throw new Error("unreachable");
   const prepared = preparedResult.harness;
-
   const first = await prepared.startTurn(turnRequest()).result();
   assert.equal(first.kind, "lost");
-  const second = await prepared.startTurn(turnRequest()).result();
-  assert.equal(second.kind, "failed");
-  if (second.kind !== "failed") throw new Error("unreachable");
-  assert.equal(second.detail.failure.category, "recovery-unavailable");
-
-  const appServer = installed
-    .invocations()
-    .find((invocation) => invocation.args.join(" ") === "app-server");
-  assert.ok(appServer !== undefined);
-  assert.equal(
-    appServer.stdinLines.filter(
-      (line) => JSON.parse(line).method === "turn/start",
-    ).length,
-    1,
-  );
-  await prepared.close();
-});
+  if (first.kind !== "lost" || first.detail.session.state !== "detached") {
+    throw new Error("unreachable");
+  }
+  return { prepared, coordinate: first.detail.session.coordinate };
+}
 
 async function prepareCodex(path: string): Promise<PreparedHarness> {
   const result = await createCodexAdapter({ path, env: {} }).prepare({
@@ -429,7 +662,8 @@ test("Codex profile is truthful and user-compatible", async () => {
   const { profile } = result.harness;
   assert.equal(profile.harness, "codex");
   assert.equal(profile.adapterRevision, "codex-probe-1");
-  assert.equal(profile.recovery.mode, "unavailable");
+  assert.equal(profile.recovery.mode, "native-reattach");
+  assert.match(profile.recovery.evidence, /thread\/resume.*exact/i);
   assert.equal(profile.interruption.mode, "unavailable");
   assert.equal(profile.approvals.available, false);
   assert.equal(profile.clarifications.available, false);

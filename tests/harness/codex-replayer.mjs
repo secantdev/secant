@@ -74,6 +74,20 @@ for await (const line of lines) {
     );
     continue;
   }
+  if (request.method === "thread/resume") {
+    if (scenario.recovery?.malformedFrame === true) {
+      process.stdout.write("{malformed\n");
+      continue;
+    }
+    const threadId =
+      scenario.recovery?.threadId === undefined
+        ? "thread-1"
+        : scenario.recovery.threadId;
+    process.stdout.write(
+      `${JSON.stringify({ id: request.id, result: threadStartResponse(threadId) })}\n`,
+    );
+    continue;
+  }
   if (request.method === "turn/start") {
     turnNumber += 1;
     const turnId = `turn-${turnNumber}`;
@@ -201,7 +215,7 @@ if (Array.isArray(scenario.traffic) && trafficAt < scenario.traffic.length) {
 }
 process.exit(scenario.exitCode ?? 0);
 
-function threadStartResponse() {
+function threadStartResponse(threadId = "thread-1") {
   return {
     approvalPolicy: "on-request",
     approvalsReviewer: "user",
@@ -210,7 +224,7 @@ function threadStartResponse() {
     modelProvider: "openai",
     sandbox: { type: "workspaceWrite" },
     thread: {
-      id: "thread-1",
+      ...(threadId === null ? {} : { id: threadId }),
       turns: [],
     },
   };

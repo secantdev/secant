@@ -50,6 +50,7 @@ export interface InstalledCodexReplayer {
   requireLogin(): void;
   failTurn(message: string): void;
   configureTurn(options: CodexTurnReplayOptions): void;
+  configureRecovery(options: CodexRecoveryReplayOptions): void;
 }
 
 export interface CodexTurnReplayOptions {
@@ -61,6 +62,11 @@ export interface CodexTurnReplayOptions {
   readonly stallFirstTurn?: boolean;
   readonly malformedItem?: boolean;
   readonly malformedTerminal?: boolean;
+}
+
+export interface CodexRecoveryReplayOptions {
+  readonly threadId?: string | null;
+  readonly malformedFrame?: boolean;
 }
 
 function npmBunShim(scriptRelative: string): string {
@@ -271,6 +277,12 @@ export function installCodexReplayer(): InstalledCodexReplayer {
       const casePath = join(installedFixtureDirectory, "case.json");
       const protocolCase = JSON.parse(readFileSync(casePath, "utf8"));
       protocolCase.turn = { ...protocolCase.turn, ...options };
+      writeFileSync(casePath, JSON.stringify(protocolCase));
+    },
+    configureRecovery(options) {
+      const casePath = join(installedFixtureDirectory, "case.json");
+      const protocolCase = JSON.parse(readFileSync(casePath, "utf8"));
+      protocolCase.recovery = options;
       writeFileSync(casePath, JSON.stringify(protocolCase));
     },
   };

@@ -188,7 +188,7 @@ function responseResult(method: string, message: CodexRpcEnvelope): unknown {
   return message.result;
 }
 
-const threadStartResultSchema = z.looseObject({
+const threadResultSchema = z.looseObject({
   model: z.string().min(1),
   thread: z.looseObject({ id: z.string().min(1) }),
 });
@@ -201,7 +201,15 @@ export function parseThreadStartResult(value: unknown): {
   readonly threadId: string;
   readonly model: string;
 } {
-  const result = parseResult(value, threadStartResultSchema, "thread/start");
+  const result = parseResult(value, threadResultSchema, "thread/start");
+  return { threadId: result.thread.id, model: result.model };
+}
+
+export function parseThreadResumeResult(value: unknown): {
+  readonly threadId: string;
+  readonly model: string;
+} {
+  const result = parseResult(value, threadResultSchema, "thread/resume");
   return { threadId: result.thread.id, model: result.model };
 }
 

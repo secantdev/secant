@@ -17,6 +17,7 @@ import {
   type HarnessRequest,
   type HarnessTurn,
   type LostUnknown,
+  type PreparedHarness,
   type RecoveryCoordinate,
   type TurnAdmission,
   type TurnEvent,
@@ -43,6 +44,16 @@ export interface PrepareProfileScenarios {
 export interface TurnLifecycleScenarios extends PrepareProfileScenarios {
   /** A Turn the Harness ends with a terminal error subtype. */
   failedTurn(): HarnessAdapterFactory;
+}
+
+/** Exact native reattachment behaviours for an Adapter whose deterministic
+ * scenario detaches its first Turn without requiring a control operation. */
+export interface ExactThreadRecoveryScenarios {
+  readonly label: string;
+  /** The recovered native conversation acknowledges the requested coordinate. */
+  resumeAcknowledged(): HarnessAdapterFactory;
+  /** Recovery returns missing or different native conversation evidence. */
+  resumeUnacknowledged(): HarnessAdapterFactory;
 }
 
 /**
@@ -209,6 +220,87 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
   });
 }
 
+export function runExactThreadRecoveryCases(
+  scenarios: ExactThreadRecoveryScenarios,
+): void {
+  runRecoveryCases({
+    ...scenarios,
+    assertStickyUnusable: true,
+    expectedAdmissionsBeforeFailure: 0,
+    expectedMode: "native-reattach",
+    detach: async (prepared) => {
+      const first = await prepared
+        .startTurn(request(recorder().recorder))
+        .result();
+      return lostDetachedCoordinate(first);
+    },
+  });
+}
+
+interface RecoveryCaseDriver extends ExactThreadRecoveryScenarios {
+  readonly assertStickyUnusable?: boolean;
+  readonly expectedAdmissionsBeforeFailure?: number;
+  readonly expectedMode?: "native-reattach";
+  detach(prepared: PreparedHarness): Promise<RecoveryCoordinate>;
+}
+
+function runRecoveryCases(driver: RecoveryCaseDriver): void {
+  const name = (behaviour: string) => `[${driver.label}] ${behaviour}`;
+
+  test(
+    name("a detached Session resumes from its coordinate and completes"),
+    async () => {
+      const prepared = await prepare(driver.resumeAcknowledged());
+      if (driver.expectedMode !== undefined) {
+        assert.equal(prepared.profile.recovery.mode, driver.expectedMode);
+      }
+      const coordinate = await driver.detach(prepared);
+      const second = recorder();
+      const result = await prepared
+        .startTurn(request(second.recorder, { resume: coordinate }))
+        .result();
+      assert.equal(result.kind, "completed");
+      if (result.kind !== "completed") throw new Error("unreachable");
+      assert.equal(result.detail.session.state, "open");
+      assert.equal(second.admissions.length, 1);
+      assert.deepEqual(second.admissions[0]?.resume, coordinate);
+      await prepared.close();
+    },
+  );
+
+  test(
+    name("unacknowledged recovery makes the Session permanently unusable"),
+    async () => {
+      const prepared = await prepare(driver.resumeUnacknowledged());
+      const coordinate = await driver.detach(prepared);
+      const refused = recorder();
+      const second = await prepared
+        .startTurn(request(refused.recorder, { resume: coordinate }))
+        .result();
+      assert.equal(second.kind, "failed");
+      if (second.kind !== "failed") throw new Error("unreachable");
+      assert.equal(second.detail.failure.phase, "recovery");
+      assert.equal(second.detail.session.state, "unusable");
+      if (driver.expectedAdmissionsBeforeFailure !== undefined) {
+        assert.equal(
+          refused.admissions.length,
+          driver.expectedAdmissionsBeforeFailure,
+        );
+      }
+
+      if (driver.assertStickyUnusable === true) {
+        const admissionsAfterFailure = refused.admissions.length;
+        const third = await prepared
+          .startTurn(request(refused.recorder))
+          .result();
+        assert.deepEqual(third, second);
+        assert.equal(refused.admissions.length, admissionsAfterFailure);
+      }
+      await prepared.close();
+    },
+  );
+}
+
 /**
  * Run the request-free interrupt, lost, recovery, and cleanup cases against one
  * provider. Both the fake and the Claude Code Adapter over the replayer call it.
@@ -221,6 +313,17 @@ export function runInterruptRecoveryCases(
 ): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
   const outcome = options.interruptOutcome ?? "interrupted";
+
+  runRecoveryCases({
+    ...scenarios,
+    detach: async (prepared) => {
+      const turn = prepared.startTurn(request(recorder().recorder));
+      const events = observe(turn);
+      await events.waitForSession();
+      await turn.interrupt();
+      return detachedCoordinate(await turn.result(), outcome);
+    },
+  });
 
   test(
     name(
@@ -273,54 +376,6 @@ export function runInterruptRecoveryCases(
   );
 
   test(
-    name("a detached Session resumes from its coordinate and completes"),
-    async () => {
-      const prepared = await prepare(scenarios.resumeAcknowledged());
-      const turn1 = prepared.startTurn(request(recorder().recorder));
-      const events1 = observe(turn1);
-      await events1.waitForSession();
-      await turn1.interrupt();
-      const coordinate = detachedCoordinate(await turn1.result(), outcome);
-
-      const second = recorder();
-      const turn2 = prepared.startTurn(
-        request(second.recorder, { resume: coordinate }),
-      );
-      const result2 = await turn2.result();
-      assert.equal(result2.kind, "completed");
-      if (result2.kind !== "completed") throw new Error("unreachable");
-      assert.equal(result2.detail.session.state, "open");
-      assert.equal(second.admissions.length, 1);
-      assert.deepEqual(second.admissions[0].resume, coordinate);
-      await prepared.close();
-    },
-  );
-
-  test(
-    name(
-      "a resume the Harness does not acknowledge makes the Session unusable",
-    ),
-    async () => {
-      const prepared = await prepare(scenarios.resumeUnacknowledged());
-      const turn1 = prepared.startTurn(request(recorder().recorder));
-      const events1 = observe(turn1);
-      await events1.waitForSession();
-      await turn1.interrupt();
-      const coordinate = detachedCoordinate(await turn1.result(), outcome);
-
-      const turn2 = prepared.startTurn(
-        request(recorder().recorder, { resume: coordinate }),
-      );
-      const result2 = await turn2.result();
-      assert.equal(result2.kind, "failed");
-      if (result2.kind !== "failed") throw new Error("unreachable");
-      assert.equal(result2.detail.failure.phase, "recovery");
-      assert.equal(result2.detail.session.state, "unusable");
-      await prepared.close();
-    },
-  );
-
-  test(
     name("close during a live Turn bounds cleanup and is idempotent"),
     async () => {
       const prepared = await prepare(scenarios.blockingTurn());
@@ -359,6 +414,16 @@ function detachedCoordinate(
   } else if (result.kind !== "interrupted") {
     throw new Error("unreachable");
   }
+  assert.equal(result.detail.session.state, "detached");
+  if (result.detail.session.state !== "detached") {
+    throw new Error("unreachable");
+  }
+  return result.detail.session.coordinate;
+}
+
+function lostDetachedCoordinate(result: TurnResult): RecoveryCoordinate {
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
   assert.equal(result.detail.session.state, "detached");
   if (result.detail.session.state !== "detached") {
     throw new Error("unreachable");

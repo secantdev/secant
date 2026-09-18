@@ -59,12 +59,19 @@ export { isolatedGitEnvironment };
 // `bun:sqlite` is a Bun built-in, so the driver ships inside the compiled binary and
 // lives only here and in the Catalog (runtime-neutrality allowlist).
 
+/** A closed semantic Harness selection pinned by a Run. This is deliberately not
+ *  an executable, Adapter revision, observed version, or effective model. */
+export type SelectedHarnessId = "claude-code";
+
 /** A Run's canonical record, read back from its own `run.db`. */
 export interface RunRecord {
   readonly runId: string;
   readonly workspacePath: string; // the resolved absolute Workspace value, pinned
   readonly bundleSnapshotDigest: string; // the pinned Bundle Snapshot reference
   readonly launch: unknown; // the Launch inputs, stored and returned opaque
+  /** The immutable semantic Harness selected for this Run. Absent for a
+   *  Command-only Run and for a pre-M4 Run not yet upgraded. */
+  readonly selectedHarness?: SelectedHarnessId;
   readonly state: string; // canonical Run state, including a durable `blocked` pause
   readonly createdAt: string; // ISO 8601
 }
@@ -95,6 +102,8 @@ export interface CreateRunRequest {
   readonly operationId: string;
   readonly bundleSnapshotDigest: string;
   readonly launch: unknown; // JSON-serialisable; stored opaque
+  /** Required by Application for an Agent-bearing Run; omitted for Command-only. */
+  readonly selectedHarness?: SelectedHarnessId;
   readonly at: Date;
 }
 
@@ -936,6 +945,9 @@ export function openRunGroup(
           workspacePath,
           bundleSnapshotDigest: request.bundleSnapshotDigest,
           launch: request.launch,
+          ...(request.selectedHarness !== undefined
+            ? { selectedHarness: request.selectedHarness }
+            : {}),
           state: "created",
           createdAt: request.at.toISOString(),
         };

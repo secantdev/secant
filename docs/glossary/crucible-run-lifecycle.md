@@ -81,7 +81,9 @@ This cluster defines the target Crucible terms for a **Run** and everything that
 
 ## Run states
 
-A **Run** pins its **Workspace**, **Bundle Snapshot**, **Harness**, default model, and **Launch inputs** at launch.
+An Agent-bearing **Run** pins its semantic **Harness** selection with its **Workspace**, **Bundle Snapshot**, and **Launch inputs** at launch; a
+Command-only Run has no Harness selection. A Run pins no model. The selected Harness is immutable recovery and routing truth, while each Agent-step
+Attempt separately records the Harness executable, version, Adapter evidence, and effective model it actually observed.
 
 | State       | Meaning                                                         | Terminal |
 | ----------- | --------------------------------------------------------------- | -------- |

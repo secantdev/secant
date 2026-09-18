@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
@@ -93,7 +93,12 @@ function failedScript(): FakeScript {
 }
 
 /** Author a single-`agent`-step Bundle (session "s"). */
-function writeAgentBundle(): { folder: string; id: string } {
+function writeAgentBundle(): {
+  folder: string;
+  id: string;
+  selectedHarness: "claude-code";
+  expectedPrepareCount: 1;
+} {
   const folder = makeTempDir("secant-harness-id-bundle-");
   mkdirSync(join(folder, "prompts"), { recursive: true });
   writeFileSync(join(folder, "prompts", "go.md"), "Do the work.\n");
@@ -122,11 +127,65 @@ function writeAgentBundle(): { folder: string; id: string } {
     join(folder, "manifest.json"),
     JSON.stringify(manifest, null, 2),
   );
-  return { folder, id: manifest.bundle.id };
+  return {
+    folder,
+    id: manifest.bundle.id,
+    selectedHarness: "claude-code",
+    expectedPrepareCount: 1,
+  };
+}
+
+/** Author a single `interactive-agent` Step for TUI-capable admission. */
+function writeInteractiveAgentBundle(): {
+  folder: string;
+  id: string;
+  selectedHarness: "claude-code";
+  expectedPrepareCount: 1;
+  supportsInteractiveTurns: true;
+} {
+  const folder = makeTempDir("secant-selected-harness-interactive-");
+  mkdirSync(join(folder, "prompts"), { recursive: true });
+  writeFileSync(join(folder, "prompts", "talk.md"), "Work with me.\n");
+  const manifest = {
+    formatVersion: 1,
+    bundle: {
+      id: "dev.secant.selected-harness-interactive",
+      version: "1.0.0",
+      name: "Selected Harness Interactive",
+      description: "An Interactive-agent Run for selected-Harness admission.",
+    },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [{ path: "prompts/talk.md", kind: "prompt" }],
+    routing: [
+      {
+        id: "talk",
+        kind: "interactive-agent",
+        session: "s",
+        prompt: { asset: "prompts/talk.md" },
+      },
+    ],
+  };
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  return {
+    folder,
+    id: manifest.bundle.id,
+    selectedHarness: "claude-code",
+    expectedPrepareCount: 1,
+    supportsInteractiveTurns: true,
+  };
 }
 
 /** Author a single-`command`-step Bundle (a Command-only Run: no Harness). */
-function writeCommandBundle(): { folder: string; id: string } {
+function writeCommandBundle(): {
+  folder: string;
+  id: string;
+  expectedPrepareCount: 0;
+  isolateHarnessDiscovery: true;
+} {
   const folder = makeTempDir("secant-harness-id-cmd-");
   const manifest = {
     formatVersion: 1,
@@ -154,7 +213,12 @@ function writeCommandBundle(): { folder: string; id: string } {
     join(folder, "manifest.json"),
     JSON.stringify(manifest, null, 2),
   );
-  return { folder, id: manifest.bundle.id };
+  return {
+    folder,
+    id: manifest.bundle.id,
+    expectedPrepareCount: 0,
+    isolateHarnessDiscovery: true,
+  };
 }
 
 /** Wire the Application against a home, install a Bundle, approve, and launch it to
@@ -162,23 +226,62 @@ function writeCommandBundle(): { folder: string; id: string } {
 async function launch(
   t: TestContext,
   script: FakeScript,
-  bundle: { folder: string; id: string },
+  bundle: {
+    folder: string;
+    id: string;
+    selectedHarness?: "claude-code";
+    expectedPrepareCount: 0 | 1;
+    isolateHarnessDiscovery?: true;
+    supportsInteractiveTurns?: true;
+  },
   home: string,
   workspace: string,
 ): Promise<{ wired: Wiring; runId: string; run: RunView }> {
   const saved = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-  // A resolvable executable so Preflight's Harness discovery passes; the fake Adapter
-  // is what actually runs.
-  process.env[CLAUDE_CODE_EXECUTABLE_ENV] = process.execPath;
-  t.after(() => {
+  const savedPath = process.env.PATH;
+  let environmentRestored = false;
+  const restoreEnvironment = (): void => {
+    if (environmentRestored) return;
+    environmentRestored = true;
     if (saved === undefined) delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
     else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = saved;
-  });
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+  };
+  if (bundle.isolateHarnessDiscovery === true) {
+    // Keep the Command executable resolvable while making both Claude discovery
+    // sources fail. If Command-only Preflight accidentally discovers a Harness,
+    // admission is refused instead of letting this test pass silently.
+    const isolatedBin = makeTempDir("secant-command-only-path-");
+    const isolatedRuntime = join(isolatedBin, RUNTIME_NAME);
+    copyFileSync(process.execPath, isolatedRuntime);
+    chmodSync(isolatedRuntime, 0o755);
+    process.env.PATH = isolatedBin;
+    process.env[CLAUDE_CODE_EXECUTABLE_ENV] = join(
+      isolatedBin,
+      "missing-claude",
+    );
+  } else {
+    // A resolvable executable so Agent-bearing Preflight passes; the fake Adapter
+    // is what actually runs.
+    process.env[CLAUDE_CODE_EXECUTABLE_ENV] = process.execPath;
+  }
+  t.after(restoreEnvironment);
 
+  const adapter = createFake(script)();
+  let prepareCount = 0;
   const wired = wireApplication({
     secantHome: home,
     launchCwd: workspace,
-    harnessAdapter: createFake(script)(),
+    harnessAdapter: {
+      prepare(options) {
+        prepareCount++;
+        return adapter.prepare(options);
+      },
+    },
+    ...(bundle.supportsInteractiveTurns === true
+      ? { supportsInteractiveTurns: true }
+      : {}),
   });
   t.after(() => {
     wired.runGroup.close();
@@ -211,7 +314,31 @@ async function launch(
   assert.ok(admission.admitted, JSON.stringify(admission));
   const runId = admission.runId;
   assert.ok(runId);
+  // The isolated PATH is needed only during synchronous Preflight. Restore it
+  // before awaiting so concurrent test files and Command execution see the host.
+  if (bundle.isolateHarnessDiscovery === true) restoreEnvironment();
+
+  // Async execution has yielded at Harness preparation when submit returns. The
+  // semantic selection must already be durable before an Attempt can start.
+  const created = wired.runGroup.readRun(runId);
+  assert.ok(created.ok);
+  assert.equal(created.run.selectedHarness, bundle.selectedHarness);
+  const replay = wired.projectionPort.submit({
+    operationId: "op-launch",
+    operation: "launch-run",
+    input: {
+      bundle: { id: bundle.id },
+      launchInputs: {},
+      trustDigest: entry.digest,
+    },
+  });
+  assert.deepEqual(replay, admission);
+  const replayed = wired.runGroup.readRun(runId);
+  assert.ok(replayed.ok);
+  assert.equal(replayed.run.selectedHarness, bundle.selectedHarness);
+
   await awaitSettled(wired.projectionPort, "op-launch");
+  assert.equal(prepareCount, bundle.expectedPrepareCount);
   return { wired, runId, run: readRun(wired, runId) };
 }
 
@@ -226,7 +353,7 @@ function readRun(wired: Wiring, runId: string): RunView {
   }
 }
 
-test("a rested Agent Run projects its Harness identity and effective model (#125)", async (t) => {
+test("[new-run-harness-selection] a new Agent Run pins Claude Code separately from observed Attempt evidence", async (t) => {
   const home = makeTempDir("secant-harness-id-home-");
   const { run } = await launch(
     t,
@@ -242,6 +369,20 @@ test("a rested Agent Run projects its Harness identity and effective model (#125
     executableVersion: "1.2.3",
   });
   assert.equal(run.effectiveModel, "fake-sonnet");
+});
+
+test("[new-run-harness-selection] a new Interactive-agent Run pins Claude Code before its first Turn", async (t) => {
+  const home = makeTempDir("secant-harness-id-home-");
+  const { run } = await launch(
+    t,
+    { profile: profile(), turns: [] },
+    writeInteractiveAgentBundle(),
+    home,
+    makeTempDir("secant-harness-id-ws-"),
+  );
+  assert.equal(run.state, "blocked");
+  assert.equal(run.harness, undefined);
+  assert.equal(run.effectiveModel, undefined);
 });
 
 test("the Harness identity is identical after the Run is reopened (#125)", async (t) => {
@@ -267,6 +408,9 @@ test("the Harness identity is identical after the Run is reopened (#125)", async
     reopened.catalog.close();
   });
   const run = readRun(reopened, runId);
+  const reopenedRecord = reopened.runGroup.readRun(runId);
+  assert.ok(reopenedRecord.ok);
+  assert.equal(reopenedRecord.run.selectedHarness, "claude-code");
   assert.deepEqual(run.harness, {
     name: "Claude Code",
     executable: "/usr/bin/claude",
@@ -385,7 +529,7 @@ test("a Turn that observed no model keeps the Harness identity but omits the mod
   assert.equal(run.effectiveModel, undefined);
 });
 
-test("a Command-only Run projects no Harness identity (#125)", async (t) => {
+test("[new-run-harness-selection] a Command-only Run selects, discovers, and prepares no Harness", async (t) => {
   const home = makeTempDir("secant-harness-id-home-");
   const { run } = await launch(
     t,

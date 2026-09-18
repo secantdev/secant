@@ -20,6 +20,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - The Trust grant is written only after `createRun` succeeds: any refusal reached before creation (a mismatching trust acknowledgement, a failed
   Preflight) returns without a grant, so it never leaves a dangling one. (`createRun` itself no longer refuses — ADR 0031 admits any number of live
   Runs.) Preflight runs before the Trust gate, so a Run whose preconditions fail is refused before trust is ever asked for.
+- New Agent/Interactive-agent Runs pin the semantic `claude-code` selection in `createRun`; Command-only Runs omit it. The Store returns that same
+  immutable selection on an Operation replay, so Application never derives it from later Attempt evidence or rewrites it after creation (#138).
 - Never `acquireRun` a Run merely to read it when it is live in another process: acquiring bumps the owner-fencing epoch and would abort the process
   running it. `readResource`/`runResult` read through the live in-process owner when present, else acquire-and-close a rested Run, else refuse with
   `run-live-elsewhere`.

@@ -47,3 +47,11 @@ Two sentences of the decision above drifted from what M3 shipped, and are correc
   the **Review-checkpoint cadence** — a human grant buys one interval of newly-run iterations, and only newly-run iterations count toward it.
 - **Neither the model nor the Harness is a Run-level pin.** The effective model and the normalized Harness identity are both **per-Attempt** facts, each
   Agent-step Attempt recording its own (#125). "The Run pins only a default model … the Harness itself stays pinned" is superseded: the Run pins neither.
+
+## Amendment — semantic Harness selection is Run truth; observed identity remains Attempt evidence (M4)
+
+M4's selectable second Adapter supersedes only the Harness half of the M3 amendment above. Every new Agent-bearing Run durably pins one semantic
+Harness id atomically with creation, before its first Attempt, and never changes it; a Command-only Run has no selection. The nullable stored field is
+reserved for Command-only and pre-M4 Runs. The selected id is recovery and routing truth, not observed evidence: each Agent-step Attempt still records
+the Harness name, resolved executable, executable version, Adapter evidence, and effective model it actually observed. A Run therefore pins no model,
+and its semantic Harness selection must not be inferred from an Attempt or rewritten from later observations.

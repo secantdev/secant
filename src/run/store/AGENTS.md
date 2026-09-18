@@ -6,6 +6,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 - `run.db` is the only canonical truth and owns its Run's nullable process id plus monotonic fencing epoch. `coordination.db` holds only registration and
   create/delete admission and is rebuildable: a corrupt one is deleted and re-seeded from readable Run Stores without changing their owner records.
+- `run_record.selected_harness` is the immutable semantic Run selection, written in the staged store before create publishes. It is nullable only for
+  Command-only and pre-M4 Runs, validates as a closed id at read ingress, and stays distinct from per-Attempt Harness/model evidence (#138).
 - Ownership is per Run, not per Workspace (ADR 0031): each Run Store carries one owner record; an absent record reads unowned at epoch zero. There is no
   Workspace-wide claim column and no one-live-Run index, so any number of Runs may be live in one Workspace at once, each owned separately.
   `createRun` never refuses for the Workspace and two concurrent creates both succeed; ownership is set on the create/resume claim and released only on

@@ -50,12 +50,19 @@ function publicationRefs(home: string, runId: string): string {
 function create(
   group: RunGroup,
   operationId: string,
-  overrides: { digest?: string; launch?: unknown } = {},
+  overrides: {
+    digest?: string;
+    launch?: unknown;
+    selectedHarness?: "claude-code";
+  } = {},
 ) {
   return group.createRun({
     operationId,
     bundleSnapshotDigest: overrides.digest ?? "sha256:deadbeef",
     launch: overrides.launch ?? { goal: "ship it" },
+    ...(overrides.selectedHarness !== undefined
+      ? { selectedHarness: overrides.selectedHarness }
+      : {}),
     at: AT,
   });
 }
@@ -150,6 +157,54 @@ test("create is idempotent per operation id", async (t) => {
     readdirSync(groupDirOf(home)).filter((n) => !n.endsWith(".db")).length,
     1,
   );
+});
+
+test("[new-run-harness-selection] create, replay, and reopen preserve selected Harness while Command-only stays unselected", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+
+  const first = create(group, "op-agent", {
+    selectedHarness: "claude-code",
+  });
+  assert.equal(first.record.selectedHarness, "claude-code");
+
+  const replay = create(group, "op-agent", {
+    selectedHarness: "claude-code",
+  });
+  assert.equal(replay.outcome, "already-created");
+  assert.equal(replay.runId, first.runId);
+  assert.equal(replay.record.selectedHarness, "claude-code");
+
+  const commandOnly = create(group, "op-command");
+  assert.equal(commandOnly.record.selectedHarness, undefined);
+  group.close();
+
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  const reopenedAgent = reopened.readRun(first.runId);
+  assert.ok(reopenedAgent.ok);
+  assert.equal(reopenedAgent.run.selectedHarness, "claude-code");
+  const reopenedCommand = reopened.readRun(commandOnly.runId);
+  assert.ok(reopenedCommand.ok);
+  assert.equal(reopenedCommand.run.selectedHarness, undefined);
+});
+
+test("an unknown persisted selected Harness makes the Run record unreadable", (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-agent", {
+    selectedHarness: "claude-code",
+  });
+
+  const raw = new Database(join(groupDirOf(home), created.runId, "run.db"));
+  raw.run("UPDATE run_record SET selected_harness = ?", ["unknown"]);
+  raw.close();
+
+  assert.deepEqual(group.readRun(created.runId), {
+    ok: false,
+    problem: { kind: "run-store-damaged", runId: created.runId },
+  });
 });
 
 test("delete releases the claim so the Workspace can host a new Run", async (t) => {

@@ -32,7 +32,7 @@ import {
   type ArtifactType,
   type AssetKind,
   type Platform,
-  type RoutingNode,
+  routingNeedsHarness,
 } from "../workflow/workflow.js";
 
 // The one wiring path both composition roots take (#74 A1, A2, A6). Before this,
@@ -182,7 +182,7 @@ function makeRunExecution(
     // Run rests — the ownership ADR 0022 requires to transfer exactly once to the
     // Run (#116). Preflight already proved the executable resolves, so a prepare
     // failure here is an environment fault that surfaces as a run-execution fault.
-    if (!routing.some(needsHarness)) return executeRouting(routing, deps);
+    if (!routingNeedsHarness(routing)) return executeRouting(routing, deps);
     const facts = harnessFacts(catalog, digest);
     const prepared = await adapter.prepare({
       workspace: owner.record.workspacePath,
@@ -285,15 +285,6 @@ function interactiveOutcome(
     case "lost":
       return "lost";
   }
-}
-
-/** Whether a Routing node carries a Step kind that needs a Harness (an Agent or
- *  interactive-agent Step, top-level or inside a Repeat group). */
-function needsHarness(node: RoutingNode): boolean {
-  const steps = "repeat" in node ? node.repeat.steps : [node];
-  return steps.some(
-    (step) => step.kind === "agent" || step.kind === "interactive-agent",
-  );
 }
 
 /** The manifest facts Agent-prompt rendering resolves against (#116): each Launch

@@ -10,6 +10,9 @@ export const runRecord = sqliteTable("run_record", {
   workspace_path: text("workspace_path").notNull(),
   bundle_snapshot_digest: text("bundle_snapshot_digest").notNull(),
   launch: text("launch").notNull(),
+  // Nullable only for Command-only Runs and Runs created before M4. Agent-bearing
+  // Runs created from M4 onward pin their semantic Harness at creation.
+  selected_harness: text("selected_harness"),
   state: text("state").notNull(),
   created_at: text("created_at").notNull(),
 });

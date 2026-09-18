@@ -7,6 +7,7 @@ import {
 import type { Catalog } from "../catalog/catalog.js";
 import {
   flattenSteps,
+  routingNeedsHarness,
   type AgentStep,
   type AuthoredManifest,
   type Platform,
@@ -20,7 +21,12 @@ import {
   INTERRUPT_TURN_ABORT,
   SIGNAL_ABORT,
 } from "../run/execution/execution.js";
-import type { RunGroup, RunOwner, RunRecord } from "../run/store/store.js";
+import type {
+  RunGroup,
+  RunOwner,
+  RunRecord,
+  SelectedHarnessId,
+} from "../run/store/store.js";
 import {
   focusSnapshot,
   listSnapshot,
@@ -296,6 +302,15 @@ export interface Application {
 // strings); the resume path validates the opaque run.db payload against this
 // before Preflight (A10).
 const launchInputMap = z.record(z.string(), z.string());
+
+/** The semantic Harness pinned by a newly created Run. Client choice has not
+ *  landed yet, so every Agent-bearing routing selects the sole production
+ *  Adapter while Command-only routing remains unselected. */
+function selectedHarnessFor(
+  routing: readonly RoutingNode[],
+): SelectedHarnessId | undefined {
+  return routingNeedsHarness(routing) ? "claude-code" : undefined;
+}
 
 export function createApplication(deps: ApplicationDependencies): Application {
   const { catalog, runGroup, runExecution, prepareRunInteractiveStep } = deps;
@@ -1141,10 +1156,12 @@ export function createApplication(deps: ApplicationDependencies): Application {
       }
     }
 
+    const selectedHarness = selectedHarnessFor(manifest.routing);
     const created = runGroup.createRun({
       operationId,
       bundleSnapshotDigest: entry.digest,
       launch: input.launchInputs,
+      ...(selectedHarness !== undefined ? { selectedHarness } : {}),
       at: new Date(),
     });
     if (needsGrant) {

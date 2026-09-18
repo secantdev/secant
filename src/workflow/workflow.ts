@@ -299,6 +299,7 @@ export {
   checkComposition,
   flattenSteps,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
+  routingNeedsHarness,
   type CompositionFinding,
   type FindingSeverity,
   type TextAssets,

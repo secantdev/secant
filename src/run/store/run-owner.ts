@@ -90,6 +90,7 @@ const runRecordRow = z.object({
   workspace_path: z.string(),
   bundle_snapshot_digest: z.string(),
   launch: z.string(),
+  selected_harness: z.literal("claude-code").nullable(),
   state: z.string(),
   created_at: z.string(),
 });
@@ -182,6 +183,9 @@ function toRunRecord(row: z.infer<typeof runRecordRow>): RunRecord {
     workspacePath: row.workspace_path,
     bundleSnapshotDigest: row.bundle_snapshot_digest,
     launch: JSON.parse(row.launch),
+    ...(row.selected_harness !== null
+      ? { selectedHarness: row.selected_harness }
+      : {}),
     state: row.state,
     createdAt: row.created_at,
   };
@@ -245,6 +249,7 @@ export function stageRunStore(params: TStageRunStoreParams): void {
           workspace_path: record.workspacePath,
           bundle_snapshot_digest: record.bundleSnapshotDigest,
           launch: JSON.stringify(record.launch ?? null),
+          selected_harness: record.selectedHarness ?? null,
           state: record.state,
           created_at: record.createdAt,
         })

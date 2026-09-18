@@ -1,0 +1,1 @@
+ALTER TABLE `run_record` ADD `selected_harness` text;

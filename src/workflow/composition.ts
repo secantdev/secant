@@ -403,6 +403,14 @@ export function flattenSteps(routing: readonly RoutingNode[]): Step[] {
   return steps;
 }
 
+/** Whether any Step in a routing declares Harness capability needs. This is the
+ *  shared static fact used by launch admission and execution composition. */
+export function routingNeedsHarness(routing: readonly RoutingNode[]): boolean {
+  return flattenSteps(routing).some(
+    (step) => STEP_KINDS[step.kind].capabilityNeeds.length > 0,
+  );
+}
+
 /** Every `$ref` value anywhere in a parsed JSON Schema. */
 function collectRefs(value: unknown): unknown[] {
   const refs: unknown[] = [];

@@ -1,0 +1,17 @@
+{
+  "harness": "codex",
+  "executableVersion": "codex-cli 0.154.0",
+  "protocolVersion": "codex-probe-1",
+  "recordedAt": "2026-09-18T12:05:26.500Z",
+  "redactions": [
+    {
+      "placeholder": "/recorded/codex-home",
+      "reason": "Codex home"
+    },
+    {
+      "placeholder": "recorded@example.invalid",
+      "reason": "account email"
+    }
+  ],
+  "refreshCommand": "bun tests/harness/record-codex.ts"
+}

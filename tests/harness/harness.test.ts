@@ -10,8 +10,10 @@ import test from "node:test";
 import {
   APPROVAL_DECISIONS,
   CLAUDE_CODE_SERVED_CAPABILITIES,
+  CODEX_SERVED_CAPABILITIES,
   CONTROL_REJECTIONS,
   discoverClaudeCode,
+  discoverCodex,
   HARNESS_PLATFORMS,
   LOST_UNKNOWNS,
   TURN_EVENT_KINDS,
@@ -51,6 +53,27 @@ test("the closed vocabulary sets are exactly what the Interface fixes", () => {
       "model",
     ],
   );
+});
+
+test("Codex discovery shares configured-then-PATH order and served capabilities", () => {
+  const resolved: string[] = [];
+  const discovery = discoverCodex({
+    configuredExecutable: "configured-codex",
+    env: { SECANT_CODEX: "ignored-env-codex" },
+    resolve(name) {
+      resolved.push(name);
+      return name === "codex" ? "/bin/codex" : undefined;
+    },
+  });
+
+  assert.deepEqual(resolved, ["configured-codex", "codex"]);
+  assert.equal(discovery.kind, "found");
+  if (discovery.kind !== "found") throw new Error("unreachable");
+  assert.equal(discovery.attempt.source, "path");
+  assert.deepEqual(CODEX_SERVED_CAPABILITIES, {
+    "agent-turn": true,
+    "interactive-turns": true,
+  });
 });
 
 test("Claude Code discovery shares configured-then-PATH order and served capabilities", () => {

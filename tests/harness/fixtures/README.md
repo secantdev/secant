@@ -64,6 +64,25 @@ The recorder refuses to write a recording whose bytes still match a credential
 pattern after redaction, naming the pattern — a recording must not carry a live
 secret.
 
+## Codex qualification replay
+
+Codex records the Adapter's pinned schema/probe revision in `protocolVersion`;
+app-server has no negotiated protocol version. The Codex replayer separately
+models `--version`, stable `app-server generate-json-schema`, and one stdio JSONL
+app-server child. Qualification fixtures contain only pre-thread traffic:
+`initialize`, `initialized`, `account/read`, and `model/list`. A fixture must not
+contain `thread/*`, `turn/*`, prompt, or input content.
+
+The `codex-qualification` case carries the installed binary's complete generated
+stable schema as `stable-schema.generated.json`, plus its byte-faithful, redacted
+pre-thread response lines. The generated file is intentionally not formatted or
+reviewed as handwritten source. Claude Code has no analogue because its CLI does
+not expose a schema-generation qualification command; its native evidence is the
+recorded stdout stream instead. Refresh Codex with
+`bun tests/harness/record-codex.ts` while logged in through Codex. It is replay
+evidence for deterministic Adapter behavior on all three CI operating systems,
+not a claim that the currently installed real Codex remains compatible.
+
 ## Synthetic cases
 
 Some Adapter behaviours a real `claude` cannot be made to emit on demand:

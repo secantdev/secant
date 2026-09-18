@@ -599,15 +599,27 @@ export type HarnessAdapterFactory = () => HarnessAdapter;
 export { createClaudeCodeAdapter } from "./claude-code.js";
 export type { ClaudeCodeAdapterOverrides } from "./claude-code.js";
 
+export { createCodexAdapter } from "./codex.js";
+export type {
+  CodexAdapterOverrides,
+  CodexQualificationObserver,
+} from "./codex.js";
+
 export {
   CLAUDE_CODE_EXECUTABLE_ENV,
   CLAUDE_CODE_SERVED_CAPABILITIES,
+  CODEX_EXECUTABLE_ENV,
+  CODEX_SERVED_CAPABILITIES,
+  discoverCodex,
   discoverClaudeCode,
 } from "./discovery.js";
 export type {
   ClaudeCodeDiscovery,
   ClaudeCodeDiscoveryAttempt,
   ClaudeCodeDiscoveryOptions,
+  CodexDiscovery,
+  CodexDiscoveryAttempt,
+  CodexDiscoveryOptions,
 } from "./discovery.js";
 
 // The permission bridge the Claude Code Adapter launches against. Exported so the

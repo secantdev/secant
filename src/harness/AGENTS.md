@@ -6,9 +6,10 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 - The public entry (`harness.ts`) is the whole Interface surface: the Adapter Interface, the evidence-bearing profile, and the factory a
   composition root calls. No native frame, protocol type, or conversation-id value crosses it; the declared exceptions are the Workspace path
-  (`PrepareOptions.workspace`, the directory every Session runs against), three named test seams — the session-id generator (`overrides.sessionId`), the
-  Session process spawn (`overrides.spawn`, a scripted stand-in for the process Module's child) and the Claude-native executable env constant
-  (`CLAUDE_CODE_EXECUTABLE_ENV`, `SECANT_CLAUDE_CODE`) — the synchronous discovery outcome and static served-capability table that Preflight shares
+  (`PrepareOptions.workspace`, the directory every Session runs against), the named native-Adapter test seams on their override types (including Codex's
+  recorder-only qualification byte observer), and the executable env constants (`CLAUDE_CODE_EXECUTABLE_ENV` / `SECANT_CLAUDE_CODE` and
+  `CODEX_EXECUTABLE_ENV` / `SECANT_CODEX`) — the synchronous discovery outcome
+  and static served-capability table that Preflight shares
   with the Adapter (the resolved spawn target stays private), and the permission-bridge factory (`startPermissionBridge`), exported so the fixture
   recorder composes the production bridge instead of a copy (#127 D3); its surface is launch flags, the bearer, a redactor and a teardown, never an MCP type.
   Recovery coordinates cross the Seam only as opaque values
@@ -79,6 +80,17 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   phrase settles `is_error:false` and stays a completed Turn. The raw result never crosses the Seam — only `AUTHENTICATION_REQUIRED` does.
 - Session unusability is stored as a private `unusableReason` on the Session, set by `markUnusable` when a resume is not acknowledged; the Turn-start path
   (`submit`) reads it first and fails every further Turn with the same recovery failure, never opening a fresh conversation.
+
+## Invariants (Codex qualification)
+
+- `codex.ts` owns Adapter orchestration, cache and profile; `codex/qualification.ts` owns the bounded pre-thread JSONL exchange and diagnostics;
+  `codex/required-schema.ts` owns structural compatibility. Unlike Claude's runtime `frames.ts`, the required-schema file validates generated
+  qualification evidence; later Codex Turn frames belong in their own runtime protocol submodule.
+- Every `prepare` observes `codex --version`; cached stable-schema evidence is keyed by discovery source, executable path and SHA-256 byte identity, version,
+  platform, and probe revision. A cache hit skips schema generation only — it never skips the live handshake.
+- Live qualification owns one `codex app-server` child, sends exactly one `initialize` then `initialized`, runs only bounded `account/read` and
+  `model/list` probes, creates no thread, Turn, or prompt, and retains that initialized child in the Prepared Harness.
+- Codex inherits user environment/home; unauthenticated becomes the fixed separate-login remediation, and no account or credential crosses the Seam.
 
 ## Tests
 

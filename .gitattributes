@@ -2,3 +2,6 @@
 # platforms, so the ADR 0027 three-OS Prettier gate agrees on Windows, where
 # core.autocrlf would otherwise hand Prettier CRLF line endings.
 * text=auto eol=lf
+
+# Byte-faithful Codex generator output; fixture metadata and traffic remain reviewed.
+tests/harness/fixtures/codex/codex-qualification/stable-schema.generated.json linguist-generated

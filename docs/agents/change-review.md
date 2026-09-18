@@ -10,6 +10,8 @@ Record a concise, relevance-driven summary on the implementing GitHub issue. Ide
   behaviors deliberately left untested and why. A reasoned gap is acceptable; a silent one is not.
 - Replaced legacy behavior and deletions.
 - Purpose of each new dependency.
+- UPSTREAM currency: when the work copies from or rebuilds a component against OpenCode, record it in `UPSTREAM` (what was taken, what was changed) per
+  ADR 0018. No gate follows this, so the record is only current if the review updates it.
 - Guidance or ADR changes required by the work.
 - Local learnings: non-obvious facts recorded in the nearest `AGENTS.md`, one to three lines each, and stale lines pruned on the way.
 

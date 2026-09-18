@@ -38,3 +38,12 @@ We rejected copying OpenCode's package count, a shared model/utility barrel, gen
 construction in clients, and target-to-legacy shortcuts. The cost is explicit translation and a maintained small import policy; the benefit is
 local reasoning about ownership and failure without making each caller learn storage, protocol, or renderer mechanisms. Runtime dependencies and
 the production source tree remain unchanged by this planning resolution; enforcement tooling establishes the agreed ratchet before migration.
+
+## Amendment (2026-09-18, M3): the `process` Module and deferred forced removal
+
+The ownership list above gains a distinct **`process`** Module — owned child-process spawn, PATH-walk and Windows shim executable resolution, and
+tree-reaping kill — created in M2 and depended on by Run execution and Preflight in M3. It is a declared Module root in the
+[import policy](../../tests/architecture/module-policy.ts) and the [target topology](../agents/topology.md).
+
+**Forced Bundle removal**, named among Application's cross-domain use cases above, is a standing deferral: no milestone through M3 implements it, so
+its Catalog use/removal-exclusion and live-Run-elsewhere guarantees are unbuilt. Application still owns it when it lands. No other decision here changes.

@@ -58,8 +58,20 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   execution, and closes it when the Run rests (ownership transferred exactly once, ADR 0022). Preflight does the _synchronous_ Harness discovery (configured command then the
   `claude` PATH name, via the `process` resolver) and the capability-need union, so a `not-found`/`unsupported-shim`/`interactive-step-needs-tui` refusal lands before a Run
   exists; the async `prepare` (spawning `claude --version`) runs only at execution. `supportsInteractiveTurns` is a client fact the Application forwards to Preflight.
-- The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no live snapshot;
-  the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`).
+- The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no **durable**
+  snapshot; the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`). The live lane is
+  separate — Turn activity reaches an open client through the live overlay below (#117), not through this durable write.
+- The live overlay carries a `generation` that a raised or settled request bumps (`makeRequestChannel`), each pushing a fresh overlay, so an answer formed against a
+  superseded generation is refused as stale. A `preview`-only observation is a coalesced update that deliberately does **not** bump the generation, so an in-flight answer
+  stays valid across it (#117).
+- At Turn end `bindAnswer(undefined)` clears any still-outstanding request, bumps the generation, and sets the live phase to `settling` before announcing the overlay, so a
+  resumed Run starts clean. The durable `request-expired` timeline row is execution's write, not the live lane's.
+- A **durable** push (`pushRunUpdate`) fans out to this Run's observers **and** every Run-list observer (`pushRunListUpdates`); a **live overlay** push (`pushLiveOverlay`)
+  reaches this Run's observers only. A late-joining observer catches up on the current overlay at open, so a follower connecting after a request was raised still sees it.
+- An approval Request's answer names its own source — `human` or `client-policy` (`HarnessAnswerSource`); the client declaring provenance is what lets the durable timeline
+  render "answered by client policy" (`run-projection`) without the Adapter knowing a client policy exists.
+- By design a client can receive live and preview updates for a Turn whose durable start it never saw: the late-join catch-up replays the current overlay at open, so a
+  headless follower opening mid-Turn observes the live request even though its durable Turn-start snapshot predates the connection.
 - The Agent executor records the normalized Harness identity (name/executable/version) on that Attempt from the prepared profile (#125), so the `run`
   Projection reads it back through `owner.harnessIdentity()` and exposes it as the additive `run.harness` view — one identity for the latest Agent-step
   Attempt, no native id crossing the Port; absent for a Command-only Run.

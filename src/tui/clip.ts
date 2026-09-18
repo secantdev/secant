@@ -10,8 +10,8 @@ import stringWidth from "string-width";
 // Width is measured in *display columns*, not UTF-16 code units (D5): a wide glyph
 // (CJK, some emoji) occupies two columns and a zero-width combining mark none, so
 // slicing by `.length` miscounts and an overflowing row is corrupted, not clipped
-// (tui/AGENTS.md). `string-width` is the runtime-neutral column measure OpenCode
-// uses for the same alignment work.
+// (tui/AGENTS.md). `string-width` is the runtime-neutral column measure used for the
+// same alignment work (it is a direct npm dependency, not an OpenCode-vendored one).
 
 /** Truncate `text` to `width` display columns, marking a cut with a trailing
  *  ellipsis. The result never exceeds `width` columns. */

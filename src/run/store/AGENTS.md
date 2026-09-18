@@ -46,9 +46,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - An acquired owner releases through its fencing epoch. A stale owner whose Run was taken over cannot clear the new owner's `owner_pid` during its own cleanup.
 - Diagnostics retention (ADR 0023, #96): `diagnostics/` has had a writer since #88, so the 90-day expiry is a best-effort prune at group open (`pruneDiagnostics`,
   driven by an injectable clock) — files with an mtime at or before `now - 90 days` are deleted, newer ones kept. It walks Run directories on the filesystem, not
-  the registrations, so it runs before any Run is acquired and never fails the open. The two enum columns domain logic branches on — `attempt_log.outcome` and
-  `gate_answer.answer` — are validated with `z.enum` at their read ingress (not cast), so a drifted value is rejected there rather than trusted by the resume cursor
-  or the grant count.
+  the registrations, so it runs before any Run is acquired and never fails the open.
+- D7 has two halves. The closed-set columns the Store itself branches on — `attempt_log.outcome`, `gate_answer.answer`, and `pending_gate.shape` — are validated with `z.enum`
+  at their read ingress (not cast), so a drifted value is rejected there rather than trusted by the resume cursor, the grant count, or the pending-gate derivation. The six M3
+  closed-set columns the Store does **not** branch on — turn `origin`, turn `kind`, turn `result_kind`, `turn_event.kind`, `harness_session.availability`, and
+  `transcript_entry.role` — are returned raw and narrowed tolerantly at the Projection's read ingress instead (an unknown value falls to a safe default), so the Store never
+  rejects a Turn row over a value only the client interprets.
 - A Human Gate answer (#85) is a bound Artifact recorded through `recordGateAnswer` — a publication-shaped write (stage a commit, then one transaction moves the
   binding and appends the `gate_answer` row) that deliberately skips `attempt_log`, so `blocked` stays derived and iterations still count off the log. Idempotent
   per `operation_id` (a UNIQUE column); its `iterations_at_grant` is the offset the derived "iterations since the last grant" count resets from.
@@ -75,3 +78,16 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   non-null `harness` — so `harness` non-null is what marks an Agent-step Attempt, independent of `effective_model` (which stays null when the Turn observed
   no model). It is recorded on every autonomous Agent Step outcome, including `cancelled`/`indeterminate` and the recovery-refused failure; the interactive-agent
   Step's synthetic Attempt (#122) records neither identity nor effective model, so a purely-interactive Run projects no identity — the same scope both facts share.
+- Transcript ordering (#124): `transcript_entry.seq` is an `INTEGER PRIMARY KEY`, i.e. an alias for the database-wide rowid, so it is monotonic across the whole `run.db`, not
+  per Session; a page filters it by Session key and pages upward by `seq` (`before`). The rowid alias is exactly why a page cursor stays stable — appending later rows never
+  renumbers earlier ones — so an opaque `before` cursor keeps naming the same boundary.
+- Turn ordering (#116): `turn.sequence` is `count(turn)` taken under the admit transaction, so it numbers every Turn in the Run regardless of Session — two Sessions' Turns
+  interleave in one numbering, and it is not a per-Session sequence.
+- `turn_event.payload` is opaque JSON, never a raw protocol frame: the Store neither validates nor interprets it, and the Projection reads it tolerantly (an unrecognized event
+  kind projects nothing). Only Crucible-shaped normalized events are ever written.
+- There are no foreign keys and no `foreign_keys` pragma anywhere in either schema (only `busy_timeout` is set), so referential integrity rests entirely on the write
+  transactions that keep related rows consistent; nothing the database enforces stands behind them.
+- Run delete drops the registration and reclaims the directory as one lifecycle unit; with no foreign keys there is nothing to cascade — the directory holds the whole Run.
+- Owner fencing spans two databases: the canonical-write re-check reads `owner_epoch` from the coordination database while the write itself commits to that Run's `run.db`, so
+  the check and the write it guards are not one atomic step — a window a concurrent takeover can slip through. [#133](https://github.com/secantdev/secant/issues/133) closes it by
+  moving the owner record so the fence check and the write share one transaction.

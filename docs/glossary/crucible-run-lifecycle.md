@@ -92,8 +92,9 @@ A **Run** pins its **Workspace**, **Bundle Snapshot**, **Harness**, default mode
 | `succeeded` | the routing completed                                           | yes      |
 | `cancelled` | the user explicitly ended the Run                               | yes      |
 
-`blocked` is derived from the current **Step Attempt** rather than stored, as is the interrupted condition of a Run marked live with no process
-running it.
+`blocked` is durable truth, not computed: since [#108](https://github.com/secantdev/secant/issues/108) the authored **Human Gate**'s `pending_gate`
+row and the `blocked` state are written in one transaction, and execution also stores `blocked` before a checkpoint pause, so a killed Run reconciles
+`blocked`. The interrupted condition of a Run marked live with no process running it is what is computed at open, not the state itself.
 
 `running` and `blocked` are live states. `halted` and `failed` are resting, resumable states. `succeeded` and `cancelled` are terminal states.
 

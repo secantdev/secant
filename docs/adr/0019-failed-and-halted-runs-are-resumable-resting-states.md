@@ -35,3 +35,15 @@ retires the one-live-Run-per-Workspace rule this ADR restated: any number of Run
 owner, held through `running` **and** `blocked`. "A halted Run holds no Workspace claim" therefore becomes the general case — no Run holds a
 Workspace claim — and the consequence above stands unchanged: Crucible never promises a Run's Workspace is unchanged when it resumes, so resume is
 best-effort and steps re-read the world. Where this ADR and ADR 0031 differ, ADR 0031 governs.
+
+## Amendment — resume resets a cadence, not an Iteration bound; model and Harness are Attempt facts (M3)
+
+Two sentences of the decision above drifted from what M3 shipped, and are corrected here:
+
+- **There is no Iteration bound to reset.** [ADR 0020](./0020-deterministic-verdicts-and-human-checkpoints-terminate-repetition.md) removed the fixed
+  iteration cap, so "resuming a `failed` Run resets that Step's attempt and Iteration counters to their declared bounds" no longer holds. Iterations
+  count from absolute zero across resumes (`runRepeatGroup`): a resume replays the completed iterations by Step identity without re-running them, then
+  runs fresh ones. What resume actually resets is the failed Step's **retry budget** (the Step re-attempts with its full budget) and, for a Repeat group,
+  the **Review-checkpoint cadence** — a human grant buys one interval of newly-run iterations, and only newly-run iterations count toward it.
+- **Neither the model nor the Harness is a Run-level pin.** The effective model and the normalized Harness identity are both **per-Attempt** facts, each
+  Agent-step Attempt recording its own (#125). "The Run pins only a default model … the Harness itself stays pinned" is superseded: the Run pins neither.

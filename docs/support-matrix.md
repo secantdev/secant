@@ -9,9 +9,8 @@ legacy-conhost row.
 ## Operating systems and architectures
 
 Each cross-compiled single-file binary is built and then smoked on its own operating system inside the canonical three-OS gate, on every push and pull
-request. The `build` job cross-compiles all three targets; the `smoke` job runs the compiled-binary smoke (help, version, no-TTY refusal, workspace
-approve-then-read, Proof Bundle build, and Runs that reach `succeeded`, halt on a materialization conflict, and pause at a Human Gate) against the
-matching binary on the matching runner.
+request. The `build` job cross-compiles all three targets; the `smoke` job runs the compiled-binary smoke against the matching binary on the matching
+runner. The scenarios it covers are enumerated once in [testing guidance](./agents/testing.md) — this row does not restate them.
 
 | OS      | Architecture | Binary                   | Evidence                                                                                                                 |
 | ------- | ------------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
@@ -22,7 +21,9 @@ matching binary on the matching runner.
 ## Terminals
 
 CI cannot drive a real terminal, so terminal support rests on a human-recorded real-terminal check per release (ADR 0027). The re-run path is
-`bun run check:windows-terminal` (`scripts/release-checks/windows-terminal.ts`).
+`bun run check:windows-terminal` (`scripts/release-checks/windows-terminal.ts`). The check has been **re-armed** since the M1 evidence below: a
+`src/tui/renderer/` change lands after that pass, which by the release-check rule requires the Windows Terminal check to be re-run. The row still cites
+only the M1 pass — no new pass is claimed here until a fresh report is recorded.
 
 | Terminal              | Host                               | Evidence                                                                                                                                                                                                    |
 | --------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

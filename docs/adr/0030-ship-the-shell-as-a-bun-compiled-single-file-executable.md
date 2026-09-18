@@ -6,8 +6,9 @@ Windows soak; that [soak passed](https://github.com/secantdev/secant/issues/60#i
 runtime and distribution half of the [process/runtime decision](https://github.com/secantdev/secant/issues/21#issuecomment-5497308855) ("Node 24
 LTS, one npm package, no self-contained executable in v1"), which rested on the disproven "Node needs no FFI" measurement in
 [#6](https://github.com/secantdev/secant/issues/6); [ADR 0026](./0026-replace-legacy-devflow-in-place-by-wholesale-deletion.md)'s "realigned to
-Node 24" sentence; and [ADR 0027](./0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md)'s "one pinned Node version" and "publishes to
-npm from CI" sentences.
+Node 24" sentence; [ADR 0027](./0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md)'s "one pinned Node version" and "publishes to
+npm from CI" sentences; and [ADR 0018](./0018-adopt-opencode-presentation-as-pinned-reduced-vendor.md)'s legacy-conhost support claim, its
+Bun-adoption conditional, and its conhost-targeted human release check (see that ADR's ADR 0030 amendment).
 
 Node 26.4+ was the alternative. Its problems are temporary — the `--experimental-ffi` flag is a no-op from 26.9 and LTS lands 2026-10-28 — except
 the permanent ones: a user must install a specific Node, nvm users lose the global on a version switch, and a zero-dependency installer is never

@@ -61,6 +61,12 @@ launch changes nothing.
 [ADR 0030](./0030-ship-the-shell-as-a-bun-compiled-single-file-executable.md), taken after the
 [#60](https://github.com/secantdev/secant/issues/60#issuecomment-5623212589) Windows soak passed, changes only where the built-in bytes live: each
 built-in `.wfb` is **embedded in the compiled binary as an asset** and installed at startup **from the embedded bytes**, replacing the "beside the
-CLI's own `dist/`" npm-tarball placement; the tarball assertion above becomes the compiled-binary smoke. Shipping (CI builds the exact `.wfb` with
-`bundle build --no-install --output`), versioning (`bundles/builtin.lock.json`, the gate's digest rebuild, the LF `.gitattributes`), the startup
-ensure semantics, and upgrade/coexistence are all unchanged. Where this ADR and ADR 0030 differ, ADR 0030 governs.
+CLI's own `dist/`" npm-tarball placement; the tarball assertion above becomes the compiled-binary smoke. Versioning (`bundles/builtin.lock.json`, the
+gate's digest rebuild, the LF `.gitattributes`), the startup ensure semantics, and upgrade/coexistence are unchanged. Where this ADR and ADR 0030 differ,
+ADR 0030 governs.
+
+The **Shipping** section above is **not** unchanged. ADR 0030 replaced the whole packaging toolchain it describes: the TypeScript bundler that deletes
+`dist/` before writing, the npm package whose `package.json` `files` lists only `dist`, and the release tarball are all gone, superseded by a Bun
+single-file executable compiled by [`scripts/build.ts`](../../scripts/build.ts). What survives is only the per-built-in `.wfb` build step
+(`bundle build --no-install --output`) and its allow-list; the built-in bytes are then embedded as binary assets, never placed in a tarball. M6 must
+implement built-in shipping from ADR 0030's compiled-binary toolchain, not the stale Shipping text above.

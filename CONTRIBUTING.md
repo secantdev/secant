@@ -24,7 +24,7 @@ One command is the canonical gate. CI runs the same command after a clean instal
 bun run check
 ```
 
-It covers type checking, formatting, lint, the recursively discovered deterministic tests, the production build, and installed-package smoke tests.
+It covers type checking, formatting, lint, the recursively discovered deterministic tests, the production build, and compiled-binary smoke tests.
 Checks that need an installed Harness, network access, or a real terminal are opt-in and not part of it.
 
 ## Find your way

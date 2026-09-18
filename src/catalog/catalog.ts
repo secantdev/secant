@@ -19,8 +19,10 @@ import { catalogMigrations } from "../drizzle/migrations.js";
 import { catalogEntries, trustGrants, workspaceApprovals } from "./schema.js";
 
 // The Catalog owns the catalog database under the Secant home. Everything about
-// SQLite stays behind this Interface: no SQLite type, row shape, or storage path
-// crosses it. Callers ask; they never reach into rows. (ADR 0025, #21 storage.)
+// SQLite stays behind this Interface: no SQLite type or row shape crosses it, and
+// the one storage path that does is the installed asset root (`assetRoot`), which
+// deliberately crosses so a Run can read the extracted layer. Callers ask; they
+// never reach into rows. (ADR 0025, #21 storage.)
 
 /** A recorded Workspace approval. Its home is the Catalog database. */
 export interface WorkspaceApproval {

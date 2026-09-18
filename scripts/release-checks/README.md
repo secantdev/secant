@@ -3,8 +3,9 @@
 ## Windows Terminal
 
 Run this check on Windows when the Bun pin, OpenTUI pin, or
-`src/tui/renderer/` has changed. It must use the final packed build for the
-release; the pseudo-terminal CI job does not replace this real-terminal check.
+`src/tui/renderer/` has changed. It must use the final compiled single-file
+executable for the release (ADR 0030); the pseudo-terminal CI job does not
+replace this real-terminal check.
 
 1. Open a Windows Terminal tab at the repository root.
 2. Install the exact locked dependencies with `bun install --frozen-lockfile`.
@@ -16,7 +17,8 @@ release; the pseudo-terminal CI job does not replace this real-terminal check.
    observed-only legacy-conhost runs.
 5. Only a report whose Windows Terminal outcome is `pass` satisfies the release
    check. Paste the complete Markdown report printed by the script into the
-   release checklist issue (milestone #48 for M1). The conhost row records what
+   release checklist issue for the milestone currently in progress (the open
+   milestone gate issue), not a pinned issue number. The conhost row records what
    happened but does not decide the outcome.
 
 Pass an explicit binary path when checking a downloaded artefact:

@@ -79,3 +79,12 @@ protocol is unversioned (Codex app-server) runs the pinned conformance probe aga
 Harness is `unavailable` with a typed reason, never best-effort parsing. A Workflow Bundle never selects or constrains a model in v1; the Adapter
 profile supplies the model list when the Harness exposes one and declares free-text entry otherwise. A non-binding recommended model authored in
 the Bundle is deferred to a later version.
+
+## Amendment (2026-09-18): delivery mode is the Adapter's, substitution is the caller's
+
+Recorded while tidying the M3 audit
+([#129](https://github.com/secantdev/secant/issues/129), audit [#127](https://github.com/secantdev/secant/issues/127)).
+The 2026-09-07 amendment above read as if the Adapter renders the prompt. It does not. What the Adapter owns, and the profile declares, is the delivery
+**mode** — `native` or `plain-path` for a skill, and the equivalent `FileDelivery` mode for file artifacts. Substituting Bundle artifacts into the prompt
+text is the **caller's**, because rendering needs the Bundle input and asset knowledge this ADR keeps out of the Adapter (the Adapter knows no Workflow
+Bundle). The caller renders the prompt text and hands it in as the Turn's semantic input; the Adapter chooses only how each declared asset is delivered.

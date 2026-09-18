@@ -46,12 +46,11 @@ jobs:
           path: dist/secant-*
           if-no-files-found: error
 
-  # Each cross-compiled binary is smoked on its own OS: the compiled-binary smoke
-  # (help, version, no-TTY refusal, workspace approve then read, Proof Bundle
-  # build, and Runs that reach succeeded, halt on a materialization conflict, and
-  # pause at a Human Gate for an answer, plus the git-worktree-root refusal), plus
-  # codesign --verify on macOS. The smoke harness runs under the pinned Bun; the
-  # binary it exercises is standalone.
+  # Each cross-compiled binary is smoked on its own OS with the compiled-binary
+  # smoke, plus codesign --verify on macOS. The scenarios it covers are
+  # enumerated once in docs/agents/testing.md (the one home) — not restated here.
+  # The smoke harness runs under the pinned Bun; the binary it exercises is
+  # standalone.
   smoke:
     needs: build
     strategy:

@@ -26,9 +26,11 @@ which is what makes the invariant below testable at all.
 Three extraction rules apply to every file copied. Vendored source is **runtime-neutral by construction**: no `Bun.*` call and no `bun:*` import
 survives the copy, with `Bun.stringWidth` and `Bun.file` the realistic cases, so that the runtime and packaging decision stays genuinely open rather
 than quietly forced by what we pasted in. Crucible **never speaks OpenCode's vocabulary** — no `@opencode-ai/*` import, no OpenCode event name, no
-OpenCode SDK call, no OpenCode domain type — and this is enforced by a structural check in the canonical gate rather than by review, because the
-extraction research already classifies core flows importing OpenCode domain types as grounds to abandon adoption entirely, and a condition that severe
-must not depend on who reviews the pull request. Finally, **no dead UI**: features Crucible does not have, such as OpenCode's model picker, provider
+OpenCode SDK call, no OpenCode domain type. What the canonical gate's structural check actually enforces is the **import specifier** — no `@opencode-ai/*`
+import (`tests/architecture/module-policy.ts`) — the load-bearing case, since importing an OpenCode domain type means importing the package; the
+event-name, SDK-call, and domain-type prohibitions are standing policy the check does not mechanically detect. Enforcing the import by check rather than
+review matters because the extraction research already classifies core flows importing OpenCode domain types as grounds to abandon adoption entirely, and
+a condition that severe must not depend on who reviews the pull request. Finally, **no dead UI**: features Crucible does not have, such as OpenCode's model picker, provider
 login, MCP/LSP status, upgrade prompt, workspace management, and plugin slots, are deleted at copy time rather than hidden behind a flag or left
 visible as no-ops, since hidden code still has to be read on every upstream review and still has to be ported off Bun APIs, while a visible no-op is a
 bad user experience by construction. Because files are copied by hand, not copying is the cheapest available action. The standing rule that keeps it
@@ -67,16 +69,18 @@ over fake snapshots and events, renderer frame tests over OpenTUI's in-memory re
 snapshot tests are optional, because they fail on deliberate changes as readily as accidental ones while the first two layers already cover ordering
 and dispatch.
 
-The 33 themes shipped in OpenCode's TUI are taken, attributed, and pruned. Verified against the OpenCode tree at `2cba7e22`, not one carries any
+The 33 themes shipped in OpenCode's TUI are taken, attributed, and pruned. Verified against the OpenCode tree at `1ead9e3d7f` (the commit the `UPSTREAM`
+record pins; this ADR first cited `2cba7e22`, which disagrees with every other record), not one carries any
 attribution — `license`, `author`, `credit`, `copyright`, and `source` return no matches across the set — and the palettes are the genuine upstream
 values rather than reinterpretations, with Nord carrying `#2e3440`, `#88c0d0`, `#bf616a`, `#a3be8c` and Gruvbox carrying `#282828`, `#ebdbb2`,
 `#fb4934`, `#b8bb26`. This is real third-party work, but the obligation is far smaller than a per-file provenance audit: most are well-known
 MIT-licensed community themes needing one notice line each. Material and Monokai warrant an individual licence check, and Cursor, Vercel, and GitHub
 raise a naming question rather than a copyright one — shipping a theme named for another company's product inside a competing tool — so those five are
 dropped and the rest attributed. The remaining attribution obligations stand as the research wrote them: MIT notices for OpenCode and OpenTUI in a
-shipped third-party notices file, the BSD-3-Clause notice for `diff` if it survives into the artifact, and a locked licence inventory generated from
-the real artifact. Taking the themes does **not** make Crucible accessible: the theme schema bakes green and red into `success`/`error` and
-`diffAdd`/`diffDelete`, so no theme choice makes the TUI legible to colourblind users and the fix is that the UI never signals state by colour alone.
+shipped third-party notices file, the BSD-3-Clause notice for `diff` if it survives into the artifact, and — in place of a locked licence inventory
+generated from the real artifact — the third-party notices cross-check that [#128](https://github.com/secantdev/secant/issues/128) adds against
+`THIRD-PARTY-NOTICES.md`. Taking the themes does **not** make Crucible accessible: the theme schema bakes green and red into `success`/`error` and
+`diffAdded`/`diffRemoved`, so no theme choice makes the TUI legible to colourblind users and the fix is that the UI never signals state by colour alone.
 That belongs to the command and projection interface, not here. Finally, the trade this ADR consciously accepts: because the presentation subset is
 copied rather than depended upon, upstream can never break it — and can never fix it either. Every bug in the copied code is permanently Crucible's.
 That is the strongest reason the copied subset stays small and the state-coupled components are rebuilt rather than adapted.
@@ -101,3 +105,16 @@ that carries the upstream tool's own identity inside Crucible raises the same na
 That leaves 25 of the 33 upstream theme assets shipped, each attributed by one line in `THIRD-PARTY-NOTICES.md`. Because the default OpenCode theme was
 among the drops, Crucible's shipped default is `nord` — a widely-known MIT community palette — and there is no theme picker and no persisted preference
 yet.
+
+## Amendment (ADR 0030): runtime resolved, legacy conhost dropped
+
+[ADR 0030](./0030-ship-the-shell-as-a-bun-compiled-single-file-executable.md) settled the runtime and packaging question this ADR deliberately left
+open, and in doing so reversed three sentences above. Recorded here because that ADR names this one in its supersession list:
+
+- **Legacy conhost is no longer a supported host.** ADR 0030 drops the legacy-conhost support-matrix row. Secant still ships the stdin-release
+  teardown workaround and prints a one-line notice pointing at Windows Terminal, and the TUI still runs there, but "legacy conhost stays a supported
+  host" no longer holds — the segment is surrendered, not preserved.
+- **The Bun-adoption conditional has fired.** The clause reading that adopting Bun later "would forfeit legacy conhost support until someone finds a
+  Bun-side release" is spent: Bun is the shipped runtime now, and that forfeit is the accepted cost rather than a future risk.
+- **The human real-console check retargets to Windows Terminal.** It is re-run when the Bun pin, the OpenTUI pin, or `src/tui/renderer/` changed —
+  against Windows Terminal, not the legacy conhost console this ADR aimed it at.

@@ -159,8 +159,9 @@ export const TURN_ORIGINS = exhaustive<TurnOrigin>()([
   "human",
 ] as const);
 
-/** The content of one Turn. Prompt rendering is Adapter-owned; the caller
- *  supplies the semantic input and never bakes in Harness syntax. */
+/** The content of one Turn. The caller renders the prompt text, substituting
+ *  any Bundle artifacts, and supplies it here; the Adapter owns only the
+ *  delivery mode (a profile fact), never the prompt text (ADR 0022). */
 export interface TurnInput {
   readonly text: string;
 }

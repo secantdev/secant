@@ -103,10 +103,13 @@ studied for architecture and behaviour.
 
   src/tui/vendor/theme-context.tsx   rebuilt against packages/tui/src/context/theme.tsx
   src/tui/approval-dialog.tsx        rebuilt against packages/tui/src/ui/dialog-confirm.tsx
-  src/tui/home.tsx                   rebuilt against OpenCode's Home route
-  src/tui/app.tsx                    rebuilt against packages/tui/src/app.tsx
+  src/tui/home.tsx                   rebuilt against packages/tui/src/routes/index.tsx (the Home route)
   src/tui/bundle-list.tsx            rebuilt against packages/tui/src/ui/dialog-select.tsx
   src/tui/bundle-inspect.tsx         rebuilt against packages/tui/src/feature-plugins/system/diff-viewer.tsx
+
+(`app.tsx` carried a "rebuilt against packages/tui/src/app.tsx" line that never cited
+OpenCode in the source and was never actually studied against it — #127 audit A47 —
+so it is dropped rather than left unbacked.)
 
 Added 2026-09-12 for #57 (list and inspect Workflow Bundles in the TUI). Both
 screens render the read-only `bundle-catalog` Projection through the Projection
@@ -138,11 +141,15 @@ Added 2026-09-14 for the M2 Run screens (#89–#93: watch, review, and browse
 Runs in the timeline-first Run Workbench). No OpenCode source crosses; each file
 records the upstream it studied and what it deliberately did not take.
 
-  src/tui/run-workbench.tsx   studied routes/session/index.tsx @ 1ead9e3d7f
-  src/tui/run-timeline.ts     studied routes/session/index.tsx @ 1ead9e3d7f
-  src/tui/previous-runs.tsx   studied packages/tui/src/ui/dialog-select.tsx
-  src/tui/start-run.tsx       studied routes/session/index.tsx @ 1ead9e3d7f
+  src/tui/run-workbench.tsx   studied packages/tui/src/routes/session/index.tsx
+  src/tui/run-timeline.ts     studied packages/tui/src/routes/session/index.tsx
+  src/tui/previous-runs.tsx   reuses bundle-list.tsx's selection model second-hand
+                              (bundle-list.tsx itself came from packages/tui/src/ui/dialog-select.tsx)
   src/tui/keymap.ts           studied packages/tui/src/keymap.tsx
+
+(`start-run.tsx` carried a "studied routes/session/index.tsx" line that never cited
+OpenCode in the source — #127 audit A47 — so it is dropped rather than left unbacked;
+path forms above are normalised to the `packages/tui/src/…` form the header pins.)
 
 What was taken and changed:
 
@@ -165,6 +172,35 @@ What was taken and changed:
     Taken:   the single-active-index selection model, reused from bundle-list.
     Changed: rows are the read-only Previous Runs Projection; the empty state
              names the headless Run commands.
+
+Added 2026-09-18 for the M3 Run controls (#99, #117, #120, #121, #122). M3 rebuilt
+exactly the components OpenCode factors out; no OpenCode source crosses. Each records
+the upstream it studied, in the `packages/tui/src/…` path form.
+
+  src/tui/run-workbench.tsx     approval control studied packages/tui/src/routes/session/permission.tsx;
+                                the bottom-region modal stack and its disabled-prompt rule studied
+                                packages/tui/src/routes/session/index.tsx
+  src/tui/run-inspection.tsx    split out of run-workbench.tsx (#99); inherits its
+                                packages/tui/src/routes/session/index.tsx provenance
+  src/tui/run-timeline-rows.ts  split out of run-workbench.tsx (#120); inherits its
+                                packages/tui/src/routes/session/index.tsx provenance
+
+What was taken and changed:
+
+  approval control (HarnessRequestControl, from routes/session/permission.tsx):
+    Taken:   the inline permission-prompt shape -- the tool and input summary, a row
+             of decision options, and an accept/deny key line.
+    Changed: it is one arm of the Port-driven bottom-region `<Switch>`, not a modal
+             dialog; the decisions come from the answer Offer, and a stale/rejected
+             answer keeps an inline refusal while the bumped-generation offer
+             re-renders.
+  bottom-region modal stack (from routes/session/index.tsx):
+    Taken:   the single bottom region whose control follows Run state.
+    Changed: a `<Switch>` in fixed precedence (approval request, free-text gate,
+             Review checkpoint, interactive input); while a request or free-text gate
+             is up it owns Esc and every printable key, so the Run Actions rail and
+             the two-press Esc interrupt are suppressed -- the disabled-prompt rule,
+             which replaces the passive footer input rather than merely skipping it.
 
 
 THEME ASSETS (25 vendored, unmodified palettes)

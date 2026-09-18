@@ -38,7 +38,7 @@ The repository must expose one canonical check entrypoint covering:
 - Linting.
 - Recursively discovered deterministic tests.
 - The production build.
-- Installation and packaged-entrypoint smoke testing of the produced package, covering `--help`/`--version` and the headless commands a slice lands.
+- Compiled-binary smoke testing of the produced single-file executable (ADR 0030), covering `--help`/`--version` and the headless commands a slice lands.
 - Narrow structural checks when a settled, high-cost rule becomes mechanically enforceable, including the import-boundary and guidance-structure
   suites under `tests/architecture/`.
 

@@ -34,6 +34,9 @@ Before editing under a Module root that carries its own `AGENTS.md`, read that f
 - `src/bundle/AGENTS.md` — Bundle Module: digest, validator, and budget invariants for slice authors.
 - `src/run/store/AGENTS.md` — Run Store Module: coordination/run.db split, crash-safety ordering, and fencing invariants for slice authors.
 - `src/harness/AGENTS.md` — Harness Module: Interface opacity, terminal ordering, typed-failure/throw split, and durable-admission invariants.
+- `src/process/AGENTS.md` — process Module: the always-false Windows escalation flag, the two-stage shared-bound shutdown, and the bare-name git spawns.
+- `src/run/execution/AGENTS.md` — Run execution Module: the abort-reason to resting-state mapping and the three admitted Turn writes.
+- `src/catalog/AGENTS.md` — Catalog Module: first-install-wins, generation-keyed Trust grants, lock-free re-extraction, and the asset-root Interface crossing.
 
 ## Commits
 

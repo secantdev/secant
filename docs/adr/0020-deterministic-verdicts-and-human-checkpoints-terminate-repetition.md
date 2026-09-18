@@ -33,3 +33,15 @@ without failing a legitimate long Run because someone guessed a maximum. The cap
 always the honest exit. **Retries** are bounded differently and deliberately so: they measure transient flakiness rather than problem size, so the
 step kind decides what is retryable at all, Crucible sets the default budget, and a **Workflow Bundle** may optionally override it. A bound that reads
 an artifact — the literal expression of `2N + 5` — was rejected as the beginning of the workflow expression language this design exists to avoid.
+
+## Amendment — Command outputs are declared, and a signal death is indeterminate (M3)
+
+The Command-step sentence above ("succeeds if the command ran to an exit, writing a `pass`/`fail` Verdict plus a `text` artifact … fails only when the
+command could not execute at all") is narrowed to match what M3 shipped:
+
+- **Outputs exist only when the Step declares them.** A succeeding Command writes the `pass`/`fail` Verdict and the captured-output `text` **only for the
+  outputs its `produces` names** (`commandOutputs`); a Command's Step-kind contract is a verdict and a text, so any other declared output stays absent and
+  the Run Store names it missing. The exit status is the value that decides `pass` vs `fail`; it is never itself the Attempt outcome.
+- **A signal death is `indeterminate`, not `failed`.** A command killed by an external signal with no exit — Ctrl+C, an outside SIGTERM, the terminal
+  closing mid-Run — settles the Attempt **`indeterminate`**: never retried, resting the Run `halted` for human resume ([ADR 0019](./0019-failed-and-halted-runs-are-resumable-resting-states.md)).
+  That is distinct from the retryable **`failed`** of a spawn error (a missing binary) or a timeout, which the original sentence collapsed together.

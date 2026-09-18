@@ -23,6 +23,18 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   hidden while an interactive Step owns the input (#122): its Esc leaves, so surfacing an Esc-driven interrupt there would collide too.
 - The free-text gate control is a hand-rolled text buffer over that raw-key pipeline, not a native `<input>`: the Workbench is Port-driven, so a native input on
   the keymap path never sees its keys. Single-char `name` only — shifted symbols and IME are deferred real-terminal input (#23).
+- An armed End-Step confirm is the one exception to "only Ctrl+C escapes while typing": the `pending()` check sits **above** the typing branch in the
+  Workbench key loop (`run-workbench.tsx`), so while the End-Step confirm is armed `y` confirms and Escape backs out rather than typing into the interactive
+  input. (Kept on its own line: a later ticket rewrites the key-routing paragraph around it when native input lands.)
+- A stale approval answer keeps its inline refusal while the offer re-renders: a genuinely new request (a fresh `requestId`) resets the decision to `allow`
+  and clears the refusal, but a stale answer keeps the same id, so its refusal survives while the bumped-generation offer re-renders (`onIdentityChange` on
+  the request id).
+- A live update is told from a durable one by kind, and the settling watermark drives the preview-to-authoritative swap (`reduceRunUpdate`, `run-view.tsx`):
+  a `live` overlay at phase `settling` records the durable `settledCountAtSettling`; the next `durable` update whose settled-Turn count passes it drops the
+  live overlay and preview and shows the authoritative snapshot alone. A `preview` update only refreshes the streaming text.
+- Typed-but-unsent interactive text (the `draft` signal) clears only on a **fresh** interactive Step (the focus effect keyed on the Step id), so it survives a
+  Turn settle and a tab away within the same Step; a send clears it optimistically before dispatch, so a refused send loses the text (the refusal re-surfaces,
+  the draft does not).
 - The timeline's scroll/live-edge/anchor/new-activity is a pure index reducer (`run-timeline.ts`), not OpenTUI's `<scrollbox>` (which OpenCode's session
   timeline uses). `run-timeline-rows.ts` joins append-only durable history with stable-key replaceable live tail rows; an absolute `top` keeps naming the
   same first-visible row while new rows land, and the new-activity count is `total − viewportBottom`. Neither invariant exists in the scrollbox.

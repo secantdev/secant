@@ -7,7 +7,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Exit-code contract: the headless Run commands exit 0 only when the Run rests exactly `succeeded`, **2** when it rests `blocked` at its Human Gate
   checkpoint (the M2 gate's expected outcome — distinguished from a failure so CI can assert it), and 1 for every other rest (A36, `exitForState` in
   `run-commands.ts`). Because `blocked` now has its own code, the package smoke asserts it through its `run()` helper's `expect` option rather than raw
-  `spawnSync`.
+  `spawnSync`. This rest-state exit is only `launch`, `resume` and `answer` — the three commands that drive to settlement through `settleAndReportRun`;
+  `show`, `list`, `read`, `cancel` and `delete` exit 0 on success (or 1 on a refusal), never by rest state. On Ctrl+C the signal handler (`withClients`,
+  `composition/main.ts`, #98) aborts the live Runs, restores the default disposition, and re-raises the signal, so the process exits **128 plus the signal
+  number** rather than 1 — the Unix "killed" contract a CI script reads, which a fabricated 1 destroys. The `halted` rest lands lazily: the claim is left
+  live and the next open reconciles it `halted` (ADR 0019), not the signalled process.
 - `run answer` gates on the Port's `answer-human-gate` Offer (A14): the Offer owns legality and carries the exact Gate reference, so its absence — not a
   client re-derivation from `run.state` — refuses an unanswerable Run, and submitting against `offer.gate` lets the Application catch a Gate that moved
   as stale. Never classify the answer or synthesize the reference here. `run answer` takes `--continue`/`--stop` (approve-reject and checkpoints) or
@@ -22,6 +26,16 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - The `run` command group lives in `run-commands.ts` and registers onto the program `buildProgram` passes (A25); it is handed `io`/`execute`/`fail`/`settle`
   and shares `settledOutcome` and `settleAndReportRun` (the await-settlement-then-report tail, A24). `splitSelector` lives there too and `bundle inspect`
   imports it (A24).
+- `launch`/`resume` answer approval Harness Requests while following the live Run (#117): `followHarnessRequests` opens the `run` Projection and, on each
+  `live` overlay, submits `answer-harness-request` (as `client-policy`) for every offer not yet in its `attempted` set — the key is `generation:requestId`,
+  so a request re-offered at a later generation (a prior answer went stale) is retried. `--harness-requests` defaults to **`deny`** (`parseHarnessRequestPolicy`):
+  an unattended Run denies every approval unless the operator opts into `allow` (the only other value; Claude Code offers no "always"). The follower must be
+  started before settlement is awaited, so an Agent Turn that pauses on approval is unblocked and the Run can rest; it is harmless for a Command-only Run.
+- `run read --transcript` (#124) selects the Session from `<run-id>/<session>` then `--session`; with neither it takes the sole Session that has a recorded
+  transcript. It refuses `run-session-not-found` when the named Session has no transcript, when the Run has none at all, or when more than one Session exists
+  and none was named (`readTranscript`).
+- `render.ts` ignores an unknown action-offer kind on purpose: each offer kind is rendered by its own filtered loop, so an offer kind the client does not
+  recognise falls through every loop and prints nothing rather than erroring — the client never enumerates a closed set of offers.
 - The `--json` shapes are frozen: the three-OS CI gate parses specific fields (`.result.run.state`, `.checkpoint.completedIterations`, …), so renaming
   one breaks the gate. They are not uniform — `bundle inspect --json` prints the inner bundle while `bundle list --json` prints the snapshot — so match
   the existing shape a command already emits.

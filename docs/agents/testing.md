@@ -7,11 +7,23 @@ sleep, or other unstable external state. Tests requiring those resources are opt
 test runner (`bun test`), not `bun:test`; `bunfig.toml` records why the per-test timeout is a CLI `--timeout` flag rather than a `[test] timeout` key
 (that key applies only to `bun:test`, so it never reaches these tests).
 
-Package smoke tests install the produced artefact in an isolated temporary location and exercise its entrypoint: the Bun compiled single-file
-executable is copied out of `dist/` and run there. It covers far more than `--help`/`--version` now — approving a Workspace under a temporary
-`SECANT_HOME` and reading it back with `--json`, building a Proof Bundle, launching Runs that reach `succeeded`, that halt on a materialization
-conflict, and that pause at a Human Gate for an answer, plus the no-interactive-terminal and `git-worktree-root` refusals. They are the CI acceptance
-seam for headless work and do not invoke a real Harness.
+Package smoke tests copy the produced Bun compiled single-file executable out of `dist/` into an isolated temporary location and exercise it there. They
+are the CI acceptance seam for headless work and do not invoke a real Harness. This is the one home for the package-smoke enumeration — the support matrix
+and the `check.yml` `smoke` job point here rather than restating it. Beyond `--help`/`--version` and the no-TTY refusal, the smoke runs, on each of the
+three operating systems:
+
+- The **M3 gate** ([#106](https://github.com/secantdev/secant/issues/106)): the headless Test Repair Proof Bundle Run launched from the installed binary
+  against the recorded Claude Code replayer on PATH, reaching its authored Human Gate and, once answered, `succeeded` with the frozen Run `--json` fields.
+- The **signal halt-then-resume** path: a Run interrupted by SIGINT mid-execution rests `halted` (POSIX aborts the live Run and leaves the claim live;
+  Windows SIGINT terminates and leaves the same claim), and a later `resume` completes it.
+- **Windows `.cmd` shim** acceptance and refusal: a Command step naming an npm-style `.cmd` shim resolves through the shim, while a broken shim is refused
+  at Preflight (POSIX has no shim, so it is skipped there).
+- The **Matt front** refusal: the maintained interactive-agent Bundle refused headlessly with the `interactive-step-needs-tui` code and its remediation.
+- **Install and collision**: building the Proof Bundle with `--no-install --output`, installing it, and rejecting a byte-different same-identity archive as
+  a `bundle-identity-collision` (first-install-wins).
+- **Run list and delete**: listing Previous Runs over `bundle-catalog`/`run-list`, refusing to cancel a resting Run, and deleting a Run's store.
+- The **relocated pre-Drizzle home**: the checked-in pre-Drizzle fixture relocated beneath the isolated install, proving the compiled binary migrates and
+  opens it through its embedded migration registries.
 
 Test observable behavior through the same Interface callers use. Internal refactoring should not require test rewrites. When shallow Modules are
 replaced by a deeper Module, replace their implementation-coupled tests rather than retaining both suites.

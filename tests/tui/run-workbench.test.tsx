@@ -408,6 +408,20 @@ async function press(
   await t.renderOnce();
 }
 
+// Type printable text into a focused native <input> (D9). Text entry rides the
+// renderer's mock input (the real terminal path the field reads), never the fake
+// Renderer Port — the Port carries only the Workbench dispatcher's command keys.
+async function type(
+  t: {
+    renderOnce: () => Promise<void>;
+    mockInput: { typeText: (text: string) => Promise<void> };
+  },
+  text: string,
+) {
+  await t.mockInput.typeText(text);
+  await t.renderOnce();
+}
+
 function noOverflow(frame: string, width: number) {
   for (const line of frame.split("\n")) {
     assert.ok(
@@ -1978,9 +1992,9 @@ function liveTurnRunOf(over: Partial<RunView> = {}): RunView {
 
 test("the interactive input takes the human's text and Enter sends one Turn (#122)", async () => {
   const wb = await mountWorkbench(interactiveRunOf());
-  // Focus is on the input during the Step; the human's keystrokes accumulate.
-  await press(wb.t, wb.renderer, "h");
-  await press(wb.t, wb.renderer, "i");
+  // Focus is on the native field during the Step; the human's text rides the mock
+  // input, while Enter to send comes over the Port dispatcher (D9).
+  await type(wb.t, "hi");
   assert.match(wb.t.captureCharFrame(), /> hi/);
 
   await press(wb.t, wb.renderer, "return");
@@ -2015,6 +2029,40 @@ test("Escape backs out of an armed End Step without dispatching (#122)", async (
   assert.doesNotMatch(wb.t.captureCharFrame(), /End this interactive Step\?/);
 });
 
+test("End Step armed blurs the field so the confirming y never types, and dropping the arm refocuses it (D9)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  await type(wb.t, "hi");
+  await press(wb.t, wb.renderer, "e", { ctrl: true }); // arm End Step → field blurs
+  assert.match(wb.t.captureCharFrame(), /End this interactive Step\?/);
+  // While armed the field is blurred: a keystroke (the confirming `y` included) does not
+  // type — the draft is unchanged. `y` over the Port confirms; it is never text.
+  await type(wb.t, "y");
+  assert.match(wb.t.captureCharFrame(), /> hi/);
+  assert.doesNotMatch(wb.t.captureCharFrame(), /> hiy/);
+  // Esc drops the arm; the field refocuses and accepts text again.
+  await press(wb.t, wb.renderer, "escape");
+  await type(wb.t, "!");
+  assert.match(wb.t.captureCharFrame(), /> hi!/);
+});
+
+test("the armed End Step confirms on y over the Port and no y lands in the field (D9)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  await type(wb.t, "draft");
+  await press(wb.t, wb.renderer, "e", { ctrl: true });
+  await press(wb.t, wb.renderer, "y"); // confirm through the Port dispatcher
+  assert.deepEqual(wb.control.ends, [{ runId: "run-1", stepId: "discuss" }]);
+});
+
+test("the interactive field is blurred while a send is in flight so no key types (D9)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  await type(wb.t, "hi");
+  await press(wb.t, wb.renderer, "return"); // send → outcome pending → field blurs
+  assert.match(wb.t.captureCharFrame(), /… sending…/); // the in-flight hint
+  await type(wb.t, "X"); // the field is blurred, so this does not land
+  assert.match(wb.t.captureCharFrame(), /> hi/);
+  assert.doesNotMatch(wb.t.captureCharFrame(), /> hiX/);
+});
+
 test("End Step is not offered mid-Turn (#122)", async () => {
   // No send/end offers means a Turn is live: End Step cannot arm and Enter sends
   // nothing, so the human waits (or interrupts) rather than ending mid-Turn.
@@ -2029,9 +2077,9 @@ test("End Step is not offered mid-Turn (#122)", async () => {
   assert.equal(wb.control.sends.length, 0);
 });
 
-test("a send refusal surfaces in the input and re-enables it (#122)", async () => {
+test("a refused send surfaces the refusal and keeps the typed draft (#122, A9)", async () => {
   const wb = await mountWorkbench(interactiveRunOf());
-  await press(wb.t, wb.renderer, "h");
+  await type(wb.t, "hi");
   await press(wb.t, wb.renderer, "return");
   wb.control.setInteractiveOutcome({
     kind: "refused",
@@ -2044,6 +2092,9 @@ test("a send refusal surfaces in the input and re-enables it (#122)", async () =
   });
   await wb.t.renderOnce();
   assert.match(wb.t.captureCharFrame(), /a Turn is already live/);
+  // A9 (fails at HEAD): the refusal re-enables the field with the draft intact — a long
+  // Turn typed at the wrong moment is not lost. HEAD cleared the draft before dispatch.
+  assert.match(wb.t.captureCharFrame(), /> hi/);
 });
 
 test("the interactive input reads without colour and fits a narrow terminal (#122)", async () => {
@@ -2054,6 +2105,37 @@ test("the interactive input reads without colour and fits a narrow terminal (#12
   assert.match(frame, /Your Turn/);
   assert.match(frame, /enter send Turn · \^E end step/);
   noOverflow(frame, 48);
+});
+
+test("the corrected INTERACTIVE_HEIGHT reclaims one timeline row at a fixed height (A33) — fails at HEAD", async () => {
+  // At width 100 / height 24 the interactive input now reserves 3 rows (was 4), so the
+  // timeline viewport is 15 rows. events(15) fills it exactly: the oldest event (e0) sits
+  // at the top and the newest (e14) at the live edge, with no overflow. At HEAD the input
+  // over-reserved a row, so the viewport was 14 and e0 fell off the top.
+  const wb = await mountWorkbench(
+    interactiveRunOf({ timeline: events(15) }),
+    100,
+    24,
+  );
+  const frame = wb.t.captureCharFrame();
+  assert.match(frame, / e0 /); // the reclaimed row: the oldest event is visible
+  assert.match(frame, / e14/); // the newest event still sits at the live edge
+  noOverflow(frame, 100);
+});
+
+test("the corrected CHECKPOINT_HEIGHT reclaims one timeline row at a fixed height (A33) — fails at HEAD", async () => {
+  // At width 100 / height 24 the Review checkpoint now reserves 7 rows (was 8), so the
+  // timeline viewport is 10 rows. events(10) fills it exactly: the oldest event (e0) is
+  // visible with no overflow. At HEAD the checkpoint over-reserved a row and e0 fell off.
+  const wb = await mountWorkbench(
+    blockedRunOf({ timeline: events(10) }),
+    100,
+    24,
+  );
+  const frame = wb.t.captureCharFrame();
+  assert.match(frame, / e0 /); // the reclaimed row: the oldest event is visible
+  assert.match(frame, / e9/); // the newest event still sits at the live edge
+  noOverflow(frame, 100);
 });
 
 const FREE_TEXT_GATE: RunGateReference = {
@@ -2133,15 +2215,22 @@ test("Esc denies the outstanding request", async () => {
   assert.equal(control.requests[0]?.decision, "deny");
 });
 
-test("the request control vanishes when the Turn settles without an answer", async () => {
-  const { t, control } = await mountWithRequest();
+test("the request control vanishes when the Turn settles without an answer, and keys reach the timeline again (A8)", async () => {
+  const { t, control, renderer } = await mountWithRequest();
   assert.match(t.captureCharFrame(), /Harness Request · awaiting/);
-  // The Turn ends (or is interrupted/lost): the ephemeral overlay is gone.
+  assert.match(t.captureCharFrame(), /ephemeral Harness Request/); // the header basis
+  // The Turn ends (or is interrupted/lost) and the overlay clears — the reducer drops it
+  // on a `closed` update or when durable liveness leaves live-here (A8, run-view.test.ts).
+  // Here the mounted view is handed the cleared overlay directly.
   control.setLive(undefined);
   await t.renderOnce();
   const frame = t.captureCharFrame();
-  assert.doesNotMatch(frame, /awaiting your approval/);
+  assert.doesNotMatch(frame, /awaiting your approval/); // the request control is gone
+  assert.doesNotMatch(frame, /ephemeral Harness Request/); // header no longer claims it
   assert.match(frame, /d details/); // footer returned
+  // Ordinary keys reach the timeline again — the modal no longer swallows them.
+  await press(t, renderer, "d");
+  assert.match(t.captureCharFrame(), /› Details/);
 });
 
 test("the request is never re-asked: a later overlay with no outstanding clears the control", async () => {
@@ -2206,13 +2295,54 @@ test("a free-text gate shows a text input in place of the footer", async () => {
 
 test("typing then Enter dispatches answer-human-gate with the typed text against the gate", async () => {
   const { t, control, renderer } = await mountWorkbench(freeTextRunOf());
-  for (const ch of ["f", "i", "x", "space", "4", "2"])
-    await press(t, renderer, ch);
-  assert.match(t.captureCharFrame(), /> fix 42/); // buffer echoed with a caret
-  await press(t, renderer, "return");
+  await type(t, "fix 42"); // text rides the native field via the mock input (D9)
+  assert.match(t.captureCharFrame(), /> fix 42/); // field echoes the value
+  await press(t, renderer, "return"); // Enter to submit comes over the Port dispatcher
   assert.equal(control.texts.length, 1);
   assert.equal(control.texts[0]?.text, "fix 42");
   assert.deepEqual(control.texts[0]?.gate, FREE_TEXT_GATE);
+});
+
+test("the free-text field takes capitals and punctuation verbatim (D9) — fails at HEAD", async () => {
+  const { t, control, renderer } = await mountWorkbench(freeTextRunOf());
+  // At HEAD the hand-rolled buffer lowercased capitals and dropped shifted symbols, so
+  // `ABC-1!.` arrived `abc-1!.`; the native field carries the exact text.
+  await type(t, "ABC-1!.");
+  assert.match(t.captureCharFrame(), /> ABC-1!\./);
+  await press(t, renderer, "return");
+  assert.equal(control.texts[0]?.text, "ABC-1!.");
+});
+
+test("a bracketed paste and a word delete edit the free-text field natively (D9)", async () => {
+  const { t, control, renderer } = await mountWorkbench(freeTextRunOf());
+  await t.mockInput.pasteBracketedText("fix issue");
+  await t.renderOnce();
+  assert.match(t.captureCharFrame(), /> fix issue/); // the paste landed whole
+  // Ctrl+Backspace deletes the last word — reachable only through the native field.
+  t.mockInput.pressBackspace({ ctrl: true });
+  await t.renderOnce();
+  await press(t, renderer, "return");
+  assert.equal(control.texts[0]?.text, "fix ");
+});
+
+test("the interactive field takes capitals and punctuation verbatim (D9) — fails at HEAD", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  await type(wb.t, "ABC-1!.");
+  assert.match(wb.t.captureCharFrame(), /> ABC-1!\./);
+  await press(wb.t, wb.renderer, "return");
+  assert.deepEqual(wb.control.sends, [
+    { runId: "run-1", stepId: "discuss", text: "ABC-1!." },
+  ]);
+});
+
+test("a capital typed as a shifted key reaches the interactive field as uppercase (D9)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  wb.t.mockInput.pressKey("a", { shift: true });
+  await wb.t.renderOnce();
+  await press(wb.t, wb.renderer, "return");
+  assert.deepEqual(wb.control.sends, [
+    { runId: "run-1", stepId: "discuss", text: "A" },
+  ]);
 });
 
 test("an empty free-text submission is refused locally without dispatching", async () => {
@@ -2253,6 +2383,36 @@ test("Steer renders as unavailable with the exact reason and has no dispatch", a
   // No key dispatches steer; the seam is never touched from the Workbench.
   await press(t, renderer, "s");
   assert.equal(control.requests.length, 0);
+});
+
+test("Esc from Details returns focus to the timeline during a live Turn, never arming interrupt (A7) — fails at HEAD", async () => {
+  // With a live agent Turn the interrupt Offer stands, so at HEAD the two-press Esc arm
+  // sat above the focused-region branches and shadowed Details' own Esc: opening Details
+  // and pressing Esc armed (and a second Esc cancelled) the Turn instead of going back.
+  let interrupted = 0;
+  const actions = okActions({
+    interrupt: () => {
+      interrupted += 1;
+      return () => ({ kind: "ok" });
+    },
+  });
+  const { t, renderer } = await mountWorkbench(
+    liveTurnRunOf({ timeline: events(4) }),
+    100,
+    40,
+    actions,
+  );
+  await press(t, renderer, "d"); // open Details; focus moves there
+  const detailsFrame = t.captureCharFrame();
+  assert.match(detailsFrame, /› Details/);
+  assert.match(detailsFrame, /esc back/); // the footer stays honest about what Esc does
+  await press(t, renderer, "escape"); // A7: back to the timeline, not an interrupt arm
+  const afterEsc = t.captureCharFrame();
+  assert.match(afterEsc, /› Timeline/);
+  assert.doesNotMatch(afterEsc, /Press esc again to interrupt/);
+  // A second Esc — now in timeline focus — only arms; it dispatches no interrupt-turn.
+  await press(t, renderer, "escape");
+  assert.equal(interrupted, 0);
 });
 
 test("first Interrupt press arms the hint, second dispatches interrupt-turn, and the Workbench stays", async () => {

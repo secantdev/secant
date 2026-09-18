@@ -98,6 +98,99 @@ async function flushUpdates(): Promise<void> {
   await Promise.resolve();
 }
 
+/** Open a live Run projection over a hand-driven update queue, so a test can push each
+ *  update lane (durable, live, preview, closed) and read the joined view. */
+function openLiveProjection(initial: RunSnapshot): {
+  projection: RunWorkbenchProjection;
+  updates: UpdateQueue<ProjectionUpdate<RunSnapshot>>;
+  dispose: () => void;
+} {
+  const updates = new UpdateQueue<ProjectionUpdate<RunSnapshot>>();
+  const opened = { snapshot: initial, updates, close() {} };
+  const port = {
+    openProjection: () => opened,
+    submit() {
+      throw new Error("submit is not used");
+    },
+    readResource() {
+      throw new Error("readResource is not used");
+    },
+  } as unknown as ProjectionPort;
+  let projection!: RunWorkbenchProjection;
+  const dispose = createRoot((dispose) => {
+    projection = createLiveRunWorkbenchView(port).openRun("run-1");
+    return dispose;
+  });
+  return { projection, updates, dispose };
+}
+
+/** A live overlay holding one outstanding approval Harness Request (#117): the view a
+ *  lost Turn must not leave standing (A8). */
+const REQUESTING: RunLiveOverlay = {
+  runId: "run-1",
+  generation: 3,
+  phase: "working",
+  outstanding: [
+    {
+      requestId: "req-1",
+      tool: "Edit",
+      input: '{"path":"a.ts"}',
+      decisions: ["allow", "deny"],
+    },
+  ],
+  offers: [
+    {
+      action: "answer-harness-request",
+      runId: "run-1",
+      requestId: "req-1",
+      generation: 3,
+      decisions: ["allow", "deny"],
+      basis: "ephemeral Harness Request",
+    },
+  ],
+  preview: "Editing a.ts",
+};
+
+test("a closed update clears the live overlay and preview so a lost Turn leaves no dead control (A8) — fails at HEAD", async () => {
+  const { projection, updates, dispose } = openLiveProjection(
+    snapshotOf(runOf()),
+  );
+  updates.push({ kind: "live", overlay: REQUESTING });
+  await flushUpdates();
+  assert.equal(projection.live()?.outstanding.length, 1);
+  assert.equal(projection.preview(), "Editing a.ts");
+  // The follow loop breaks (subject gone) with the last overlay still in state; HEAD
+  // returned the state untouched, keeping a dead request control standing.
+  updates.push({ kind: "closed", reason: "subject-gone" });
+  await flushUpdates();
+  assert.equal(projection.live(), undefined);
+  assert.equal(projection.preview(), undefined);
+  dispose();
+  updates.end();
+});
+
+test("a durable update whose liveness leaves live-here drops the live overlay (A8) — fails at HEAD", async () => {
+  const { projection, updates, dispose } = openLiveProjection(
+    snapshotOf(runOf()),
+  );
+  updates.push({ kind: "live", overlay: REQUESTING });
+  await flushUpdates();
+  assert.equal(projection.live()?.outstanding.length, 1);
+  // Durable liveness leaves live-here (the Turn is no longer live in this instance);
+  // HEAD kept the overlay, so the request control kept standing over a dead Turn.
+  updates.push({
+    kind: "durable",
+    snapshot: snapshotOf(
+      runOf({ state: "halted", liveness: { state: "not-live" } }),
+    ),
+  });
+  await flushUpdates();
+  assert.equal(projection.live(), undefined);
+  assert.equal(projection.preview(), undefined);
+  dispose();
+  updates.end();
+});
+
 test("the live Run view joins durable, overlay, and preview lanes and clears only after authoritative settlement", async () => {
   const initial = snapshotOf(runOf());
   const updates = new UpdateQueue<ProjectionUpdate<RunSnapshot>>();

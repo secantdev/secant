@@ -35,6 +35,11 @@ import { seedTestRepairWorkspace } from "../tests/helpers/testRepairWorkspace.js
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
 
+// The runtime's directory goes on every isolated env's PATH so a launched Command
+// Step can spawn it by bare name (the #88 materialization scenario runs `-e`
+// scripts). Module scope so `homeEnv` closes over it.
+const runtimeDir = dirname(process.execPath);
+
 function hostBinary() {
   const key = hostTargetKey(process.platform, process.arch);
   if (key === undefined) {
@@ -54,14 +59,15 @@ if (!existsSync(source)) {
 
 type RunOptions = SpawnSyncOptions & { expect?: number };
 
+// `expect` is the required exit code (default 0). A Run resting blocked at its
+// checkpoint exits 2 (A36) — a known, deliberate code — so the gate scenarios
+// assert it through this helper instead of dropping to raw spawnSync. Returns
+// stdout; sites that need a non-zero exit or the full result keep raw spawnSync.
 function run(
   command: string,
   args: readonly string[],
   options: RunOptions = {},
 ): string {
-  // `expect` is the required exit code (default 0). A Run resting blocked at its
-  // checkpoint exits 2 (A36) — a known, deliberate code — so the gate scenarios
-  // assert it through this helper instead of dropping to raw spawnSync.
   const { expect = 0, ...spawnOptions } = options;
   const result = spawnSync(command, [...args], {
     cwd: projectRoot,
@@ -81,6 +87,93 @@ function run(
     );
   }
   return result.stdout;
+}
+
+/** The base env for an isolated SECANT_HOME with the runtime dir on PATH (A35):
+ *  the workspace, legacy, and SIGINT scenarios differ only by SECANT_HOME. */
+function homeEnv(secantHome: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    SECANT_HOME: secantHome,
+    PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
+  };
+}
+
+/** Write a manifest, build (default-install) the Bundle, and confirm it installed,
+ *  returning its catalog row (A35): the win32 branch and three scenarios shared
+ *  this exact shape. Distinct from the `--no-install --output` + `bundle install`
+ *  family, which stays inline. */
+async function buildAndInstall(
+  binary: string,
+  folder: string,
+  manifest: { bundle: { id: string } },
+  where: {
+    build: string;
+    list: string;
+    env: NodeJS.ProcessEnv;
+    label: string;
+  },
+): Promise<{ id: string; digest: string }> {
+  await mkdir(folder, { recursive: true });
+  await writeFile(
+    join(folder, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  run(binary, ["bundle", "build", folder], {
+    cwd: where.build,
+    env: where.env,
+  });
+  const installed = JSON.parse(
+    run(binary, ["bundle", "list", "--json"], {
+      cwd: where.list,
+      env: where.env,
+    }),
+  ).result.bundles.find(
+    (bundle: { id: string }) => bundle.id === manifest.bundle.id,
+  );
+  if (installed === undefined) {
+    throw new Error(`${where.label} Bundle was not installed.`);
+  }
+  return installed;
+}
+
+/** Assert each command exits non-zero and its combined stdout+stderr matches the
+ *  expected code/needle (A35): the unknown-command, not-found, and Preflight
+ *  refusal loops were three copies of this. A string `match` is a substring; a
+ *  RegExp is tested. */
+function assertRefuses(
+  binary: string,
+  cases: readonly {
+    args: readonly string[];
+    match: string | RegExp;
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+    detail: string;
+  }[],
+): void {
+  for (const scenario of cases) {
+    const result = spawnSync(binary, [...scenario.args], {
+      cwd: scenario.cwd,
+      encoding: "utf8",
+      ...(scenario.env !== undefined ? { env: scenario.env } : {}),
+    });
+    if (result.error) throw result.error;
+    if (result.status === 0) {
+      throw new Error(
+        `\`secant ${scenario.args.join(" ")}\` should exit non-zero.`,
+      );
+    }
+    const output = `${result.stdout}${result.stderr}`;
+    const matched =
+      typeof scenario.match === "string"
+        ? output.includes(scenario.match)
+        : scenario.match.test(output);
+    if (!matched) {
+      throw new Error(
+        `\`secant ${scenario.args.join(" ")}\` ${scenario.detail}: ${output}`,
+      );
+    }
+  }
 }
 
 function assertMigrated(
@@ -147,38 +240,28 @@ try {
   }
 
   // An unknown command and an unknown flag exit non-zero with a usage message,
-  // before any composition wiring (issue #72). `run` throws on a non-zero exit,
-  // so use spawnSync directly to assert the failure.
-  for (const args of [["frobnicate"], ["bundle", "list", "--bogus"]]) {
-    const result = spawnSync(binary, args, {
+  // before any composition wiring (issue #72).
+  assertRefuses(binary, [
+    {
+      args: ["frobnicate"],
+      match: /unknown-(command|option)/,
       cwd: smokeRoot,
-      encoding: "utf8",
-    });
-    if (result.error) throw result.error;
-    if (result.status === 0) {
-      throw new Error(`\`secant ${args.join(" ")}\` should exit non-zero.`);
-    }
-    const output = `${result.stdout}${result.stderr}`;
-    if (!/unknown-(command|option)/.test(output)) {
-      throw new Error(
-        `\`secant ${args.join(" ")}\` did not print a usage message: ${output}`,
-      );
-    }
-  }
+      detail: "did not print a usage message",
+    },
+    {
+      args: ["bundle", "list", "--bogus"],
+      match: /unknown-(command|option)/,
+      cwd: smokeRoot,
+      detail: "did not print a usage message",
+    },
+  ]);
 
   // Approve a temporary Workspace under a temporary SECANT_HOME, then read it
   // back with --json — the SQLite write→read round-trip (issue #50, AC7).
   const secantHome = join(smokeRoot, "secant-home");
   const workspaceDirectory = join(smokeRoot, "workspace");
   await mkdir(workspaceDirectory, { recursive: true });
-  // The runtime's directory is on PATH so a launched Command Step can spawn it by
-  // bare name (the #88 materialization scenario below runs `-e` scripts).
-  const runtimeDir = dirname(process.execPath);
-  const workspaceEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    SECANT_HOME: secantHome,
-    PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
-  };
+  const workspaceEnv = homeEnv(secantHome);
 
   // A compiled binary carries all three migration registries with it. Relocate the
   // checked-in pre-Drizzle home beneath this isolated install, retarget its one Run
@@ -226,11 +309,7 @@ try {
       .run(canonicalLegacyWorkspace);
     runDatabase.close();
 
-    const legacyEnv = {
-      ...process.env,
-      SECANT_HOME: legacyHome,
-      PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
-    };
+    const legacyEnv = homeEnv(legacyHome);
     const listed = JSON.parse(
       run(binary, ["run", "list", "--json"], {
         cwd: legacyWorkspace,
@@ -541,27 +620,22 @@ try {
   // Run error paths from the compiled binary (issue #82, AC7): `run show` on an
   // unknown Run id and `run launch` on an uninstalled Bundle each exit non-zero
   // with the precise Problem, before any Run directory exists.
-  const notFoundCases: [string[], string][] = [
-    [["run", "show", "no-such-run"], "run-not-found"],
-    [["run", "launch", "io.example.absent"], "bundle-not-installed"],
-  ];
-  for (const [args, code] of notFoundCases) {
-    const result = spawnSync(binary, args, {
+  assertRefuses(binary, [
+    {
+      args: ["run", "show", "no-such-run"],
+      match: "run-not-found",
       cwd: workspaceDirectory,
-      encoding: "utf8",
       env: workspaceEnv,
-    });
-    if (result.error) throw result.error;
-    if (result.status === 0) {
-      throw new Error(`\`secant ${args.join(" ")}\` should exit non-zero.`);
-    }
-    const output = `${result.stdout}${result.stderr}`;
-    if (!output.includes(code)) {
-      throw new Error(
-        `\`secant ${args.join(" ")}\` did not print ${code}: ${output}`,
-      );
-    }
-  }
+      detail: "did not print run-not-found",
+    },
+    {
+      args: ["run", "launch", "io.example.absent"],
+      match: "bundle-not-installed",
+      cwd: workspaceDirectory,
+      env: workspaceEnv,
+      detail: "did not print bundle-not-installed",
+    },
+  ]);
 
   // Preflight refusals from the compiled binary (issue #83, AC7; #116), each before
   // any Run exists. An interactive-agent Bundle is refused headlessly with
@@ -675,30 +749,22 @@ try {
     }
   }
 
-  const preflightCases: [string[], string][] = [
-    [
-      ["run", "launch", "dev.secant.smoke-interactive"],
-      "interactive-step-needs-tui",
-    ],
-    [["run", "launch", "dev.secant.git-guard"], "git-worktree-root"],
-  ];
-  for (const [args, needle] of preflightCases) {
-    const result = spawnSync(binary, args, {
+  assertRefuses(binary, [
+    {
+      args: ["run", "launch", "dev.secant.smoke-interactive"],
+      match: "interactive-step-needs-tui",
       cwd: workspaceDirectory,
-      encoding: "utf8",
       env: workspaceEnv,
-    });
-    if (result.error) throw result.error;
-    if (result.status === 0) {
-      throw new Error(`\`secant ${args.join(" ")}\` should exit non-zero.`);
-    }
-    const output = `${result.stdout}${result.stderr}`;
-    if (!output.includes(needle)) {
-      throw new Error(
-        `\`secant ${args.join(" ")}\` did not report a Preflight refusal (${needle}): ${output}`,
-      );
-    }
-  }
+      detail: "did not report a Preflight refusal (interactive-step-needs-tui)",
+    },
+    {
+      args: ["run", "launch", "dev.secant.git-guard"],
+      match: "git-worktree-root",
+      cwd: workspaceDirectory,
+      env: workspaceEnv,
+      detail: "did not report a Preflight refusal (git-worktree-root)",
+    },
+  ]);
 
   // Workspace materialization, verification, conflict, and resume from the
   // compiled binary on each gated OS (issue #88, AC6). A `home: workspace` text
@@ -760,27 +826,17 @@ try {
         },
       ],
     };
-    const folder = join(smokeRoot, "materialize-bundle");
-    await mkdir(folder, { recursive: true });
-    await writeFile(
-      join(folder, "manifest.json"),
-      JSON.stringify(manifest, null, 2),
+    const installed = await buildAndInstall(
+      binary,
+      join(smokeRoot, "materialize-bundle"),
+      manifest,
+      {
+        build: smokeRoot,
+        list: workspaceDirectory,
+        env: workspaceEnv,
+        label: "Materialization",
+      },
     );
-    run(binary, ["bundle", "build", folder], {
-      cwd: smokeRoot,
-      env: workspaceEnv,
-    });
-
-    const listJson = run(binary, ["bundle", "list", "--json"], {
-      cwd: workspaceDirectory,
-      env: workspaceEnv,
-    });
-    const installed = JSON.parse(listJson).result.bundles.find(
-      (bundle: { id: string }) => bundle.id === id,
-    );
-    if (installed === undefined) {
-      throw new Error(`Materialization Bundle was not installed: ${listJson}`);
-    }
 
     const launched = spawnSync(
       binary,
@@ -821,18 +877,13 @@ try {
 
     // Restore the file to its bound content, then resume: the Run continues.
     await writeFile(absPath, content);
-    const resumed = spawnSync(binary, ["run", "resume", runId], {
+    const resumed = run(binary, ["run", "resume", runId], {
       cwd: workspaceDirectory,
-      encoding: "utf8",
       env: workspaceEnv,
     });
-    if (resumed.error) throw resumed.error;
-    if (
-      resumed.status !== 0 ||
-      !`${resumed.stdout}`.includes("State: succeeded")
-    ) {
+    if (!resumed.includes("State: succeeded")) {
       throw new Error(
-        `Resuming after restoring the file did not continue the Run: ${resumed.stdout}${resumed.stderr}`,
+        `Resuming after restoring the file did not continue the Run: ${resumed}`,
       );
     }
   }
@@ -892,27 +943,17 @@ try {
         },
       ],
     };
-    const folder = join(smokeRoot, "answer-bundle");
-    await mkdir(folder, { recursive: true });
-    await writeFile(
-      join(folder, "manifest.json"),
-      JSON.stringify(manifest, null, 2),
+    const installed = await buildAndInstall(
+      binary,
+      join(smokeRoot, "answer-bundle"),
+      manifest,
+      {
+        build: smokeRoot,
+        list: workspaceDirectory,
+        env: workspaceEnv,
+        label: "Answer",
+      },
     );
-    run(binary, ["bundle", "build", folder], {
-      cwd: smokeRoot,
-      env: workspaceEnv,
-    });
-
-    const listJson = run(binary, ["bundle", "list", "--json"], {
-      cwd: workspaceDirectory,
-      env: workspaceEnv,
-    });
-    const installed = JSON.parse(listJson).result.bundles.find(
-      (bundle: { id: string }) => bundle.id === id,
-    );
-    if (installed === undefined) {
-      throw new Error(`Answer Bundle was not installed: ${listJson}`);
-    }
 
     // First invocation: launch, which blocks at the checkpoint and exits 2 (A36).
     const launched = run(
@@ -1025,11 +1066,7 @@ try {
     const sigintHome = join(smokeRoot, "sigint-home");
     const sigintWorkspace = join(smokeRoot, "sigint-workspace");
     await mkdir(sigintWorkspace, { recursive: true });
-    const sigintEnv = {
-      ...process.env,
-      SECANT_HOME: sigintHome,
-      PATH: `${runtimeDir}${delimiter}${process.env.PATH ?? ""}`,
-    };
+    const sigintEnv = homeEnv(sigintHome);
     const runtime = basename(process.execPath);
     const markerDir = join(smokeRoot, "sigint-markers");
     await mkdir(markerDir, { recursive: true });
@@ -1079,29 +1116,21 @@ try {
         },
       ],
     };
-    const folder = join(smokeRoot, "sigint-bundle");
-    await mkdir(folder, { recursive: true });
-    await writeFile(
-      join(folder, "manifest.json"),
-      JSON.stringify(manifest, null, 2),
-    );
     run(binary, ["workspace", "approve"], {
       cwd: sigintWorkspace,
       env: sigintEnv,
     });
-    run(binary, ["bundle", "build", folder], {
-      cwd: sigintWorkspace,
-      env: sigintEnv,
-    });
-    const installed = JSON.parse(
-      run(binary, ["bundle", "list", "--json"], {
-        cwd: sigintWorkspace,
+    const installed = await buildAndInstall(
+      binary,
+      join(smokeRoot, "sigint-bundle"),
+      manifest,
+      {
+        build: sigintWorkspace,
+        list: sigintWorkspace,
         env: sigintEnv,
-      }),
-    ).result.bundles.find((bundle: { id: string }) => bundle.id === id);
-    if (installed === undefined) {
-      throw new Error("SIGINT smoke Bundle was not installed.");
-    }
+        label: "SIGINT smoke",
+      },
+    );
 
     // A real child launches the Run and blocks in the `block` Step's sleep.
     const child = spawn(
@@ -1166,18 +1195,13 @@ try {
 
     // Let the interrupted Step complete at once on resume, then resume: it continues.
     await writeFile(proceedMarker, "go");
-    const resumed = spawnSync(binary, ["run", "resume", runId], {
+    const resumed = run(binary, ["run", "resume", runId], {
       cwd: sigintWorkspace,
-      encoding: "utf8",
       env: sigintEnv,
     });
-    if (resumed.error) throw resumed.error;
-    if (
-      resumed.status !== 0 ||
-      !`${resumed.stdout}`.includes("State: succeeded")
-    ) {
+    if (!resumed.includes("State: succeeded")) {
       throw new Error(
-        `Resuming a SIGINT-interrupted Run did not continue it: ${resumed.stdout}${resumed.stderr}`,
+        `Resuming a SIGINT-interrupted Run did not continue it: ${resumed}`,
       );
     }
     if (!existsSync(lastMarker)) {
@@ -1490,57 +1514,44 @@ try {
       ],
     });
 
-    const buildAndInstall = async (
-      folderName: string,
-      manifest: { bundle: { id: string } },
-    ) => {
-      const folder = join(smokeRoot, folderName);
-      await mkdir(folder, { recursive: true });
-      await writeFile(
-        join(folder, "manifest.json"),
-        JSON.stringify(manifest, null, 2),
-      );
-      run(binary, ["bundle", "build", folder], {
-        cwd: smokeRoot,
-        env: shimEnv,
-      });
-      const installed = JSON.parse(
-        run(binary, ["bundle", "list", "--json"], {
-          cwd: workspaceDirectory,
-          env: shimEnv,
-        }),
-      ).result.bundles.find(
-        (bundle: { id: string }) => bundle.id === manifest.bundle.id,
-      );
-      if (installed === undefined) {
-        throw new Error(`${folderName} Bundle was not installed.`);
-      }
-      return installed;
-    };
-
     // The npm-style `.cmd` shim: Preflight passes and the Command runs to a Verdict.
+    // Routed through `run()` so the exit code is asserted (default 0) alongside the
+    // Run state.
     const okId = "dev.secant.cmd-shim-ok";
     const okInstalled = await buildAndInstall(
-      "cmd-shim-ok",
+      binary,
+      join(smokeRoot, "cmd-shim-ok"),
       shimBundle(okId, "Cmd Shim Ok", "shimtool"),
+      {
+        build: smokeRoot,
+        list: workspaceDirectory,
+        env: shimEnv,
+        label: "cmd-shim-ok",
+      },
     );
-    const okLaunch = spawnSync(
+    const okLaunch = run(
       binary,
       ["run", "launch", okId, "--trust", okInstalled.digest, "--json"],
-      { cwd: workspaceDirectory, encoding: "utf8", env: shimEnv },
+      { cwd: workspaceDirectory, env: shimEnv },
     );
-    if (okLaunch.error) throw okLaunch.error;
-    if (JSON.parse(okLaunch.stdout).result.run.state !== "succeeded") {
+    if (JSON.parse(okLaunch).result.run.state !== "succeeded") {
       throw new Error(
-        `npm-style .cmd shim Command did not run to succeeded: ${okLaunch.stdout}${okLaunch.stderr}`,
+        `npm-style .cmd shim Command did not run to succeeded: ${okLaunch}`,
       );
     }
 
     // The plain `.bat`: refused at Preflight (before Trust) with the shim Problem.
     const batId = "dev.secant.cmd-shim-bat";
     await buildAndInstall(
-      "cmd-shim-bat",
+      binary,
+      join(smokeRoot, "cmd-shim-bat"),
       shimBundle(batId, "Cmd Shim Bat", "battool"),
+      {
+        build: smokeRoot,
+        list: workspaceDirectory,
+        env: shimEnv,
+        label: "cmd-shim-bat",
+      },
     );
     const batLaunch = spawnSync(binary, ["run", "launch", batId], {
       cwd: workspaceDirectory,

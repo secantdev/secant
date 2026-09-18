@@ -215,11 +215,15 @@ function reduceRunUpdate(
 ): FollowedRun {
   if (update.kind === "durable") {
     const settledCount = settledTurnCount(update.snapshot);
-    if (
+    const settled =
       state.live?.phase === "settling" &&
       state.settledCountAtSettling !== undefined &&
-      settledCount > state.settledCountAtSettling
-    ) {
+      settledCount > state.settledCountAtSettling;
+    // Drop the live overlay and preview once the Turn's authoritative truth lands (the
+    // settling watermark passed) or once durable liveness leaves live-here. A lost Turn
+    // otherwise leaves the last overlay standing — a dead approval-request control over a
+    // Run no longer live here, the header still claiming an ephemeral Harness Request (A8).
+    if (settled || !isLiveHere(update.snapshot)) {
       return { snapshot: update.snapshot };
     }
     return { ...state, snapshot: update.snapshot };
@@ -241,7 +245,22 @@ function reduceRunUpdate(
       preview: update.text.length > 0 ? update.text : undefined,
     };
   }
+  // A `closed` update ends the follow (observer lagged, subject gone, shutdown) with
+  // the last live overlay still in state; clear it and the preview so a lost Turn
+  // leaves no dead request control up (A8).
+  if (update.kind === "closed") {
+    return { snapshot: state.snapshot };
+  }
   return state;
+}
+
+/** Whether the durable snapshot reports the Run live in this instance. The live
+ *  overlay is this instance's ephemeral Turn view, so it can only stand while the
+ *  Run is live-here (A8). */
+function isLiveHere(snapshot: RunSnapshot): boolean {
+  return (
+    snapshot.result.found && snapshot.result.run.liveness.state === "live-here"
+  );
 }
 
 function settledTurnCount(snapshot: RunSnapshot): number {

@@ -355,6 +355,19 @@ test("interactive-agent rests blocked, takes two human Turns, and ends into the 
   assert.match(shown, /interactive-step-ended/);
 });
 
+test("run show names the interactive Turn basis for a blocked interactive Step (#122, A15)", async (t) => {
+  // The interactive Turn is the second of the three blocked bases `run show` must name
+  // (durable Human Gate, interactive Turn, ephemeral Harness Request). It comes off the
+  // durable send-interactive-turn Offer, so `run show` prints it from the snapshot alone.
+  const { wired, runId, run } = await launchInteractive(t, {
+    profile: profile(),
+    turns: [COMPLETED_DETACHED],
+  });
+  assert.equal(run.state, "blocked");
+  const shown = await runShow(wired, runId);
+  assert.match(shown, /Blocked: interactive Turn/);
+});
+
 /** Render the headless `run show` for a Run through the public headless entrypoint,
  *  so this reads the reopened history exactly as the CLI client does. */
 async function runShow(wired: Wiring, runId: string): Promise<string> {

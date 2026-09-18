@@ -12,6 +12,24 @@ import {
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import { installReplayer } from "../harness/replayer.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { awaitSettled } from "../helpers/settleOperation.js";
+import type {
+  ProjectionUpdate,
+  RunLiveOverlay,
+  RunSnapshot,
+} from "../../src/application/projection-port.js";
+
+/** Await the first live overlay matching `predicate` (an outstanding request). */
+async function nextOverlay(
+  updates: AsyncIterable<ProjectionUpdate<RunSnapshot>>,
+  predicate: (overlay: RunLiveOverlay) => boolean,
+): Promise<RunLiveOverlay> {
+  for await (const update of updates) {
+    if (update.kind === "live" && predicate(update.overlay))
+      return update.overlay;
+  }
+  throw new Error("the update stream closed before a matching overlay arrived");
+}
 
 // #117 AC1 end-to-end: a synthesized Agent Bundle over the recorded Test Repair
 // fix-Turn, launched headlessly with `--harness-requests allow`, pauses on the Edit
@@ -203,5 +221,61 @@ test("run launch --harness-requests deny denies the approval and follows the rec
   assert.match(
     shown.out,
     /request-answered.*answered by client policy \(deny\)/,
+  );
+});
+
+test("run show names the ephemeral Harness Request from the live overlay while a Turn is paused (#117, A15) — unreachable at HEAD", async (t) => {
+  const { wired, bundleId, digest } = wire(t);
+  // Launch directly through the Port with no follower, so the Edit approval stays
+  // outstanding and the Turn stays paused for `run show` to observe (the headless `run
+  // launch` would answer it by policy at once, leaving only a durable timeline entry).
+  const admission = wired.projectionPort.submit({
+    operationId: "op-launch-a15",
+    operation: "launch-run",
+    input: { bundle: { id: bundleId }, launchInputs: {}, trustDigest: digest },
+  });
+  assert.ok(
+    admission.admitted && admission.runId !== undefined,
+    JSON.stringify(admission),
+  );
+  const runId = admission.runId;
+
+  // Wait until the Turn pauses on the Edit approval, then read the request to answer.
+  const opened = wired.projectionPort.openProjection({
+    family: "run",
+    runId,
+  });
+  const overlay = await nextOverlay(
+    opened.updates,
+    (o) => o.outstanding.length > 0,
+  );
+  opened.close();
+
+  // `run show` reads the live overlay and names the third blocked basis — unreachable at
+  // HEAD, which read only the durable snapshot and printed `State: running` with no hint.
+  const shown = await headless(wired, ["run", "show", runId]);
+  assert.equal(shown.code, 0, shown.out);
+  assert.match(shown.out, /Blocked: ephemeral Harness Request/);
+  assert.match(shown.out, /Harness Request:/);
+  assert.match(shown.out, /tool: Edit/);
+  assert.match(shown.out, /sum\.mjs/); // the exact input Claude Code asked to run
+
+  // Answer the outstanding request so the Turn completes and the Run settles, leaving no
+  // paused live process for teardown to kill.
+  const offer = overlay.offers[0]!;
+  wired.projectionPort.submit({
+    operationId: "op-answer-a15",
+    operation: "answer-harness-request",
+    input: {
+      runId,
+      requestId: offer.requestId,
+      generation: offer.generation,
+      decision: "allow",
+      by: "human",
+    },
+  });
+  assert.equal(
+    (await awaitSettled(wired.projectionPort, "op-launch-a15")).status,
+    "applied",
   );
 });

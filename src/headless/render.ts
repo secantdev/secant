@@ -8,6 +8,7 @@ import type {
   RunListGroup,
   RunListSnapshot,
   RunView,
+  SendInteractiveTurnOffer,
 } from "../application/projection-port.js";
 
 // The headless client's plain-text renderers: pure snapshot → string functions
@@ -180,6 +181,18 @@ export function renderRun(run: RunView): string {
       `  gate: ${pendingGate.gate.shape} at step ${pendingGate.gate.stepId}` +
         ` (attempt ${pendingGate.gate.attemptId})`,
     );
+  }
+
+  // A blocked Run resting at an interactive-agent Step (#122) names its basis from the
+  // send-interactive-turn Offer, present at a Turn boundary. Its transcript is reached by
+  // reference, never inlined here (A15). The ephemeral Harness Request basis is the third
+  // case; it rides the live overlay, so `run show` prints it, not this pure renderer.
+  const interactiveOffer = run.actionOffers.find(
+    (offer): offer is SendInteractiveTurnOffer =>
+      offer.action === "send-interactive-turn",
+  );
+  if (interactiveOffer !== undefined) {
+    lines.push("", `Blocked: ${interactiveOffer.basis}`);
   }
 
   // The answer-human-gate offer appears only while blocked (#85, #108); print each

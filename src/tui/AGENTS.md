@@ -21,11 +21,17 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   interrupt disarm). `interrupt-turn`/`steer-turn` offers stay present through an `awaiting-approval` Turn (run-projection derives them from liveness, not
   `TurnPhase`), so without this guard the request control and the "esc esc interrupt" hint collide over Esc. The interrupt/steer rows and the Esc arm are also
   hidden while an interactive Step owns the input (#122): its Esc leaves, so surfacing an Esc-driven interrupt there would collide too.
-- The free-text gate control is a hand-rolled text buffer over that raw-key pipeline, not a native `<input>`: the Workbench is Port-driven, so a native input on
-  the keymap path never sees its keys. Single-char `name` only — shifted symbols and IME are deferred real-terminal input (#23).
-- An armed End-Step confirm is the one exception to "only Ctrl+C escapes while typing": the `pending()` check sits **above** the typing branch in the
-  Workbench key loop (`run-workbench.tsx`), so while the End-Step confirm is armed `y` confirms and Escape backs out rather than typing into the interactive
-  input. (Kept on its own line: a later ticket rewrites the key-routing paragraph around it when native input lands.)
+- The free-text gate control and the interactive input each mount a native OpenTUI `<input>` (`run-gate-control.tsx`, `run-workbench.tsx`; D9), not a hand-rolled
+  buffer. The verified routing order is why this works on the Port-driven Workbench: OpenTUI delivers a keypress to the global listeners registered on `keyInput`
+  **before** the focused renderable's own handler, and the production Renderer Port adapter (`renderer/renderer.ts`, `renderer.keyInput.on("keypress", …)`) is exactly
+  such a global listener, so the Workbench dispatcher runs first and always fires its command — a focused field can never preempt a command key. The dispatcher claims
+  the command keys (Enter to submit, Esc to leave/deny, Ctrl+E to arm End Step, `y` to confirm) and lets every other key reach the field, which owns text, cursor motion,
+  word delete, paste, and shifted symbols (so capitals and punctuation are no longer out of reach — the #23 shifted-symbol deferral is retired for these two controls).
+- We do **not** call `stopPropagation` (the narrow Port key value carries no such method, A16), so the focused field also receives a command key by its own bindings. That
+  is harmless because the freeze blurs the field for the keys that would double: the field is blurred (`focused` false) while an answer is in flight and while a confirming
+  keypress is armed, so the confirming `y` confirms rather than types. The `pending()` check still sits **above** the typing branch in the Workbench key loop
+  (`run-workbench.tsx`), so an armed End-Step confirm takes `y`/Escape. The one non-frozen double is Ctrl+E: it arms End Step and, on the same event, the field also runs its
+  built-in Ctrl+E→line-end before the arm blurs it — a moot cursor move, so the bindings override the research left optional is deferred.
 - A stale approval answer keeps its inline refusal while the offer re-renders: a genuinely new request (a fresh `requestId`) resets the decision to `allow`
   and clears the refusal, but a stale answer keeps the same id, so its refusal survives while the bumped-generation offer re-renders (`onIdentityChange` on
   the request id).
@@ -59,12 +65,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   dispatch, and small-width/resize relayout without overflow. A lone Escape is held briefly by OpenTUI key disambiguation — poll in real time, not by
   frame count.
 
-- The interactive-agent input (`run-workbench.tsx`, #122) is a text field driven by the raw-key pipeline, not an OpenTUI `<input>`: while `focus` is `interactive` it owns
-  every key, so `q`/`r`/`c`/`x`/`t` type rather than fire their bare-letter commands (only Ctrl+C still exits). Text accumulates from the key `name` (a single-char name types,
-  `space`/`backspace` map through) — capitals and punctuation the Renderer Port does not name are out of reach until it carries the printable value. Enter dispatches
-  `send-interactive-turn` (blank/whitespace refused before dispatch); Ctrl+E arms `end-interactive-step`, offered — and so armable — only at a Turn boundary (no live Turn),
-  reusing the same `pending` arm-and-confirm. The Step is "active" whenever the Run is blocked at an `interactive-agent` Step (independent of a live Turn), so focus stays on
-  the input across the whole Step and returns to the timeline when it ends.
+- The interactive-agent input (`run-workbench.tsx`, #122) is a native OpenTUI `<input>` (D9): while `focus` is `interactive` the field owns text, so `q`/`r`/`c`/`x`/`t`
+  type into it rather than fire their bare-letter commands (only Ctrl+C still exits, and the dispatcher gates those commands on not typing). The field carries capitals,
+  punctuation, paste and word delete verbatim. Enter dispatches `send-interactive-turn` (blank/whitespace refused before dispatch, and a refused send keeps the draft, A9);
+  Ctrl+E arms `end-interactive-step`, offered — and so armable — only at a Turn boundary (no live Turn), reusing the same `pending` arm-and-confirm. The Step is "active"
+  whenever the Run is blocked at an `interactive-agent` Step (independent of a live Turn), so focus stays on the input across the whole Step and returns to the timeline when
+  it ends. In tests, text rides `testRender`'s mock input (the field's real key source) while the dispatcher's command keys ride the fake Renderer Port.
 - A destructive Run Action (cancel or delete) arms a confirming keypress before it dispatches (`run-workbench.tsx` `pending`): `y` confirms, Escape backs out.
   An ordinary resume dispatches at once; a resume Offer carrying a takeover form first confirms once and names the foreign owner process.
 - The quit confirmation (`app.tsx` `GuardedExitProvider`/`QuitConfirmation`) lives on the vendored dialog stack, not a bare `<Show>` overlay: every screen's bindings are

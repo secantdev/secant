@@ -1103,6 +1103,151 @@ test("a Turn is admitted, events append, and the result settles immutably (#116)
   assert.equal(owner.effectiveModel(), "claude-opus-5");
 });
 
+test("a fenced owner refuses every Turn-side write and the authored pending gate, writing nothing (A51)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const stale = group.acquireRun(created.runId)!;
+  const fresh = group.acquireRun(created.runId)!; // bumps the epoch, fencing `stale`
+  t.after(() => fresh.close());
+
+  const fenced = { ok: false, reason: "fenced" };
+  // Admission refused is what proves the Turn `not-started` (store/AGENTS.md): no
+  // stdin is sent because no `turn` row exists.
+  assert.deepEqual(
+    stale.admitTurn({
+      turnId: "turn-1",
+      attemptId: "0.0:write",
+      session: "s",
+      origin: "managed",
+      kind: "agent",
+      input: "do the thing",
+      recoveryCoordinate: "native-abc",
+      harness: "claude-code",
+      at: AT,
+    }),
+    fenced,
+  );
+  assert.deepEqual(
+    stale.appendTurnEvent({
+      turnId: "turn-1",
+      kind: "assistant-content",
+      payload: JSON.stringify({ content: "hello" }),
+      at: AT,
+    }),
+    fenced,
+  );
+  assert.deepEqual(
+    stale.settleTurn({
+      turnId: "turn-1",
+      session: "s",
+      resultKind: "completed",
+      resultDetail: JSON.stringify({ kind: "completed" }),
+      availability: "open",
+      assistantContent: "hello",
+      at: AT,
+    }),
+    fenced,
+  );
+  assert.deepEqual(
+    stale.recordPendingGate({
+      attemptId: "0.1:gate",
+      stepId: "gate",
+      shape: "approve-reject",
+      message: "Ship it?",
+      at: AT,
+    }),
+    fenced,
+  );
+
+  // Nothing landed: the fresh owner reads no Turn, no event, no Session, no
+  // transcript entry, no pending gate, and the Run never rested `blocked`.
+  assert.deepEqual(fresh.turns(), []);
+  assert.deepEqual(fresh.turnEvents(), []);
+  assert.deepEqual(fresh.harnessSessions(), []);
+  assert.deepEqual(fresh.transcript(), []);
+  assert.equal(fresh.pendingGate(), undefined);
+  const read = group.readRun(created.runId);
+  assert.ok(read.ok && read.run.state === "created");
+});
+
+test("settling a Turn records the detached and unusable Session availabilities with their detail (A51)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner !== undefined);
+  t.after(() => owner.close());
+
+  const later = new Date(AT.getTime() + 1_000);
+  const admit = (turnId: string, session: string, at: Date) =>
+    owner.admitTurn({
+      turnId,
+      attemptId: `${turnId}:attempt`,
+      session,
+      origin: "managed",
+      kind: "agent",
+      input: `input for ${session}`,
+      recoveryCoordinate: `native-${session}`,
+      harness: "claude-code",
+      at,
+    });
+  assert.ok(admit("turn-a", "s-a", AT).ok);
+  assert.ok(admit("turn-b", "s-b", later).ok);
+  assert.deepEqual(
+    owner.harnessSessions().map((s) => s.availability),
+    ["open", "open"],
+  );
+
+  // The process is closed when the Run rests and the Session becomes detached
+  // with the resume id (spec #107): the shape execution writes for a completed
+  // Turn whose Harness closes, carrying the recovery coordinate as the detail.
+  assert.ok(
+    owner.settleTurn({
+      turnId: "turn-a",
+      session: "s-a",
+      resultKind: "completed",
+      resultDetail: JSON.stringify({ kind: "completed" }),
+      availability: "detached",
+      availabilityDetail: "native-s-a",
+      assistantContent: "done",
+      at: later,
+    }).ok,
+  );
+  // Recovery that fails leaves the Session `unusable`, its reason as the detail.
+  assert.ok(
+    owner.settleTurn({
+      turnId: "turn-b",
+      session: "s-b",
+      resultKind: "failed",
+      resultDetail: JSON.stringify({ kind: "failed" }),
+      availability: "unusable",
+      availabilityDetail: "resume-unacknowledged",
+      at: later,
+    }).ok,
+  );
+
+  assert.deepEqual(owner.harnessSessions(), [
+    {
+      session: "s-a",
+      availability: "detached",
+      availabilityDetail: "native-s-a",
+    },
+    {
+      session: "s-b",
+      availability: "unusable",
+      availabilityDetail: "resume-unacknowledged",
+    },
+  ]);
+  assert.deepEqual(
+    owner.turns().map((turn) => turn.resultKind),
+    ["completed", "failed"],
+  );
+});
+
 test("the latest Agent-step Attempt's Harness identity is durable across reopening (#125)", async (t) => {
   const home = makeTempDir("secant-store-");
   const group = openRunGroup(home, WORKSPACE);

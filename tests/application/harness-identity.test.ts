@@ -179,6 +179,66 @@ function writeInteractiveAgentBundle(): {
   };
 }
 
+/** Author an Agent Step inside a Repeat group whose baseline Verdict already
+ *  passes. The Turn never runs, but static routing still requires a Harness. */
+function writeNestedAgentBundle(): {
+  folder: string;
+  id: string;
+  selectedHarness: "claude-code";
+  expectedPrepareCount: 1;
+} {
+  const folder = makeTempDir("secant-selected-harness-nested-agent-");
+  mkdirSync(join(folder, "prompts"), { recursive: true });
+  writeFileSync(join(folder, "prompts", "go.md"), "Do the work.\n");
+  const manifest = {
+    formatVersion: 1,
+    bundle: {
+      id: "dev.secant.selected-harness-nested-agent",
+      version: "1.0.0",
+      name: "Selected Harness Nested Agent",
+      description: "An Agent-bearing Repeat group for Harness selection.",
+    },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [{ path: "prompts/go.md", kind: "prompt" }],
+    routing: [
+      {
+        id: "baseline",
+        kind: "command",
+        produces: [{ name: "passing", type: "verdict" }],
+        command: {
+          executable: RUNTIME_NAME,
+          arguments: ["-e", "process.exit(0)"],
+        },
+      },
+      {
+        repeat: {
+          until: "passing",
+          reviewCheckpoint: { interval: 1, message: "Review the work." },
+          steps: [
+            {
+              id: "work",
+              kind: "agent",
+              session: "s",
+              prompt: { asset: "prompts/go.md" },
+            },
+          ],
+        },
+      },
+    ],
+  };
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  return {
+    folder,
+    id: manifest.bundle.id,
+    selectedHarness: "claude-code",
+    expectedPrepareCount: 1,
+  };
+}
+
 /** Author a single-`command`-step Bundle (a Command-only Run: no Harness). */
 function writeCommandBundle(): {
   folder: string;
@@ -381,6 +441,20 @@ test("[new-run-harness-selection] a new Interactive-agent Run pins Claude Code b
     makeTempDir("secant-harness-id-ws-"),
   );
   assert.equal(run.state, "blocked");
+  assert.equal(run.harness, undefined);
+  assert.equal(run.effectiveModel, undefined);
+});
+
+test("[new-run-harness-selection] an Agent nested in a Repeat group pins Claude Code", async (t) => {
+  const home = makeTempDir("secant-harness-id-home-");
+  const { run } = await launch(
+    t,
+    { profile: profile(), turns: [] },
+    writeNestedAgentBundle(),
+    home,
+    makeTempDir("secant-harness-id-ws-"),
+  );
+  assert.equal(run.state, "succeeded");
   assert.equal(run.harness, undefined);
   assert.equal(run.effectiveModel, undefined);
 });

@@ -197,6 +197,28 @@ function assertMigrated(
   }
 }
 
+/** A pre-M4 Run has no semantic Harness selection until the legacy-upgrade slice
+ *  assigns one. The migration must preserve that absence rather than inventing
+ *  `claude-code` from the Adapter that happened to exist at the time. */
+function assertLegacyRunRemainsUnselected(databasePath: string): void {
+  const database = new Database(databasePath);
+  try {
+    const row = database
+      .query("SELECT selected_harness AS selectedHarness FROM run_record")
+      .get() as { selectedHarness: string | null } | null;
+    if (row === null) {
+      throw new Error("Compiled binary migration lost the pre-M4 Run record.");
+    }
+    if (row.selectedHarness !== null) {
+      throw new Error(
+        "Compiled binary migration invented a selected Harness for a pre-M4 Run.",
+      );
+    }
+  } finally {
+    database.close();
+  }
+}
+
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
@@ -330,7 +352,9 @@ try {
     // (`harness`/`executable`/`executable_version`), #133 moved ownership into the
     // Run Store, #134 added the persisted steer capability evidence, and #138 added
     // the Run's semantic selected-Harness id.
-    assertMigrated(join(groupDir, runId, "run.db"), "Run Store", 8);
+    const runDatabasePath = join(groupDir, runId, "run.db");
+    assertMigrated(runDatabasePath, "Run Store", 8);
+    assertLegacyRunRemainsUnselected(runDatabasePath);
   }
 
   run(binary, ["workspace", "approve"], {

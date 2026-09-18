@@ -1,0 +1,91 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "f55c2849-cc08-4817-b94f-b0d71420510c",
+  "prevIds": ["fafd5967-0cca-4e29-9a9a-4640542c5b38"],
+  "ddl": [
+    {
+      "name": "operations",
+      "entityType": "tables"
+    },
+    {
+      "name": "runs",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "operation_id",
+      "entityType": "columns",
+      "table": "operations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kind",
+      "entityType": "columns",
+      "table": "operations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "run_id",
+      "entityType": "columns",
+      "table": "operations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "recorded_at",
+      "entityType": "columns",
+      "table": "operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "run_id",
+      "entityType": "columns",
+      "table": "runs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "runs"
+    },
+    {
+      "columns": ["operation_id"],
+      "nameExplicit": false,
+      "name": "operations_pk",
+      "table": "operations",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["run_id"],
+      "nameExplicit": false,
+      "name": "runs_pk",
+      "table": "runs",
+      "entityType": "pks"
+    }
+  ],
+  "renames": []
+}

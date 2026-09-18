@@ -1,10 +1,12 @@
 import catalogInitial from "./catalog/20260915095848_chubby_vanisher/migration.sql" with { type: "text" };
 import coordinationInitial from "./coordination/20260915095850_yellow_forge/migration.sql" with { type: "text" };
+import coordinationRunRegistrationOnly from "./coordination/20260918034609_white_alex_power/migration.sql" with { type: "text" };
 import runInitial from "./run/20260915095853_hesitant_silverclaw/migration.sql" with { type: "text" };
 import runPendingGate from "./run/20260916030347_mighty_vivisector/migration.sql" with { type: "text" };
 import runHarnessTurns from "./run/20260916112916_cooing_squadron_supreme/migration.sql" with { type: "text" };
 import runTurnKind from "./run/20260917052606_ambiguous_the_hand/migration.sql" with { type: "text" };
 import runHarnessIdentity from "./run/20260917061423_easy_iceman/migration.sql" with { type: "text" };
+import runOwnership from "./run/20260918034612_curvy_piledriver/migration.sql" with { type: "text" };
 import type { MigrationsJournal } from "drizzle-orm/migrator";
 
 // A migration's journal `name` and `timestamp` are the two load-bearing fields
@@ -47,6 +49,10 @@ export const catalogMigrations: MigrationsJournal = [
 
 export const coordinationMigrations: MigrationsJournal = [
   journalEntry("20260915095850_yellow_forge", coordinationInitial),
+  journalEntry(
+    "20260918034609_white_alex_power",
+    coordinationRunRegistrationOnly,
+  ),
 ];
 
 export const runMigrations: MigrationsJournal = [
@@ -55,4 +61,5 @@ export const runMigrations: MigrationsJournal = [
   journalEntry("20260916112916_cooing_squadron_supreme", runHarnessTurns),
   journalEntry("20260917052606_ambiguous_the_hand", runTurnKind),
   journalEntry("20260917061423_easy_iceman", runHarnessIdentity),
+  journalEntry("20260918034612_curvy_piledriver", runOwnership),
 ];

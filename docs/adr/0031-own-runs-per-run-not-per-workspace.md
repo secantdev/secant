@@ -13,14 +13,15 @@ Secant enables rather than restricts, and OpenCode — the practice baseline —
 Workspace collisions between Runs are the user's, exactly as collisions between a Run and a user's own edits already are; the **Materialization
 conflict** stays the only detection and covers only `home: workspace` Artifacts.
 
-Ownership is a per-Run record, not a Workspace fact. The `runs` registration in `coordination.db` carries a nullable owning process id and the
-monotonic fencing epoch; `NULL` means unowned, and the former `state` column and the `one_live_run` index are deleted. Ownership lasts from
+Ownership is a per-Run record, not a Workspace fact. Each Run's own `run.db` carries a nullable owning process id and the monotonic fencing epoch;
+`NULL` means unowned, and an absent owner record reads as unowned at epoch zero. The `runs` registration in `coordination.db` carries only the Run id
+and creation time; the former `state` column and the `one_live_run` index are deleted. Ownership lasts from
 acquisition until the Run rests — **including through `blocked`**, so a Review checkpoint is answered in the instance that reached it. Whoever
 opens a Workspace group performs the bookkeeping for every owned Run by probing its process: an alive owner leaves the Run live, listed as live
 elsewhere, and refused to open with the owner named ([#21](https://github.com/secantdev/secant/issues/21)); a dead owner rests the Run — a
 `running` Run becomes `halted` with the `indeterminate` marker as before, while a `blocked` Run **stays `blocked`** with its ownership
 released, because nothing was cut off and the pending gate is still true. Fencing, not the probe, is what makes ownership safe: acquiring a
-Run bumps the epoch and a stale owner's next canonical write is refused, so **taking over** a Run whose owner appears alive is offered behind one
+Run bumps the epoch and a stale owner's next canonical write is refused inside the transaction that performs the write, so **taking over** a Run whose owner appears alive is offered behind one
 confirmation naming that owner, and the probe is only a courtesy against accidental takeover and process-id reuse.
 
 One instance may run several Runs at once. A Run keeps running when the user leaves its Workbench, launching while other Runs are live is not
@@ -30,7 +31,7 @@ gate under another name), releasing ownership on `blocked` (ownership split by s
 cross-instance observation (still the future version [#21](https://github.com/secantdev/secant/issues/21) parked; observe and own remain one
 fencing operation). This supersedes the one-live-Run sentences of [ADR 0019](./0019-failed-and-halted-runs-are-resumable-resting-states.md) and
 [ADR 0023](./0023-own-durable-run-truth-in-isolated-run-stores.md), both amended to point here; the rest of ADR 0023 — isolated Run Stores,
-owner fencing, startup recovery that starts no Step work, coordinator rebuild with no owner — is unchanged.
+owner fencing, startup recovery that starts no Step work, and coordinator rebuild from readable Run Stores — is unchanged.
 
 ## Amendment (M3 tidy, [#129](https://github.com/secantdev/secant/issues/129))
 
@@ -42,3 +43,13 @@ owner fencing, startup recovery that starts no Step work, coordinator rebuild wi
   Since [#108](https://github.com/secantdev/secant/issues/108) the authored Human Gate's `pending_gate` row and the `blocked` state are written in one
   transaction, so `blocked` is durable truth a crash cannot lose; the checkpoint facts a Review checkpoint shows are still projected from the attempt log,
   but the state itself is stored.
+
+## Amendment — ownership moves into each Run Store (2026-09-18, [#133](https://github.com/secantdev/secant/issues/133))
+
+The original storage sentence put the owning process id and fencing epoch in the cross-Run registration. A fencing check in `coordination.db` and the
+canonical write it guarded in `run.db` could not be one atomic step: a takeover could land between them while a Turn settled, making a stale owner's
+result permanent because settled results are immutable. The owner record therefore moves into each Run's own store. Every canonical write reads the
+epoch and performs its write in one immediate `run.db` transaction; acquisition, takeover, resume, release, end, listing, and startup reconciliation
+read the same record. `coordination.db` retains only registration and create/delete admission, and a coordinator rebuild recovers ownership from every
+readable Run Store before reconciliation probes it. The ownership duration, courtesy probe, confirmed takeover, and startup rule that begins no Step
+work are unchanged.

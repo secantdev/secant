@@ -70,58 +70,54 @@ export function admitTurn(
   request: AdmitTurnRequest,
 ): void {
   const at = request.at.toISOString();
-  db.transaction((tx) => {
-    // The Turn's position in the Run, computed under the write lock so it never
-    // races and the executor never re-reads every Turn row per admission. Turns are
-    // append-only, so the count is the next zero-based sequence.
-    const sequence =
-      tx.select({ value: count() }).from(turns).get()?.value ?? 0;
-    tx.insert(harnessSessions)
-      .values({
-        session_key: request.session,
+  // The Turn's position in the Run, computed under the caller's write lock so it
+  // never races. Turns are append-only, so the count is the next zero-based sequence.
+  const sequence = db.select({ value: count() }).from(turns).get()?.value ?? 0;
+  db.insert(harnessSessions)
+    .values({
+      session_key: request.session,
+      native_session_id: request.recoveryCoordinate,
+      availability: "open",
+      availability_detail: null,
+      harness: request.harness,
+      profile_digest: null,
+      created_at: at,
+      updated_at: at,
+    })
+    .onConflictDoUpdate({
+      target: harnessSessions.session_key,
+      set: {
         native_session_id: request.recoveryCoordinate,
         availability: "open",
         availability_detail: null,
-        harness: request.harness,
-        profile_digest: null,
-        created_at: at,
         updated_at: at,
-      })
-      .onConflictDoUpdate({
-        target: harnessSessions.session_key,
-        set: {
-          native_session_id: request.recoveryCoordinate,
-          availability: "open",
-          availability_detail: null,
-          updated_at: at,
-        },
-      })
-      .run();
-    tx.insert(turns)
-      .values({
-        turn_id: request.turnId,
-        attempt_id: request.attemptId,
-        session_key: request.session,
-        origin: request.origin,
-        kind: request.kind,
-        sequence,
-        input: request.input,
-        admitted_at: at,
-        result_kind: null,
-        result_detail: null,
-        settled_at: null,
-      })
-      .run();
-    tx.insert(transcriptEntries)
-      .values({
-        session_key: request.session,
-        turn_id: request.turnId,
-        role: "user",
-        content: request.input,
-        at,
-      })
-      .run();
-  });
+      },
+    })
+    .run();
+  db.insert(turns)
+    .values({
+      turn_id: request.turnId,
+      attempt_id: request.attemptId,
+      session_key: request.session,
+      origin: request.origin,
+      kind: request.kind,
+      sequence,
+      input: request.input,
+      admitted_at: at,
+      result_kind: null,
+      result_detail: null,
+      settled_at: null,
+    })
+    .run();
+  db.insert(transcriptEntries)
+    .values({
+      session_key: request.session,
+      turn_id: request.turnId,
+      role: "user",
+      content: request.input,
+      at,
+    })
+    .run();
 }
 
 // Append one normalized durable Turn event (#116), append-only.
@@ -147,43 +143,41 @@ export function settleTurn(
   request: SettleTurnRequest,
 ): void {
   const at = request.at.toISOString();
-  db.transaction((tx) => {
-    // Immutable: once a Turn's result is set, the whole settle is a no-op — the
-    // Session availability and transcript it recorded are settled truth too.
-    const current = tx
-      .select({ result_kind: turns.result_kind })
-      .from(turns)
-      .where(eq(turns.turn_id, request.turnId))
-      .get();
-    if (current === undefined || current.result_kind !== null) return;
-    tx.update(turns)
-      .set({
-        result_kind: request.resultKind,
-        result_detail: request.resultDetail,
-        settled_at: at,
+  // Immutable: once a Turn's result is set, the whole settle is a no-op — the
+  // Session availability and transcript it recorded are settled truth too.
+  const current = db
+    .select({ result_kind: turns.result_kind })
+    .from(turns)
+    .where(eq(turns.turn_id, request.turnId))
+    .get();
+  if (current === undefined || current.result_kind !== null) return;
+  db.update(turns)
+    .set({
+      result_kind: request.resultKind,
+      result_detail: request.resultDetail,
+      settled_at: at,
+    })
+    .where(and(eq(turns.turn_id, request.turnId), isNull(turns.result_kind)))
+    .run();
+  db.update(harnessSessions)
+    .set({
+      availability: request.availability,
+      availability_detail: request.availabilityDetail ?? null,
+      updated_at: at,
+    })
+    .where(eq(harnessSessions.session_key, request.session))
+    .run();
+  if (request.assistantContent !== undefined) {
+    db.insert(transcriptEntries)
+      .values({
+        session_key: request.session,
+        turn_id: request.turnId,
+        role: "assistant",
+        content: request.assistantContent,
+        at,
       })
-      .where(and(eq(turns.turn_id, request.turnId), isNull(turns.result_kind)))
       .run();
-    tx.update(harnessSessions)
-      .set({
-        availability: request.availability,
-        availability_detail: request.availabilityDetail ?? null,
-        updated_at: at,
-      })
-      .where(eq(harnessSessions.session_key, request.session))
-      .run();
-    if (request.assistantContent !== undefined) {
-      tx.insert(transcriptEntries)
-        .values({
-          session_key: request.session,
-          turn_id: request.turnId,
-          role: "assistant",
-          content: request.assistantContent,
-          at,
-        })
-        .run();
-    }
-  });
+  }
 }
 
 // An owner death mid-Turn leaves the Turn admitted without a settled result:

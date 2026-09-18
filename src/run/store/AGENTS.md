@@ -4,23 +4,26 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Invariants
 
-- `run.db` is the only canonical truth. `coordination.db` holds cross-Run facts (registration, per-Run ownership, owner fencing, create/delete
-  admission) and is rebuildable: a corrupt one is deleted and re-seeded from the readable Run Stores unowned, so never store truth there that a Run
-  Store cannot reconstruct.
-- Ownership is per Run, not per Workspace (ADR 0031): the `runs` row carries the nullable `owner_pid` (`NULL` = unowned) beside the fencing epoch —
-  there is no Workspace-wide claim column and no one-live-Run index, so any number of Runs may be live in one Workspace at once, each owned separately.
+- `run.db` is the only canonical truth and owns its Run's nullable process id plus monotonic fencing epoch. `coordination.db` holds only registration and
+  create/delete admission and is rebuildable: a corrupt one is deleted and re-seeded from readable Run Stores without changing their owner records.
+- Ownership is per Run, not per Workspace (ADR 0031): each Run Store carries one owner record; an absent record reads unowned at epoch zero. There is no
+  Workspace-wide claim column and no one-live-Run index, so any number of Runs may be live in one Workspace at once, each owned separately.
   `createRun` never refuses for the Workspace and two concurrent creates both succeed; ownership is set on the create/resume claim and released only on
   rest/delete/takeover — including _held through_ derived-`blocked`, so a Review checkpoint is answered in the instance that reached it.
 - Create publishes by renaming the `.creating` quarantine into place as the last step before the transaction commits; delete drops the registration first,
   then reclaims the directory. Any failure before those points leaves only a quarantine (or an unadopted directory) the next open removes. The one window
   left is process death between a successful rename and the commit — the same accepted micro-window the Catalog carries.
+- Coordination open retries migration once before corruption recovery: concurrent migrators may both read a stale journal, then the loser must reopen and
+  observe the winner's committed generated ALTER rather than deleting the healthy database underneath it. Only `SQLITE_CORRUPT`/`SQLITE_NOTADB` enters
+  destructive rebuild; permission, I/O, lock, and other failures propagate with their cause.
 - Destructive at open: when the coordination DB is intact (not rebuilt) it is authoritative, so any Run directory the `runs` registrations do not list is
   treated as a crash orphan and `rmSync`'d recursively (`openRunGroup`). A slice that stages a Run directory outside `admitCreate`'s committed transaction
   therefore loses it on the next open with no trace — the only safe way to add one is the `.creating` quarantine rename inside that transaction.
-- Owner fencing is a monotonic `owner_epoch` bumped on every `acquireRun`; a canonical write re-checks the epoch, so a stale owner (a returned crashed
-  process) is refused. `acquireRun` bumps the epoch but does **not** touch `owner_pid` — ownership is the create/resume claim, so a short-lived read-acquire
-  (a Projection read, `readResource`) never marks a resting Run live. Only a takeover (`acquireRun` with `takeover`) claims `owner_pid` for this process and
-  fences the previous owner regardless of the liveness probe; `endRun` releases ownership (clears `owner_pid`) and its store stays until an explicit delete.
+- Owner fencing is a monotonic epoch bumped on every `acquireRun`. Every canonical write opens one immediate `run.db` transaction, reads the epoch first,
+  refuses a stale owner without writing, and otherwise performs the whole write in that transaction; private writers take that transaction and never open
+  another. `publishAttempt` and `recordGateAnswer` keep a cheap check before staging Git but repeat the authoritative check inside the write transaction.
+  `acquireRun` bumps the epoch without claiming, so a Projection read never marks a resting Run live. Only takeover claims this process while bumping;
+  `endRun` releases only this process's ownership and leaves the store until explicit deletion.
 - Takeover is what makes ownership safe, not the probe (ADR 0031): a plain `acquireRun`/`resumeRun` declines a Run owned by a live _other_ process (the
   courtesy probe, `process.kill(pid, 0)`), so the Application can confirm before fencing; the `takeover` flag bumps the epoch anyway, so the previous owner's
   next canonical write is refused. `resumeRun` refuses such a Run `run-live-elsewhere` with its `ownerPid`; a takeover is
@@ -32,18 +35,19 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Git mechanics shell out to the `git` executable (no library); `artifacts.git` is created lazily on first publication. An absent `git` surfaces as a
   precise `git-unavailable` Problem only on the stage/publish path; the read path deliberately throws `GitUnavailable` (an environment fault is not an
   absent artifact) and `readArtifact` passes it through. Bindings/attempt reads validate their row at the read ingress like the coordination reads (D7).
-- Startup reconciliation (#86, #98 S2, ADR 0031): at open every _owned_ Run (`owner_pid` not NULL) is bookkept by probing its owner (`process.kill(pid, 0)`,
-  injectable as `isOwnerAlive`). An owner still alive in another process is a Run genuinely live there — left untouched, listed with its `ownerPid` so the
-  Application can refuse `run-live-elsewhere`. A dead owner is reconciled **by stored state**: a `running`/`created` record is rested `halted` with one appended
+- Startup reconciliation (#86, #98 S2, ADR 0031): at open every registration opens its `run.db`, reads the owner, probes it, and performs any rest plus
+  release inside that same immediate transaction (`process.kill(pid, 0)` is injectable as `isOwnerAlive`). An owner still alive in another process is a
+  Run genuinely live there — left untouched, listed with its `ownerPid` so the Application can refuse `run-live-elsewhere`. A dead owner is reconciled
+  **by stored state**: a `running`/`created` record is rested `halted` with one appended
   `indeterminate` attempt-log marker; every other state is already at rest and left as-is, so a `blocked` record stays `blocked` (nothing was cut off, the
   checkpoint still holds). Either way its ownership is released, running no Step work. The `pid !== selfPid` guard makes an owner equal to our own pid always
   reconcile — this handles pid reuse and lets a same-process reopen (the reconciliation tests) reconcile; `selfPid` is injectable so two `openRunGroup`s on one
-  home stand in for two processes. The generated coordination schema models nullable `owner_pid` directly; previous-release databases migrate through the
-  embedded Drizzle journal at open. The marker lands in `attempt_log` (not an `attempt` row); the resume skip cursor reads that log, so it is the marker's
+  home stand in for two processes. Previous-release databases migrate through the embedded Drizzle journals at open. The marker lands in `attempt_log`
+  (not an `attempt` row); the resume skip cursor reads that log, so it is the marker's
   `indeterminate` outcome — not any absence from the log — that keeps the succeeded-attempt cursor unchanged and re-runs the interrupted Step.
 - Reconciliation splits by stored state, so execution stores `blocked` before returning a checkpoint pause. A dead-owner open then keeps the pending checkpoint
   `blocked` and releases only its ownership; it never invents an interrupted Attempt.
-- An acquired owner releases through its fencing epoch. A stale owner whose Run was taken over cannot clear the new owner's `owner_pid` during its own cleanup.
+- An acquired owner releases through its fencing epoch. A stale owner whose Run was taken over cannot clear the new owner during its own cleanup.
 - Diagnostics retention (ADR 0023, #96): `diagnostics/` has had a writer since #88, so the 90-day expiry is a best-effort prune at group open (`pruneDiagnostics`,
   driven by an injectable clock) — files with an mtime at or before `now - 90 days` are deleted, newer ones kept. It walks Run directories on the filesystem, not
   the registrations, so it runs before any Run is acquired and never fails the open.
@@ -88,6 +92,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - There are no foreign keys and no `foreign_keys` pragma anywhere in either schema (only `busy_timeout` is set), so referential integrity rests entirely on the write
   transactions that keep related rows consistent; nothing the database enforces stands behind them.
 - Run delete drops the registration and reclaims the directory as one lifecycle unit; with no foreign keys there is nothing to cascade — the directory holds the whole Run.
-- Owner fencing spans two databases: the canonical-write re-check reads `owner_epoch` from the coordination database while the write itself commits to that Run's `run.db`, so
-  the check and the write it guards are not one atomic step — a window a concurrent takeover can slip through. [#133](https://github.com/secantdev/secant/issues/133) closes it by
-  moving the owner record so the fence check and the write share one transaction.
+- Resume reads registration only to answer `unknown-run`, then claims ownership in `run.db`. Listing and startup reconciliation open each registered Run
+  Store to read ownership and close every handle before returning; a damaged store lists unowned, matching its exact-read Problem. A coordinator rebuild
+  reads each readable Run's owner before restoring registration, so a live owner survives corruption and the following reconciliation decides its fate.

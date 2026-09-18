@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { basename, join } from "node:path";
 import { Database } from "bun:sqlite";
-import { and, count, eq, isNotNull } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
 import { drizzle, type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import type { MigrationsJournal } from "drizzle-orm/migrator";
@@ -32,6 +32,9 @@ import { operations, runs } from "./coordination-schema.js";
 import {
   DAMAGED,
   acquireRunOwner,
+  claimRunOwnership,
+  endRunOwnership,
+  readRunOwnership,
   readRunStore,
   reconcileRunStore,
   stageRunStore,
@@ -46,11 +49,10 @@ export { isolatedGitEnvironment };
 // The Run Store owns each Run's canonical truth and the cross-Run coordination
 // for one Workspace. Runs sharing a resolved absolute Workspace path are grouped
 // under a readable `<slug>--<path-digest>` directory; that group's
-// `coordination.db` owns only cross-Run facts (Run registration, per-Run ownership
-// and owner fencing, and create/delete admission), while each Run owns its own
-// `run.db` canonical record. Any number of Runs may be live in one Workspace at
-// once; each is owned separately (ADR 0031), so there is no Workspace-wide claim —
-// ownership is the nullable `owner_pid` beside the fencing epoch (`NULL` = unowned).
+// `coordination.db` owns only Run registration and create/delete admission, while
+// each Run's `run.db` owns its canonical record and owner fencing. Any number of
+// Runs may be live in one Workspace at once; each is owned separately (ADR 0031),
+// so there is no Workspace-wide claim.
 // Nothing storage-shaped — no SQLite type, no row, no path — crosses this Interface;
 // callers ask in domain terms (ADR 0023, ADR 0030, ADR 0031, #21 storage).
 // `bun:sqlite` is a Bun built-in, so the driver ships inside the compiled binary and
@@ -512,10 +514,10 @@ export interface RunGroup {
     readonly runId: string;
   }): DeleteRunResult;
   /**
-   * Release a Run's ownership (clear its `owner_pid`) while its canonical store
-   * stays until an explicit delete. Called when the Run rests (ADR 0031: ownership
-   * lasts from acquisition until rest — including through `blocked`). Idempotent;
-   * ending an absent or already-unowned Run is a no-op.
+   * Release this process's ownership while the canonical store stays until an
+   * explicit delete. Called when the Run rests (ADR 0031: ownership lasts from
+   * acquisition until rest — including through `blocked`). Idempotent; ending an
+   * absent, unowned, or foreign-owned Run is a no-op.
    */
   endRun(runId: string): void;
   /**
@@ -547,8 +549,6 @@ export interface RunGroup {
 
 const registrationRow = z.object({
   run_id: z.string(),
-  owner_epoch: z.number(),
-  owner_pid: z.number().nullable(),
   created_at: z.string(),
 });
 
@@ -589,6 +589,7 @@ function groupDirName(workspacePath: string): string {
 interface StoreDatabase {
   readonly db: SQLiteBunDatabase;
   readonly sqlite: Database;
+  isClosed(): boolean;
   close(): void;
 }
 
@@ -601,11 +602,17 @@ function openDatabase(
     sqlite.exec("PRAGMA busy_timeout = 5000");
     const db = drizzle({ client: sqlite });
     migrate(db, migrations);
+    let closed = false;
     return {
       db,
       sqlite,
+      isClosed() {
+        return closed;
+      },
       close() {
+        if (closed) return;
         sqlite.close();
+        closed = true;
       },
     };
   } catch (error) {
@@ -618,16 +625,40 @@ function openRunDatabase(path: string): StoreDatabase {
   return openDatabase(path, runMigrations);
 }
 
-function stageStoredRun(dir: string, record: RunRecord): void {
-  stageRunStore({ dir, record, openDatabase: openRunDatabase });
+interface TStageStoredRunParams {
+  readonly dir: string;
+  readonly record: RunRecord;
+  readonly ownerPid: number;
+}
+
+function stageStoredRun(params: TStageStoredRunParams): void {
+  stageRunStore({
+    dir: params.dir,
+    record: params.record,
+    ownerPid: params.ownerPid,
+    openDatabase: openRunDatabase,
+  });
 }
 
 function readStoredRun(dir: string): RunRecord | typeof DAMAGED | undefined {
   return readRunStore({ dir, openDatabase: openRunDatabase });
 }
 
-function reconcileStoredRun(dir: string, at: Date): boolean {
-  return reconcileRunStore({ dir, at, openDatabase: openRunDatabase });
+interface TReconcileStoredRunParams {
+  readonly dir: string;
+  readonly at: Date;
+  readonly selfPid: number;
+  readonly isOwnerAlive: (pid: number) => boolean;
+}
+
+function reconcileStoredRun(params: TReconcileStoredRunParams): boolean {
+  return reconcileRunStore({
+    dir: params.dir,
+    at: params.at,
+    selfPid: params.selfPid,
+    isOwnerAlive: params.isOwnerAlive,
+    openDatabase: openRunDatabase,
+  });
 }
 
 /** The Run directories in a group, excluding the coordination DB and quarantines. */
@@ -683,14 +714,45 @@ function cleanQuarantine(groupDir: string): void {
   }
 }
 
-/** Open the coordination DB, rebuilding it bare-bones from the readable Run
- *  Stores (unowned) when the existing file is corrupt. */
+// Two processes can read the migration journal before either applies a generated
+// ALTER. The loser then observes the winner's committed schema and its stale ALTER
+// fails; reopening re-reads the committed journal. Only two failed opens reach the
+// corruption rebuild, so that transient race never deletes a healthy live database.
+function openMigratedCoordination(coordinationPath: string): StoreDatabase {
+  try {
+    return openDatabase(coordinationPath, coordinationMigrations);
+  } catch (firstError) {
+    try {
+      return openDatabase(coordinationPath, coordinationMigrations);
+    } catch (secondError) {
+      throw new AggregateError(
+        [firstError, secondError],
+        "Run Store: coordination database did not open after a migration retry.",
+        { cause: secondError },
+      );
+    }
+  }
+}
+
+function isSqliteCorruption(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (
+    "code" in error &&
+    (error.code === "SQLITE_CORRUPT" || error.code === "SQLITE_NOTADB")
+  ) {
+    return true;
+  }
+  return error.cause === undefined ? false : isSqliteCorruption(error.cause);
+}
+
+/** Open the coordination DB, rebuilding registration from readable Run Stores
+ *  when the existing file is corrupt. Ownership remains in each Run Store. */
 function openCoordination(
   coordinationPath: string,
   groupDir: string,
 ): StoreDatabase & { readonly rebuilt: boolean } {
   try {
-    const database = openDatabase(coordinationPath, coordinationMigrations);
+    const database = openMigratedCoordination(coordinationPath);
     try {
       database.db.select({ value: count() }).from(runs).get();
       database.db.select({ value: count() }).from(operations).get();
@@ -703,16 +765,18 @@ function openCoordination(
     return {
       db: database.db,
       sqlite: database.sqlite,
+      isClosed: database.isClosed,
       close: database.close,
       rebuilt: false,
     };
-  } catch {
+  } catch (error) {
+    if (!isSqliteCorruption(error)) throw error;
     rmSync(coordinationPath, { force: true });
   }
-  const database = openDatabase(coordinationPath, coordinationMigrations);
-  // Register each readable Run unowned (`owner_pid` NULL); a Run with a damaged
-  // run.db is left unregistered but its bytes stay untouched (canonical truth
-  // survives until an explicit delete).
+  const database = openMigratedCoordination(coordinationPath);
+  // Register each readable Run after reading its owner from the same Run Store. A
+  // damaged run.db is left unregistered but its bytes stay untouched (canonical
+  // truth survives until an explicit delete).
   // ponytail: the admission ledger (`operations`) is not rebuilt — a Run's run.db
   // does not record the operation id that created it. So a create/delete retry
   // that races a coordination-corruption rebuild is no longer deduplicated and
@@ -720,14 +784,22 @@ function openCoordination(
   // operation id retried) and yields a duplicate, not data loss; persist the
   // create operation id in run.db and re-seed from it here if it ever bites.
   for (const name of runDirNames(groupDir)) {
-    const record = readStoredRun(join(groupDir, name));
-    if (record !== undefined && record !== DAMAGED) {
+    const dir = join(groupDir, name);
+    const record = readStoredRun(dir);
+    const ownership = readRunOwnership({
+      dir,
+      openDatabase: openRunDatabase,
+    });
+    if (
+      record !== undefined &&
+      record !== DAMAGED &&
+      ownership !== undefined &&
+      ownership !== DAMAGED
+    ) {
       database.db
         .insert(runs)
         .values({
           run_id: record.runId,
-          owner_epoch: 0,
-          owner_pid: null,
           created_at: record.createdAt,
         })
         .run();
@@ -736,6 +808,7 @@ function openCoordination(
   return {
     db: database.db,
     sqlite: database.sqlite,
+    isClosed: database.isClosed,
     close: database.close,
     rebuilt: true,
   };
@@ -862,12 +935,14 @@ export function openRunGroup(
           state: "created",
           createdAt: request.at.toISOString(),
         };
-        stageStoredRun(join(groupDir, `${runId}.creating`), record);
+        stageStoredRun({
+          dir: join(groupDir, `${runId}.creating`),
+          record,
+          ownerPid: selfPid,
+        });
         tx.insert(runs)
           .values({
             run_id: runId,
-            owner_epoch: 0,
-            owner_pid: selfPid,
             created_at: record.createdAt,
           })
           .run();
@@ -925,33 +1000,29 @@ export function openRunGroup(
     );
   }
 
-  // Take ownership of an existing Run under BEGIN IMMEDIATE, so the ownership check
-  // is decided under the write lock (ADR 0031). Already owned by this process is an
-  // idempotent `resumed`; a Run owned by a live *other* process refuses (the probe
-  // is a courtesy — a takeover fences it regardless); otherwise claim it.
+  // Registration answers `unknown-run`; ownership is claimed under BEGIN IMMEDIATE
+  // in the Run's own database. Already owned here is idempotent, while a live other
+  // process is refused by the courtesy probe (ADR 0031).
   function admitResume(runId: string): ResumeRunResult {
-    return db.transaction(
-      (tx): ResumeRunResult => {
-        const registration = tx
-          .select({ owner_pid: runs.owner_pid })
-          .from(runs)
-          .where(eq(runs.run_id, runId))
-          .get();
-        if (registration === undefined)
-          return { outcome: "unknown-run", runId };
-        const ownerPid = registration.owner_pid;
-        if (ownerPid === selfPid) return { outcome: "resumed", runId };
-        if (ownerPid != null && isOwnerAlive(ownerPid)) {
-          return { outcome: "run-live-elsewhere", runId, ownerPid };
-        }
-        tx.update(runs)
-          .set({ owner_pid: selfPid })
-          .where(eq(runs.run_id, runId))
-          .run();
-        return { outcome: "resumed", runId };
-      },
-      { behavior: "immediate" },
-    );
+    const registration = db
+      .select({ run_id: runs.run_id })
+      .from(runs)
+      .where(eq(runs.run_id, runId))
+      .get();
+    if (registration === undefined) return { outcome: "unknown-run", runId };
+    const claim = claimRunOwnership({
+      dir: join(groupDir, runId),
+      selfPid,
+      isOwnerAlive,
+      openDatabase: openRunDatabase,
+    });
+    if (claim.kind === "live-elsewhere") {
+      return { outcome: "run-live-elsewhere", runId, ownerPid: claim.ownerPid };
+    }
+    if (claim.kind === "unreadable") {
+      throw new Error(`Run Store: cannot claim unreadable Run ${runId}.`);
+    }
+    return { outcome: "resumed", runId };
   }
 
   function reclaimRunDir(runId: string): void {
@@ -962,8 +1033,8 @@ export function openRunGroup(
     rmSync(deletingDir, { recursive: true, force: true });
   }
 
-  // Startup reconciliation (ADR 0023, ADR 0031, #86, #98 S2): every *owned* Run
-  // (`owner_pid` not NULL) is bookkept by probing its owner. An owner still alive in
+  // Startup reconciliation (ADR 0023, ADR 0031, #86, #98 S2): every registered
+  // Run reads its owner from run.db and probes it under one transaction. An owner alive in
   // another process is a Run genuinely live there — leave it untouched (it stays
   // listed live-elsewhere, and opening or resuming it is refused with the owner
   // named). A dead owner (or a pid equal to ours, which at open means a reused pid —
@@ -972,23 +1043,17 @@ export function openRunGroup(
   // is rested `halted` with the interrupted Attempt `indeterminate`; a `blocked`
   // record stays `blocked` because nothing was cut off and the checkpoint still
   // holds. Either way its ownership is released, running no Step work, so a reopened
-  // home never silently resumes execution (ADR 0019). An unowned Run is already at
-  // rest and skipped. A missing pid on a rebuilt coordination file reads as unowned.
-  for (const row of db
-    .select()
-    .from(runs)
-    .where(isNotNull(runs.owner_pid))
-    .all()) {
+  // home never silently resumes execution (ADR 0019). An absent owner row reads as
+  // unowned at epoch zero and is skipped.
+  for (const row of db.select().from(runs).all()) {
     const parsed = registrationRow.safeParse(row);
     if (!parsed.success) continue;
-    const pid = parsed.data.owner_pid;
-    if (pid == null) continue;
-    if (pid !== selfPid && isOwnerAlive(pid)) continue;
-    reconcileStoredRun(join(groupDir, parsed.data.run_id), new Date());
-    db.update(runs)
-      .set({ owner_pid: null })
-      .where(eq(runs.run_id, parsed.data.run_id))
-      .run();
+    reconcileStoredRun({
+      dir: join(groupDir, parsed.data.run_id),
+      at: new Date(),
+      selfPid,
+      isOwnerAlive,
+    });
   }
 
   return {
@@ -1007,12 +1072,11 @@ export function openRunGroup(
       return result;
     },
     endRun(runId) {
-      // ponytail: releasing ownership is not owner-fenced here; no caller needs a
-      // stale owner blocked from ending yet. Guard with the epoch if one ever does.
-      db.update(runs)
-        .set({ owner_pid: null })
-        .where(eq(runs.run_id, runId))
-        .run();
+      endRunOwnership({
+        dir: join(groupDir, runId),
+        selfPid,
+        openDatabase: openRunDatabase,
+      });
     },
     resumeRun(runId) {
       return admitResume(runId);
@@ -1025,8 +1089,13 @@ export function openRunGroup(
       // A takeover claims ownership and bumps the epoch atomically; a plain acquire
       // bumps only, leaving the create/resume claim as-is (so a read-only acquire
       // never marks a resting Run live). Fencing is the epoch bump either way.
+      const registered = db
+        .select({ run_id: runs.run_id })
+        .from(runs)
+        .where(eq(runs.run_id, runId))
+        .get();
+      if (registered === undefined) return undefined;
       return acquireRunOwner({
-        coordinationDb: db,
         groupDir,
         runId,
         takeover: options.takeover === true,
@@ -1046,9 +1115,15 @@ export function openRunGroup(
           if (!parsed.success) {
             throw new Error("Run Store: a runs row is malformed.");
           }
-          // Live means owned (a process holds it through `blocked` until rest);
-          // name the owner and whether it is this instance (ADR 0031, #98 S2).
-          const ownerPid = parsed.data.owner_pid;
+          const ownership = readRunOwnership({
+            dir: join(groupDir, parsed.data.run_id),
+            openDatabase: openRunDatabase,
+          });
+          // A damaged store lists unowned, matching the exact read's damaged Problem.
+          const ownerPid =
+            ownership === undefined || ownership === DAMAGED
+              ? null
+              : ownership.ownerPid;
           const live = ownerPid != null;
           if (ownerPid === null) {
             return {

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
-  mkdirSync,
   readdirSync,
   renameSync,
   utimesSync,
@@ -23,6 +23,9 @@ import { makeTempDir } from "../../helpers/tempDir.js";
 
 const WORKSPACE = "/work/example-project";
 const AT = new Date("2026-09-12T12:00:00.000Z");
+const LOCKED_COORDINATION_WORKER = fileURLToPath(
+  new URL("./locked-coordination-worker.ts", import.meta.url),
+);
 
 const enc = (text: string) => new TextEncoder().encode(text);
 const dec = (bytes: Uint8Array | undefined) =>
@@ -61,6 +64,31 @@ function create(
 function groupDirOf(home: string): string {
   const runs = join(home, "runs");
   return join(runs, readdirSync(runs)[0]!);
+}
+
+function runLockedCoordinationWorker(home: string): Promise<string> {
+  const child = spawn(
+    process.execPath,
+    [LOCKED_COORDINATION_WORKER, home, WORKSPACE],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(stderr || `coordination worker exited ${code}`));
+    });
+  });
 }
 
 test("creating a Run produces the grouped directory and its store", async (t) => {
@@ -189,17 +217,47 @@ test("a stale owner cannot write after being fenced", async (t) => {
   assert.equal(read.run.state, "done");
 });
 
+test("a takeover cannot cross an in-flight canonical write transaction", (t) => {
+  const home = makeTempDir("secant-store-");
+  const first = openRunGroup(home, WORKSPACE, { selfPid: 1000 });
+  t.after(() => first.close());
+  const created = create(first, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = first.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  const second = openRunGroup(home, WORKSPACE, {
+    selfPid: 2000,
+    isOwnerAlive: (pid) => pid === 1000,
+  });
+  t.after(() => second.close());
+
+  const runDatabase = new Database(
+    join(groupDirOf(home), created.runId, "run.db"),
+  );
+  runDatabase.exec("BEGIN IMMEDIATE");
+  try {
+    const takeover = second.acquireRun(created.runId, { takeover: true });
+    takeover?.close();
+    assert.equal(takeover, undefined);
+  } finally {
+    runDatabase.exec("COMMIT");
+    runDatabase.close();
+  }
+
+  assert.deepEqual(owner.writeState("running"), { ok: true });
+});
+
 test("a crash after staging leaves only a .creating quarantine the next open removes", async (t) => {
   const home = makeTempDir("secant-store-");
   // Poison the operations table so the admitted create faults on its INSERT,
   // after the run.db has been staged into `.creating` and before the rename.
   const groupDir = join(home, "runs", exampleGroupName());
-  mkdirSync(groupDir, { recursive: true });
+  const bootstrap = openRunGroup(home, WORKSPACE);
+  bootstrap.close();
   const raw = new Database(join(groupDir, "coordination.db"));
-  raw.exec(
-    "CREATE TABLE runs (run_id TEXT PRIMARY KEY, owner_epoch INTEGER NOT NULL, " +
-      "owner_pid INTEGER, created_at TEXT NOT NULL) STRICT",
-  );
+  raw.exec("DROP TABLE operations");
   raw.exec(
     "CREATE TABLE operations (operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL, " +
       "run_id TEXT NOT NULL, recorded_at TEXT NOT NULL, CHECK (0)) STRICT",
@@ -309,7 +367,7 @@ test("a create retried long after the Run was deleted starts a fresh Run", async
   assert.notEqual(retry.runId, first.runId);
 });
 
-test("a corrupt coordination.db is rebuilt from readable Run Stores with no owner or claim", async (t) => {
+test("a coordination rebuild reopened by its owner reconciles the recovered owner", async (t) => {
   const home = makeTempDir("secant-store-");
   const group = openRunGroup(home, WORKSPACE);
   const created = create(group, "op-1");
@@ -325,10 +383,69 @@ test("a corrupt coordination.db is rebuilt from readable Run Stores with no owne
   const listed = reopened.listRuns();
   assert.equal(listed.length, 1);
   assert.equal(listed[0]!.runId, created.runId);
-  // Rebuilt with no claim: the Workspace is free, so a fresh create is admitted.
+  // Rebuilding recovered this process as the owner; startup reconciliation then
+  // treats the matching pid as reused and releases it before listing.
   assert.equal(listed[0]!.live, false);
   const again = create(reopened, "op-2");
   assert.equal(again.outcome, "created");
+});
+
+test("a live Run owner survives a coordination database rebuild", (t) => {
+  const home = makeTempDir("secant-store-");
+  const first = openRunGroup(home, WORKSPACE, { selfPid: 1000 });
+  const created = create(first, "op-1");
+  assert.ok(created.outcome === "created");
+  first.close();
+
+  const groupDir = groupDirOf(home);
+  writeFileSync(join(groupDir, "coordination.db"), "not a database at all");
+
+  const second = openRunGroup(home, WORKSPACE, {
+    selfPid: 2000,
+    isOwnerAlive: (pid) => pid === 1000,
+  });
+  t.after(() => second.close());
+
+  assert.deepEqual(second.listRuns(), [
+    {
+      runId: created.runId,
+      live: true,
+      ownerPid: 1000,
+      ownedByThisProcess: false,
+    },
+  ]);
+  assert.deepEqual(second.resumeRun(created.runId), {
+    outcome: "run-live-elsewhere",
+    runId: created.runId,
+    ownerPid: 1000,
+  });
+});
+
+test("a locked coordination database is never mistaken for corruption", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const first = openRunGroup(home, WORKSPACE);
+  const created = create(first, "op-1");
+  assert.ok(created.outcome === "created");
+  first.close();
+
+  const coordinationPath = join(groupDirOf(home), "coordination.db");
+  const lock = new Database(coordinationPath);
+  lock.exec("BEGIN EXCLUSIVE");
+  try {
+    assert.deepEqual(JSON.parse(await runLockedCoordinationWorker(home)), {
+      kind: "aggregate",
+      errorCount: 2,
+      causeIsLastError: true,
+    });
+    assert.ok(existsSync(coordinationPath));
+  } finally {
+    lock.exec("COMMIT");
+    lock.close();
+  }
+
+  const reopened = openRunGroup(home, WORKSPACE);
+  t.after(() => reopened.close());
+  assert.equal(reopened.listRuns()[0]?.runId, created.runId);
 });
 
 test("a corrupt run.db reports a Problem for that Run while siblings stay readable", async (t) => {
@@ -498,6 +615,7 @@ test("a live-owned Run refuses resume and a plain acquire, but takeover fences t
   });
   assert.deepEqual(owner1.release(), { ok: false, reason: "fenced" });
   assert.deepEqual(owner2.writeState("cancelled"), { ok: true });
+  first.endRun(created.runId);
   // Ownership moved to pid 2000.
   const listing = second.listRuns().find((run) => run.runId === created.runId);
   assert.equal(listing?.ownerPid, 2000);

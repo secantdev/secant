@@ -1,17 +1,10 @@
 import { randomUUID } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { and, asc, desc, eq, isNotNull, notInArray, sql } from "drizzle-orm";
+import { asc, desc, eq, isNotNull, notInArray } from "drizzle-orm";
 import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite";
 import { z } from "zod";
 import { openArtifactRepo } from "./artifacts/artifacts.js";
-import { runs } from "./coordination-schema.js";
 import {
   artifactBindings,
   artifactVersions,
@@ -20,6 +13,7 @@ import {
   gateAnswers,
   materializationConflicts,
   pendingGates,
+  runOwner,
   runRecord,
 } from "./run-schema.js";
 import type {
@@ -48,6 +42,7 @@ export const DAMAGED = Symbol("run-store-damaged");
 
 export interface TRunDatabaseHandle {
   readonly db: SQLiteBunDatabase;
+  isClosed(): boolean;
   close(): void;
 }
 
@@ -56,6 +51,7 @@ export type TOpenRunDatabase = (path: string) => TRunDatabaseHandle;
 interface TStageRunStoreParams {
   readonly dir: string;
   readonly record: RunRecord;
+  readonly ownerPid: number;
   readonly openDatabase: TOpenRunDatabase;
 }
 
@@ -66,6 +62,8 @@ interface TReadRunStoreParams {
 
 interface TReconcileRunStoreParams extends TReadRunStoreParams {
   readonly at: Date;
+  readonly selfPid: number;
+  readonly isOwnerAlive: (pid: number) => boolean;
 }
 
 interface TCreateRunOwnerParams {
@@ -73,13 +71,11 @@ interface TCreateRunOwnerParams {
   readonly runDir: string;
   readonly runId: string;
   readonly record: RunRecord;
-  readonly fenced: () => boolean;
-  readonly release: () => WriteResult;
+  readonly epoch: number;
   readonly close: () => void;
 }
 
 interface TAcquireRunOwnerParams {
-  readonly coordinationDb: SQLiteBunDatabase;
   readonly groupDir: string;
   readonly runId: string;
   readonly takeover: boolean;
@@ -96,6 +92,10 @@ const runRecordRow = z.object({
   launch: z.string(),
   state: z.string(),
   created_at: z.string(),
+});
+const runOwnerRow = z.object({
+  ownerEpoch: z.number(),
+  ownerPid: z.number().nullable(),
 });
 const bindingRow = z.object({ version_id: z.string() });
 const attemptOutcome = z.enum([
@@ -174,6 +174,50 @@ function toRunRecord(row: z.infer<typeof runRecordRow>): RunRecord {
   };
 }
 
+export interface TRunOwnership {
+  readonly ownerPid: number | null;
+  readonly ownerEpoch: number;
+}
+
+const RUN_OWNER_SINGLETON = 1;
+const UNOWNED_RUN: TRunOwnership = { ownerPid: null, ownerEpoch: 0 };
+
+function readRunOwnershipRow(db: SQLiteBunDatabase): TRunOwnership {
+  const row = db
+    .select({
+      ownerEpoch: runOwner.ownerEpoch,
+      ownerPid: runOwner.ownerPid,
+    })
+    .from(runOwner)
+    .where(eq(runOwner.singleton, RUN_OWNER_SINGLETON))
+    .get();
+  return row === undefined ? UNOWNED_RUN : runOwnerRow.parse(row);
+}
+
+function writeRunOwnershipRow(
+  db: SQLiteBunDatabase,
+  ownership: TRunOwnership,
+): void {
+  db.insert(runOwner)
+    .values({
+      singleton: RUN_OWNER_SINGLETON,
+      ownerEpoch: ownership.ownerEpoch,
+      ownerPid: ownership.ownerPid,
+    })
+    .onConflictDoUpdate({
+      target: runOwner.singleton,
+      set: ownership,
+    })
+    .run();
+}
+
+function readRunRecordRow(db: SQLiteBunDatabase): RunRecord | typeof DAMAGED {
+  const row = db.select().from(runRecord).limit(1).get();
+  if (row === undefined) return DAMAGED;
+  const parsed = runRecordRow.safeParse(row);
+  return parsed.success ? toRunRecord(parsed.data) : DAMAGED;
+}
+
 export function stageRunStore(params: TStageRunStoreParams): void {
   const { dir, record, openDatabase } = params;
   mkdirSync(dir, { recursive: true });
@@ -181,17 +225,22 @@ export function stageRunStore(params: TStageRunStoreParams): void {
   mkdirSync(join(dir, "diagnostics"), { recursive: true });
   const database = openDatabase(join(dir, "run.db"));
   try {
-    database.db
-      .insert(runRecord)
-      .values({
-        run_id: record.runId,
-        workspace_path: record.workspacePath,
-        bundle_snapshot_digest: record.bundleSnapshotDigest,
-        launch: JSON.stringify(record.launch ?? null),
-        state: record.state,
-        created_at: record.createdAt,
-      })
-      .run();
+    database.db.transaction((tx) => {
+      tx.insert(runRecord)
+        .values({
+          run_id: record.runId,
+          workspace_path: record.workspacePath,
+          bundle_snapshot_digest: record.bundleSnapshotDigest,
+          launch: JSON.stringify(record.launch ?? null),
+          state: record.state,
+          created_at: record.createdAt,
+        })
+        .run();
+      writeRunOwnershipRow(tx, {
+        ownerPid: params.ownerPid,
+        ownerEpoch: 0,
+      });
+    });
   } finally {
     database.close();
   }
@@ -205,14 +254,92 @@ export function readRunStore(
   let database: TRunDatabaseHandle | undefined;
   try {
     database = params.openDatabase(path);
-    const row = database.db.select().from(runRecord).limit(1).get();
-    if (row === undefined) return DAMAGED;
-    const parsed = runRecordRow.safeParse(row);
-    return parsed.success ? toRunRecord(parsed.data) : DAMAGED;
+    return readRunRecordRow(database.db);
   } catch {
     return DAMAGED;
   } finally {
     database?.close();
+  }
+}
+
+export function readRunOwnership(
+  params: TReadRunStoreParams,
+): TRunOwnership | typeof DAMAGED | undefined {
+  const path = join(params.dir, "run.db");
+  if (!existsSync(path)) return undefined;
+  let database: TRunDatabaseHandle | undefined;
+  try {
+    database = params.openDatabase(path);
+    if (readRunRecordRow(database.db) === DAMAGED) return DAMAGED;
+    return readRunOwnershipRow(database.db);
+  } catch {
+    return DAMAGED;
+  } finally {
+    database?.close();
+  }
+}
+
+interface TClaimRunOwnershipParams extends TReadRunStoreParams {
+  readonly selfPid: number;
+  readonly isOwnerAlive: (pid: number) => boolean;
+}
+
+interface TEndRunOwnershipParams extends TReadRunStoreParams {
+  readonly selfPid: number;
+}
+
+export type TClaimRunOwnershipResult =
+  | { readonly kind: "claimed" }
+  | { readonly kind: "live-elsewhere"; readonly ownerPid: number }
+  | { readonly kind: "unreadable" };
+
+export function claimRunOwnership(
+  params: TClaimRunOwnershipParams,
+): TClaimRunOwnershipResult {
+  const path = join(params.dir, "run.db");
+  if (!existsSync(path)) return { kind: "unreadable" };
+  const database = params.openDatabase(path);
+  try {
+    return database.db.transaction(
+      (tx): TClaimRunOwnershipResult => {
+        const ownership = readRunOwnershipRow(tx);
+        if (readRunRecordRow(tx) === DAMAGED) return { kind: "unreadable" };
+        const ownerPid = ownership.ownerPid;
+        if (ownerPid === params.selfPid) return { kind: "claimed" };
+        if (ownerPid !== null && params.isOwnerAlive(ownerPid)) {
+          return { kind: "live-elsewhere", ownerPid };
+        }
+        writeRunOwnershipRow(tx, {
+          ownerEpoch: ownership.ownerEpoch,
+          ownerPid: params.selfPid,
+        });
+        return { kind: "claimed" };
+      },
+      { behavior: "immediate" },
+    );
+  } finally {
+    database.close();
+  }
+}
+
+export function endRunOwnership(params: TEndRunOwnershipParams): void {
+  const path = join(params.dir, "run.db");
+  if (!existsSync(path)) return;
+  const database = params.openDatabase(path);
+  try {
+    database.db.transaction(
+      (tx) => {
+        const ownership = readRunOwnershipRow(tx);
+        if (ownership.ownerPid !== params.selfPid) return;
+        writeRunOwnershipRow(tx, {
+          ownerEpoch: ownership.ownerEpoch,
+          ownerPid: null,
+        });
+      },
+      { behavior: "immediate" },
+    );
+  } finally {
+    database.close();
   }
 }
 
@@ -222,33 +349,47 @@ export function reconcileRunStore(params: TReconcileRunStoreParams): boolean {
   let database: TRunDatabaseHandle | undefined;
   try {
     database = params.openDatabase(path);
-    const raw = database.db
-      .select({ run_id: runRecord.run_id, state: runRecord.state })
-      .from(runRecord)
-      .limit(1)
-      .get();
-    if (raw === undefined) return false;
-    const parsed = reconcileRow.safeParse(raw);
-    if (!parsed.success) return false;
-    if (parsed.data.state !== "running" && parsed.data.state !== "created") {
-      return false;
-    }
-    const row = parsed.data;
-    database.db.transaction((tx) => {
-      tx.insert(attemptLog)
-        .values({
-          attempt_id: randomUUID(),
-          outcome: "indeterminate",
-          at: params.at.toISOString(),
-        })
-        .run();
-      tx.update(runRecord)
-        .set({ state: "halted" })
-        .where(eq(runRecord.run_id, row.run_id))
-        .run();
-      settleAbandonedTurns(tx, params.at.toISOString());
-    });
-    return true;
+    return database.db.transaction(
+      (tx): boolean => {
+        const ownership = readRunOwnershipRow(tx);
+        const ownerPid = ownership.ownerPid;
+        if (ownerPid === null) return true;
+        if (ownerPid !== params.selfPid && params.isOwnerAlive(ownerPid)) {
+          return true;
+        }
+
+        const raw = tx
+          .select({ run_id: runRecord.run_id, state: runRecord.state })
+          .from(runRecord)
+          .limit(1)
+          .get();
+        const parsed = reconcileRow.safeParse(raw);
+        if (!parsed.success) return false;
+        if (
+          parsed.data.state === "running" ||
+          parsed.data.state === "created"
+        ) {
+          tx.insert(attemptLog)
+            .values({
+              attempt_id: randomUUID(),
+              outcome: "indeterminate",
+              at: params.at.toISOString(),
+            })
+            .run();
+          tx.update(runRecord)
+            .set({ state: "halted" })
+            .where(eq(runRecord.run_id, parsed.data.run_id))
+            .run();
+          settleAbandonedTurns(tx, params.at.toISOString());
+        }
+        writeRunOwnershipRow(tx, {
+          ownerEpoch: ownership.ownerEpoch,
+          ownerPid: null,
+        });
+        return true;
+      },
+      { behavior: "immediate" },
+    );
   } catch {
     return false;
   } finally {
@@ -278,60 +419,62 @@ interface TCommitAttemptParams {
 }
 
 function commitAttempt(params: TCommitAttemptParams): void {
-  params.db.transaction((tx) => {
-    const at = params.request.at.toISOString();
-    if (params.versionId !== undefined) {
-      for (const output of params.request.outputs) {
-        tx.insert(artifactVersions)
-          .values({
-            version_id: params.versionId,
-            artifact_name: output.name,
-            artifact_type: output.type,
-            attempt_id: params.request.attemptId,
-            created_at: at,
-          })
-          .run();
-        tx.insert(artifactBindings)
-          .values({
-            artifact_name: output.name,
-            version_id: params.versionId,
-            updated_at: at,
-          })
-          .onConflictDoUpdate({
-            target: artifactBindings.artifact_name,
-            set: { version_id: params.versionId, updated_at: at },
-          })
-          .run();
-      }
+  const at = params.request.at.toISOString();
+  if (params.versionId !== undefined) {
+    for (const output of params.request.outputs) {
+      params.db
+        .insert(artifactVersions)
+        .values({
+          version_id: params.versionId,
+          artifact_name: output.name,
+          artifact_type: output.type,
+          attempt_id: params.request.attemptId,
+          created_at: at,
+        })
+        .run();
+      params.db
+        .insert(artifactBindings)
+        .values({
+          artifact_name: output.name,
+          version_id: params.versionId,
+          updated_at: at,
+        })
+        .onConflictDoUpdate({
+          target: artifactBindings.artifact_name,
+          set: { version_id: params.versionId, updated_at: at },
+        })
+        .run();
     }
-    const identity = params.request.harnessIdentity;
-    tx.insert(attempts)
-      .values({
-        attempt_id: params.request.attemptId,
-        outcome: params.request.outcome,
-        version_id: params.versionId ?? null,
-        settled_at: at,
-        effective_model: params.request.effectiveModel ?? null,
-        harness: identity?.harness ?? null,
-        executable: identity?.executable ?? null,
-        executable_version: identity?.executableVersion ?? null,
-      })
-      .run();
-    tx.insert(attemptLog)
-      .values({
-        attempt_id: params.request.attemptId,
-        outcome: params.request.outcome,
-        at,
-      })
-      .run();
-    if (params.request.advanceState !== undefined) {
-      updateRunState({
-        db: tx,
-        runId: params.runId,
-        state: params.request.advanceState,
-      });
-    }
-  });
+  }
+  const identity = params.request.harnessIdentity;
+  params.db
+    .insert(attempts)
+    .values({
+      attempt_id: params.request.attemptId,
+      outcome: params.request.outcome,
+      version_id: params.versionId ?? null,
+      settled_at: at,
+      effective_model: params.request.effectiveModel ?? null,
+      harness: identity?.harness ?? null,
+      executable: identity?.executable ?? null,
+      executable_version: identity?.executableVersion ?? null,
+    })
+    .run();
+  params.db
+    .insert(attemptLog)
+    .values({
+      attempt_id: params.request.attemptId,
+      outcome: params.request.outcome,
+      at,
+    })
+    .run();
+  if (params.request.advanceState !== undefined) {
+    updateRunState({
+      db: params.db,
+      runId: params.runId,
+      state: params.request.advanceState,
+    });
+  }
 }
 
 interface TRecordConflictParams {
@@ -342,18 +485,17 @@ interface TRecordConflictParams {
 }
 
 function recordConflict(params: TRecordConflictParams): void {
-  params.db.transaction((tx) => {
-    tx.insert(materializationConflicts)
-      .values({
-        diagnostic_id: params.diagnosticId,
-        artifact_name: params.request.artifactName,
-        artifact_path: params.request.path,
-        version_id: params.request.versionId,
-        at: params.request.at.toISOString(),
-      })
-      .run();
-    updateRunState({ db: tx, runId: params.runId, state: "halted" });
-  });
+  params.db
+    .insert(materializationConflicts)
+    .values({
+      diagnostic_id: params.diagnosticId,
+      artifact_name: params.request.artifactName,
+      artifact_path: params.request.path,
+      version_id: params.request.versionId,
+      at: params.request.at.toISOString(),
+    })
+    .run();
+  updateRunState({ db: params.db, runId: params.runId, state: "halted" });
 }
 
 interface TRecordGateAnswerParams {
@@ -366,43 +508,41 @@ interface TRecordGateAnswerParams {
 
 function recordGateAnswer(params: TRecordGateAnswerParams): void {
   const { db, runId, request, answerId, versionId } = params;
-  db.transaction((tx) => {
-    const at = request.at.toISOString();
-    tx.insert(artifactVersions)
-      .values({
-        version_id: versionId,
-        artifact_name: request.artifactName,
-        artifact_type: "text",
-        attempt_id: answerId,
-        created_at: at,
-      })
-      .run();
-    tx.insert(artifactBindings)
-      .values({
-        artifact_name: request.artifactName,
-        version_id: versionId,
-        updated_at: at,
-      })
-      .onConflictDoUpdate({
-        target: artifactBindings.artifact_name,
-        set: { version_id: versionId, updated_at: at },
-      })
-      .run();
-    tx.insert(gateAnswers)
-      .values({
-        answer_id: answerId,
-        operation_id: request.operationId,
-        gate_attempt_id: request.gateAttemptId,
-        answer: request.answer,
-        iterations_at_grant: request.iterationsAtGrant,
-        version_id: versionId,
-        at,
-      })
-      .run();
-    if (request.advanceState !== undefined) {
-      updateRunState({ db: tx, runId, state: request.advanceState });
-    }
-  });
+  const at = request.at.toISOString();
+  db.insert(artifactVersions)
+    .values({
+      version_id: versionId,
+      artifact_name: request.artifactName,
+      artifact_type: "text",
+      attempt_id: answerId,
+      created_at: at,
+    })
+    .run();
+  db.insert(artifactBindings)
+    .values({
+      artifact_name: request.artifactName,
+      version_id: versionId,
+      updated_at: at,
+    })
+    .onConflictDoUpdate({
+      target: artifactBindings.artifact_name,
+      set: { version_id: versionId, updated_at: at },
+    })
+    .run();
+  db.insert(gateAnswers)
+    .values({
+      answer_id: answerId,
+      operation_id: request.operationId,
+      gate_attempt_id: request.gateAttemptId,
+      answer: request.answer,
+      iterations_at_grant: request.iterationsAtGrant,
+      version_id: versionId,
+      at,
+    })
+    .run();
+  if (request.advanceState !== undefined) {
+    updateRunState({ db, runId, state: request.advanceState });
+  }
 }
 
 interface TRecordPendingGateParams {
@@ -417,20 +557,34 @@ interface TRecordPendingGateParams {
 // and re-rests `blocked`.
 function recordPendingGate(params: TRecordPendingGateParams): void {
   const { db, runId, request } = params;
-  db.transaction((tx) => {
-    tx.insert(pendingGates)
-      .values({
-        attempt_id: request.attemptId,
-        step_id: request.stepId,
-        shape: request.shape,
-        message: request.message,
-        output_artifact_name: request.outputArtifactName ?? null,
-        raised_at: request.at.toISOString(),
-      })
-      .onConflictDoNothing({ target: pendingGates.attempt_id })
-      .run();
-    updateRunState({ db: tx, runId, state: "blocked" });
-  });
+  db.insert(pendingGates)
+    .values({
+      attempt_id: request.attemptId,
+      step_id: request.stepId,
+      shape: request.shape,
+      message: request.message,
+      output_artifact_name: request.outputArtifactName ?? null,
+      raised_at: request.at.toISOString(),
+    })
+    .onConflictDoNothing({ target: pendingGates.attempt_id })
+    .run();
+  updateRunState({ db, runId, state: "blocked" });
+}
+
+type TGuardedWriteResult =
+  { readonly kind: "written" } | { readonly kind: "fenced" };
+
+type TCanonicalWrite = (tx: SQLiteBunDatabase) => void;
+
+type TFencedWriteResult = {
+  readonly ok: false;
+  readonly reason: "fenced";
+};
+
+const FENCED_WRITE: TFencedWriteResult = { ok: false, reason: "fenced" };
+
+function toWriteResult(result: TGuardedWriteResult): WriteResult {
+  return result.kind === "fenced" ? FENCED_WRITE : { ok: true };
 }
 
 function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
@@ -438,16 +592,35 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
   const repo = openArtifactRepo(params.runDir);
   const diagnosticsDir = join(params.runDir, "diagnostics");
 
+  function isFenced(): boolean {
+    if (params.database.isClosed()) return true;
+    return readRunOwnershipRow(db).ownerEpoch !== params.epoch;
+  }
+
+  function guardedWrite(write: TCanonicalWrite): TGuardedWriteResult {
+    if (params.database.isClosed()) return { kind: "fenced" };
+    return db.transaction(
+      (tx): TGuardedWriteResult => {
+        const ownership = readRunOwnershipRow(tx);
+        if (ownership.ownerEpoch !== params.epoch) return { kind: "fenced" };
+        write(tx);
+        return { kind: "written" };
+      },
+      { behavior: "immediate" },
+    );
+  }
+
   return {
     runId: params.runId,
     record: params.record,
     writeState(state) {
-      if (params.fenced()) return { ok: false, reason: "fenced" };
-      updateRunState({ db, runId: params.runId, state });
-      return { ok: true };
+      const result = guardedWrite((tx) => {
+        updateRunState({ db: tx, runId: params.runId, state });
+      });
+      return toWriteResult(result);
     },
     publishAttempt(request) {
-      if (params.fenced()) return { ok: false, reason: "fenced" };
+      if (isFenced()) return FENCED_WRITE;
       const settled = db
         .select({ outcome: attempts.outcome, version_id: attempts.version_id })
         .from(attempts)
@@ -465,13 +638,15 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         // tree is not a valid `git mktree` input. Settle it with no version, like a
         // non-producing outcome.
         if (request.outputs.length === 0 && request.required.length === 0) {
-          commitAttempt({
-            db,
-            runId: params.runId,
-            request,
-            versionId: undefined,
+          const committed = guardedWrite((tx) => {
+            commitAttempt({
+              db: tx,
+              runId: params.runId,
+              request,
+              versionId: undefined,
+            });
           });
-          return { ok: true };
+          return toWriteResult(committed);
         }
         const staged = repo.stageCommit(
           request.attemptId,
@@ -480,17 +655,26 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
           request.at,
         );
         if (!staged.ok) return { ok: false, problem: staged.problem };
-        if (params.fenced()) return { ok: false, reason: "fenced" };
-        commitAttempt({
-          db,
-          runId: params.runId,
-          request,
-          versionId: staged.versionId,
+        const committed = guardedWrite((tx) => {
+          commitAttempt({
+            db: tx,
+            runId: params.runId,
+            request,
+            versionId: staged.versionId,
+          });
         });
+        if (committed.kind === "fenced") return FENCED_WRITE;
         return { ok: true, versionId: staged.versionId };
       }
-      commitAttempt({ db, runId: params.runId, request, versionId: undefined });
-      return { ok: true };
+      const committed = guardedWrite((tx) => {
+        commitAttempt({
+          db: tx,
+          runId: params.runId,
+          request,
+          versionId: undefined,
+        });
+      });
+      return toWriteResult(committed);
     },
     currentVersion(name) {
       const row = db
@@ -523,19 +707,14 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         });
     },
     recordMaterializationConflict(request) {
-      if (params.fenced()) return { ok: false, reason: "fenced" };
       const diagnosticId = randomUUID();
-      mkdirSync(diagnosticsDir, { recursive: true });
       const diagnosticPath = join(diagnosticsDir, diagnosticId);
-      writeFileSync(diagnosticPath, request.diagnostic);
-      // A fence acquired between staging the bytes and committing the row refuses
-      // the write; the contract is "nothing is written", so the staged diagnostic
-      // must not survive as an orphan until the 90-day prune (A10).
-      if (params.fenced()) {
-        rmSync(diagnosticPath, { force: true });
-        return { ok: false, reason: "fenced" };
-      }
-      recordConflict({ db, runId: params.runId, request, diagnosticId });
+      const recorded = guardedWrite((tx) => {
+        mkdirSync(diagnosticsDir, { recursive: true });
+        writeFileSync(diagnosticPath, request.diagnostic);
+        recordConflict({ db: tx, runId: params.runId, request, diagnosticId });
+      });
+      if (recorded.kind === "fenced") return FENCED_WRITE;
       return { ok: true, diagnosticId };
     },
     materializationConflicts() {
@@ -571,7 +750,7 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
       }
     },
     recordGateAnswer(request) {
-      if (params.fenced()) return { ok: false, reason: "fenced" };
+      if (isFenced()) return FENCED_WRITE;
       const existing = db
         .select({
           answer_id: gateAnswers.answer_id,
@@ -597,14 +776,16 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         request.at,
       );
       if (!staged.ok) return { ok: false, problem: staged.problem };
-      if (params.fenced()) return { ok: false, reason: "fenced" };
-      recordGateAnswer({
-        db,
-        runId: params.runId,
-        request,
-        answerId,
-        versionId: staged.versionId,
+      const recorded = guardedWrite((tx) => {
+        recordGateAnswer({
+          db: tx,
+          runId: params.runId,
+          request,
+          answerId,
+          versionId: staged.versionId,
+        });
       });
+      if (recorded.kind === "fenced") return FENCED_WRITE;
       return { ok: true, versionId: staged.versionId, replayed: false };
     },
     gateAnswers() {
@@ -635,9 +816,10 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         });
     },
     recordPendingGate(request) {
-      if (params.fenced()) return { ok: false, reason: "fenced" };
-      recordPendingGate({ db, runId: params.runId, request });
-      return { ok: true };
+      const recorded = guardedWrite((tx) => {
+        recordPendingGate({ db: tx, runId: params.runId, request });
+      });
+      return toWriteResult(recorded);
     },
     pendingGate() {
       // The gate the Run currently rests at: the pending-gate record whose
@@ -659,19 +841,16 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         : toPendingGate(pendingGateRow.parse(row));
     },
     admitTurn(request) {
-      if (params.fenced()) return { ok: false, reason: "fenced" };
-      admitTurn(db, request);
-      return { ok: true };
+      const admitted = guardedWrite((tx) => admitTurn(tx, request));
+      return toWriteResult(admitted);
     },
     appendTurnEvent(request) {
-      if (params.fenced()) return { ok: false, reason: "fenced" };
-      appendTurnEvent(db, request);
-      return { ok: true };
+      const appended = guardedWrite((tx) => appendTurnEvent(tx, request));
+      return toWriteResult(appended);
     },
     settleTurn(request) {
-      if (params.fenced()) return { ok: false, reason: "fenced" };
-      settleTurn(db, request);
-      return { ok: true };
+      const settled = guardedWrite((tx) => settleTurn(tx, request));
+      return toWriteResult(settled);
     },
     turns() {
       return readTurns(db);
@@ -732,7 +911,15 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         executableVersion: parsed.executable_version,
       };
     },
-    release: params.release,
+    release() {
+      const released = guardedWrite((tx) => {
+        writeRunOwnershipRow(tx, {
+          ownerEpoch: params.epoch,
+          ownerPid: null,
+        });
+      });
+      return toWriteResult(released);
+    },
     close: params.close,
   };
 }
@@ -740,76 +927,63 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
 export function acquireRunOwner(
   params: TAcquireRunOwnerParams,
 ): RunOwner | undefined {
-  const record = readRunStore({
-    dir: join(params.groupDir, params.runId),
-    openDatabase: params.openDatabase,
-  });
-  if (record === undefined || record === DAMAGED) return undefined;
-
-  if (!params.takeover) {
-    const registration = params.coordinationDb
-      .select({ owner_pid: runs.owner_pid })
-      .from(runs)
-      .where(eq(runs.run_id, params.runId))
-      .get();
-    const ownerPid = registration?.owner_pid;
-    if (
-      ownerPid != null &&
-      ownerPid !== params.selfPid &&
-      params.isOwnerAlive(ownerPid)
-    ) {
-      return undefined;
-    }
-  }
-
-  const bumped = params.coordinationDb
-    .update(runs)
-    .set(
-      params.takeover
-        ? {
-            owner_epoch: sql`${runs.owner_epoch} + 1`,
-            owner_pid: params.selfPid,
-          }
-        : { owner_epoch: sql`${runs.owner_epoch} + 1` },
-    )
-    .where(eq(runs.run_id, params.runId))
-    .returning({ owner_epoch: runs.owner_epoch })
-    .get();
-  if (bumped === undefined) return undefined;
-
-  const epoch = bumped.owner_epoch;
   const runDir = join(params.groupDir, params.runId);
-  const runDatabase = params.openDatabase(join(runDir, "run.db"));
+  let runDatabase: TRunDatabaseHandle;
+  try {
+    runDatabase = params.openDatabase(join(runDir, "run.db"));
+  } catch {
+    return undefined;
+  }
+
+  type TAcquireResult =
+    | {
+        readonly kind: "acquired";
+        readonly epoch: number;
+        readonly record: RunRecord;
+      }
+    | { readonly kind: "refused" };
+
+  let acquired: TAcquireResult;
+  try {
+    acquired = runDatabase.db.transaction(
+      (tx): TAcquireResult => {
+        const ownership = readRunOwnershipRow(tx);
+        const ownerPid = ownership.ownerPid;
+        if (
+          !params.takeover &&
+          ownerPid !== null &&
+          ownerPid !== params.selfPid &&
+          params.isOwnerAlive(ownerPid)
+        ) {
+          return { kind: "refused" };
+        }
+        const record = readRunRecordRow(tx);
+        if (record === DAMAGED) return { kind: "refused" };
+        const epoch = ownership.ownerEpoch + 1;
+        writeRunOwnershipRow(tx, {
+          ownerEpoch: epoch,
+          ownerPid: params.takeover ? params.selfPid : ownership.ownerPid,
+        });
+        return { kind: "acquired", epoch, record };
+      },
+      { behavior: "immediate" },
+    );
+  } catch {
+    runDatabase.close();
+    return undefined;
+  }
+  if (acquired.kind === "refused") {
+    runDatabase.close();
+    return undefined;
+  }
   const close = params.trackHandle(runDatabase);
-
-  function fenced(): boolean {
-    const current = params.coordinationDb
-      .select({ owner_epoch: runs.owner_epoch })
-      .from(runs)
-      .where(eq(runs.run_id, params.runId))
-      .get();
-    return current === undefined || current.owner_epoch !== epoch;
-  }
-
-  function release(): WriteResult {
-    const released = params.coordinationDb
-      .update(runs)
-      .set({ owner_pid: null })
-      .where(and(eq(runs.run_id, params.runId), eq(runs.owner_epoch, epoch)))
-      .returning({ run_id: runs.run_id })
-      .get();
-    return released === undefined
-      ? { ok: false, reason: "fenced" }
-      : { ok: true };
-  }
 
   return createRunOwner({
     database: runDatabase,
     runDir,
     runId: params.runId,
-    record,
-    fenced,
-    release,
+    record: acquired.record,
+    epoch: acquired.epoch,
     close,
   });
 }

@@ -14,6 +14,14 @@ export const runRecord = sqliteTable("run_record", {
   created_at: text("created_at").notNull(),
 });
 
+// One row per Run Store. The fixed singleton key makes the invariant structural;
+// an absent row is the legacy representation of an unowned Run at epoch zero.
+export const runOwner = sqliteTable("run_owner", {
+  singleton: integer("singleton").primaryKey(),
+  ownerEpoch: integer("owner_epoch").notNull(),
+  ownerPid: integer("owner_pid"),
+});
+
 export const artifactVersions = sqliteTable(
   "artifact_version",
   {

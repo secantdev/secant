@@ -9,10 +9,8 @@
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import {
-  resolveExecutable,
   spawnCommand,
   spawnOwnedProcess,
-  type ExecutableResolution,
   type OwnedProcess,
   type OwnedProcessClose,
 } from "../process/process.js";
@@ -64,14 +62,16 @@ import {
   type ApprovalRequest,
   type PermissionBridge,
 } from "./permission-bridge.js";
+import {
+  CLAUDE_CODE_EXECUTABLE_ENV,
+  discoverClaudeCode,
+  discoveredClaudeCodeTarget,
+  type DiscoveredClaudeCodeTarget,
+} from "./discovery.js";
 
 /** The message a denied approval returns to the bridge caller. Claude sees it
  *  and adjusts its approach. */
 const DENY_MESSAGE = "The tool use was denied.";
-
-/** The one M3 environment variable naming an explicit Claude Code executable
- *  path or command, tried before the canonical PATH name (#107). */
-export const CLAUDE_CODE_EXECUTABLE_ENV = "SECANT_CLAUDE_CODE";
 
 /** This Adapter's revision, stamped onto every profile it produces so a cached
  *  qualification from an older Adapter is never mistaken for a current one. */
@@ -123,25 +123,9 @@ export function createClaudeCodeAdapter(
   return new ClaudeCodeAdapter(overrides);
 }
 
-/** One discovery attempt: the human name of where we looked and the bare name
- *  or path handed to the resolver. */
-interface DiscoveryAttempt {
-  readonly source: string;
-  readonly name: string;
-}
-
 /** A resolved, spawnable Claude Code target. */
-interface DiscoveredTarget {
+interface DiscoveredTarget extends DiscoveredClaudeCodeTarget {
   readonly source: string;
-  readonly executable: string;
-  readonly prefixArgs: readonly string[];
-  /** The path whose bytes identify this Claude Code: the script an npm `.cmd`
-   *  shim wraps (which changes when Claude Code updates), else the executable
-   *  itself. Never the shared interpreter (`node`/`bun`), whose bytes never
-   *  move when Claude Code does. */
-  readonly identityPath: string;
-  /** Whether the target is a native binary or an npm-style shim. */
-  readonly shim: boolean;
 }
 
 class ClaudeCodeAdapter implements HarnessAdapter {
@@ -213,47 +197,11 @@ class ClaudeCodeAdapter implements HarnessAdapter {
   ):
     | { ok: true; target: DiscoveredTarget }
     | { ok: false; failure: HarnessFailure } {
-    const configured =
-      options.configuredExecutable ??
-      (this.overrides.env ?? process.env)[CLAUDE_CODE_EXECUTABLE_ENV];
-    const attempts: DiscoveryAttempt[] = [];
-    if (configured !== undefined && configured.length > 0) {
-      attempts.push({
-        source: `configured command '${configured}'`,
-        name: configured,
-      });
-    }
-    attempts.push({ source: "PATH name 'claude'", name: "claude" });
-
-    for (const attempt of attempts) {
-      const resolution = this.resolve(attempt.name);
-      if (resolution.kind === "found") {
-        return { ok: true, target: toTarget(attempt, resolution) };
-      }
-      if (resolution.kind === "unsupported-shim") {
-        return {
-          ok: false,
-          failure: failure(
-            "unsupported-shim",
-            `Refusing ${attempt.source}: '${resolution.path}' is a Windows shim the resolver cannot parse. Name the interpreter, or point ${CLAUDE_CODE_EXECUTABLE_ENV} at the real executable.`,
-          ),
-        };
-      }
-      // not-found: try the next location.
-    }
-    return {
-      ok: false,
-      failure: failure(
-        "not-found",
-        `No Claude Code executable found. Searched: ${attempts
-          .map((attempt) => attempt.source)
-          .join(", ")}.`,
-      ),
-    };
-  }
-
-  private resolve(name: string): ExecutableResolution {
-    return resolveExecutable(name, {
+    const discovery = discoverClaudeCode({
+      ...(options.configuredExecutable !== undefined
+        ? { configuredExecutable: options.configuredExecutable }
+        : {}),
+      env: this.overrides.env ?? process.env,
       ...(this.overrides.platform !== undefined
         ? { platform: this.overrides.platform }
         : {}),
@@ -264,6 +212,33 @@ class ClaudeCodeAdapter implements HarnessAdapter {
         ? { resolve: this.overrides.resolve }
         : {}),
     });
+    if (discovery.kind === "found") {
+      return {
+        ok: true,
+        target: {
+          source: discovery.attempt.description,
+          ...discoveredClaudeCodeTarget(discovery),
+        },
+      };
+    }
+    if (discovery.kind === "unsupported-shim") {
+      return {
+        ok: false,
+        failure: failure(
+          "unsupported-shim",
+          `Refusing ${discovery.attempt.description}: '${discovery.path}' is a Windows shim the resolver cannot parse. Name the interpreter, or point ${CLAUDE_CODE_EXECUTABLE_ENV} at the real executable.`,
+        ),
+      };
+    }
+    return {
+      ok: false,
+      failure: failure(
+        "not-found",
+        "No Claude Code executable found. Searched: " +
+          discovery.attempts.map((attempt) => attempt.description).join(", ") +
+          ".",
+      ),
+    };
   }
 
   /** Probe `<executable> --version` and nothing else — the only argv this slice
@@ -1478,20 +1453,6 @@ function cleanupFailure(
       : result.kind === "signal" && result.signal !== null
         ? { nativeCode: result.signal }
         : {}),
-  };
-}
-
-function toTarget(
-  attempt: DiscoveryAttempt,
-  resolution: Extract<ExecutableResolution, { kind: "found" }>,
-): DiscoveredTarget {
-  const shim = resolution.prefixArgs.length > 0;
-  return {
-    source: attempt.source,
-    executable: resolution.executable,
-    prefixArgs: resolution.prefixArgs,
-    identityPath: resolution.prefixArgs[0] ?? resolution.executable,
-    shim,
   };
 }
 

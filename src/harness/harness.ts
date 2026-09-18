@@ -596,11 +596,19 @@ export type HarnessAdapterFactory = () => HarnessAdapter;
 // Code Adapter (#111) is the first; Codex and Gemini follow.
 // ---------------------------------------------------------------------------
 
-export {
-  createClaudeCodeAdapter,
-  CLAUDE_CODE_EXECUTABLE_ENV,
-} from "./claude-code.js";
+export { createClaudeCodeAdapter } from "./claude-code.js";
 export type { ClaudeCodeAdapterOverrides } from "./claude-code.js";
+
+export {
+  CLAUDE_CODE_EXECUTABLE_ENV,
+  CLAUDE_CODE_SERVED_CAPABILITIES,
+  discoverClaudeCode,
+} from "./discovery.js";
+export type {
+  ClaudeCodeDiscovery,
+  ClaudeCodeDiscoveryAttempt,
+  ClaudeCodeDiscoveryOptions,
+} from "./discovery.js";
 
 // The permission bridge the Claude Code Adapter launches against. Exported so the
 // opt-in fixture recorder composes the production bridge (with its own approval

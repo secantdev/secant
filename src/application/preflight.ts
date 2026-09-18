@@ -9,21 +9,15 @@ import {
   type LaunchInput,
   type Platform,
 } from "../workflow/workflow.js";
-import { CLAUDE_CODE_EXECUTABLE_ENV } from "../harness/harness.js";
+import {
+  CLAUDE_CODE_EXECUTABLE_ENV,
+  CLAUDE_CODE_SERVED_CAPABILITIES,
+  discoverClaudeCode,
+} from "../harness/harness.js";
 import { resolveExecutable } from "../process/process.js";
 import { isolatedGitEnvironment } from "../run/store/store.js";
 import type { FieldViolation, Problem } from "./projection-port.js";
 import { selectPlatform } from "./select-platform.js";
-
-// The Harness capability needs Secant's one M3 Harness (Claude Code) serves. A
-// Step kind declares its needs (`agent-turn`, `interactive-turns`); Preflight
-// refuses a routing whose union is not a subset of this set before a Run exists
-// (#116). Claude Code serves both; the check is the seam a future Harness that
-// serves fewer would trip.
-const HARNESS_SERVED_CAPABILITIES: ReadonlySet<string> = new Set([
-  "agent-turn",
-  "interactive-turns",
-]);
 
 // Preflight: the Application-owned precondition gate that refuses to create a Run
 // whose prerequisites are not met and says exactly why (#14, spec #76). It runs
@@ -100,13 +94,30 @@ export function preflight(request: PreflightRequest): PreflightResult {
   }
   if (capabilityNeeds.size > 0) {
     const unmet = [...capabilityNeeds].filter(
-      (need) => !HARNESS_SERVED_CAPABILITIES.has(need),
+      (need) => CLAUDE_CODE_SERVED_CAPABILITIES[need] !== true,
     );
     if (unmet.length > 0) {
       return { problem: harnessCapabilityUnmet(unmet) };
     }
-    const discovered = discoverHarness();
-    if ("problem" in discovered) return discovered;
+    const discovery = discoverClaudeCode();
+    if (discovery.kind === "unsupported-shim") {
+      return {
+        problem: harnessUnsupportedShim(discovery.attempt.name, discovery.path),
+      };
+    }
+    if (discovery.kind === "not-found") {
+      return {
+        problem: harnessNotFound(
+          discovery.attempts.map((attempt) => {
+            const source =
+              attempt.source === "configured"
+                ? `configured command (${CLAUDE_CODE_EXECUTABLE_ENV})`
+                : attempt.description;
+            return `${source}: "${attempt.name}"`;
+          }),
+        ),
+      };
+    }
   }
 
   // 5. Every declared Launch input is required and validated by its Artifact type;
@@ -274,39 +285,6 @@ function probeGitWorktreeRoot(workspacePath: string): PreflightResult {
   return canonicalTop === workspacePath
     ? { ok: true }
     : { problem: worktreeRootFailed(workspacePath) };
-}
-
-// --- Harness discovery (#116) ----------------------------------------------
-
-/** Discover the Harness executable the way the Adapter does — the configured
- *  command (one M3 env var) first, then the canonical PATH name `claude` — through
- *  the same `process` resolver command steps use, so Preflight's precondition and
- *  the Adapter's spawn agree. An unsupported Windows shim fails immediately; a
- *  not-found on every attempt names what was searched. */
-function discoverHarness(): PreflightResult {
-  const configured = process.env[CLAUDE_CODE_EXECUTABLE_ENV]?.trim();
-  const attempts: readonly { source: string; name: string }[] =
-    configured !== undefined && configured.length > 0
-      ? [
-          {
-            source: `configured command (${CLAUDE_CODE_EXECUTABLE_ENV})`,
-            name: configured,
-          },
-          { source: "PATH name 'claude'", name: "claude" },
-        ]
-      : [{ source: "PATH name 'claude'", name: "claude" }];
-  const searched: string[] = [];
-  for (const attempt of attempts) {
-    const resolution = resolveExecutable(attempt.name);
-    if (resolution.kind === "found") return { ok: true };
-    if (resolution.kind === "unsupported-shim") {
-      return {
-        problem: harnessUnsupportedShim(attempt.name, resolution.path),
-      };
-    }
-    searched.push(`${attempt.source}: "${attempt.name}"`);
-  }
-  return { problem: harnessNotFound(searched) };
 }
 
 // --- Platform / executable selection ---------------------------------------

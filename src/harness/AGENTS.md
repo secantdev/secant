@@ -8,8 +8,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   composition root calls. No native frame, protocol type, or conversation-id value crosses it; the declared exceptions are the Workspace path
   (`PrepareOptions.workspace`, the directory every Session runs against), three named test seams — the session-id generator (`overrides.sessionId`), the
   Session process spawn (`overrides.spawn`, a scripted stand-in for the process Module's child) and the Claude-native executable env constant
-  (`CLAUDE_CODE_EXECUTABLE_ENV`, `SECANT_CLAUDE_CODE`) — and the permission-bridge factory (`startPermissionBridge`), exported so the fixture recorder
-  composes the production bridge instead of a copy (#127 D3); its surface is launch flags, the bearer, a redactor and a teardown, never an MCP type.
+  (`CLAUDE_CODE_EXECUTABLE_ENV`, `SECANT_CLAUDE_CODE`) — the synchronous discovery outcome and static served-capability table that Preflight shares
+  with the Adapter (the resolved spawn target stays private), and the permission-bridge factory (`startPermissionBridge`), exported so the fixture
+  recorder composes the production bridge instead of a copy (#127 D3); its surface is launch flags, the bearer, a redactor and a teardown, never an MCP type.
   Recovery coordinates cross the Seam only as opaque values
   (`RecoveryCoordinate`), never Run truth — nothing above the Seam decides anything from their contents. Native Adapters,
   protocol models, and qualification stay private to each Adapter and re-export nothing native.

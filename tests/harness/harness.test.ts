@@ -9,7 +9,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   APPROVAL_DECISIONS,
+  CLAUDE_CODE_SERVED_CAPABILITIES,
   CONTROL_REJECTIONS,
+  discoverClaudeCode,
   HARNESS_PLATFORMS,
   LOST_UNKNOWNS,
   TURN_EVENT_KINDS,
@@ -49,4 +51,25 @@ test("the closed vocabulary sets are exactly what the Interface fixes", () => {
       "model",
     ],
   );
+});
+
+test("Claude Code discovery shares configured-then-PATH order and served capabilities", () => {
+  const resolved: string[] = [];
+  const discovery = discoverClaudeCode({
+    configuredExecutable: "configured-claude",
+    env: { SECANT_CLAUDE_CODE: "ignored-env-claude" },
+    resolve(name) {
+      resolved.push(name);
+      return name === "claude" ? "/bin/claude" : undefined;
+    },
+  });
+
+  assert.deepEqual(resolved, ["configured-claude", "claude"]);
+  assert.equal(discovery.kind, "found");
+  if (discovery.kind !== "found") throw new Error("unreachable");
+  assert.equal(discovery.attempt.source, "path");
+  assert.deepEqual(CLAUDE_CODE_SERVED_CAPABILITIES, {
+    "agent-turn": true,
+    "interactive-turns": true,
+  });
 });

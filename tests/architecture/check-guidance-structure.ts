@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { findCredentials } from "../harness/redact.js";
 import { ownerOf } from "./module-policy.js";
 
 export interface GuidanceIssue {
@@ -131,16 +132,109 @@ export function checkGuidanceStructure(root: string): GuidanceIssue[] {
           report(recording, 1, "Recorded fixture lacks recording.json");
           continue;
         }
-        const missing = sidecarKeys.filter(
-          (key) => !(key in parseObject(sidecar)),
-        );
+        const metadata = parseObject(sidecar);
+        const missing = sidecarKeys.filter((key) => !(key in metadata));
         if (missing.length)
           report(sidecar, 1, `recording.json lacks ${missing.join(", ")}`);
+        const extra = Object.keys(metadata).filter(
+          (key) => !sidecarKeys.includes(key as (typeof sidecarKeys)[number]),
+        );
+        if (extra.length) {
+          report(
+            sidecar,
+            1,
+            `recording.json has unexpected ${extra.join(", ")}`,
+          );
+        }
+        validateRecordingMetadata(metadata, sidecar, report);
+        for (const file of filesIn(recording)) {
+          const labels = findCredentials(readFileSync(file, "utf8"));
+          if (labels.length > 0) {
+            report(
+              file,
+              1,
+              `recording still matches credential pattern(s): ${labels.join(", ")}`,
+            );
+          }
+        }
       }
     }
   }
 
   return issues;
+}
+
+function validateRecordingMetadata(
+  metadata: Record<string, unknown>,
+  sidecar: string,
+  report: (file: string, line: number, message: string) => void,
+): void {
+  for (const key of [
+    "harness",
+    "executableVersion",
+    "protocolVersion",
+    "refreshCommand",
+  ] as const) {
+    if (
+      typeof metadata[key] !== "string" ||
+      metadata[key].trim().length === 0
+    ) {
+      report(sidecar, 1, `recording.json has invalid ${key}`);
+    }
+  }
+  if (
+    metadata.recordedAt !== "synthetic" &&
+    (typeof metadata.recordedAt !== "string" ||
+      !isIsoInstant(metadata.recordedAt))
+  ) {
+    report(sidecar, 1, "recording.json has invalid recordedAt");
+  }
+  if (
+    !Array.isArray(metadata.redactions) ||
+    metadata.redactions.some(
+      (entry) =>
+        !isObject(entry) ||
+        typeof entry.placeholder !== "string" ||
+        entry.placeholder.length === 0 ||
+        typeof entry.reason !== "string" ||
+        entry.reason.length === 0,
+    )
+  ) {
+    report(sidecar, 1, "recording.json has invalid redactions");
+  }
+  if (
+    metadata.harness === "codex" &&
+    (typeof metadata.protocolVersion !== "string" ||
+      !/^codex-probe-\d+$/.test(metadata.protocolVersion))
+  ) {
+    report(
+      sidecar,
+      1,
+      "Codex protocolVersion must name a codex-probe revision",
+    );
+  }
+  if (
+    metadata.recordedAt === "synthetic" &&
+    (typeof metadata.refreshCommand !== "string" ||
+      !/^synthetic -- .+/.test(metadata.refreshCommand))
+  ) {
+    report(
+      sidecar,
+      1,
+      "Synthetic recording refreshCommand must state why it is synthetic",
+    );
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isIsoInstant(value: string): boolean {
+  const timestamp = Date.parse(value);
+  return (
+    Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
+  );
 }
 
 function isSymlink(path: string) {
@@ -168,6 +262,13 @@ function subdirectories(directory: string) {
     .filter((entry) => entry.isDirectory())
     .map((entry) => join(directory, entry.name))
     .sort();
+}
+
+function filesIn(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? filesIn(path) : [path];
+  });
 }
 
 function findNamed(directory: string, name: string): string[] {

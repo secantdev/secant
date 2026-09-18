@@ -42,7 +42,7 @@ import {
 import {
   CodexDiagnosticCapture,
   CodexQualificationConnection,
-  type CodexQualificationObserver,
+  type CodexRecordingObserver,
 } from "./codex/qualification.js";
 import { validateRequiredSchema } from "./codex/required-schema.js";
 import {
@@ -60,7 +60,7 @@ import {
   parseTurnStartResult,
 } from "./codex/runtime-protocol.js";
 
-export type { CodexQualificationObserver } from "./codex/qualification.js";
+export type { CodexRecordingObserver } from "./codex/qualification.js";
 
 const HARNESS_NAME = "codex";
 const PROBE_REVISION = "codex-probe-2";
@@ -87,9 +87,9 @@ export interface CodexAdapterOverrides {
   readonly cleanupTimeoutMs?: number;
   readonly probeRevision?: () => string;
   readonly spawn?: typeof spawnOwnedProcess;
-  /** Recorder-only observation of the exact qualification bytes. Production
-   *  passes none; native protocol data never reaches an ordinary caller. */
-  readonly qualificationObserver?: CodexQualificationObserver;
+  /** Recorder-only observation of the exact schema, protocol/stderr bytes, and
+   *  shutdown. Production passes none; native data never reaches a caller. */
+  readonly recordingObserver?: CodexRecordingObserver;
 }
 
 interface TDiscoveredTarget extends DiscoveredCodexTarget {
@@ -134,6 +134,7 @@ class CodexAdapter implements HarnessAdapter {
     if (!discovery.ok) return discovery;
     const version = await this.probeVersion(discovery.target);
     if (!version.ok) return version;
+    this.overrides.recordingObserver?.version(version.value);
 
     const probeRevision = this.overrides.probeRevision?.() ?? PROBE_REVISION;
     const cachePlatform =
@@ -147,7 +148,7 @@ class CodexAdapter implements HarnessAdapter {
       probeRevision,
     });
     if (cacheKey === undefined || !this.cache.has(cacheKey)) {
-      const schema = await this.qualifySchema(discovery.target);
+      const schema = await this.qualifySchema(discovery.target, probeRevision);
       if (!schema.ok) return schema;
       if (cacheKey !== undefined) this.cache.add(cacheKey);
     }
@@ -170,7 +171,7 @@ class CodexAdapter implements HarnessAdapter {
         options.workspace,
         this.overrides.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
         this.overrides.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
-        this.overrides.qualificationObserver,
+        this.overrides.recordingObserver,
       ),
     };
   }
@@ -248,6 +249,7 @@ class CodexAdapter implements HarnessAdapter {
 
   private async qualifySchema(
     target: TDiscoveredTarget,
+    probeRevision: string,
   ): Promise<TProbeResult<true>> {
     const directory = mkdtempSync(join(tmpdir(), "secant-codex-schema-"));
     try {
@@ -269,7 +271,7 @@ class CodexAdapter implements HarnessAdapter {
         );
       }
       const schemaText = readFileSync(schemaPath, "utf8");
-      this.overrides.qualificationObserver?.schema(schemaText);
+      this.overrides.recordingObserver?.schema(schemaText, probeRevision);
       const parsed = JSON.parse(schemaText);
       const validated = validateRequiredSchema(parsed);
       if (!validated.ok) {
@@ -320,10 +322,11 @@ class CodexAdapter implements HarnessAdapter {
     const connection = new CodexQualificationConnection(
       spawned.process,
       this.overrides.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
-      this.overrides.qualificationObserver,
+      this.overrides.recordingObserver,
     );
     const diagnosticCapture = new CodexDiagnosticCapture(
       spawned.process.stderr,
+      this.overrides.recordingObserver,
     );
     try {
       await connection.initialize();
@@ -342,6 +345,7 @@ class CodexAdapter implements HarnessAdapter {
             cleanupTimeoutMs:
               this.overrides.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
             includeStderr: false,
+            observer: this.overrides.recordingObserver,
           }),
         };
       }
@@ -368,6 +372,7 @@ class CodexAdapter implements HarnessAdapter {
           cleanupTimeoutMs:
             this.overrides.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
           includeStderr: true,
+          observer: this.overrides.recordingObserver,
         }),
       };
     }
@@ -388,7 +393,7 @@ class CodexPreparedHarness implements PreparedHarness {
     private readonly workspace: string,
     private readonly handshakeTimeoutMs: number,
     private readonly cleanupTimeoutMs: number,
-    private readonly observer: CodexQualificationObserver | undefined,
+    private readonly observer: CodexRecordingObserver | undefined,
   ) {
     this.connection.startRuntime({
       message: (message) => this.acceptMessage(message),
@@ -1803,12 +1808,17 @@ interface TFailedQualification {
   readonly failure: HarnessFailure;
   readonly cleanupTimeoutMs: number;
   readonly includeStderr: boolean;
+  readonly observer?: CodexRecordingObserver;
 }
 
 async function failedQualification(
   options: TFailedQualification,
 ): Promise<HarnessFailure> {
   const closed = await options.process.closeStdin(options.cleanupTimeoutMs);
+  options.observer?.closed(
+    closed.kind,
+    closed.kind === "exited" ? closed.status : undefined,
+  );
   const diagnosticResult = await options.diagnostics.settle(
     options.cleanupTimeoutMs,
   );

@@ -63,13 +63,9 @@ export class CodexJsonlConnection {
 
   constructor(
     private readonly process: OwnedProcess,
-    private observer: CodexProtocolObserver | undefined,
+    private readonly observer: CodexProtocolObserver | undefined,
   ) {
     this.iterator = process.stdout[Symbol.asyncIterator]();
-  }
-
-  finishQualificationObservation(): void {
-    this.observer = undefined;
   }
 
   async qualificationRequest(method: string, params: object): Promise<unknown> {

@@ -61,6 +61,7 @@ test("test temp directories are allocated through the shared helper", async () =
     "helpers/tempDir.ts",
     "terminal/lifecycle.ts",
     "harness/record.ts",
+    "harness/record-codex.ts",
     "architecture/check-vendor-provenance.ts",
   ]);
 

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
   CODEX_EXECUTABLE_ENV,
   createCodexAdapter,
+  type CodexRecordingObserver,
   type DurableTurnRecorder,
   type HarnessPlatform,
   type PreparedHarness,
@@ -14,9 +16,11 @@ import {
 } from "../../src/harness/harness.js";
 import type { OwnedProcess } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { seedTestRepairWorkspace } from "../helpers/testRepairWorkspace.js";
 import {
   runExactThreadRecoveryCases,
   runApprovalRequestCases,
+  runInterruptRecoveryCases,
   runNativeSteerCases,
   runPrepareProfileCases,
   runTurnLifecycleCases,
@@ -24,11 +28,16 @@ import {
 } from "./conformance.js";
 import {
   installCodexReplayer,
+  installSyntheticCodexReplayer,
   type InstalledCodexReplayer,
-  type CodexApprovalReplay,
 } from "./codex-replayer-install.js";
+import {
+  CODEX_RECORDING_INPUT,
+  codexTestRepairPrompt,
+} from "./codex-recording-cases.js";
+import { createCodexRecordingCapture } from "./codex-recording.js";
 
-const replayer = installCodexReplayer();
+const replayer = installSyntheticCodexReplayer();
 
 runPrepareProfileCases({
   label: "codex",
@@ -42,7 +51,12 @@ runPrepareProfileCases({
 
 runTurnLifecycleCases({
   label: "codex-turn-lifecycle",
-  baseline: () => () => createCodexAdapter({ path: replayer.path, env: {} }),
+  inputText: CODEX_RECORDING_INPUT.completion,
+  baseline: () => () =>
+    createCodexAdapter({
+      path: installCodexReplayer("completion").path,
+      env: {},
+    }),
   prepareFailure: () => () =>
     createCodexAdapter({
       path: makeTempDir("secant-codex-empty-"),
@@ -53,13 +67,69 @@ runTurnLifecycleCases({
 });
 
 runNativeSteerCases({
-  label: "codex-live-controls",
-  steerableTurn: () => {
-    const installed = installCodexReplayer();
+  label: "codex-recorded-conformance",
+  inputText: CODEX_RECORDING_INPUT.steer,
+  guidanceText: CODEX_RECORDING_INPUT.steerGuidance,
+  steerableTurn: () => () =>
+    createCodexAdapter({
+      path: installCodexReplayer("steer").path,
+      env: {},
+    }),
+});
+
+runInterruptRecoveryCases({
+  label: "codex-recorded-conformance",
+  inputText: CODEX_RECORDING_INPUT.completion,
+  interruptInputText: CODEX_RECORDING_INPUT.sleep,
+  resumeInputText: CODEX_RECORDING_INPUT.resume,
+  baseline: () => () =>
+    createCodexAdapter({
+      path: installCodexReplayer("completion").path,
+      env: {},
+    }),
+  prepareFailure: () => () =>
+    createCodexAdapter({
+      path: makeTempDir("secant-codex-empty-"),
+      env: {},
+    }),
+  failedTurn: () => () =>
+    createCodexAdapter({ path: failedTurnReplayer().path, env: {} }),
+  blockingTurn: () => () =>
+    createCodexAdapter({
+      path: installCodexReplayer("interrupt").path,
+      env: {},
+    }),
+  unresponsiveInterrupt: () => {
+    const installed = installSyntheticCodexReplayer();
     installed.configureTurn({
       withholdTerminal: true,
-      steerTerminal: "completed",
+      stallInterruptResponse: true,
     });
+    return () =>
+      createCodexAdapter({
+        path: installed.path,
+        env: {},
+        handshakeTimeoutMs: 500,
+        cleanupTimeoutMs: 20,
+      });
+  },
+  lostCompletion: () => {
+    const installed = installSyntheticCodexReplayer();
+    installed.configureTurn({ stopAfter: "accepted" });
+    return () => createCodexAdapter({ path: installed.path, env: {} });
+  },
+  resumeAcknowledged: () => () =>
+    createCodexAdapter({
+      path: installCodexReplayer("resume").path,
+      env: {},
+    }),
+  resumeUnacknowledged: () => {
+    const installed = installSyntheticCodexReplayer();
+    installed.configureTurn({
+      withholdTerminal: true,
+      interruptTerminal: "interrupted",
+    });
+    installed.configureRecovery({ threadId: "different-thread" });
     return () => createCodexAdapter({ path: installed.path, env: {} });
   },
 });
@@ -73,22 +143,19 @@ runExactThreadRecoveryCases({
 const codexApprovalScenarios: ApprovalRequestScenarios = {
   label: "codex-approval-contract",
   concurrentCount: 2,
+  awaitedInputText: CODEX_RECORDING_INPUT.approval,
   concurrentRequests: () => () =>
     createCodexAdapter({
       path: installCodexReplayer("codex-approval-contract").path,
       env: {},
     }),
-  awaitedApproval: () =>
-    approvalAdapter([
-      {
-        id: "server-command-1",
-        kind: "command",
-        itemId: "command-1",
-        command: "bun test",
-      },
-    ]),
+  awaitedApproval: () => () =>
+    createCodexAdapter({
+      path: installCodexReplayer("approval").path,
+      env: {},
+    }),
   interruptible: () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     installed.configureTurn({
       approvals: [
         {
@@ -105,12 +172,6 @@ const codexApprovalScenarios: ApprovalRequestScenarios = {
 };
 
 runApprovalRequestCases(codexApprovalScenarios);
-
-function approvalAdapter(approvals: readonly CodexApprovalReplay[]) {
-  const installed = installCodexReplayer();
-  installed.configureTurn({ approvals });
-  return () => createCodexAdapter({ path: installed.path, env: {} });
-}
 
 test("Codex approval allow and deny map only to native accept and decline", async () => {
   const installed = installCodexReplayer("codex-approval-contract");
@@ -166,7 +227,7 @@ test("Codex approval allow and deny map only to native accept and decline", asyn
 });
 
 test("native approval resolution wins over a late answer while peers remain independent", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [
       {
@@ -212,7 +273,7 @@ test("native approval resolution wins over a late answer while peers remain inde
 });
 
 test("concurrent answers write exactly one native decision", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [
       {
@@ -260,7 +321,7 @@ test("concurrent answers write exactly one native decision", async () => {
 });
 
 test("a duplicate native server request id fails the Turn closed", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [
       {
@@ -282,7 +343,7 @@ test("a duplicate native server request id fails the Turn closed", async () => {
 });
 
 test("a moved file approval exposes both exact paths", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [
       {
@@ -319,7 +380,7 @@ test("a moved file approval exposes both exact paths", async () => {
 
 for (const nativeRace of ["resolution", "terminal"] as const) {
   test(`${nativeRace} wins while an approval answer write is in flight`, async () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     const controlled = approvalRaceProcess();
     const preparedResult = await createCodexAdapter({
       path: installed.path,
@@ -368,7 +429,7 @@ for (const nativeRace of ["resolution", "terminal"] as const) {
 }
 
 test("approval response write failure preserves its cause and expires the request", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   const controlled = approvalRaceProcess();
   const preparedResult = await createCodexAdapter({
     path: installed.path,
@@ -404,7 +465,7 @@ test("approval response write failure preserves its cause and expires the reques
 });
 
 test("terminal truth expires an outstanding approval before settling", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [
       {
@@ -438,7 +499,7 @@ test("terminal truth expires an outstanding approval before settling", async () 
 });
 
 test("close expires an outstanding approval before native interruption", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [
       {
@@ -471,7 +532,7 @@ test("close expires an outstanding approval before native interruption", async (
 });
 
 test("unsupported mandatory Codex approval shapes fail closed", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [
       { id: "unsupported", kind: "unsupported-command", itemId: "stdin-1" },
@@ -486,7 +547,7 @@ test("unsupported mandatory Codex approval shapes fail closed", async () => {
 });
 
 test("a file approval without exact file-change context fails closed", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [{ id: "file", kind: "file", itemId: "missing-file-change" }],
   });
@@ -503,7 +564,7 @@ test("a file approval without exact file-change context fails closed", async () 
 });
 
 test("experimental request-user-input remains disabled and fails closed", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     approvals: [
       { id: "request-input", kind: "request-user-input", itemId: "input-1" },
@@ -519,13 +580,13 @@ test("experimental request-user-input remains disabled and fails closed", async 
 });
 
 function failedTurnReplayer() {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.failTurn("scripted terminal failure");
   return installed;
 }
 
 function exactRecoveryReplayer(threadId: string) {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true });
   installed.configureRecovery({ threadId });
   return () =>
@@ -537,7 +598,7 @@ function exactRecoveryReplayer(threadId: string) {
 }
 
 test("refused durable admission sends no prompt content", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   const prepared = await prepareCodex(installed.path);
   const turn = prepared.startTurn(
     turnRequest({
@@ -563,7 +624,7 @@ test("refused durable admission sends no prompt content", async () => {
 
 for (const stopAfter of ["accepted", "item-completed"] as const) {
   test(`${stopAfter} without terminal truth settles lost`, async () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     installed.configureTurn({ stopAfter });
     const prepared = await prepareCodex(installed.path);
     const result = await prepared.startTurn(turnRequest()).result();
@@ -575,7 +636,7 @@ for (const stopAfter of ["accepted", "item-completed"] as const) {
 }
 
 test("a malformed runtime frame loses the Turn without fabricating completion", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ malformedFrame: true });
   const prepared = await prepareCodex(installed.path);
   const result = await prepared.startTurn(turnRequest()).result();
@@ -585,28 +646,8 @@ test("a malformed runtime frame loses the Turn without fabricating completion", 
   await prepared.close();
 });
 
-test("completed agent content supersedes streamed preview content", async () => {
-  const installed = installCodexReplayer();
-  const prepared = await prepareCodex(installed.path);
-  const turn = prepared.startTurn(turnRequest());
-  const events = observeEvents(turn);
-  const result = await turn.result();
-  assert.equal(result.kind, "completed");
-  if (result.kind !== "completed") throw new Error("unreachable");
-  assert.equal(result.detail.finalContent, "final answer");
-  assert.ok(events.some((event) => event.kind === "preview"));
-  assert.deepEqual(
-    events.filter((event) => event.kind === "assistant-content"),
-    [{ kind: "assistant-content", content: "final answer" }],
-  );
-  const replayed: TurnEvent[] = [];
-  turn.subscribe((event) => replayed.push(event));
-  assert.ok(replayed.every((event) => event.kind !== "preview"));
-  await prepared.close();
-});
-
 test("supported Codex item lifecycles use semantic Harness events", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ fullActivity: true });
   const prepared = await prepareCodex(installed.path);
   const turn = prepared.startTurn(turnRequest());
@@ -639,7 +680,7 @@ test("supported Codex item lifecycles use semantic Harness events", async () => 
 });
 
 test("retrying errors remain nonterminal activity", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ retryingError: "temporary overload" });
   const prepared = await prepareCodex(installed.path);
   const turn = prepared.startTurn(turnRequest());
@@ -657,7 +698,7 @@ test("retrying errors remain nonterminal activity", async () => {
 });
 
 test("retry evidence is not reused as terminal failure evidence", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.failTurn("authoritative terminal failure");
   installed.configureTurn({ retryingError: "temporary overload" });
   const prepared = await prepareCodex(installed.path);
@@ -673,7 +714,7 @@ test("retry evidence is not reused as terminal failure evidence", async () => {
 
 for (const malformed of ["malformedItem", "malformedTerminal"] as const) {
   test(`${malformed} fails closed as protocol corruption`, async () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     installed.configureTurn({ [malformed]: true });
     const prepared = await prepareCodex(installed.path);
     const result = await prepared.startTurn(turnRequest()).result();
@@ -685,7 +726,7 @@ for (const malformed of ["malformedItem", "malformedTerminal"] as const) {
 }
 
 test("only the matching terminal Turn event can settle", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ mismatchedTerminal: true });
   const prepared = await prepareCodex(installed.path);
   const result = await prepared.startTurn(turnRequest()).result();
@@ -694,14 +735,30 @@ test("only the matching terminal Turn event can settle", async () => {
 });
 
 test("later fresh Turns reuse one private thread and continue RPC ids", async () => {
-  const installed = installCodexReplayer();
+  const installed = installCodexReplayer("two-turns");
   const prepared = await prepareCodex(installed.path);
   assert.equal(
-    (await prepared.startTurn(turnRequest()).result()).kind,
+    (
+      await prepared
+        .startTurn(
+          turnRequest(undefined, {
+            text: CODEX_RECORDING_INPUT.completion,
+          }),
+        )
+        .result()
+    ).kind,
     "completed",
   );
   assert.equal(
-    (await prepared.startTurn(turnRequest()).result()).kind,
+    (
+      await prepared
+        .startTurn(
+          turnRequest(undefined, {
+            text: CODEX_RECORDING_INPUT.secondCompletion,
+          }),
+        )
+        .result()
+    ).kind,
     "completed",
   );
   const appServer = installed
@@ -726,7 +783,7 @@ test("later fresh Turns reuse one private thread and continue RPC ids", async ()
 });
 
 test("codex-live-controls steers the exact active native Turn", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ withholdTerminal: true });
   const prepared = await prepareCodex(installed.path);
   const turn = prepared.startTurn(turnRequest());
@@ -753,7 +810,7 @@ test("codex-live-controls steers the exact active native Turn", async () => {
 });
 
 test("codex-live-controls interrupts only from matching terminal truth", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     interruptTerminal: "interrupted",
@@ -780,7 +837,7 @@ test("codex-live-controls interrupts only from matching terminal truth", async (
 });
 
 test("codex-live-controls does not turn interrupt acknowledgement into terminal truth", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ withholdTerminal: true });
   const prepared = await prepareCodex(installed.path);
   const turn = prepared.startTurn(turnRequest());
@@ -810,7 +867,7 @@ test("codex-live-controls does not turn interrupt acknowledgement into terminal 
 });
 
 test("codex-live-controls child loss before confirmation keeps interruption unknown", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     interruptTerminal: "exit",
@@ -829,7 +886,7 @@ test("codex-live-controls child loss before confirmation keeps interruption unkn
 });
 
 test("codex-live-controls native interrupt rejection does not poison later input", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     interruptRpcError: "stale",
@@ -851,7 +908,7 @@ test("codex-live-controls native interrupt rejection does not poison later input
 });
 
 test("codex-live-controls native Interrupt mismatch is expired", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     interruptRpcError: "mismatch",
@@ -873,7 +930,7 @@ test("codex-live-controls native Interrupt mismatch is expired", async () => {
 });
 
 test("codex-live-controls does not downgrade a near-miss Interrupt error", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     interruptRpcError: "near-miss",
@@ -896,7 +953,7 @@ test("codex-live-controls does not downgrade a near-miss Interrupt error", async
 });
 
 test("codex-live-controls native internal control error stays distinct and preserves its code", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     interruptRpcError: "internal",
@@ -922,7 +979,7 @@ test("codex-live-controls native internal control error stays distinct and prese
 
 for (const terminal of ["completed", "failed"] as const) {
   test(`codex-live-controls ${terminal} terminal truth wins an interrupt acknowledgement race`, async () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     installed.configureTurn({
       withholdTerminal: true,
       interruptTerminalBeforeResponse: terminal,
@@ -941,7 +998,7 @@ for (const terminal of ["completed", "failed"] as const) {
 }
 
 test("codex-live-controls matching interrupted terminal can confirm before acknowledgement", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     interruptTerminalBeforeResponse: "interrupted",
@@ -956,7 +1013,7 @@ test("codex-live-controls matching interrupted terminal can confirm before ackno
 });
 
 test("codex-live-controls rejects a mismatched native Steer response as stale", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     mismatchedSteerResponse: true,
@@ -977,7 +1034,7 @@ test("codex-live-controls rejects a mismatched native Steer response as stale", 
 
 for (const race of ["no-active", "mismatch"] as const) {
   test(`codex-live-controls rejects the native ${race} Steer race as expired`, async () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     installed.configureTurn({
       withholdTerminal: true,
       steerRpcError: race,
@@ -1004,7 +1061,7 @@ for (const controlCase of [
   { native: "schema", reason: "expired" },
 ] as const) {
   test(`codex-live-controls maps native Steer ${controlCase.native} to ${controlCase.reason}`, async () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     installed.configureTurn({
       withholdTerminal: true,
       steerRpcError: controlCase.native,
@@ -1025,7 +1082,7 @@ for (const controlCase of [
 }
 
 test("codex-live-controls does not downgrade a near-miss native error", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     steerRpcError: "near-miss",
@@ -1048,7 +1105,7 @@ test("codex-live-controls does not downgrade a near-miss native error", async ()
 });
 
 test("codex-live-controls malformed Steer response fails closed without throwing", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     malformedSteerResponse: true,
@@ -1071,7 +1128,7 @@ test("codex-live-controls malformed Steer response fails closed without throwing
 });
 
 test("codex-live-controls control timeout preserves its cause on the Turn", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     stallSteerResponse: true,
@@ -1107,7 +1164,7 @@ test("codex-live-controls control timeout preserves its cause on the Turn", asyn
 
 for (const failure of ["malformed", "timeout"] as const) {
   test(`codex-live-controls Interrupt ${failure} is a control failure with interruption unknown`, async () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     installed.configureTurn({
       withholdTerminal: true,
       malformedInterruptResponse: failure === "malformed",
@@ -1143,7 +1200,7 @@ for (const failure of ["malformed", "timeout"] as const) {
 }
 
 test("codex-live-controls close interrupts live work before app-server shutdown", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     interruptTerminal: "interrupted",
@@ -1170,7 +1227,7 @@ test("codex-live-controls close interrupts live work before app-server shutdown"
 });
 
 test("codex-live-controls close stays bounded before a native Turn exists", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   const preparedResult = await createCodexAdapter({
     path: installed.path,
     env: {},
@@ -1205,7 +1262,7 @@ test("codex-live-controls close stays bounded before a native Turn exists", asyn
 });
 
 test("codex-live-controls close bounds an already in-flight Interrupt", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     stallInterruptResponse: true,
@@ -1243,7 +1300,7 @@ test("codex-live-controls close bounds an already in-flight Interrupt", async ()
 });
 
 test("codex-live-controls close rejects an in-flight Steer receipt", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({
     withholdTerminal: true,
     stallSecondSteerResponse: true,
@@ -1266,7 +1323,7 @@ test("codex-live-controls close rejects an in-flight Steer receipt", async () =>
 });
 
 test("cleanup failure cannot rewrite an already-settled Codex Turn", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.failCleanup(9);
   const prepared = await prepareCodex(installed.path);
   const turn = prepared.startTurn(turnRequest());
@@ -1279,7 +1336,7 @@ test("cleanup failure cannot rewrite an already-settled Codex Turn", async () =>
 });
 
 test("codex-exact-thread-recovery acknowledges the same thread before admission and prompt", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true });
   const { prepared, coordinate } = await prepareDetachedCodex(installed);
   const methodsAtAdmission: string[] = [];
@@ -1328,7 +1385,7 @@ test("codex-exact-thread-recovery acknowledges the same thread before admission 
 });
 
 test("a newly materialized Codex Session resumes from the caller coordinate without starting fresh", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   const prepared = await prepareCodex(installed.path);
   const result = await prepared
     .startTurn({
@@ -1352,7 +1409,7 @@ test("a newly materialized Codex Session resumes from the caller coordinate with
 });
 
 test("a detached Codex Session recovers its private coordinate when resume is omitted", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true });
   const { prepared } = await prepareDetachedCodex(installed);
   assert.equal(
@@ -1373,7 +1430,7 @@ test("a detached Codex Session recovers its private coordinate when resume is om
 });
 
 test("a mismatched Codex recovery acknowledgement permanently fences the Session", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true });
   installed.configureRecovery({ threadId: "different-thread" });
   const { prepared, coordinate } = await prepareDetachedCodex(installed);
@@ -1419,7 +1476,7 @@ test("a mismatched Codex recovery acknowledgement permanently fences the Session
 });
 
 test("a Codex recovery response without a thread acknowledgement fails before admission", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true });
   installed.configureRecovery({ threadId: null });
   const { prepared, coordinate } = await prepareDetachedCodex(installed);
@@ -1448,7 +1505,7 @@ test("a Codex recovery response without a thread acknowledgement fails before ad
 });
 
 test("malformed transport during Codex recovery is a sticky recovery failure", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true });
   installed.configureRecovery({ malformedFrame: true });
   const { prepared, coordinate } = await prepareDetachedCodex(installed);
@@ -1470,7 +1527,7 @@ test("malformed transport during Codex recovery is a sticky recovery failure", a
 });
 
 test("a detached Codex Session cannot be rebound to another recovery coordinate", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true, stopAfter: "accepted" });
   installed.configureRecovery({ threadId: "different-thread" });
   const { prepared } = await prepareDetachedCodex(installed);
@@ -1531,13 +1588,14 @@ async function prepareCodex(path: string): Promise<PreparedHarness> {
 
 function turnRequest(
   recorder: DurableTurnRecorder = successfulRecorder(),
+  overrides?: { readonly text?: string; readonly session?: string },
 ): TurnRequest {
   return {
-    session: "codex-test",
+    session: overrides?.session ?? "codex-test",
     origin: "managed",
     correlationKey: { opaque: "codex-correlation" },
     recorder,
-    input: { text: "private prompt" },
+    input: { text: overrides?.text ?? "private prompt" },
   };
 }
 
@@ -1598,8 +1656,8 @@ async function waitForEventCount(
   });
 }
 
-test("codex-qualification initializes once without creating a conversation", async () => {
-  const installed = installCodexReplayer();
+test("[codex-recorded-conformance] qualification initializes once without creating a conversation", async () => {
+  const installed = installCodexReplayer("codex-qualification");
   const result = await createCodexAdapter({
     path: installed.path,
     env: {},
@@ -1660,9 +1718,334 @@ test("codex-qualification initializes once without creating a conversation", asy
   await result.harness.close();
 });
 
+test("the recorder observer captures runtime traffic and shutdown through the production Adapter", async () => {
+  const installed = installSyntheticCodexReplayer();
+  const observed: {
+    direction: "stdin" | "stdout" | "stderr";
+    line: string;
+  }[] = [];
+  const closes: { kind: string; status: number | undefined }[] = [];
+  let schemaBytes = 0;
+  let executableVersion: string | undefined;
+  let protocolVersion: string | undefined;
+  const decoder = new TextDecoder();
+  const observer: CodexRecordingObserver = {
+    version(version) {
+      executableVersion = version;
+    },
+    schema(schema, revision) {
+      schemaBytes = Buffer.byteLength(schema);
+      protocolVersion = revision;
+    },
+    stdin(bytes) {
+      observed.push({ direction: "stdin", line: decoder.decode(bytes) });
+    },
+    stdout(bytes) {
+      observed.push({ direction: "stdout", line: decoder.decode(bytes) });
+    },
+    stderr(bytes) {
+      observed.push({ direction: "stderr", line: decoder.decode(bytes) });
+    },
+    closed(kind, status) {
+      closes.push({ kind, status });
+    },
+  };
+  const prepared = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+    recordingObserver: observer,
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+
+  const result = await prepared.harness.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "completed");
+  await prepared.harness.close();
+
+  const runtimeMethods = observed
+    .filter((entry) => entry.direction === "stdin")
+    .map((entry) => JSON.parse(entry.line).method)
+    .filter(
+      (method) => method?.startsWith("thread/") || method?.startsWith("turn/"),
+    );
+  assert.deepEqual(runtimeMethods, ["thread/start", "turn/start"]);
+  assert.equal(executableVersion, "codex-cli 0.155.0");
+  assert.equal(protocolVersion, "codex-probe-2");
+  assert.ok(schemaBytes > 0);
+  assert.ok(
+    observed.some(
+      (entry) =>
+        entry.direction === "stdout" &&
+        JSON.parse(entry.line).method === "turn/completed",
+    ),
+  );
+  assert.deepEqual(closes, [{ kind: "exited", status: 0 }]);
+
+  const failedCapture = createCodexRecordingCapture();
+  const failed = await createCodexAdapter({
+    path: installCodexReplayer("authentication").path,
+    env: {},
+    recordingObserver: failedCapture.observer,
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(failed.ok, false);
+  assert.deepEqual(failedCapture.exit, { kind: "exited", status: 0 });
+
+  const stderrCapture = createCodexRecordingCapture();
+  const stderrPreparedResult = await createCodexAdapter({
+    path: installCodexReplayer("interrupt").path,
+    env: {},
+    recordingObserver: stderrCapture.observer,
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(stderrPreparedResult.ok, true);
+  if (!stderrPreparedResult.ok) throw new Error("unreachable");
+  const stderrTurn = stderrPreparedResult.harness.startTurn(
+    recordedSleepRequest("interrupt"),
+  );
+  const stderrEvents = observeEvents(stderrTurn);
+  await waitForToolOrRequest(stderrTurn, stderrEvents);
+  await stderrTurn.interrupt();
+  await stderrTurn.result();
+  await stderrPreparedResult.harness.close();
+  assert.ok(
+    stderrCapture.traffic.some(
+      (entry) => entry.direction === "stderr" && entry.line.length > 0,
+    ),
+  );
+});
+
+test("[codex-recorded-conformance] completion replays exact client traffic", async () => {
+  const installed = installCodexReplayer("completion");
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn({
+    ...turnRequest(),
+    session: "completion",
+    correlationKey: { opaque: "record-completion" },
+    input: { text: CODEX_RECORDING_INPUT.completion },
+  });
+  const events = observeEvents(turn);
+  const result = await turn.result();
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") throw new Error("unreachable");
+  assert.equal(result.detail.finalContent, "recorded completion.");
+  assert.equal(result.detail.effectiveModel.known, true);
+  assert.ok(events.some((event) => event.kind === "preview"));
+  assert.deepEqual(
+    events.filter((event) => event.kind === "assistant-content"),
+    [{ kind: "assistant-content", content: "recorded completion." }],
+  );
+  const replayed: TurnEvent[] = [];
+  turn.subscribe((event) => replayed.push(event));
+  assert.ok(replayed.every((event) => event.kind !== "preview"));
+  await prepared.close();
+  assert.deepEqual(
+    installed
+      .invocations()
+      .find((invocation) => invocation.args.join(" ") === "app-server")
+      ?.stdinLines.map((line) => JSON.parse(line).method),
+    [
+      "initialize",
+      "initialized",
+      "account/read",
+      "model/list",
+      "thread/start",
+      "turn/start",
+    ],
+  );
+});
+
+test("strict Codex replay refuses client traffic that diverges from recorded bytes", async () => {
+  const prepared = await prepareCodex(installCodexReplayer("completion").path);
+  const result = await prepared
+    .startTurn({
+      ...turnRequest(),
+      session: "completion",
+      correlationKey: { opaque: "record-completion" },
+      input: { text: "different unrecorded input" },
+    })
+    .result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.unknown, "acceptance");
+  await prepared.close();
+});
+
+test("[codex-recorded-conformance] native Steer replays its exact active Turn", async () => {
+  const prepared = await prepareCodex(installCodexReplayer("steer").path);
+  const turn = prepared.startTurn({
+    ...turnRequest(),
+    session: "steer",
+    correlationKey: { opaque: "record-steer" },
+    input: {
+      text: CODEX_RECORDING_INPUT.steer,
+    },
+  });
+  await waitForSession(turn);
+  assert.deepEqual(
+    await turn.steer({ text: CODEX_RECORDING_INPUT.steerGuidance }),
+    { outcome: "accepted" },
+  );
+  assert.equal((await turn.result()).kind, "completed");
+  await prepared.close();
+});
+
+test("[codex-recorded-conformance] approval exposes the action and replays allow once", async () => {
+  const prepared = await prepareCodex(installCodexReplayer("approval").path);
+  const turn = prepared.startTurn({
+    ...turnRequest(),
+    session: "approval",
+    correlationKey: { opaque: "record-approval" },
+    input: {
+      text: CODEX_RECORDING_INPUT.approval,
+    },
+  });
+  const events = observeEvents(turn);
+  await waitForRequestCount(turn, events, 1);
+  const raised = events.find((event) => event.kind === "request-raised");
+  assert.equal(raised?.kind, "request-raised");
+  if (raised?.kind !== "request-raised") throw new Error("unreachable");
+  assert.equal(raised.request.shape.kind, "approval");
+  if (raised.request.shape.kind !== "approval") throw new Error("unreachable");
+  assert.match(
+    raised.request.shape.input,
+    /touch \/tmp\/secant-codex-recording-approval/,
+  );
+  assert.deepEqual(
+    await turn.answerRequest({
+      requestId: raised.request.requestId,
+      kind: "approval",
+      decision: "allow",
+    }),
+    { outcome: "accepted" },
+  );
+  assert.equal((await turn.result()).kind, "completed");
+  await prepared.close();
+});
+
+test("[codex-recorded-conformance] Interrupt waits for recorded terminal truth", async () => {
+  const prepared = await prepareCodex(installCodexReplayer("interrupt").path);
+  const turn = prepared.startTurn(recordedSleepRequest("interrupt"));
+  const events = observeEvents(turn);
+  await waitForToolOrRequest(turn, events);
+  assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+  assert.equal((await turn.result()).kind, "interrupted");
+  await prepared.close();
+});
+
+test("[codex-recorded-conformance] Resume reattaches the exact recorded thread", async () => {
+  const prepared = await prepareCodex(installCodexReplayer("resume").path);
+  const first = prepared.startTurn(recordedSleepRequest("resume"));
+  const events = observeEvents(first);
+  await waitForToolOrRequest(first, events);
+  assert.deepEqual(await first.interrupt(), { outcome: "accepted" });
+  const interrupted = await first.result();
+  assert.equal(interrupted.kind, "interrupted");
+  if (
+    interrupted.kind !== "interrupted" ||
+    interrupted.detail.session.state !== "detached"
+  ) {
+    throw new Error("unreachable");
+  }
+  const second = prepared.startTurn({
+    ...turnRequest(),
+    session: "resume",
+    correlationKey: { opaque: "record-resume" },
+    input: { text: CODEX_RECORDING_INPUT.resume },
+    resume: interrupted.detail.session.coordinate,
+  });
+  assert.equal((await second.result()).kind, "completed");
+  await prepared.close();
+});
+
+test("[codex-recorded-conformance] authentication stays a typed prepare failure", async () => {
+  const result = await createCodexAdapter({
+    path: installCodexReplayer("authentication").path,
+    env: {},
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("unreachable");
+  assert.equal(result.failure.category, "authentication");
+  assert.match(
+    result.failure.diagnostics ?? "",
+    /Log in separately through Codex/,
+  );
+});
+
+test("[codex-recorded-conformance] synthetic incompatible init fails closed", async () => {
+  const result = await createCodexAdapter({
+    path: installCodexReplayer("incompatibility").path,
+    env: {},
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("unreachable");
+  assert.equal(result.failure.category, "protocol-incompatible");
+  assert.match(
+    result.failure.diagnostics ?? "",
+    /initialize returned an incompatible result/,
+  );
+});
+
+test("[codex-recorded-conformance] Test Repair applies its recorded Workspace patch", async () => {
+  const workspace = makeTempDir("secant-codex-recorded-repair-");
+  seedTestRepairWorkspace(workspace);
+  const preparedResult = await createCodexAdapter({
+    path: installCodexReplayer("test-repair").path,
+    env: {},
+  }).prepare({ workspace });
+  assert.equal(preparedResult.ok, true);
+  if (!preparedResult.ok) throw new Error("unreachable");
+  const result = await preparedResult.harness
+    .startTurn({
+      ...turnRequest(),
+      session: "test-repair",
+      correlationKey: { opaque: "record-test-repair" },
+      input: { text: codexTestRepairPrompt(workspace) },
+    })
+    .result();
+  assert.equal(result.kind, "completed", JSON.stringify(result));
+  execFileSync(process.execPath, ["test", "sum.test.mjs"], {
+    cwd: workspace,
+    stdio: "pipe",
+  });
+  await preparedResult.harness.close();
+});
+
+function recordedSleepRequest(session: "interrupt" | "resume"): TurnRequest {
+  return {
+    ...turnRequest(),
+    session,
+    correlationKey: { opaque: `record-${session}` },
+    input: {
+      text: CODEX_RECORDING_INPUT.sleep,
+    },
+  };
+}
+
+async function waitForToolOrRequest(
+  turn: ReturnType<PreparedHarness["startTurn"]>,
+  events: readonly TurnEvent[],
+): Promise<void> {
+  if (
+    events.some(
+      (event) =>
+        event.kind === "tool-activity" || event.kind === "request-raised",
+    )
+  ) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const subscription = turn.subscribe((event) => {
+      if (event.kind !== "tool-activity" && event.kind !== "request-raised") {
+        return;
+      }
+      subscription.unsubscribe();
+      resolve();
+    });
+  });
+}
+
 test("configured Codex wins over PATH and Claude Code is never a fallback", async () => {
-  const configured = installCodexReplayer();
-  const onPath = installCodexReplayer();
+  const configured = installSyntheticCodexReplayer();
+  const onPath = installSyntheticCodexReplayer();
   onPath.drift("codex-cli 0.146.0");
   const result = await createCodexAdapter({
     path: onPath.path,
@@ -1670,7 +2053,7 @@ test("configured Codex wins over PATH and Claude Code is never a fallback", asyn
   }).prepare({ workspace: process.cwd() });
   assert.equal(result.ok, true);
   if (!result.ok) throw new Error("unreachable");
-  assert.equal(result.harness.profile.executableVersion, "codex-cli 0.154.0");
+  assert.equal(result.harness.profile.executableVersion, "codex-cli 0.155.0");
   assert.match(result.harness.profile.executable, /configured command/);
   await result.harness.close();
 
@@ -1711,7 +2094,7 @@ test("an unsupported host platform is a typed Codex outcome", async () => {
 });
 
 test("Codex profile is truthful and user-compatible", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   const result = await createCodexAdapter({
     path: installed.path,
     env: {},
@@ -1737,7 +2120,7 @@ test("Codex profile is truthful and user-compatible", async () => {
 });
 
 test("required schema drift fails closed before app-server launch", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.removeSchemaMethod("turn/completed");
   const result = await createCodexAdapter({
     path: installed.path,
@@ -1759,7 +2142,7 @@ test("required schema drift fails closed before app-server launch", async () => 
 });
 
 test("a changed required schema field type fails closed", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.changeTurnStatusShape();
   const result = await createCodexAdapter({
     path: installed.path,
@@ -1785,7 +2168,7 @@ for (const field of [
   "server-request-id",
 ] as const) {
   test(`changed approval ${field} schema fails qualification closed`, async () => {
-    const installed = installCodexReplayer();
+    const installed = installSyntheticCodexReplayer();
     installed.changeApprovalSchemaShape(field);
     const result = await createCodexAdapter({
       path: installed.path,
@@ -1802,7 +2185,7 @@ for (const field of [
 }
 
 test("version and generated-schema probe failures stay typed", async () => {
-  const versionFailure = installCodexReplayer();
+  const versionFailure = installSyntheticCodexReplayer();
   versionFailure.failVersion(7);
   const versionResult = await createCodexAdapter({
     path: versionFailure.path,
@@ -1813,7 +2196,7 @@ test("version and generated-schema probe failures stay typed", async () => {
   assert.equal(versionResult.failure.category, "version-probe");
   assert.equal(versionResult.failure.nativeCode, "7");
 
-  const malformedSchema = installCodexReplayer();
+  const malformedSchema = installSyntheticCodexReplayer();
   malformedSchema.corruptSchema();
   const schemaResult = await createCodexAdapter({
     path: malformedSchema.path,
@@ -1826,7 +2209,7 @@ test("version and generated-schema probe failures stay typed", async () => {
 });
 
 test("required live response drift fails closed and reaps the child", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.removeResponseField("model/list", "data");
   const result = await createCodexAdapter({
     path: installed.path,
@@ -1850,7 +2233,7 @@ test("required live response drift fails closed and reaps the child", async () =
 });
 
 test("a child that stops draining stdin cannot outlive the handshake bound", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   const stalled = stalledProcess();
   const result = await createCodexAdapter({
     path: installed.path,
@@ -1865,7 +2248,7 @@ test("a child that stops draining stdin cannot outlive the handshake bound", asy
 });
 
 test("a notification flood cannot extend the whole-RPC deadline", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   const flooding = notificationFloodProcess();
   const result = await createCodexAdapter({
     path: installed.path,
@@ -1879,7 +2262,7 @@ test("a notification flood cannot extend the whole-RPC deadline", async () => {
 });
 
 test("app-server launch and cleanup failures preserve their own evidence", async () => {
-  const launchReplayer = installCodexReplayer();
+  const launchReplayer = installSyntheticCodexReplayer();
   const launchCause = new Error("scripted app-server launch failure");
   const launchResult = await createCodexAdapter({
     path: launchReplayer.path,
@@ -1895,7 +2278,7 @@ test("app-server launch and cleanup failures preserve their own evidence", async
   assert.equal(launchResult.failure.category, "app-server-launch");
   assert.equal(launchResult.failure.cause, launchCause);
 
-  const cleanupReplayer = installCodexReplayer();
+  const cleanupReplayer = installSyntheticCodexReplayer();
   cleanupReplayer.failCleanup(9);
   const prepared = await createCodexAdapter({
     path: cleanupReplayer.path,
@@ -1908,7 +2291,7 @@ test("app-server launch and cleanup failures preserve their own evidence", async
   assert.equal(first.failure?.category, "cleanup");
   assert.strictEqual(await prepared.harness.close(), first);
 
-  const evidenceReplayer = installCodexReplayer();
+  const evidenceReplayer = installSyntheticCodexReplayer();
   const stderrCause = new Error("scripted stderr read failure");
   const cleanupCause = new Error("scripted cleanup failure");
   const evidenceProcess = qualificationProcess({ stderrCause, cleanupCause });
@@ -1926,7 +2309,7 @@ test("app-server launch and cleanup failures preserve their own evidence", async
 });
 
 test("authentication remains Codex-owned with separate-login remediation", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   installed.requireLogin();
   const result = await createCodexAdapter({
     path: installed.path,
@@ -1955,7 +2338,7 @@ test("authentication remains Codex-owned with separate-login remediation", async
 });
 
 test("cached schema evidence is reused but every prepare initializes a fresh child", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   const adapter = createCodexAdapter({ path: installed.path, env: {} });
   const first = await adapter.prepare({ workspace: process.cwd() });
   const second = await adapter.prepare({ workspace: process.cwd() });
@@ -2008,7 +2391,7 @@ test("cached schema evidence is reused but every prepare initializes a fresh chi
 });
 
 test("cache evidence invalidates on source, path, version, platform, and probe revision", async () => {
-  const installed = installCodexReplayer();
+  const installed = installSyntheticCodexReplayer();
   let cachePlatform: HarnessPlatform = "windows";
   let probeRevision = "codex-probe-2";
   const adapter = createCodexAdapter({
@@ -2048,7 +2431,7 @@ test("cache evidence invalidates on source, path, version, platform, and probe r
   probeRevision = "codex-probe-3";
   await qualify(installed.windowsShimPath);
 
-  const another = installCodexReplayer();
+  const another = installSyntheticCodexReplayer();
   await qualify(another.windowsShimPath);
   assert.equal(
     installed

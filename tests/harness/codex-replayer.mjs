@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { execFileSync } from "node:child_process";
 import { appendFileSync, cpSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,13 +49,90 @@ const scenario = JSON.parse(
 );
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 let trafficAt = 0;
+let requestedWorkspace;
 let turnNumber = 0;
 let activeTurnId;
 const outstandingApprovals = new Map();
 let steerNumber = 0;
+
+function replayLine(line) {
+  const escapedWorkspace = JSON.stringify(
+    requestedWorkspace ?? process.cwd(),
+  ).slice(1, -1);
+  return line.replaceAll("«WORKSPACE»", escapedWorkspace);
+}
+
+function expectedStdinLine(recordedLine, actualLine) {
+  if (!recordedLine.includes("«WORKSPACE»")) return replayLine(recordedLine);
+  try {
+    const actual = JSON.parse(actualLine);
+    if (
+      actual.method === "thread/start" &&
+      typeof actual.params?.cwd === "string"
+    ) {
+      requestedWorkspace = actual.params.cwd;
+      return replayLine(recordedLine);
+    }
+  } catch {
+    // The caller's JSON validation below remains authoritative.
+  }
+  return replayLine(recordedLine);
+}
+
+function applyWorkspacePatch(path) {
+  try {
+    execFileSync(
+      "git",
+      ["apply", "--whitespace=nowarn", join(recording.fixtureDirectory, path)],
+      { cwd: process.cwd() },
+    );
+  } catch (error) {
+    process.stderr.write(
+      `recorded Codex Workspace patch failed: ${error?.message ?? error}\n`,
+    );
+    process.exit(3);
+  }
+}
+
+function drainRecordedOutput() {
+  while (trafficAt < (scenario.traffic?.length ?? 0)) {
+    const entry = scenario.traffic[trafficAt];
+    if (entry.direction === "stdin") return;
+    trafficAt += 1;
+    if (entry.direction === "stdout") {
+      process.stdout.write(replayLine(entry.line));
+    } else if (entry.direction === "stderr") {
+      process.stderr.write(replayLine(entry.line));
+    } else if (entry.direction === "workspace-patch") {
+      applyWorkspacePatch(entry.path);
+    } else {
+      process.stderr.write("recorded Codex traffic has an unknown direction\n");
+      process.exit(3);
+    }
+  }
+}
+
+if (scenario.replay === "strict") drainRecordedOutput();
 for await (const line of lines) {
   log({ type: "stdin", line });
-  if (Array.isArray(scenario.traffic)) {
+  if (scenario.replay === "strict") {
+    const expected = scenario.traffic[trafficAt];
+    if (
+      expected === undefined ||
+      expected.direction !== "stdin" ||
+      expectedStdinLine(expected.line, line) !== `${line}\n`
+    ) {
+      process.stderr.write("recorded Codex stdin diverged\n");
+      process.exit(3);
+    }
+    trafficAt += 1;
+    drainRecordedOutput();
+    continue;
+  }
+  if (
+    scenario.replay === "synthetic-fault-injection" &&
+    Array.isArray(scenario.traffic)
+  ) {
     const expected = scenario.traffic[trafficAt];
     if (
       expected !== undefined &&
@@ -71,6 +149,10 @@ for await (const line of lines) {
       }
       continue;
     }
+  }
+  if (scenario.replay !== "synthetic-fault-injection") {
+    process.stderr.write("recorded Codex case is not strict or synthetic\n");
+    process.exit(3);
   }
   const request = JSON.parse(line);
   if (request.method === undefined && outstandingApprovals.has(request.id)) {
@@ -325,7 +407,7 @@ for await (const line of lines) {
     );
   }
 }
-if (Array.isArray(scenario.traffic) && trafficAt < scenario.traffic.length) {
+if (scenario.replay === "strict" && trafficAt < scenario.traffic.length) {
   process.stderr.write("recorded Codex traffic ended early\n");
   process.exit(4);
 }

@@ -600,10 +600,7 @@ export { createClaudeCodeAdapter } from "./claude-code.js";
 export type { ClaudeCodeAdapterOverrides } from "./claude-code.js";
 
 export { createCodexAdapter } from "./codex.js";
-export type {
-  CodexAdapterOverrides,
-  CodexQualificationObserver,
-} from "./codex.js";
+export type { CodexAdapterOverrides, CodexRecordingObserver } from "./codex.js";
 
 export {
   CLAUDE_CODE_EXECUTABLE_ENV,

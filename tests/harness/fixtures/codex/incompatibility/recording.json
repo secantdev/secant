@@ -1,0 +1,8 @@
+{
+  "harness": "codex",
+  "executableVersion": "codex-cli 0.155.0",
+  "protocolVersion": "codex-probe-2",
+  "recordedAt": "synthetic",
+  "redactions": [],
+  "refreshCommand": "synthetic -- a compatible real Codex cannot deterministically omit a required initialize field; this fault proves fail-closed replay"
+}

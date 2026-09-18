@@ -1,0 +1,30 @@
+{
+  "replay": "strict",
+  "traffic": [
+    {
+      "direction": "stdin",
+      "line": "{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"secant\",\"title\":\"Secant\",\"version\":\"0.0.0-dev\"},\"capabilities\":{\"experimentalApi\":false}}}\n"
+    },
+    {
+      "direction": "stdout",
+      "line": "{\"id\":1,\"result\":{\"userAgent\":\"secant/0.155.0 (Mac OS 26.6.2; arm64) vscode/3.21.9 (secant; 0.0.0-dev)\",\"codexHome\":\"/recorded/codex-home\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n"
+    },
+    {
+      "direction": "stdin",
+      "line": "{\"method\":\"initialized\"}\n"
+    },
+    {
+      "direction": "stdin",
+      "line": "{\"id\":2,\"method\":\"account/read\",\"params\":{\"refreshToken\":false}}\n"
+    },
+    {
+      "direction": "stdout",
+      "line": "{\"method\":\"remoteControl/status/changed\",\"params\":{\"status\":\"disabled\",\"serverName\":\"«HOSTNAME»\",\"installationId\":\"recorded-installation-id\",\"environmentId\":null},\"emittedAtMs\":1789755740573}\n"
+    },
+    {
+      "direction": "stdout",
+      "line": "{\"id\":2,\"result\":{\"account\":null,\"requiresOpenaiAuth\":true}}\n"
+    }
+  ],
+  "exitCode": 0
+}

@@ -2,8 +2,12 @@
   "harness": "codex",
   "executableVersion": "codex-cli 0.155.0",
   "protocolVersion": "codex-probe-2",
-  "recordedAt": "2026-09-18T18:23:48.881Z",
+  "recordedAt": "2026-09-18T18:32:37.659Z",
   "redactions": [
+    {
+      "placeholder": "«WORKSPACE»",
+      "reason": "recording Workspace path"
+    },
     {
       "placeholder": "recorded-installation-id",
       "reason": "Codex installation id"
@@ -19,7 +23,11 @@
     {
       "placeholder": "recorded@example.invalid",
       "reason": "Codex account email"
+    },
+    {
+      "placeholder": "«HOME»",
+      "reason": "user home path"
     }
   ],
-  "refreshCommand": "bun tests/harness/record-codex.ts codex-qualification"
+  "refreshCommand": "bun tests/harness/record-codex.ts test-repair"
 }

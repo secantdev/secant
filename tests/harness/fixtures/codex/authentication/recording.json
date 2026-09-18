@@ -1,0 +1,21 @@
+{
+  "harness": "codex",
+  "executableVersion": "codex-cli 0.155.0",
+  "protocolVersion": "codex-probe-2",
+  "recordedAt": "2026-09-18T18:22:20.595Z",
+  "redactions": [
+    {
+      "placeholder": "/recorded/codex-home",
+      "reason": "Codex home path"
+    },
+    {
+      "placeholder": "recorded-installation-id",
+      "reason": "Codex installation id"
+    },
+    {
+      "placeholder": "«HOSTNAME»",
+      "reason": "recording host name"
+    }
+  ],
+  "refreshCommand": "bun tests/harness/record-codex.ts authentication"
+}

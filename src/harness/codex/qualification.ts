@@ -39,10 +39,12 @@ const modelResultSchema = z.looseObject({
   ),
 });
 
-export interface CodexQualificationObserver extends CodexProtocolObserver {
-  schema(schema: string): void;
+export interface CodexRecordingObserver extends CodexProtocolObserver {
+  version(version: string): void;
+  schema(schema: string, probeRevision: string): void;
   stdin(bytes: Uint8Array): void;
   stdout(bytes: Uint8Array): void;
+  stderr(bytes: Uint8Array): void;
   closed(kind: string, status: number | undefined): void;
 }
 
@@ -54,7 +56,7 @@ export class CodexQualificationConnection {
   constructor(
     private readonly process: OwnedProcess,
     private readonly timeoutMs: number,
-    private readonly observer: CodexQualificationObserver | undefined,
+    private readonly observer: CodexRecordingObserver | undefined,
   ) {
     this.connection = new CodexJsonlConnection(process, observer);
   }
@@ -89,7 +91,6 @@ export class CodexQualificationConnection {
       throw new Error("Codex qualification connection already transferred");
     }
     this.transferred = true;
-    this.connection.finishQualificationObservation();
     return this.connection;
   }
 
@@ -124,7 +125,10 @@ export class CodexDiagnosticCapture {
   private captured = "";
   private bytes = 0;
 
-  constructor(stream: AsyncIterable<Uint8Array>) {
+  constructor(
+    stream: AsyncIterable<Uint8Array>,
+    private readonly observer?: CodexRecordingObserver,
+  ) {
     this.completion = this.consume(stream).then(
       () => undefined,
       (cause) =>
@@ -154,6 +158,7 @@ export class CodexDiagnosticCapture {
 
   private async consume(stream: AsyncIterable<Uint8Array>): Promise<void> {
     for await (const chunk of stream) {
+      this.observer?.stderr(chunk);
       if (this.bytes >= MAX_STDERR_BYTES) continue;
       const remaining = MAX_STDERR_BYTES - this.bytes;
       const accepted = chunk.subarray(0, remaining);

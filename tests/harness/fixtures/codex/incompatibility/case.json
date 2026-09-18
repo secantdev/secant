@@ -1,0 +1,14 @@
+{
+  "replay": "strict",
+  "traffic": [
+    {
+      "direction": "stdin",
+      "line": "{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"secant\",\"title\":\"Secant\",\"version\":\"0.0.0-dev\"},\"capabilities\":{\"experimentalApi\":false}}}\n"
+    },
+    {
+      "direction": "stdout",
+      "line": "{\"id\":1,\"result\":{\"userAgent\":\"synthetic-incompatible\",\"codexHome\":\"/recorded/codex-home\",\"platformFamily\":\"unix\"}}\n"
+    }
+  ],
+  "exitCode": 0
+}

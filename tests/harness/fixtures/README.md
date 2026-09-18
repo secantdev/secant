@@ -64,24 +64,35 @@ The recorder refuses to write a recording whose bytes still match a credential
 pattern after redaction, naming the pattern — a recording must not carry a live
 secret.
 
-## Codex qualification replay
+## Codex replay
 
 Codex records the Adapter's pinned schema/probe revision in `protocolVersion`;
 app-server has no negotiated protocol version. The Codex replayer separately
 models `--version`, stable `app-server generate-json-schema`, and one stdio JSONL
-app-server child. Qualification fixtures contain only pre-thread traffic:
-`initialize`, `initialized`, `account/read`, and `model/list`. A fixture must not
-contain `thread/*`, `turn/*`, prompt, or input content.
+app-server child. A real case replays its ordered `stdin`, `stdout`, and `stderr`
+entries strictly: every client line must match before the next native bytes are
+emitted. `workspace-patch` entries apply their Git patch before the recorded
+terminal Turn event. The replayer substitutes only the recorded `«WORKSPACE»`
+path; it does not fabricate ids, requests, controls, or terminal facts.
+
+Qualification contains only pre-thread traffic: `initialize`, `initialized`,
+`account/read`, and `model/list`. It must not contain `thread/*`, `turn/*`, prompt,
+or input content. Real completion, approval, Steer, Interrupt, resume,
+authentication, and Test Repair cases extend that production-path traffic. The
+approval recorder uses a temporary pass-through executable with the per-process
+`approvals_reviewer=user` Codex override; it does not change user configuration
+or broaden Secant's one-time `allow` decision.
 
 The `codex-qualification` case carries the installed binary's complete generated
 stable schema as `stable-schema.generated.json`, plus its byte-faithful, redacted
 pre-thread response lines. The generated file is intentionally not formatted or
 reviewed as handwritten source. Claude Code has no analogue because its CLI does
 not expose a schema-generation qualification command; its native evidence is the
-recorded stdout stream instead. Refresh Codex with
-`bun tests/harness/record-codex.ts` while logged in through Codex. It is replay
-evidence for deterministic Adapter behavior on all three CI operating systems,
-not a claim that the currently installed real Codex remains compatible.
+recorded stdout stream instead. Refresh one case with
+`bun tests/harness/record-codex.ts <case>` while logged in through Codex; omitting
+the case refreshes `codex-qualification`. Authentication uses an empty temporary
+`CODEX_HOME`. Replay is deterministic Adapter evidence on all three CI operating
+systems, not a claim that the currently installed real Codex remains compatible.
 
 ## Synthetic cases
 
@@ -112,3 +123,4 @@ synthetic note. The synthetic inventory below is the pick-up list.
 | `resume-unacknowledged`   | resume init echoes a different id                                                                                                | a real `--resume` acknowledges the id                         |
 | `completed`               | success Turn: tool activity, thinking/telemetry exclusion, preview coalescing, unknown-frame tolerance                           | a real plain Turn does not emit every frame variety on demand |
 | `completed-quotes-login`  | success result whose text quotes "run /login"                                                                                    | guards that a real answer is not misread as auth              |
+| `incompatibility`         | initialize omits one required response field                                                                                     | a compatible real Codex cannot emit this fault on demand      |

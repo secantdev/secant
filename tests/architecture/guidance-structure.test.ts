@@ -35,10 +35,10 @@ test("a compliant tree with an indexed Module-local file passes", async () => {
     "tests/harness/fixtures/codex/resume/recording.json": JSON.stringify({
       harness: "codex",
       executableVersion: "0.1.0",
-      protocolVersion: "app-server v1",
-      recordedAt: "2026-09-06",
-      redactions: ["paths"],
-      refreshCommand: "npm run fixtures:codex -- resume",
+      protocolVersion: "codex-probe-2",
+      recordedAt: "2026-09-06T00:00:00.000Z",
+      redactions: [{ placeholder: "«HOME»", reason: "user home path" }],
+      refreshCommand: "bun tests/harness/record-codex.ts resume",
     }),
   });
   assert.deepEqual(issues, []);
@@ -140,4 +140,28 @@ test("recorded Harness fixtures carry a complete recording.json sidecar", async 
       m.startsWith("recording.json lacks executableVersion, protocolVersion"),
     ),
   );
+});
+
+test("recorded Harness provenance is exact and unsafe fixture bytes are refused", async () => {
+  const { issues } = await audit({
+    "tests/harness/fixtures/codex/bad/case.json":
+      '{"token":"sk-abcdefghijklmnopqrstuvwxyz012345"}\n',
+    "tests/harness/fixtures/codex/bad/recording.json": JSON.stringify({
+      harness: "codex",
+      executableVersion: "",
+      protocolVersion: "app-server v1",
+      recordedAt: "synthetic",
+      redactions: ["paths"],
+      refreshCommand: "bun record",
+      extra: true,
+    }),
+  });
+  assert.deepEqual(messages(issues).sort(), [
+    "Codex protocolVersion must name a codex-probe revision",
+    "Synthetic recording refreshCommand must state why it is synthetic",
+    "recording still matches credential pattern(s): OpenAI-style API key",
+    "recording.json has invalid executableVersion",
+    "recording.json has invalid redactions",
+    "recording.json has unexpected extra",
+  ]);
 });

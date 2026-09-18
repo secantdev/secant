@@ -2,8 +2,12 @@
   "harness": "codex",
   "executableVersion": "codex-cli 0.155.0",
   "protocolVersion": "codex-probe-2",
-  "recordedAt": "2026-09-18T18:23:48.881Z",
+  "recordedAt": "2026-09-18T18:20:40.891Z",
   "redactions": [
+    {
+      "placeholder": "«WORKSPACE»",
+      "reason": "recording Workspace path"
+    },
     {
       "placeholder": "recorded-installation-id",
       "reason": "Codex installation id"
@@ -21,5 +25,5 @@
       "reason": "Codex account email"
     }
   ],
-  "refreshCommand": "bun tests/harness/record-codex.ts codex-qualification"
+  "refreshCommand": "bun tests/harness/record-codex.ts resume"
 }

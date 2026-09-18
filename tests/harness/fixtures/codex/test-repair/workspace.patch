@@ -1,0 +1,7 @@
+diff --git a/sum.mjs b/sum.mjs
+index 2abed46..bc5f04d 100644
+--- a/sum.mjs
++++ b/sum.mjs
+@@ -1 +1 @@
+-export const sum = (a, b) => a - b;
++export const sum = (a, b) => a + b;

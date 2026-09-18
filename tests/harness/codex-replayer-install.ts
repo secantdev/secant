@@ -2,6 +2,7 @@ import {
   appendFileSync,
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -171,7 +172,8 @@ function readInvocations(logPath: string): readonly CodexInvocation[] {
 }
 
 export function installCodexReplayer(
-  caseName = "codex-qualification",
+  caseName: string,
+  syntheticFaultInjection = false,
 ): InstalledCodexReplayer {
   const fixtureDirectory = join(fixtureRoot, caseName);
   const fixtureRecording = JSON.parse(
@@ -189,17 +191,30 @@ export function installCodexReplayer(
   const selectedCase = JSON.parse(
     readFileSync(join(fixtureDirectory, "case.json"), "utf8"),
   );
+  const strictReplay =
+    !syntheticFaultInjection && selectedCase.replay === "strict";
   writeFileSync(
     join(installedFixtureDirectory, "case.json"),
     JSON.stringify({
       ...qualificationCase,
       ...selectedCase,
+      // Protocol-private tests deliberately inject deterministic faults over the
+      // recorded qualification exchange. Only that explicit synthetic mode may
+      // use the configurable response generator; real cases stay strict.
+      replay: strictReplay ? "strict" : "synthetic-fault-injection",
       responses: {
         ...qualificationCase.responses,
         ...selectedCase.responses,
       },
     }),
   );
+  const workspacePatch = join(fixtureDirectory, "workspace.patch");
+  if (existsSync(workspacePatch)) {
+    copyFileSync(
+      workspacePatch,
+      join(installedFixtureDirectory, "workspace.patch"),
+    );
+  }
   const windows = process.platform === "win32";
   const executablePath = join(directory, windows ? "codex.cmd" : "codex");
   const identityPath = join(directory, windows ? "codex.mjs" : "codex");
@@ -415,6 +430,12 @@ export function installCodexReplayer(
       writeFileSync(casePath, JSON.stringify(protocolCase));
     },
   };
+}
+
+/** Protocol-private deterministic fault injection. Real recorded cases must use
+ * `installCodexReplayer(caseName)` and therefore strict playback. */
+export function installSyntheticCodexReplayer(): InstalledCodexReplayer {
+  return installCodexReplayer("codex-qualification", true);
 }
 
 function synchronizeTraffic(

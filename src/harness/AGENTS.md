@@ -7,7 +7,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - The public entry (`harness.ts`) is the whole Interface surface: the Adapter Interface, the evidence-bearing profile, and the factory a
   composition root calls. No native frame, protocol type, or conversation-id value crosses it; the declared exceptions are the Workspace path
   (`PrepareOptions.workspace`, the directory every Session runs against), the named native-Adapter test seams on their override types (including Codex's
-  recorder-only qualification byte observer), and the executable env constants (`CLAUDE_CODE_EXECUTABLE_ENV` / `SECANT_CLAUDE_CODE` and
+  recorder-only schema, stdio, stderr, and shutdown observer), and the executable env constants (`CLAUDE_CODE_EXECUTABLE_ENV` / `SECANT_CLAUDE_CODE` and
   `CODEX_EXECUTABLE_ENV` / `SECANT_CODEX`) — the synchronous discovery outcome and static served-capability table that Preflight shares
   with the Adapter (the resolved spawn target stays private), and the permission-bridge factory (`startPermissionBridge`), exported so the fixture
   recorder composes the production bridge instead of a copy (#127 D3); its surface is launch flags, the bearer, a redactor and a teardown, never an MCP type.

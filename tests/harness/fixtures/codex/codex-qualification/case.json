@@ -1,4 +1,5 @@
 {
+  "replay": "strict",
   "traffic": [
     {
       "direction": "stdin",
@@ -6,7 +7,7 @@
     },
     {
       "direction": "stdout",
-      "line": "{\"id\":1,\"result\":{\"userAgent\":\"secant/0.154.0 (Mac OS 26.6.2; arm64) vscode/3.21.9 (secant; 0.0.0-dev)\",\"codexHome\":\"/recorded/codex-home\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n"
+      "line": "{\"id\":1,\"result\":{\"userAgent\":\"secant/0.155.0 (Mac OS 26.6.2; arm64) vscode/3.21.9 (secant; 0.0.0-dev)\",\"codexHome\":\"/recorded/codex-home\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n"
     },
     {
       "direction": "stdin",
@@ -18,7 +19,7 @@
     },
     {
       "direction": "stdout",
-      "line": "{\"method\":\"remoteControl/status/changed\",\"params\":{\"status\":\"disabled\",\"serverName\":\"Rohans-MacBook-Air.local\",\"installationId\":\"9255fdd3-32fd-4ba4-9db5-7850641521c3\",\"environmentId\":null},\"emittedAtMs\":1789733126448}\n"
+      "line": "{\"method\":\"remoteControl/status/changed\",\"params\":{\"status\":\"disabled\",\"serverName\":\"«HOSTNAME»\",\"installationId\":\"recorded-installation-id\",\"environmentId\":null},\"emittedAtMs\":1789755828828}\n"
     },
     {
       "direction": "stdout",
@@ -35,7 +36,7 @@
   ],
   "responses": {
     "initialize": {
-      "line": "{\"id\":1,\"result\":{\"userAgent\":\"secant/0.154.0 (Mac OS 26.6.2; arm64) vscode/3.21.9 (secant; 0.0.0-dev)\",\"codexHome\":\"/recorded/codex-home\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n"
+      "line": "{\"id\":1,\"result\":{\"userAgent\":\"secant/0.155.0 (Mac OS 26.6.2; arm64) vscode/3.21.9 (secant; 0.0.0-dev)\",\"codexHome\":\"/recorded/codex-home\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n"
     },
     "account/read": {
       "line": "{\"id\":2,\"result\":{\"account\":{\"type\":\"chatgpt\",\"email\":\"recorded@example.invalid\",\"planType\":\"prolite\"},\"requiresOpenaiAuth\":true}}\n"

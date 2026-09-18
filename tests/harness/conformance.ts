@@ -42,6 +42,7 @@ export interface PrepareProfileScenarios {
 /** The common Turn, terminal-ordering, and cleanup behaviours every native
  * Adapter and the deterministic fake must exhibit. */
 export interface TurnLifecycleScenarios extends PrepareProfileScenarios {
+  readonly inputText?: string;
   /** A Turn the Harness ends with a terminal error subtype. */
   failedTurn(): HarnessAdapterFactory;
 }
@@ -50,6 +51,7 @@ export interface TurnLifecycleScenarios extends PrepareProfileScenarios {
  * scenario detaches its first Turn without requiring a control operation. */
 export interface ExactThreadRecoveryScenarios {
   readonly label: string;
+  readonly resumeInputText?: string;
   /** The recovered native conversation acknowledges the requested coordinate. */
   resumeAcknowledged(): HarnessAdapterFactory;
   /** Recovery returns missing or different native conversation evidence. */
@@ -60,6 +62,8 @@ export interface ExactThreadRecoveryScenarios {
  * Steer stay covered by the common unsupported-profile case. */
 export interface NativeSteerScenarios {
   readonly label: string;
+  readonly inputText?: string;
+  readonly guidanceText?: string;
   steerableTurn(): HarnessAdapterFactory;
 }
 
@@ -74,6 +78,7 @@ export interface ApprovalRequestScenarios {
   readonly label: string;
   /** How many requests `concurrentRequests` raises at once. */
   readonly concurrentCount: number;
+  readonly awaitedInputText?: string;
   /** A Turn that raises `concurrentCount` requests at once, settling once all
    *  are answered. */
   concurrentRequests(): HarnessAdapterFactory;
@@ -93,6 +98,8 @@ export interface ApprovalRequestScenarios {
  * replayer implement these.
  */
 export interface InterruptRecoveryScenarios extends TurnLifecycleScenarios {
+  readonly interruptInputText?: string;
+  readonly resumeInputText?: string;
   /** A Turn that emits a `session` event then blocks until interrupted; the
    *  graceful interrupt stops it and it settles `interrupted` with a detached
    *  Session. */
@@ -157,7 +164,9 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
     name("a completed Turn settles once, after the producer closes"),
     async () => {
       const prepared = await prepare(scenarios.baseline());
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.inputText }),
+      );
       let settled = false;
       turn.subscribe((event) => {
         assert.ok(!settled, `event ${event.kind} observed after the result`);
@@ -175,7 +184,9 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
     async () => {
       const prepared = await prepare(scenarios.baseline());
       const turn = prepared.startTurn(
-        request(recorder({ fail: "run.db write refused" }).recorder),
+        request(recorder({ fail: "run.db write refused" }).recorder, {
+          text: scenarios.inputText,
+        }),
       );
       const events = observe(turn);
       const result = await turn.result();
@@ -194,7 +205,9 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
     async () => {
       const prepared = await prepare(scenarios.baseline());
       const turn = prepared.startTurn(
-        request(recorder({ throwOnAdmit: true }).recorder),
+        request(recorder({ throwOnAdmit: true }).recorder, {
+          text: scenarios.inputText,
+        }),
       );
       const result = await turn.result();
       assert.equal(result.kind, "not-started");
@@ -207,7 +220,9 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
 
   test(name("a terminal error subtype settles the Turn failed"), async () => {
     const prepared = await prepare(scenarios.failedTurn());
-    const turn = prepared.startTurn(request(recorder().recorder));
+    const turn = prepared.startTurn(
+      request(recorder().recorder, { text: scenarios.inputText }),
+    );
     const result = await turn.result();
     assert.equal(result.kind, "failed");
     if (result.kind !== "failed") throw new Error("unreachable");
@@ -219,7 +234,9 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
 
   test(name("close after an idle Turn is idempotent"), async () => {
     const prepared = await prepare(scenarios.baseline());
-    const turn = prepared.startTurn(request(recorder().recorder));
+    const turn = prepared.startTurn(
+      request(recorder().recorder, { text: scenarios.inputText }),
+    );
     await turn.result();
     const once = await prepared.close();
     const twice = await prepared.close();
@@ -265,7 +282,12 @@ function runRecoveryCases(driver: RecoveryCaseDriver): void {
       const coordinate = await driver.detach(prepared);
       const second = recorder();
       const result = await prepared
-        .startTurn(request(second.recorder, { resume: coordinate }))
+        .startTurn(
+          request(second.recorder, {
+            resume: coordinate,
+            text: driver.resumeInputText,
+          }),
+        )
         .result();
       assert.equal(result.kind, "completed");
       if (result.kind !== "completed") throw new Error("unreachable");
@@ -317,12 +339,19 @@ export function runNativeSteerCases(scenarios: NativeSteerScenarios): void {
     async () => {
       const prepared = await prepare(scenarios.steerableTurn());
       assert.equal(prepared.profile.steer.available, true);
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.inputText }),
+      );
       const events = observe(turn);
       await events.waitForSession();
-      assert.deepEqual(await turn.steer({ text: "inspect the other seam" }), {
-        outcome: "accepted",
-      });
+      assert.deepEqual(
+        await turn.steer({
+          text: scenarios.guidanceText ?? "inspect the other seam",
+        }),
+        {
+          outcome: "accepted",
+        },
+      );
       assert.equal((await turn.result()).kind, "completed");
       assert.deepEqual(await turn.steer({ text: "too late" }), {
         outcome: "rejected",
@@ -349,7 +378,9 @@ export function runInterruptRecoveryCases(
   runRecoveryCases({
     ...scenarios,
     detach: async (prepared) => {
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.interruptInputText }),
+      );
       const events = observe(turn);
       await events.waitForSession();
       await turn.interrupt();
@@ -363,7 +394,9 @@ export function runInterruptRecoveryCases(
     ),
     async () => {
       const prepared = await prepare(scenarios.blockingTurn());
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.interruptInputText }),
+      );
       const events = observe(turn);
       await events.waitForSession();
       const receipt = await turn.interrupt();
@@ -381,7 +414,9 @@ export function runInterruptRecoveryCases(
     name("a process that ignores the graceful signal is force-killed and lost"),
     async () => {
       const prepared = await prepare(scenarios.unresponsiveInterrupt());
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.interruptInputText }),
+      );
       const events = observe(turn);
       await events.waitForSession();
       await turn.interrupt();
@@ -397,7 +432,9 @@ export function runInterruptRecoveryCases(
     name("a producer that closes without a result loses the Turn"),
     async () => {
       const prepared = await prepare(scenarios.lostCompletion());
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.interruptInputText }),
+      );
       const result = await turn.result();
       assert.equal(result.kind, "lost");
       if (result.kind !== "lost") throw new Error("unreachable");
@@ -411,7 +448,9 @@ export function runInterruptRecoveryCases(
     name("close during a live Turn bounds cleanup and is idempotent"),
     async () => {
       const prepared = await prepare(scenarios.blockingTurn());
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.interruptInputText }),
+      );
       const events = observe(turn);
       await events.waitForSession();
       const once = await prepared.close();
@@ -531,7 +570,9 @@ export function runApprovalRequestCases(
     name("answering an already-answered request is rejected already-settled"),
     async () => {
       const prepared = await prepare(scenarios.awaitedApproval());
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.awaitedInputText }),
+      );
       const events = observe(turn);
       await events.waitForRequests(1);
       const [raised] = events.requests();
@@ -551,7 +592,9 @@ export function runApprovalRequestCases(
     name("answering with the wrong shape is rejected shape-mismatch"),
     async () => {
       const prepared = await prepare(scenarios.awaitedApproval());
-      const turn = prepared.startTurn(request(recorder().recorder));
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.awaitedInputText }),
+      );
       const events = observe(turn);
       await events.waitForRequests(1);
       const [raised] = events.requests();
@@ -787,14 +830,17 @@ let correlation = 0;
 
 function request(
   durableRecorder: DurableTurnRecorder,
-  overrides?: { readonly resume?: RecoveryCoordinate },
+  overrides?: {
+    readonly resume?: RecoveryCoordinate;
+    readonly text?: string;
+  },
 ): TurnRequest {
   return {
     session: "conformance",
     origin: "managed",
     correlationKey: { opaque: `correlation-${correlation++}` },
     recorder: durableRecorder,
-    input: { text: "conformance turn" },
+    input: { text: overrides?.text ?? "conformance turn" },
     resume: overrides?.resume,
   };
 }

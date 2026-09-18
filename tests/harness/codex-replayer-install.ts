@@ -48,6 +48,19 @@ export interface InstalledCodexReplayer {
   failCleanup(status: number): void;
   removeResponseField(method: string, field: string): void;
   requireLogin(): void;
+  failTurn(message: string): void;
+  configureTurn(options: CodexTurnReplayOptions): void;
+}
+
+export interface CodexTurnReplayOptions {
+  readonly stopAfter?: "accepted" | "item-completed";
+  readonly fullActivity?: boolean;
+  readonly retryingError?: string;
+  readonly mismatchedTerminal?: boolean;
+  readonly malformedFrame?: boolean;
+  readonly stallFirstTurn?: boolean;
+  readonly malformedItem?: boolean;
+  readonly malformedTerminal?: boolean;
 }
 
 function npmBunShim(scriptRelative: string): string {
@@ -246,6 +259,18 @@ export function installCodexReplayer(): InstalledCodexReplayer {
           requiresOpenaiAuth: true,
         };
       }
+      writeFileSync(casePath, JSON.stringify(protocolCase));
+    },
+    failTurn(message) {
+      const casePath = join(installedFixtureDirectory, "case.json");
+      const protocolCase = JSON.parse(readFileSync(casePath, "utf8"));
+      protocolCase.turn = { status: "failed", message };
+      writeFileSync(casePath, JSON.stringify(protocolCase));
+    },
+    configureTurn(options) {
+      const casePath = join(installedFixtureDirectory, "case.json");
+      const protocolCase = JSON.parse(readFileSync(casePath, "utf8"));
+      protocolCase.turn = { ...protocolCase.turn, ...options };
       writeFileSync(casePath, JSON.stringify(protocolCase));
     },
   };

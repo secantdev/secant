@@ -8,13 +8,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   composition root calls. No native frame, protocol type, or conversation-id value crosses it; the declared exceptions are the Workspace path
   (`PrepareOptions.workspace`, the directory every Session runs against), the named native-Adapter test seams on their override types (including Codex's
   recorder-only qualification byte observer), and the executable env constants (`CLAUDE_CODE_EXECUTABLE_ENV` / `SECANT_CLAUDE_CODE` and
-  `CODEX_EXECUTABLE_ENV` / `SECANT_CODEX`) — the synchronous discovery outcome
-  and static served-capability table that Preflight shares
+  `CODEX_EXECUTABLE_ENV` / `SECANT_CODEX`) — the synchronous discovery outcome and static served-capability table that Preflight shares
   with the Adapter (the resolved spawn target stays private), and the permission-bridge factory (`startPermissionBridge`), exported so the fixture
   recorder composes the production bridge instead of a copy (#127 D3); its surface is launch flags, the bearer, a redactor and a teardown, never an MCP type.
-  Recovery coordinates cross the Seam only as opaque values
-  (`RecoveryCoordinate`), never Run truth — nothing above the Seam decides anything from their contents. Native Adapters,
-  protocol models, and qualification stay private to each Adapter and re-export nothing native.
+  Recovery coordinates cross the Seam only as opaque `RecoveryCoordinate` values, never Run truth; callers never decide from their contents. Native
+  protocol models and qualification stay private to each Adapter and re-export nothing native.
 - No Routing, Step kind, retry budget, or Run policy knowledge lives here; those are above the Seam. A Turn is one mechanical exchange, not a
   judgement that a Step succeeded — the closed Turn results (`not-started`, `completed`, `failed`, `interrupted`, `lost`) are mechanical truth, and the
   Step kind decides the Attempt outcome above the Seam.
@@ -81,15 +79,17 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Session unusability is stored as a private `unusableReason` on the Session, set by `markUnusable` when a resume is not acknowledged; the Turn-start path
   (`submit`) reads it first and fails every further Turn with the same recovery failure, never opening a fresh conversation.
 
-## Invariants (Codex qualification)
+## Invariants (Codex qualification and fresh Turns)
 
-- `codex.ts` owns Adapter orchestration, cache and profile; `codex/qualification.ts` owns the bounded pre-thread JSONL exchange and diagnostics;
-  `codex/required-schema.ts` owns structural compatibility. Unlike Claude's runtime `frames.ts`, the required-schema file validates generated
-  qualification evidence; later Codex Turn frames belong in their own runtime protocol submodule.
+- `codex.ts` owns Adapter, Session, and Turn orchestration, cache, and profile; `codex/qualification.ts` owns bounded pre-thread validation and diagnostics;
+  `codex/runtime-protocol.ts` owns the retained JSONL iterator, decoder remainder, client request-id sequence, runtime frames, and normalization;
+  `codex/required-schema.ts` owns generated-schema compatibility. Native protocol types remain private across all four.
 - Every `prepare` observes `codex --version`; cached schema evidence is keyed by discovery source, path, SHA-256 identity, version, platform, and revision.
   The host platform driving discovery/profile is immutable; only the cache-key test seam varies platform evidence. A hit skips schema generation only.
-- Live qualification owns one `codex app-server` child, sends exactly one `initialize` then `initialized`, runs only bounded `account/read` and
-  `model/list` probes, creates no thread, Turn, or prompt, and retains that initialized child in the Prepared Harness.
+- Live qualification sends exactly one `initialize` then `initialized`, runs only bounded `account/read` and `model/list`, and transfers its one initialized
+  child and mutable JSONL connection into the Prepared Harness. Its byte observer ends at that transfer; runtime recording belongs to #145's distinct seam.
+- A fresh Session obtains `thread.id` before durable admission, sends no `turn/start` content when admission fails, and settles only from the matching
+  `turn/completed`; responses, item completion, EOF, and process exit never fabricate success. Completed items supersede delta previews.
 - Codex inherits user environment/home; unauthenticated becomes the fixed separate-login remediation, and no account or credential crosses the Seam.
 
 ## Tests
@@ -98,8 +98,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `--version` landed in #111; #112 added per-Turn protocol replay. #115 replaced the hand-authored `protocol-cases/` tree with the recorded (and residual
   synthetic) `tests/harness/fixtures/<harness>/<case>/` tree, its `recording.json` sidecar, and the opt-in `record.ts` tool.
 - The conformance suite is the Seam's executable specification, parameterized by an Adapter factory. `runPrepareProfileCases` and `runTurnLifecycleCases`
-  and `runInterruptRecoveryCases` (interrupt, unresponsive-interrupt, lost-completion, resume ack/no-ack, close-mid-Turn) and `runApprovalRequestCases`
-  run against both the fake and the Claude Code Adapter over the replayer. Only five tail cases stay fake-only: native steer, structured clarifications,
+  run against fake, Claude Code, and provisional Codex replay; `runInterruptRecoveryCases` and `runApprovalRequestCases` run against fake and Claude Code
+  until #142–#145 land. Only five tail cases stay fake-only: native steer, structured clarifications,
   the after-acceptance recovery checkpoint, load-with-replay recovery, and the caller-contract violations (the only things this Interface throws for).
   The fake must exhibit behaviours a real Harness never will (native steer, structured clarifications, load-with-replay recovery, several concurrent
   requests, every `lost` variant) and is never the only end-to-end double (ADR 0027). The fake performs load-with-replay rather than advertising it: a

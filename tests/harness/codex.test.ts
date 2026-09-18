@@ -5,11 +5,18 @@ import test from "node:test";
 import {
   CODEX_EXECUTABLE_ENV,
   createCodexAdapter,
+  type DurableTurnRecorder,
   type HarnessPlatform,
+  type PreparedHarness,
+  type TurnEvent,
+  type TurnRequest,
 } from "../../src/harness/harness.js";
 import type { OwnedProcess } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
-import { runPrepareProfileCases } from "./conformance.js";
+import {
+  runPrepareProfileCases,
+  runTurnLifecycleCases,
+} from "./conformance.js";
 import { installCodexReplayer } from "./codex-replayer-install.js";
 
 const replayer = installCodexReplayer();
@@ -23,6 +30,281 @@ runPrepareProfileCases({
       env: {},
     }),
 });
+
+runTurnLifecycleCases({
+  label: "codex-turn-lifecycle",
+  baseline: () => () => createCodexAdapter({ path: replayer.path, env: {} }),
+  prepareFailure: () => () =>
+    createCodexAdapter({
+      path: makeTempDir("secant-codex-empty-"),
+      env: {},
+    }),
+  failedTurn: () => () =>
+    createCodexAdapter({ path: failedTurnReplayer().path, env: {} }),
+});
+
+function failedTurnReplayer() {
+  const installed = installCodexReplayer();
+  installed.failTurn("scripted terminal failure");
+  return installed;
+}
+
+test("refused durable admission sends no prompt content", async () => {
+  const installed = installCodexReplayer();
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(
+    turnRequest({
+      admit: () =>
+        Promise.resolve({ recorded: false, reason: "run.db refused" }),
+      checkpoint: () => Promise.resolve({ recorded: true }),
+    }),
+  );
+
+  assert.equal((await turn.result()).kind, "not-started");
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const messages = appServer.stdinLines.map((line) => JSON.parse(line));
+  assert.ok(messages.some((message) => message.method === "thread/start"));
+  assert.ok(messages.every((message) => message.method !== "turn/start"));
+  assert.ok(
+    appServer.stdinLines.every((line) => !line.includes("private prompt")),
+  );
+  await prepared.close();
+});
+
+for (const stopAfter of ["accepted", "item-completed"] as const) {
+  test(`${stopAfter} without terminal truth settles lost`, async () => {
+    const installed = installCodexReplayer();
+    installed.configureTurn({ stopAfter });
+    const prepared = await prepareCodex(installed.path);
+    const result = await prepared.startTurn(turnRequest()).result();
+    assert.equal(result.kind, "lost");
+    if (result.kind !== "lost") throw new Error("unreachable");
+    assert.equal(result.detail.unknown, "completion");
+    await prepared.close();
+  });
+}
+
+test("a malformed runtime frame loses the Turn without fabricating completion", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ malformedFrame: true });
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "protocol-corruption");
+  await prepared.close();
+});
+
+test("completed agent content supersedes streamed preview content", async () => {
+  const installed = installCodexReplayer();
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  const result = await turn.result();
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") throw new Error("unreachable");
+  assert.equal(result.detail.finalContent, "final answer");
+  assert.ok(events.some((event) => event.kind === "preview"));
+  assert.deepEqual(
+    events.filter((event) => event.kind === "assistant-content"),
+    [{ kind: "assistant-content", content: "final answer" }],
+  );
+  const replayed: TurnEvent[] = [];
+  turn.subscribe((event) => replayed.push(event));
+  assert.ok(replayed.every((event) => event.kind !== "preview"));
+  await prepared.close();
+});
+
+test("supported Codex item lifecycles use semantic Harness events", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ fullActivity: true });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  assert.equal((await turn.result()).kind, "completed");
+  const tools = events
+    .filter((event) => event.kind === "tool-activity")
+    .map((event) => event.activity.tool);
+  assert.deepEqual(
+    new Set(tools),
+    new Set([
+      "command",
+      "file-change",
+      "mcp:docs/read",
+      "subagent",
+      "web-search",
+      "dynamic:custom",
+      "image-view",
+      "image-generation",
+    ]),
+  );
+  assert.ok(
+    events.some(
+      (event) =>
+        event.kind === "activity" &&
+        event.description === "Codex futureDisplayItem completed",
+    ),
+  );
+  await prepared.close();
+});
+
+test("retrying errors remain nonterminal activity", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ retryingError: "temporary overload" });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  assert.equal((await turn.result()).kind, "completed");
+  assert.ok(
+    events.some(
+      (event) =>
+        event.kind === "activity" &&
+        event.description.includes("retrying") &&
+        event.description.includes("temporary overload"),
+    ),
+  );
+  await prepared.close();
+});
+
+test("retry evidence is not reused as terminal failure evidence", async () => {
+  const installed = installCodexReplayer();
+  installed.failTurn("authoritative terminal failure");
+  installed.configureTurn({ retryingError: "temporary overload" });
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "failed");
+  if (result.kind !== "failed") throw new Error("unreachable");
+  assert.equal(
+    result.detail.failure.diagnostics,
+    "authoritative terminal failure",
+  );
+  await prepared.close();
+});
+
+for (const malformed of ["malformedItem", "malformedTerminal"] as const) {
+  test(`${malformed} fails closed as protocol corruption`, async () => {
+    const installed = installCodexReplayer();
+    installed.configureTurn({ [malformed]: true });
+    const prepared = await prepareCodex(installed.path);
+    const result = await prepared.startTurn(turnRequest()).result();
+    assert.equal(result.kind, "lost");
+    if (result.kind !== "lost") throw new Error("unreachable");
+    assert.equal(result.detail.failure?.category, "protocol-corruption");
+    await prepared.close();
+  });
+}
+
+test("only the matching terminal Turn event can settle", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ mismatchedTerminal: true });
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "completed");
+  await prepared.close();
+});
+
+test("later fresh Turns reuse one private thread and continue RPC ids", async () => {
+  const installed = installCodexReplayer();
+  const prepared = await prepareCodex(installed.path);
+  assert.equal(
+    (await prepared.startTurn(turnRequest()).result()).kind,
+    "completed",
+  );
+  assert.equal(
+    (await prepared.startTurn(turnRequest()).result()).kind,
+    "completed",
+  );
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const requests = appServer.stdinLines
+    .map((line) => JSON.parse(line))
+    .filter((message) => message.id !== undefined);
+  assert.deepEqual(
+    requests.map((message) => [message.id, message.method]),
+    [
+      [1, "initialize"],
+      [2, "account/read"],
+      [3, "model/list"],
+      [4, "thread/start"],
+      [5, "turn/start"],
+      [6, "turn/start"],
+    ],
+  );
+  await prepared.close();
+});
+
+test("a lost Turn fences its native Session from later ordinary work", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ stallFirstTurn: true });
+  const preparedResult = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+    handshakeTimeoutMs: 500,
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(preparedResult.ok, true);
+  if (!preparedResult.ok) throw new Error("unreachable");
+  const prepared = preparedResult.harness;
+
+  const first = await prepared.startTurn(turnRequest()).result();
+  assert.equal(first.kind, "lost");
+  const second = await prepared.startTurn(turnRequest()).result();
+  assert.equal(second.kind, "failed");
+  if (second.kind !== "failed") throw new Error("unreachable");
+  assert.equal(second.detail.failure.category, "recovery-unavailable");
+
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  assert.equal(
+    appServer.stdinLines.filter(
+      (line) => JSON.parse(line).method === "turn/start",
+    ).length,
+    1,
+  );
+  await prepared.close();
+});
+
+async function prepareCodex(path: string): Promise<PreparedHarness> {
+  const result = await createCodexAdapter({ path, env: {} }).prepare({
+    workspace: process.cwd(),
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error("unreachable");
+  return result.harness;
+}
+
+function turnRequest(
+  recorder: DurableTurnRecorder = successfulRecorder(),
+): TurnRequest {
+  return {
+    session: "codex-test",
+    origin: "managed",
+    correlationKey: { opaque: "codex-correlation" },
+    recorder,
+    input: { text: "private prompt" },
+  };
+}
+
+function successfulRecorder(): DurableTurnRecorder {
+  return {
+    admit: () => Promise.resolve({ recorded: true }),
+    checkpoint: () => Promise.resolve({ recorded: true }),
+  };
+}
+
+function observeEvents(
+  turn: ReturnType<PreparedHarness["startTurn"]>,
+): TurnEvent[] {
+  const events: TurnEvent[] = [];
+  turn.subscribe((event) => events.push(event));
+  return events;
+}
 
 test("codex-qualification initializes once without creating a conversation", async () => {
   const installed = installCodexReplayer();
@@ -147,11 +429,11 @@ test("Codex profile is truthful and user-compatible", async () => {
   const { profile } = result.harness;
   assert.equal(profile.harness, "codex");
   assert.equal(profile.adapterRevision, "codex-probe-1");
-  assert.equal(profile.recovery.mode, "native-reattach");
-  assert.equal(profile.interruption.mode, "active-turn");
-  assert.equal(profile.approvals.available, true);
+  assert.equal(profile.recovery.mode, "unavailable");
+  assert.equal(profile.interruption.mode, "unavailable");
+  assert.equal(profile.approvals.available, false);
   assert.equal(profile.clarifications.available, false);
-  assert.equal(profile.steer.available, true);
+  assert.equal(profile.steer.available, false);
   assert.equal(profile.modelSelection.at, "launch-and-per-turn");
   assert.equal(profile.recoveryCoordinate.timing, "before-submission");
   assert.equal(profile.skillDelivery.mode, "plain-path");

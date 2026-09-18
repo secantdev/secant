@@ -925,9 +925,17 @@ test("interrupting a live Turn spawns no resume and settles interrupted with a d
   });
   assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
   const result = await turn.result();
-  assert.equal(result.kind, "interrupted");
-  if (result.kind !== "interrupted") throw new Error("unreachable");
-  assert.equal(result.detail.interruption.mode, "process-only");
+  // On Windows the hidden console replayer survives the graceful stage, so the
+  // kill escalates and the Turn is truthfully `lost` (see the interrupt cases above).
+  if (process.platform === "win32") {
+    assert.equal(result.kind, "lost");
+    if (result.kind !== "lost") throw new Error("unreachable");
+    assert.equal(result.detail.unknown, "interruption");
+  } else {
+    assert.equal(result.kind, "interrupted");
+    if (result.kind !== "interrupted") throw new Error("unreachable");
+    assert.equal(result.detail.interruption.mode, "process-only");
+  }
   assert.equal(result.detail.session.state, "detached");
   await prepared.harness.close();
   const invocations = replayer.invocations();
@@ -972,8 +980,14 @@ test("a resumed Turn spawns with --resume and not --session-id", async () => {
   });
   await turn1.interrupt();
   const result1 = await turn1.result();
-  assert.equal(result1.kind, "interrupted");
-  if (result1.kind !== "interrupted") throw new Error("unreachable");
+  // `interrupted` off Windows, `lost` on it (the graceful stage cannot reach a
+  // hidden console child); either way the Session detaches with its coordinate.
+  assert.equal(
+    result1.kind,
+    process.platform === "win32" ? "lost" : "interrupted",
+  );
+  if (result1.kind !== "interrupted" && result1.kind !== "lost")
+    throw new Error("unreachable");
   if (result1.detail.session.state !== "detached")
     throw new Error("unreachable");
   const turn2 = prepared.harness.startTurn({

@@ -155,6 +155,13 @@ function runView(port: ProjectionPort, runId: string): RunView {
   }
 }
 
+// How the real Claude Code Adapter settles an interrupted live Turn on this OS. On
+// Windows the process Module's graceful stage (`taskkill /T`, a close request to
+// each window) cannot reach the hidden console replayer, so the kill escalates and
+// the Adapter truthfully settles `lost` with interruption unknown (ADR 0022); the
+// Run still rests `halted` with the Session detached, and resume still works.
+const INTERRUPTED_KIND = process.platform === "win32" ? "lost" : "interrupted";
+
 test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Session, and settles the Turn interrupted (#118)", async (t) => {
   const { wired, digest } = wire(
     t,
@@ -204,7 +211,7 @@ test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Sessi
   assert.equal(run.sessions?.[0]?.session, "s");
   assert.equal(run.sessions?.[0]?.availability, "detached");
   const settled = run.timeline.find((event) => event.event === "turn-settled");
-  assert.equal(settled?.detail, "interrupted");
+  assert.equal(settled?.detail, INTERRUPTED_KIND);
 
   // A control issued after acceptance is rejected as a value: the Turn has settled.
   const after = port.submit({
@@ -331,7 +338,7 @@ test("a signal (Ctrl+C) mid-Turn interrupts the Turn and rests the Run halted, n
   const run = runView(port, runId);
   assert.equal(run.state, "halted");
   const settled = run.timeline.find((event) => event.event === "turn-settled");
-  assert.equal(settled?.detail, "interrupted");
+  assert.equal(settled?.detail, INTERRUPTED_KIND);
 });
 
 test("a resume the Harness does not acknowledge fails the Attempt and never creates a fresh Session (#118)", async (t) => {

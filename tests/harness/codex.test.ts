@@ -17,6 +17,7 @@ import { makeTempDir } from "../helpers/tempDir.js";
 import {
   runExactThreadRecoveryCases,
   runApprovalRequestCases,
+  runNativeSteerCases,
   runPrepareProfileCases,
   runTurnLifecycleCases,
   type ApprovalRequestScenarios,
@@ -51,6 +52,18 @@ runTurnLifecycleCases({
     createCodexAdapter({ path: failedTurnReplayer().path, env: {} }),
 });
 
+runNativeSteerCases({
+  label: "codex-live-controls",
+  steerableTurn: () => {
+    const installed = installCodexReplayer();
+    installed.configureTurn({
+      withholdTerminal: true,
+      steerTerminal: "completed",
+    });
+    return () => createCodexAdapter({ path: installed.path, env: {} });
+  },
+});
+
 runExactThreadRecoveryCases({
   label: "codex-exact-thread-recovery",
   resumeAcknowledged: () => exactRecoveryReplayer("thread-1"),
@@ -74,6 +87,21 @@ const codexApprovalScenarios: ApprovalRequestScenarios = {
         command: "bun test",
       },
     ]),
+  interruptible: () => {
+    const installed = installCodexReplayer();
+    installed.configureTurn({
+      approvals: [
+        {
+          id: "interrupt-command",
+          kind: "command",
+          itemId: "interrupt-command-1",
+          command: "bun test",
+        },
+      ],
+      interruptTerminal: "interrupted",
+    });
+    return () => createCodexAdapter({ path: installed.path, env: {} });
+  },
 };
 
 runApprovalRequestCases(codexApprovalScenarios);
@@ -409,6 +437,39 @@ test("terminal truth expires an outstanding approval before settling", async () 
   await prepared.close();
 });
 
+test("close expires an outstanding approval before native interruption", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [
+      {
+        id: "close-command",
+        kind: "command",
+        itemId: "close-command-1",
+        command: "bun test",
+      },
+    ],
+    interruptTerminal: "interrupted",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  await waitForRequestCount(turn, events, 1);
+  await waitForSession(turn);
+
+  assert.equal((await prepared.close()).clean, true);
+  assert.equal((await turn.result()).kind, "interrupted");
+  const expired = events.filter((event) => event.kind === "request-expired");
+  assert.equal(expired.length, 1);
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  assert.equal(
+    JSON.parse(appServer.stdinLines.at(-1) ?? "{}").method,
+    "turn/interrupt",
+  );
+});
+
 test("unsupported mandatory Codex approval shapes fail closed", async () => {
   const installed = installCodexReplayer();
   installed.configureTurn({
@@ -662,6 +723,559 @@ test("later fresh Turns reuse one private thread and continue RPC ids", async ()
     ],
   );
   await prepared.close();
+});
+
+test("codex-live-controls steers the exact active native Turn", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ withholdTerminal: true });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.steer({ text: "inspect the other seam" }), {
+    outcome: "accepted",
+  });
+  await prepared.close();
+  await turn.result();
+
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const steer = appServer.stdinLines
+    .map((line) => JSON.parse(line))
+    .find((message) => message.method === "turn/steer");
+  assert.deepEqual(steer?.params, {
+    threadId: "thread-1",
+    expectedTurnId: "turn-1",
+    input: [{ type: "text", text: "inspect the other seam" }],
+  });
+});
+
+test("codex-live-controls interrupts only from matching terminal truth", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    interruptTerminal: "interrupted",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+  assert.equal((await turn.result()).kind, "interrupted");
+
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const interrupt = appServer.stdinLines
+    .map((line) => JSON.parse(line))
+    .find((message) => message.method === "turn/interrupt");
+  assert.deepEqual(interrupt?.params, {
+    threadId: "thread-1",
+    turnId: "turn-1",
+  });
+  await prepared.close();
+});
+
+test("codex-live-controls does not turn interrupt acknowledgement into terminal truth", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ withholdTerminal: true });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+  assert.deepEqual(await turn.interrupt(), {
+    outcome: "rejected",
+    reason: "already-settled",
+  });
+  let settled = false;
+  void turn.result().then(() => {
+    settled = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.deepEqual(await turn.steer({ text: "too late" }), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+
+  await prepared.close();
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.unknown, "interruption");
+});
+
+test("codex-live-controls child loss before confirmation keeps interruption unknown", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    interruptTerminal: "exit",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.unknown, "interruption");
+  assert.equal(result.detail.failure?.category, "interruption-unknown");
+  await prepared.close();
+});
+
+test("codex-live-controls native interrupt rejection does not poison later input", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    interruptRpcError: "stale",
+    steerTerminal: "completed",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.interrupt(), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  assert.deepEqual(await turn.steer({ text: "continue instead" }), {
+    outcome: "accepted",
+  });
+  assert.equal((await turn.result()).kind, "completed");
+  await prepared.close();
+});
+
+test("codex-live-controls native Interrupt mismatch is expired", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    interruptRpcError: "mismatch",
+    steerTerminal: "completed",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.interrupt(), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  assert.deepEqual(await turn.steer({ text: "continue instead" }), {
+    outcome: "accepted",
+  });
+  assert.equal((await turn.result()).kind, "completed");
+  await prepared.close();
+});
+
+test("codex-live-controls does not downgrade a near-miss Interrupt error", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    interruptRpcError: "near-miss",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.interrupt(), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.phase, "control");
+  assert.equal(result.detail.failure?.category, "native-control");
+  assert.equal(result.detail.failure?.nativeCode, "-32600");
+  await prepared.close();
+});
+
+test("codex-live-controls native internal control error stays distinct and preserves its code", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    interruptRpcError: "internal",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.interrupt(), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.unknown, "completion");
+  assert.equal(result.detail.failure?.phase, "control");
+  assert.equal(result.detail.failure?.category, "native-control");
+  assert.equal(result.detail.failure?.nativeCode, "-32603");
+  assert.ok(result.detail.failure?.cause instanceof Error);
+  await prepared.close();
+});
+
+for (const terminal of ["completed", "failed"] as const) {
+  test(`codex-live-controls ${terminal} terminal truth wins an interrupt acknowledgement race`, async () => {
+    const installed = installCodexReplayer();
+    installed.configureTurn({
+      withholdTerminal: true,
+      interruptTerminalBeforeResponse: terminal,
+    });
+    const prepared = await prepareCodex(installed.path);
+    const turn = prepared.startTurn(turnRequest());
+    await waitForSession(turn);
+
+    assert.deepEqual(await turn.interrupt(), {
+      outcome: "rejected",
+      reason: "expired",
+    });
+    assert.equal((await turn.result()).kind, terminal);
+    await prepared.close();
+  });
+}
+
+test("codex-live-controls matching interrupted terminal can confirm before acknowledgement", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    interruptTerminalBeforeResponse: "interrupted",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+  assert.equal((await turn.result()).kind, "interrupted");
+  await prepared.close();
+});
+
+test("codex-live-controls rejects a mismatched native Steer response as stale", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    mismatchedSteerResponse: true,
+    interruptTerminal: "interrupted",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.steer({ text: "stale guidance" }), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+  assert.equal((await turn.result()).kind, "interrupted");
+  await prepared.close();
+});
+
+for (const race of ["no-active", "mismatch"] as const) {
+  test(`codex-live-controls rejects the native ${race} Steer race as expired`, async () => {
+    const installed = installCodexReplayer();
+    installed.configureTurn({
+      withholdTerminal: true,
+      steerRpcError: race,
+      interruptTerminal: "interrupted",
+    });
+    const prepared = await prepareCodex(installed.path);
+    const turn = prepared.startTurn(turnRequest());
+    await waitForSession(turn);
+
+    assert.deepEqual(await turn.steer({ text: "racing guidance" }), {
+      outcome: "rejected",
+      reason: "expired",
+    });
+    assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+    assert.equal((await turn.result()).kind, "interrupted");
+    await prepared.close();
+  });
+}
+
+for (const controlCase of [
+  { native: "empty", reason: "shape-mismatch" },
+  { native: "review", reason: "expired" },
+  { native: "compact", reason: "expired" },
+  { native: "schema", reason: "expired" },
+] as const) {
+  test(`codex-live-controls maps native Steer ${controlCase.native} to ${controlCase.reason}`, async () => {
+    const installed = installCodexReplayer();
+    installed.configureTurn({
+      withholdTerminal: true,
+      steerRpcError: controlCase.native,
+      interruptTerminal: "interrupted",
+    });
+    const prepared = await prepareCodex(installed.path);
+    const turn = prepared.startTurn(turnRequest());
+    await waitForSession(turn);
+
+    assert.deepEqual(await turn.steer({ text: "rejected guidance" }), {
+      outcome: "rejected",
+      reason: controlCase.reason,
+    });
+    assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+    assert.equal((await turn.result()).kind, "interrupted");
+    await prepared.close();
+  });
+}
+
+test("codex-live-controls does not downgrade a near-miss native error", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    steerRpcError: "near-miss",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.steer({ text: "must fail closed" }), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.phase, "control");
+  assert.equal(result.detail.failure?.category, "native-control");
+  assert.equal(result.detail.failure?.nativeCode, "-32600");
+  await prepared.close();
+});
+
+test("codex-live-controls malformed Steer response fails closed without throwing", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    malformedSteerResponse: true,
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.steer({ text: "invalid response" }), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "protocol-corruption");
+  assert.equal(result.detail.failure?.phase, "control");
+  assert.ok(result.detail.failure?.cause instanceof Error);
+  await prepared.close();
+});
+
+test("codex-live-controls control timeout preserves its cause on the Turn", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    stallSteerResponse: true,
+  });
+  const preparedResult = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+    handshakeTimeoutMs: 1_000,
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(preparedResult.ok, true);
+  if (!preparedResult.ok) throw new Error("unreachable");
+  const prepared = preparedResult.harness;
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  assert.deepEqual(await turn.steer({ text: "will time out" }), {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "control-timeout");
+  assert.equal(result.detail.failure?.phase, "control");
+  assert.match(
+    result.detail.failure?.cause instanceof Error
+      ? result.detail.failure.cause.message
+      : "",
+    /turn\/steer control exchange timed out/,
+  );
+  await prepared.close();
+});
+
+for (const failure of ["malformed", "timeout"] as const) {
+  test(`codex-live-controls Interrupt ${failure} is a control failure with interruption unknown`, async () => {
+    const installed = installCodexReplayer();
+    installed.configureTurn({
+      withholdTerminal: true,
+      malformedInterruptResponse: failure === "malformed",
+      stallInterruptResponse: failure === "timeout",
+    });
+    const preparedResult = await createCodexAdapter({
+      path: installed.path,
+      env: {},
+      handshakeTimeoutMs: 1_000,
+    }).prepare({ workspace: process.cwd() });
+    assert.equal(preparedResult.ok, true);
+    if (!preparedResult.ok) throw new Error("unreachable");
+    const prepared = preparedResult.harness;
+    const turn = prepared.startTurn(turnRequest());
+    await waitForSession(turn);
+
+    assert.deepEqual(await turn.interrupt(), {
+      outcome: "rejected",
+      reason: "expired",
+    });
+    const result = await turn.result();
+    assert.equal(result.kind, "lost");
+    if (result.kind !== "lost") throw new Error("unreachable");
+    assert.equal(result.detail.unknown, "interruption");
+    assert.equal(result.detail.failure?.phase, "control");
+    assert.equal(
+      result.detail.failure?.category,
+      failure === "malformed" ? "protocol-corruption" : "control-timeout",
+    );
+    assert.ok(result.detail.failure?.cause instanceof Error);
+    await prepared.close();
+  });
+}
+
+test("codex-live-controls close interrupts live work before app-server shutdown", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    interruptTerminal: "interrupted",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+
+  const first = await prepared.close();
+  assert.equal((await turn.result()).kind, "interrupted");
+  assert.equal(first.clean, true);
+  assert.strictEqual(await prepared.close(), first);
+
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  assert.equal(
+    appServer.stdinLines.at(-1) === undefined
+      ? undefined
+      : JSON.parse(appServer.stdinLines.at(-1)!).method,
+    "turn/interrupt",
+  );
+});
+
+test("codex-live-controls close stays bounded before a native Turn exists", async () => {
+  const installed = installCodexReplayer();
+  const preparedResult = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+    handshakeTimeoutMs: 5_000,
+    cleanupTimeoutMs: 500,
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(preparedResult.ok, true);
+  if (!preparedResult.ok) throw new Error("unreachable");
+  const prepared = preparedResult.harness;
+  let admissionStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    admissionStarted = resolve;
+  });
+  const turn = prepared.startTurn(
+    turnRequest({
+      admit: () => {
+        admissionStarted();
+        return new Promise(() => undefined);
+      },
+      checkpoint: () => Promise.resolve({ recorded: true }),
+    }),
+  );
+  await started;
+
+  const closeStartedAt = Date.now();
+  assert.equal((await prepared.close()).clean, true);
+  assert.ok(
+    Date.now() - closeStartedAt < 2_000,
+    "close must use its cleanup bound before the native Turn exists",
+  );
+  assert.equal((await turn.result()).kind, "not-started");
+});
+
+test("codex-live-controls close bounds an already in-flight Interrupt", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    stallInterruptResponse: true,
+  });
+  const preparedResult = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+    handshakeTimeoutMs: 5_000,
+    cleanupTimeoutMs: 500,
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(preparedResult.ok, true);
+  if (!preparedResult.ok) throw new Error("unreachable");
+  const prepared = preparedResult.harness;
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+  assert.deepEqual(await turn.steer({ text: "establish active target" }), {
+    outcome: "accepted",
+  });
+
+  const interrupt = turn.interrupt();
+  const closeStartedAt = Date.now();
+  assert.equal((await prepared.close()).clean, true);
+  assert.ok(
+    Date.now() - closeStartedAt < 2_000,
+    "close must use its cleanup bound instead of the in-flight control bound",
+  );
+  assert.deepEqual(await interrupt, {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.unknown, "interruption");
+});
+
+test("codex-live-controls close rejects an in-flight Steer receipt", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    withholdTerminal: true,
+    stallSecondSteerResponse: true,
+    interruptTerminal: "interrupted",
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  await waitForSession(turn);
+  assert.deepEqual(await turn.steer({ text: "establish active target" }), {
+    outcome: "accepted",
+  });
+
+  const racingSteer = turn.steer({ text: "must expire during close" });
+  await prepared.close();
+  assert.deepEqual(await racingSteer, {
+    outcome: "rejected",
+    reason: "expired",
+  });
+  assert.equal((await turn.result()).kind, "interrupted");
+});
+
+test("cleanup failure cannot rewrite an already-settled Codex Turn", async () => {
+  const installed = installCodexReplayer();
+  installed.failCleanup(9);
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const settled = await turn.result();
+  assert.equal(settled.kind, "completed");
+
+  const cleanup = await prepared.close();
+  assert.equal(cleanup.clean, false);
+  assert.strictEqual(await turn.result(), settled);
 });
 
 test("codex-exact-thread-recovery acknowledges the same thread before admission and prompt", async () => {
@@ -942,6 +1556,16 @@ function observeEvents(
   return events;
 }
 
+function waitForSession(
+  turn: ReturnType<PreparedHarness["startTurn"]>,
+): Promise<void> {
+  return new Promise((resolve) => {
+    turn.subscribe((event) => {
+      if (event.kind === "session") resolve();
+    });
+  });
+}
+
 async function waitForRequestCount(
   turn: ReturnType<PreparedHarness["startTurn"]>,
   events: readonly TurnEvent[],
@@ -1099,10 +1723,10 @@ test("Codex profile is truthful and user-compatible", async () => {
   assert.equal(profile.adapterRevision, "codex-probe-2");
   assert.equal(profile.recovery.mode, "native-reattach");
   assert.match(profile.recovery.evidence, /thread\/resume.*exact/i);
-  assert.equal(profile.interruption.mode, "unavailable");
+  assert.equal(profile.interruption.mode, "active-turn");
   assert.equal(profile.approvals.available, true);
   assert.equal(profile.clarifications.available, false);
-  assert.equal(profile.steer.available, false);
+  assert.equal(profile.steer.available, true);
   assert.equal(profile.modelSelection.at, "launch-and-per-turn");
   assert.equal(profile.recoveryCoordinate.timing, "before-submission");
   assert.equal(profile.skillDelivery.mode, "plain-path");

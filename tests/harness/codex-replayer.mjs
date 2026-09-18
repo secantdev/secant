@@ -34,7 +34,10 @@ if (process.argv[3] === "generate-json-schema") {
   const outAt = process.argv.indexOf("--out");
   if (outAt < 0 || process.argv[outAt + 1] === undefined) process.exit(2);
   cpSync(
-    join(recording.fixtureDirectory, recording.schemaFile),
+    join(
+      recording.schemaDirectory ?? recording.fixtureDirectory,
+      recording.schemaFile,
+    ),
     join(process.argv[outAt + 1], "codex_app_server_protocol.schemas.json"),
   );
   process.exit(0);
@@ -48,6 +51,7 @@ let trafficAt = 0;
 let turnNumber = 0;
 let activeTurnId;
 const outstandingApprovals = new Map();
+let steerNumber = 0;
 for await (const line of lines) {
   log({ type: "stdin", line });
   if (Array.isArray(scenario.traffic)) {
@@ -144,6 +148,7 @@ for await (const line of lines) {
     process.stdout.write(
       `${JSON.stringify({ id: request.id, result: { turn } })}\n`,
     );
+    if (scenario.turn?.withholdTerminal === true) continue;
     if (scenario.turn?.stopAfter === "accepted") process.exit(0);
     const status = scenario.turn?.status ?? "completed";
     if (scenario.turn?.retryingError !== undefined) {
@@ -232,6 +237,77 @@ for await (const line of lines) {
         },
       })}\n`,
     );
+    continue;
+  }
+  if (request.method === "turn/steer") {
+    steerNumber += 1;
+    if (
+      scenario.turn?.stallSteerResponse === true ||
+      (scenario.turn?.stallSecondSteerResponse === true && steerNumber === 2)
+    ) {
+      continue;
+    }
+    if (scenario.turn?.steerRpcError !== undefined) {
+      const messages = {
+        "no-active": "no active turn to steer",
+        mismatch: "expected active turn id `turn-1` but found `turn-2`",
+        empty: "input must not be empty",
+        review: "cannot steer a review turn",
+        compact: "cannot steer a compact turn",
+        schema: "active turn uses a different output schema",
+        "near-miss":
+          "expected active turn id `turn-1` but found `turn-2` unexpectedly",
+      };
+      const message = messages[scenario.turn.steerRpcError];
+      process.stdout.write(
+        `${JSON.stringify({ id: request.id, error: { code: -32600, message } })}\n`,
+      );
+      continue;
+    }
+    const turnId = scenario.turn?.mismatchedSteerResponse
+      ? "stale-turn"
+      : request.params.expectedTurnId;
+    process.stdout.write(
+      `${JSON.stringify({ id: request.id, result: scenario.turn?.malformedSteerResponse === true ? {} : { turnId } })}\n`,
+    );
+    if (scenario.turn?.steerTerminal === "completed") {
+      emitTurnCompleted(request.params.expectedTurnId, "completed");
+    }
+    continue;
+  }
+  if (request.method === "turn/interrupt") {
+    if (scenario.turn?.interruptTerminalBeforeResponse !== undefined) {
+      emitTurnCompleted(
+        request.params.turnId,
+        scenario.turn.interruptTerminalBeforeResponse,
+      );
+    }
+    if (scenario.turn?.stallInterruptResponse === true) continue;
+    if (scenario.turn?.interruptRpcError !== undefined) {
+      const errors = {
+        stale: { code: -32600, message: "no active turn to interrupt" },
+        mismatch: {
+          code: -32600,
+          message: "expected active turn id turn-1 but found turn-2",
+        },
+        "near-miss": {
+          code: -32600,
+          message:
+            "expected active turn id turn-1 but found turn-2 unexpectedly",
+        },
+        internal: { code: -32603, message: "internal error" },
+      };
+      const error = errors[scenario.turn.interruptRpcError];
+      process.stdout.write(`${JSON.stringify({ id: request.id, error })}\n`);
+      continue;
+    }
+    process.stdout.write(
+      `${JSON.stringify({ id: request.id, result: scenario.turn?.malformedInterruptResponse === true ? null : {} })}\n`,
+    );
+    if (scenario.turn?.interruptTerminal === "interrupted") {
+      emitTurnCompleted(request.params.turnId, "interrupted");
+    }
+    if (scenario.turn?.interruptTerminal === "exit") process.exit(0);
     continue;
   }
   const response = scenario.responses[request.method];
@@ -386,7 +462,14 @@ function emitTurnCompleted(turnId, status) {
       method: "turn/completed",
       params: {
         threadId: "thread-1",
-        turn: { id: turnId, items: [], status },
+        turn: {
+          id: turnId,
+          items: [],
+          status,
+          ...(status === "failed"
+            ? { error: { message: "scripted terminal failure" } }
+            : {}),
+        },
       },
     })}\n`,
   );

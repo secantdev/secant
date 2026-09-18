@@ -47,12 +47,16 @@ import {
 import { validateRequiredSchema } from "./codex/required-schema.js";
 import {
   boundedCodexExchange,
+  CodexExchangeTimeoutError,
   type CodexJsonlConnection,
   CodexProtocolError,
+  CodexRpcResponseError,
   type CodexRpcEnvelope,
   parseRuntimeNotification,
   parseThreadResumeResult,
   parseThreadStartResult,
+  parseTurnInterruptResult,
+  parseTurnSteerResult,
   parseTurnStartResult,
 } from "./codex/runtime-protocol.js";
 
@@ -417,8 +421,15 @@ class CodexPreparedHarness implements PreparedHarness {
       );
       this.sessions.set(request.session, session);
     }
-    const turn = new CodexTurn(request, session, this.profile.steer, () => {
-      if (this.active === turn) this.active = undefined;
+    const turn = new CodexTurn({
+      request,
+      session,
+      steerCapability: this.profile.steer,
+      connection: this.connection,
+      controlTimeoutMs: this.handshakeTimeoutMs,
+      onSettled: () => {
+        if (this.active === turn) this.active = undefined;
+      },
     });
     this.active = turn;
     session.start(turn);
@@ -434,6 +445,11 @@ class CodexPreparedHarness implements PreparedHarness {
   }
 
   private async closeProcess(): Promise<CleanupReport> {
+    const active = this.active;
+    if (active !== undefined && !active.settled) {
+      active.beginClose();
+      await active.interruptForClose(this.cleanupTimeoutMs);
+    }
     const closed = await this.process.closeStdin(this.cleanupTimeoutMs);
     this.observer?.closed(
       closed.kind,
@@ -667,9 +683,47 @@ interface PendingCodexApproval {
   status: "outstanding" | "answering" | "settled";
 }
 
+type TCodexNativeTarget = {
+  readonly threadId: string;
+  readonly turnId: string;
+};
+
+type TCodexTurnParams = {
+  readonly request: TurnRequest;
+  readonly session: CodexSession;
+  readonly steerCapability: SteerCapability;
+  readonly connection: CodexJsonlConnection;
+  readonly controlTimeoutMs: number;
+  readonly onSettled: () => void;
+};
+
+type TNativeTargetWait = {
+  readonly label: string;
+  readonly timeoutMs: number;
+};
+
+type TControlFailure = {
+  readonly category: string;
+  readonly diagnostics: string;
+  readonly cause: unknown;
+  readonly nativeCode?: string;
+};
+
+type TInterruptControlState =
+  | { readonly kind: "idle" }
+  | {
+      readonly kind: "targeting" | "sent" | "acknowledged" | "confirmed";
+      readonly receipt: Promise<ControlReceipt>;
+    };
+
 class CodexTurn implements HarnessTurn {
   settled = false;
   readonly request: TurnRequest;
+  private readonly session: CodexSession;
+  private readonly steerCapability: SteerCapability;
+  private readonly connection: CodexJsonlConnection;
+  private readonly controlTimeoutMs: number;
+  private readonly onSettled: () => void;
   private readonly listeners = new Set<TurnEventListener>();
   private readonly events: TurnEvent[] = [];
   private readonly resultPromise: Promise<TurnResult>;
@@ -693,16 +747,26 @@ class CodexTurn implements HarnessTurn {
   >();
   private readonly approvalInputsByItemId = new Map<string, string>();
   private approvalSequence = 0;
+  private readonly nativeTargetPromise: Promise<TCodexNativeTarget | undefined>;
+  private resolveNativeTarget!: (
+    target: TCodexNativeTarget | undefined,
+  ) => void;
+  private nativeTargetResolved = false;
+  private interruptState: TInterruptControlState = { kind: "idle" };
+  private closing = false;
 
-  constructor(
-    request: TurnRequest,
-    private readonly session: CodexSession,
-    private readonly steerCapability: SteerCapability,
-    private readonly onSettled: () => void,
-  ) {
-    this.request = request;
+  constructor(params: TCodexTurnParams) {
+    this.request = params.request;
+    this.session = params.session;
+    this.steerCapability = params.steerCapability;
+    this.connection = params.connection;
+    this.controlTimeoutMs = params.controlTimeoutMs;
+    this.onSettled = params.onSettled;
     this.resultPromise = new Promise((resolve) => {
       this.resolveResult = resolve;
+    });
+    this.nativeTargetPromise = new Promise((resolve) => {
+      this.resolveNativeTarget = resolve;
     });
   }
 
@@ -716,15 +780,256 @@ class CodexTurn implements HarnessTurn {
     return this.resultPromise;
   }
 
-  steer(_input: SteerInput): Promise<ControlReceipt> {
+  async steer(input: SteerInput): Promise<ControlReceipt> {
+    if (this.settled || this.interruptState.kind !== "idle" || this.closing) {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    if (!this.steerCapability.available) {
+      return steerReceipt(this.steerCapability);
+    }
+    const target = await this.waitForNativeTarget({
+      label: "turn/steer target exchange",
+      timeoutMs: this.controlTimeoutMs,
+    });
+    if (target === undefined || !this.acceptsNewInput()) {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    return this.steerTarget(input, target);
+  }
+
+  private async steerTarget(
+    input: SteerInput,
+    target: TCodexNativeTarget,
+  ): Promise<ControlReceipt> {
+    let result: unknown;
+    try {
+      result = await boundedCodexExchange({
+        operation: () =>
+          this.connection.request("turn/steer", {
+            threadId: target.threadId,
+            expectedTurnId: target.turnId,
+            input: [{ type: "text", text: input.text }],
+          }),
+        timeoutMs: this.controlTimeoutMs,
+        label: "turn/steer control exchange",
+      });
+    } catch (cause) {
+      return this.rejectControlFailure(
+        "Codex turn/steer control failed.",
+        cause,
+      );
+    }
+    let steeredTurnId: string;
+    try {
+      steeredTurnId = parseTurnSteerResult(result);
+    } catch (cause) {
+      this.controlFailure({
+        category: "protocol-corruption",
+        diagnostics: "Codex emitted an invalid turn/steer response.",
+        cause,
+      });
+      return { outcome: "rejected", reason: "expired" };
+    }
+    if (!this.acceptsNewInput() || steeredTurnId !== target.turnId) {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    return { outcome: "accepted" };
+  }
+
+  async interrupt(): Promise<ControlReceipt> {
+    if (this.settled || this.closing) {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    if (this.interruptState.kind !== "idle") {
+      return { outcome: "rejected", reason: "already-settled" };
+    }
+    return this.startInterrupt(this.controlTimeoutMs);
+  }
+
+  beginClose(): void {
+    this.closing = true;
+    this.expireOutstanding();
+  }
+
+  interruptForClose(timeoutMs: number): Promise<ControlReceipt> {
     if (this.settled) {
       return Promise.resolve({ outcome: "rejected", reason: "expired" });
     }
-    return Promise.resolve(steerReceipt(this.steerCapability));
+    if (this.interruptState.kind === "idle") {
+      return this.startInterrupt(timeoutMs);
+    }
+    return this.waitForInterruptDuringClose(timeoutMs);
   }
 
-  interrupt(): Promise<ControlReceipt> {
-    return Promise.resolve({ outcome: "rejected", reason: "unsupported" });
+  private startInterrupt(timeoutMs: number): Promise<ControlReceipt> {
+    // Publish the control state before any already-ready target/response can
+    // settle the async operation and reset it during the same microtask turn.
+    const interrupt = Promise.resolve().then(() =>
+      this.requestInterrupt(timeoutMs),
+    );
+    this.interruptState = { kind: "targeting", receipt: interrupt };
+    return interrupt;
+  }
+
+  private async requestInterrupt(timeoutMs: number): Promise<ControlReceipt> {
+    const target = await this.waitForNativeTarget({
+      label: "turn/interrupt target exchange",
+      timeoutMs,
+    });
+    if (target === undefined || this.settled) {
+      this.interruptState = { kind: "idle" };
+      return { outcome: "rejected", reason: "expired" };
+    }
+    const state = this.interruptState;
+    if (state.kind !== "targeting") {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    this.interruptState = { kind: "sent", receipt: state.receipt };
+    return this.interruptTarget(target, timeoutMs);
+  }
+
+  private async interruptTarget(
+    target: TCodexNativeTarget,
+    timeoutMs: number,
+  ): Promise<ControlReceipt> {
+    let result: unknown;
+    try {
+      result = await boundedCodexExchange({
+        operation: () =>
+          this.connection.request("turn/interrupt", {
+            threadId: target.threadId,
+            turnId: target.turnId,
+          }),
+        timeoutMs,
+        label: "turn/interrupt control exchange",
+      });
+    } catch (cause) {
+      if (cause instanceof CodexRpcResponseError) {
+        this.interruptState = { kind: "idle" };
+      }
+      return this.rejectControlFailure(
+        "Codex turn/interrupt control failed.",
+        cause,
+      );
+    }
+    try {
+      parseTurnInterruptResult(result);
+    } catch (cause) {
+      this.controlFailure({
+        category: "protocol-corruption",
+        diagnostics: "Codex emitted an invalid turn/interrupt response.",
+        cause,
+      });
+      return { outcome: "rejected", reason: "expired" };
+    }
+    const state = this.interruptState;
+    if (state.kind === "confirmed") return { outcome: "accepted" };
+    if (this.settled || state.kind !== "sent") {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    this.interruptState = { kind: "acknowledged", receipt: state.receipt };
+    this.lastObservation = "Codex acknowledged turn/interrupt";
+    return { outcome: "accepted" };
+  }
+
+  private async waitForInterruptDuringClose(
+    timeoutMs: number,
+  ): Promise<ControlReceipt> {
+    const state = this.interruptState;
+    if (state.kind === "idle") {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    try {
+      return await boundedCodexExchange({
+        operation: () => state.receipt,
+        timeoutMs,
+        label: "in-flight turn/interrupt during cleanup",
+      });
+    } catch {
+      return { outcome: "rejected", reason: "expired" };
+    }
+  }
+
+  private acceptsNewInput(): boolean {
+    return (
+      !this.settled && this.interruptState.kind === "idle" && !this.closing
+    );
+  }
+
+  private async waitForNativeTarget(
+    params: TNativeTargetWait,
+  ): Promise<TCodexNativeTarget | undefined> {
+    try {
+      return await boundedCodexExchange({
+        operation: () => this.nativeTargetPromise,
+        timeoutMs: params.timeoutMs,
+        label: params.label,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  private rejectControlFailure(
+    diagnostics: string,
+    cause: unknown,
+  ): ControlReceipt {
+    const expected = expectedControlRejection(cause);
+    if (expected !== undefined) return expected;
+    if (cause instanceof CodexRpcResponseError) {
+      this.controlFailure({
+        category: "native-control",
+        diagnostics,
+        cause,
+        nativeCode: String(cause.code),
+      });
+      return { outcome: "rejected", reason: "expired" };
+    }
+    this.controlFailure({
+      category:
+        cause instanceof CodexExchangeTimeoutError
+          ? "control-timeout"
+          : "control-transport",
+      diagnostics,
+      cause,
+    });
+    return { outcome: "rejected", reason: "expired" };
+  }
+
+  private controlFailure(params: TControlFailure): void {
+    if (this.settled) return;
+    this.session.markDetached();
+    const interruptionUnknown = this.interruptionOutcomeUnknown();
+    const failure: HarnessFailure =
+      params.nativeCode === undefined
+        ? {
+            phase: "control",
+            category: params.category,
+            possibleEffects: this.submitted ? "possible" : "none",
+            diagnostics: params.diagnostics,
+            cause: params.cause,
+          }
+        : {
+            phase: "control",
+            category: params.category,
+            possibleEffects: this.submitted ? "possible" : "none",
+            diagnostics: params.diagnostics,
+            cause: params.cause,
+            nativeCode: params.nativeCode,
+          };
+    this.settle({
+      kind: "lost",
+      detail: {
+        unknown: interruptionUnknown
+          ? "interruption"
+          : this.turnId === undefined
+            ? "acceptance"
+            : "completion",
+        lastObservation: this.lastObservation,
+        session: this.session.availability(),
+        failure,
+      },
+    });
   }
 
   async answerRequest(answer: RequestAnswer): Promise<ControlReceipt> {
@@ -820,12 +1125,20 @@ class CodexTurn implements HarnessTurn {
 
   acceptTurn(turnId: string): void {
     if (this.settled) return;
+    const threadId = this.threadId;
+    if (threadId === undefined) {
+      this.protocolFailure(
+        "turn/start was acknowledged before thread creation.",
+      );
+      return;
+    }
     if (this.turnId !== undefined && this.turnId !== turnId) {
       this.protocolFailure("turn/start acknowledged a different Codex Turn.");
       return;
     }
     this.turnId = turnId;
     this.lastObservation = "Codex accepted turn/start";
+    this.resolveTarget({ threadId, turnId });
     this.flushPendingNotifications();
   }
 
@@ -918,18 +1231,26 @@ class CodexTurn implements HarnessTurn {
       return;
     }
     this.session.markDetached();
+    const interruptionUnknown = this.interruptionOutcomeUnknown();
     this.settle({
       kind: "lost",
       detail: {
-        unknown: this.turnId === undefined ? "acceptance" : "completion",
+        unknown: interruptionUnknown
+          ? "interruption"
+          : this.turnId === undefined
+            ? "acceptance"
+            : "completion",
         lastObservation: this.lastObservation,
         session: this.session.availability(),
         failure: {
           phase: "turn",
-          category: "app-server-closed",
+          category: interruptionUnknown
+            ? "interruption-unknown"
+            : "app-server-closed",
           possibleEffects: this.submitted ? "possible" : "none",
-          diagnostics:
-            "Codex app-server closed without a matching terminal Turn event.",
+          diagnostics: interruptionUnknown
+            ? "Codex app-server closed before confirming native interruption."
+            : "Codex app-server closed without a matching terminal Turn event.",
           ...(cause !== undefined ? { cause } : {}),
         },
       },
@@ -997,10 +1318,15 @@ class CodexTurn implements HarnessTurn {
       return;
     }
     this.session.markDetached();
+    const interruptionUnknown = this.interruptionOutcomeUnknown();
     this.settle({
       kind: "lost",
       detail: {
-        unknown: this.turnId === undefined ? "acceptance" : "completion",
+        unknown: interruptionUnknown
+          ? "interruption"
+          : this.turnId === undefined
+            ? "acceptance"
+            : "completion",
         lastObservation: this.lastObservation,
         session: this.session.availability(),
         failure: {
@@ -1116,6 +1442,7 @@ class CodexTurn implements HarnessTurn {
       return;
     }
     if (notification.status === "interrupted") {
+      this.confirmInterrupt();
       this.session.markDetached();
       this.settle({
         kind: "interrupted",
@@ -1152,6 +1479,19 @@ class CodexTurn implements HarnessTurn {
     for (const listener of this.listeners) listener(event);
   }
 
+  private confirmInterrupt(): void {
+    const state = this.interruptState;
+    if (state.kind === "idle") return;
+    this.interruptState = { kind: "confirmed", receipt: state.receipt };
+  }
+
+  private interruptionOutcomeUnknown(): boolean {
+    return (
+      this.interruptState.kind === "sent" ||
+      this.interruptState.kind === "acknowledged"
+    );
+  }
+
   private emitPreview(delta: string): void {
     this.preview += delta;
     const event: TurnEvent = { kind: "preview", text: this.preview };
@@ -1173,12 +1513,19 @@ class CodexTurn implements HarnessTurn {
 
   private settle(result: TurnResult): void {
     if (this.settled) return;
+    this.resolveTarget(undefined);
     this.clearPreview();
     this.expireOutstanding();
     this.settled = true;
     this.listeners.clear();
     this.onSettled();
     this.resolveResult(result);
+  }
+
+  private resolveTarget(target: TCodexNativeTarget | undefined): void {
+    if (this.nativeTargetResolved) return;
+    this.nativeTargetResolved = true;
+    this.resolveNativeTarget(target);
   }
 }
 
@@ -1190,6 +1537,47 @@ function steerReceipt(capability: SteerCapability): ControlReceipt {
   return capability.available
     ? { outcome: "accepted" }
     : { outcome: "rejected", reason: "unsupported" };
+}
+
+function expectedControlRejection(cause: unknown): ControlReceipt | undefined {
+  if (!(cause instanceof CodexRpcResponseError) || cause.code !== -32_600) {
+    return undefined;
+  }
+  // Mirrors codex-rs/app-server/src/request_processors/turn_processor.rs:
+  // 1083-1153 and 1610-1619 are the current unstructured control races.
+  const message = cause.rpcMessage;
+  if (cause.method === "turn/interrupt") {
+    if (
+      message === "no active turn to interrupt" ||
+      isExpectedTurnMismatch(cause.method, message)
+    ) {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    return undefined;
+  }
+  if (cause.method !== "turn/steer") return undefined;
+  if (message === "input must not be empty") {
+    return { outcome: "rejected", reason: "shape-mismatch" };
+  }
+  if (
+    message === "no active turn to steer" ||
+    message === "cannot steer a review turn" ||
+    message === "cannot steer a compact turn" ||
+    message === "active turn uses a different output schema" ||
+    isExpectedTurnMismatch(cause.method, message)
+  ) {
+    return { outcome: "rejected", reason: "expired" };
+  }
+  return undefined;
+}
+
+function isExpectedTurnMismatch(method: string, message: string): boolean {
+  if (method === "turn/steer") {
+    return /^expected active turn id `[^`\s]+` but found `[^`\s]+`$/.test(
+      message,
+    );
+  }
+  return /^expected active turn id \S+ but found \S+$/.test(message);
 }
 
 interface TRunTextProbe {
@@ -1291,9 +1679,9 @@ function buildProfile(options: TBuildProfile): HarnessProfile {
         "Codex thread/resume must acknowledge the exact requested private thread before durable admission and content submission.",
     },
     interruption: {
-      mode: "unavailable",
+      mode: "active-turn",
       evidence:
-        "Native Turn interruption is not exposed until exact control correlation lands.",
+        "Codex confirms active-Turn interruption through the matching terminal Turn event.",
     },
     approvals: {
       available: true,
@@ -1306,9 +1694,9 @@ function buildProfile(options: TBuildProfile): HarnessProfile {
         "Native request-user-input is experimental and remains disabled; Secant does not emulate it.",
     },
     steer: {
-      available: false,
+      available: true,
       evidence:
-        "Native same-Turn guidance is not exposed until exact Turn correlation lands.",
+        "Codex accepts native same-Turn guidance addressed to the exact active thread and Turn.",
     },
     modelSelection: {
       at: "launch-and-per-turn",

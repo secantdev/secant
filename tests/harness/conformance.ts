@@ -56,6 +56,13 @@ export interface ExactThreadRecoveryScenarios {
   resumeUnacknowledged(): HarnessAdapterFactory;
 }
 
+/** Capability-specific native same-Turn guidance. Providers without native
+ * Steer stay covered by the common unsupported-profile case. */
+export interface NativeSteerScenarios {
+  readonly label: string;
+  steerableTurn(): HarnessAdapterFactory;
+}
+
 /**
  * The approval-request subset every Adapter that can raise tool approvals must
  * exhibit: several coexisting requests, exact-id answering with its races, and
@@ -297,6 +304,30 @@ function runRecoveryCases(driver: RecoveryCaseDriver): void {
         assert.deepEqual(third, second);
         assert.equal(refused.admissions.length, admissionsAfterFailure);
       }
+      await prepared.close();
+    },
+  );
+}
+
+export function runNativeSteerCases(scenarios: NativeSteerScenarios): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+
+  test(
+    name("native same-Turn guidance is accepted while the Turn is live"),
+    async () => {
+      const prepared = await prepare(scenarios.steerableTurn());
+      assert.equal(prepared.profile.steer.available, true);
+      const turn = prepared.startTurn(request(recorder().recorder));
+      const events = observe(turn);
+      await events.waitForSession();
+      assert.deepEqual(await turn.steer({ text: "inspect the other seam" }), {
+        outcome: "accepted",
+      });
+      assert.equal((await turn.result()).kind, "completed");
+      assert.deepEqual(await turn.steer({ text: "too late" }), {
+        outcome: "rejected",
+        reason: "expired",
+      });
       await prepared.close();
     },
   );

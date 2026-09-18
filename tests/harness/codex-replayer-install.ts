@@ -77,6 +77,26 @@ export interface CodexTurnReplayOptions {
   readonly resolveFirstApproval?: boolean;
   readonly completeWithOutstandingApproval?: boolean;
   readonly duplicateFirstApproval?: boolean;
+  readonly withholdTerminal?: boolean;
+  readonly interruptTerminal?: "interrupted" | "exit";
+  readonly steerTerminal?: "completed";
+  readonly interruptRpcError?: "stale" | "mismatch" | "near-miss" | "internal";
+  readonly interruptTerminalBeforeResponse?:
+    "completed" | "failed" | "interrupted";
+  readonly stallInterruptResponse?: boolean;
+  readonly stallSteerResponse?: boolean;
+  readonly stallSecondSteerResponse?: boolean;
+  readonly mismatchedSteerResponse?: boolean;
+  readonly malformedSteerResponse?: boolean;
+  readonly malformedInterruptResponse?: boolean;
+  readonly steerRpcError?:
+    | "no-active"
+    | "mismatch"
+    | "empty"
+    | "review"
+    | "compact"
+    | "schema"
+    | "near-miss";
 }
 
 export interface CodexApprovalReplay {
@@ -172,11 +192,6 @@ export function installCodexReplayer(
       },
     }),
   );
-  copyFileSync(
-    join(qualificationFixtureDirectory, "stable-schema.generated.json"),
-    join(installedFixtureDirectory, "stable-schema.generated.json"),
-  );
-
   const windows = process.platform === "win32";
   const executablePath = join(directory, windows ? "codex.cmd" : "codex");
   const identityPath = join(directory, windows ? "codex.mjs" : "codex");
@@ -192,6 +207,10 @@ export function installCodexReplayer(
 
   let executableVersion = fixtureRecording.executableVersion;
   let versionExitCode: number | undefined;
+  // Most cases only read the 689 KB schema. Share those bytes and copy lazily
+  // only for drift cases, avoiding per-case Windows filesystem/AV contention.
+  let schemaDirectory = qualificationFixtureDirectory;
+  let schemaCopied = false;
   const writeRecording = (): void => {
     writeFileSync(
       join(directory, "recording.json"),
@@ -203,11 +222,28 @@ export function installCodexReplayer(
         redactions: fixtureRecording.redactions,
         refreshCommand: fixtureRecording.refreshCommand,
         fixtureDirectory: installedFixtureDirectory,
+        schemaDirectory,
         schemaFile: "stable-schema.generated.json",
         log: logPath,
         versionExitCode,
       }),
     );
+  };
+  const mutableSchemaPath = (): string => {
+    const installedSchemaPath = join(
+      installedFixtureDirectory,
+      "stable-schema.generated.json",
+    );
+    if (!schemaCopied) {
+      copyFileSync(
+        join(qualificationFixtureDirectory, "stable-schema.generated.json"),
+        installedSchemaPath,
+      );
+      schemaDirectory = installedFixtureDirectory;
+      schemaCopied = true;
+      writeRecording();
+    }
+    return installedSchemaPath;
   };
   writeRecording();
 
@@ -240,10 +276,7 @@ export function installCodexReplayer(
       writeRecording();
     },
     removeSchemaMethod(method) {
-      const schemaPath = join(
-        installedFixtureDirectory,
-        "stable-schema.generated.json",
-      );
+      const schemaPath = mutableSchemaPath();
       const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
       for (const definition of [
         schema.definitions.ClientRequest,
@@ -259,19 +292,13 @@ export function installCodexReplayer(
       writeFileSync(schemaPath, JSON.stringify(schema));
     },
     changeTurnStatusShape() {
-      const schemaPath = join(
-        installedFixtureDirectory,
-        "stable-schema.generated.json",
-      );
+      const schemaPath = mutableSchemaPath();
       const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
       schema.definitions.v2.Turn.properties.status = { type: "number" };
       writeFileSync(schemaPath, JSON.stringify(schema));
     },
     changeApprovalSchemaShape(field) {
-      const schemaPath = join(
-        installedFixtureDirectory,
-        "stable-schema.generated.json",
-      );
+      const schemaPath = mutableSchemaPath();
       const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
       if (field === "file-items") {
         const fileChange = schema.definitions.v2.ThreadItem.oneOf.find(
@@ -321,10 +348,7 @@ export function installCodexReplayer(
       writeFileSync(schemaPath, JSON.stringify(schema));
     },
     corruptSchema() {
-      writeFileSync(
-        join(installedFixtureDirectory, "stable-schema.generated.json"),
-        "{not json",
-      );
+      writeFileSync(mutableSchemaPath(), "{not json");
     },
     failVersion(status) {
       versionExitCode = status;

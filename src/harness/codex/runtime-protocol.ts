@@ -31,6 +31,18 @@ export interface CodexRuntimeHandlers {
 
 export class CodexProtocolError extends Error {}
 
+export class CodexRpcResponseError extends Error {
+  constructor(
+    readonly method: string,
+    readonly code: number,
+    readonly rpcMessage: string,
+  ) {
+    super(`${method} returned RPC error ${code}: ${rpcMessage}`);
+  }
+}
+
+export class CodexExchangeTimeoutError extends Error {}
+
 /** Owns one app-server stdout iterator, decoder remainder, and client request-id
  * sequence across qualification and runtime. Runtime starts exactly once after
  * the bounded qualification exchange has finished. */
@@ -185,8 +197,10 @@ export class CodexJsonlConnection {
 
 function responseResult(method: string, message: CodexRpcEnvelope): unknown {
   if (message.error !== undefined) {
-    throw new Error(
-      `${method} returned RPC error ${message.error.code}: ${message.error.message}`,
+    throw new CodexRpcResponseError(
+      method,
+      message.error.code,
+      message.error.message,
     );
   }
   if (!("result" in message)) {
@@ -203,6 +217,10 @@ const threadResultSchema = z.looseObject({
 const turnStartResultSchema = z.looseObject({
   turn: z.looseObject({ id: z.string().min(1) }),
 });
+const turnSteerResultSchema = z.looseObject({
+  turnId: z.string().min(1),
+});
+const turnInterruptResultSchema = z.looseObject({});
 
 export function parseThreadStartResult(value: unknown): {
   readonly threadId: string;
@@ -222,6 +240,14 @@ export function parseThreadResumeResult(value: unknown): {
 
 export function parseTurnStartResult(value: unknown): string {
   return parseResult(value, turnStartResultSchema, "turn/start").turn.id;
+}
+
+export function parseTurnSteerResult(value: unknown): string {
+  return parseResult(value, turnSteerResultSchema, "turn/steer").turnId;
+}
+
+export function parseTurnInterruptResult(value: unknown): void {
+  parseResult(value, turnInterruptResultSchema, "turn/interrupt");
 }
 
 const correlatedParamsSchema = z.looseObject({
@@ -648,10 +674,9 @@ export async function boundedCodexExchange<T>(options: {
 }): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`${options.label} timed out`)),
-      options.timeoutMs,
-    );
+    timer = setTimeout(() => {
+      reject(new CodexExchangeTimeoutError(`${options.label} timed out`));
+    }, options.timeoutMs);
   });
   try {
     return await Promise.race([options.operation(), timeout]);

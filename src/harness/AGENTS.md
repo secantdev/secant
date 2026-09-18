@@ -81,29 +81,26 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Invariants (Codex qualification and Turns)
 
-- `codex.ts` owns Adapter, Session, and Turn orchestration, cache, and profile; `codex/qualification.ts` owns bounded pre-thread validation and diagnostics;
-  `codex/runtime-protocol.ts` owns the retained JSONL iterator, decoder remainder, client request-id sequence, runtime frames, and normalization;
-  `codex/required-schema.ts` owns generated-schema compatibility. Native protocol types remain private across all four.
+- `codex.ts` owns orchestration, cache, and profile; `codex/qualification.ts` owns bounded pre-thread validation and diagnostics; `codex/runtime-protocol.ts`
+  owns retained JSONL state and normalization; `codex/required-schema.ts` owns generated-schema compatibility. Native protocol types stay private.
 - Every `prepare` observes `codex --version`; cached schema evidence is keyed by discovery source, path, SHA-256 identity, version, platform, and revision.
   The host platform driving discovery/profile is immutable; only the cache-key test seam varies platform evidence. A hit skips schema generation only.
-- Live qualification sends exactly one `initialize` then `initialized`, runs only bounded `account/read` and `model/list`, and transfers its one initialized
-  child and mutable JSONL connection into the Prepared Harness. Its byte observer ends at that transfer; runtime recording belongs to #145's distinct seam.
+- Live qualification sends one `initialize` then `initialized`, runs bounded `account/read` and `model/list`, and transfers its child and connection.
 - A fresh Session obtains `thread.id` before durable admission; a detached Session calls `thread/resume` on the retained connection and requires the
   exact requested id before admission. Missing, malformed, failed, or mismatched acknowledgement makes the Session permanently `unusable`, with no fresh fallback.
 - Fresh and resumed Turns preserve admission-before-content and matching terminal authority; completed items supersede delta previews.
 - Codex client RPC and reverse-request ids have separate private maps. Approvals expose exact actions; native resolution or terminal expiry wins late answers.
+- Native Steer and Interrupt wait for the exact active private `thread.id`/`turn.id` pair and use bounded RPC acknowledgement; only a matching interrupted
+  `turn/completed` proves interruption, while connection loss after acknowledgement remains `lost` with `interruption-unknown`.
+- Codex close rejects new work, expires requests, attempts bounded native interruption, closes stdin, and reaps the tree; cleanup cannot rewrite Turn truth.
 - Codex inherits user environment/home; unauthenticated becomes the fixed separate-login remediation, and no account or credential crosses the Seam.
 
 ## Tests
 
-- The `tests/harness` domain owns the deterministic fake Adapter, the shared conformance suite, and the `claude` replayer. Its argv parser and recorded
-  `--version` landed in #111; #112 added per-Turn protocol replay. #115 replaced the hand-authored `protocol-cases/` tree with the recorded (and residual
-  synthetic) `tests/harness/fixtures/<harness>/<case>/` tree, its `recording.json` sidecar, and the opt-in `record.ts` tool.
-- The conformance suite is the Seam's executable specification. Prepare/lifecycle cases run all three Adapters; exact-thread recovery and non-interrupt
-  approvals run Codex replay; other control groups remain capability-specific. Five tail cases stay fake-only: native steer, clarifications,
-  after-acceptance checkpoint, load-with-replay, and caller-contract violations (the only things this Interface throws for).
-  The fake must exhibit behaviours a real Harness never will (native steer, structured clarifications, load-with-replay recovery, several concurrent
-  requests, every `lost` variant) and is never the only end-to-end double (ADR 0027). The fake performs load-with-replay rather than advertising it: a
+- The `tests/harness` domain owns the deterministic fake Adapter, shared conformance, and native replayers. Recorded and residual synthetic cases live in
+  `tests/harness/fixtures/<harness>/<case>/` with a `recording.json` sidecar and opt-in recorder.
+- Prepare/lifecycle cases run all Adapters; Codex replay covers exact-thread recovery, approvals, and native Steer. Other control groups stay capability-specific.
+  Structured clarifications, after-acceptance checkpoint, load-with-replay, and caller-contract violations remain fake-only. The fake performs load-with-replay:
   resumed Turn re-emits the Session's transcript history (`assistant-content`, `tool-activity`), drops a scripted entry that repeats a replayed one, then
   emits `REPLAY_BARRIER` (an `activity`) before any live event — history is historical by position, inside the closed vocabulary.
 - **`bun test` startup-signal race:** a Bun child's `process.on("SIGTERM")` handler is only honoured once installed — a SIGTERM delivered before the

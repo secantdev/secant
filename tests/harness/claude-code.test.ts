@@ -181,7 +181,11 @@ const approvalScenarios: ApprovalRequestScenarios = {
   interruptible: () =>
     claudeApprovalAdapter(OUTSTANDING_SESSION, "approval-outstanding"),
 };
-runApprovalRequestCases(approvalScenarios);
+// The two interrupt-bearing approval cases settle per OS like the interrupt cases
+// below: on Windows a live Turn's interrupt is a forced kill and truthfully `lost`.
+runApprovalRequestCases(approvalScenarios, {
+  interruptOutcome: process.platform === "win32" ? "lost" : "interrupted",
+});
 
 /** A managed Turn with a trivial always-admitting recorder. */
 function bridgeTurn(session: string): TurnRequest {

@@ -402,11 +402,15 @@ export function runPrepareProfileCases(
 }
 
 /** Run the approval request/answer/expiry cases against one provider. Both the
- *  full suite (for the fake) and the Claude Code Adapter over the bridge call it. */
+ *  full suite (for the fake) and the Claude Code Adapter over the bridge call it.
+ *  `interruptOutcome` names how the provider's interrupt of a live Turn settles
+ *  (default `interrupted`), exactly as in `runInterruptRecoveryCases`. */
 export function runApprovalRequestCases(
   scenarios: ApprovalRequestScenarios,
+  options: { readonly interruptOutcome?: InterruptOutcome } = {},
 ): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+  const outcome = options.interruptOutcome ?? "interrupted";
 
   test(
     name("several requests are outstanding at once and each is answered"),
@@ -471,7 +475,7 @@ export function runApprovalRequestCases(
   );
 
   test(
-    name("interrupt is confirmed and the result is interrupted"),
+    name(`interrupt is confirmed and the result is ${outcome}`),
     async () => {
       const prepared = await prepare(scenarios.interruptible());
       const turn = prepared.startTurn(request(recorder().recorder));
@@ -479,10 +483,7 @@ export function runApprovalRequestCases(
       await events.waitForRequests(1);
       const receipt = await turn.interrupt();
       assert.deepEqual(receipt, { outcome: "accepted" });
-      const result = await turn.result();
-      assert.equal(result.kind, "interrupted");
-      if (result.kind !== "interrupted") throw new Error("unreachable");
-      assert.equal(result.detail.session.state, "detached");
+      detachedCoordinate(await turn.result(), outcome);
       // New inputs are rejected after an accepted interrupt.
       const late = await turn.steer({ text: "too late" });
       assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
@@ -502,7 +503,7 @@ export function runApprovalRequestCases(
       // The expiry event precedes the result: it is in the buffer already.
       const expired = events.all.filter((e) => e.kind === "request-expired");
       assert.equal(expired.length, 1);
-      assert.equal(result.kind, "interrupted");
+      assert.equal(result.kind, outcome);
       await prepared.close();
     },
   );

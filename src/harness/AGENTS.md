@@ -38,7 +38,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   the Turn `interrupted` (process-only); a force-kill or unconfirmed termination ends it `lost` with `interruption-unknown`. On Windows the process
   Module has no graceful stage (a hidden console child cannot observe one, #127 A6 amended), so a live Claude Code is force-killed at once and every
   Windows interrupt of a live Turn truthfully settles `lost`; the profile's interruption evidence says so there, and the conformance `interruptOutcome`
-  option pins it per OS. `onClosed` yields to an
+  option (on both the interrupt/recovery and the approval-request case groups) pins it per OS. `onClosed` yields to an
   in-flight interrupt so the two never race the result: a confirmed interrupt claims the process before awaiting, and the close path (`onClosed`) returns
   early when `this.process !== owned`, leaving the interrupt to settle the one authoritative result.
 - Recovery is caller- and history-driven: a relaunch of a Session that already ran, or any Turn carrying `resume`, spawns with `--resume` (never a fresh

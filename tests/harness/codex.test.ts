@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   CODEX_EXECUTABLE_ENV,
   createCodexAdapter,
+  type HarnessPlatform,
 } from "../../src/harness/harness.js";
 import type { OwnedProcess } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
@@ -403,13 +404,20 @@ test("cached schema evidence is reused but every prepare initializes a fresh chi
 
 test("cache evidence invalidates on source, path, version, platform, and probe revision", async () => {
   const installed = installCodexReplayer();
-  let platform: NodeJS.Platform = process.platform;
+  let cachePlatform: HarnessPlatform = "windows";
   let probeRevision = "codex-probe-1";
   const adapter = createCodexAdapter({
     path: installed.path,
     env: {},
-    platform: () => platform,
+    platform: "win32",
+    qualificationCachePlatform: () => cachePlatform,
     probeRevision: () => probeRevision,
+    resolve(name) {
+      if (name === "codex") return installed.executablePath;
+      if (name === "bun") return process.execPath;
+      if (name.endsWith("codex.cmd")) return name;
+      return undefined;
+    },
   });
 
   const prepared: { harness: { close(): Promise<unknown> } }[] = [];
@@ -427,16 +435,16 @@ test("cache evidence invalidates on source, path, version, platform, and probe r
   };
 
   await qualify();
-  await qualify(installed.executablePath);
+  await qualify(installed.windowsShimPath);
   installed.changeVersionOnly("codex-cli 0.154.1");
-  await qualify(installed.executablePath);
-  platform = platform === "linux" ? "darwin" : "linux";
-  await qualify(installed.executablePath);
+  await qualify(installed.windowsShimPath);
+  cachePlatform = "linux";
+  await qualify(installed.windowsShimPath);
   probeRevision = "codex-probe-2";
-  await qualify(installed.executablePath);
+  await qualify(installed.windowsShimPath);
 
   const another = installCodexReplayer();
-  await qualify(another.executablePath);
+  await qualify(another.windowsShimPath);
   assert.equal(
     installed
       .invocations()

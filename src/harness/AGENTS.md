@@ -86,8 +86,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `codex.ts` owns Adapter orchestration, cache and profile; `codex/qualification.ts` owns the bounded pre-thread JSONL exchange and diagnostics;
   `codex/required-schema.ts` owns structural compatibility. Unlike Claude's runtime `frames.ts`, the required-schema file validates generated
   qualification evidence; later Codex Turn frames belong in their own runtime protocol submodule.
-- Every `prepare` observes `codex --version`; cached stable-schema evidence is keyed by discovery source, executable path and SHA-256 byte identity, version,
-  platform, and probe revision. A cache hit skips schema generation only — it never skips the live handshake.
+- Every `prepare` observes `codex --version`; cached schema evidence is keyed by discovery source, path, SHA-256 identity, version, platform, and revision.
+  The host platform driving discovery/profile is immutable; only the cache-key test seam varies platform evidence. A hit skips schema generation only.
 - Live qualification owns one `codex app-server` child, sends exactly one `initialize` then `initialized`, runs only bounded `account/read` and
   `model/list` probes, creates no thread, Turn, or prompt, and retains that initialized child in the Prepared Harness.
 - Codex inherits user environment/home; unauthenticated becomes the fixed separate-login remediation, and no account or credential crosses the Seam.

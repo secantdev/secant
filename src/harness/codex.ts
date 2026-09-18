@@ -47,7 +47,10 @@ const AUTHENTICATION_REQUIRED =
 
 export interface CodexAdapterOverrides {
   readonly env?: NodeJS.ProcessEnv;
-  readonly platform?: NodeJS.Platform | (() => NodeJS.Platform);
+  readonly platform?: NodeJS.Platform;
+  /** Cache-key-only platform seam. Production uses the immutable host profile;
+   *  tests vary this independently without lying to executable discovery. */
+  readonly qualificationCachePlatform?: () => HarnessPlatform;
   readonly path?: string;
   readonly resolve?: (name: string) => string | undefined;
   readonly probeTimeoutMs?: number;
@@ -89,7 +92,7 @@ class CodexAdapter implements HarnessAdapter {
   constructor(private readonly overrides: CodexAdapterOverrides) {}
 
   async prepare(options: PrepareOptions): Promise<PrepareResult> {
-    const nativePlatform = observedPlatform(this.overrides.platform);
+    const nativePlatform = this.overrides.platform ?? process.platform;
     const platform = harnessPlatform(nativePlatform);
     if (platform === undefined) {
       return failed(
@@ -104,12 +107,14 @@ class CodexAdapter implements HarnessAdapter {
     if (!version.ok) return version;
 
     const probeRevision = this.overrides.probeRevision?.() ?? PROBE_REVISION;
+    const cachePlatform =
+      this.overrides.qualificationCachePlatform?.() ?? platform;
     const identity = fileIdentity(discovery.target.identityPath);
     const cacheKey = qualificationCacheKey({
       target: discovery.target,
       identity,
       version: version.value,
-      platform,
+      platform: cachePlatform,
       probeRevision,
     });
     if (cacheKey === undefined || !this.cache.has(cacheKey)) {
@@ -155,7 +160,7 @@ class CodexAdapter implements HarnessAdapter {
     if (options.configuredExecutable !== undefined) {
       discoveryOptions.configuredExecutable = options.configuredExecutable;
     }
-    discoveryOptions.platform = observedPlatform(this.overrides.platform);
+    discoveryOptions.platform = this.overrides.platform ?? process.platform;
     if (this.overrides.path !== undefined) {
       discoveryOptions.path = this.overrides.path;
     }
@@ -559,13 +564,6 @@ function harnessPlatform(
     default:
       return undefined;
   }
-}
-
-function observedPlatform(
-  override: CodexAdapterOverrides["platform"],
-): NodeJS.Platform {
-  if (typeof override === "function") return override();
-  return override ?? process.platform;
 }
 
 function failure(category: string, diagnostics: string): HarnessFailure {

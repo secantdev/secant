@@ -35,6 +35,7 @@ export interface CodexInvocation {
 export interface InstalledCodexReplayer {
   readonly executablePath: string;
   readonly identityPath: string;
+  readonly windowsShimPath: string;
   readonly path: string;
   invocations(): readonly CodexInvocation[];
   drift(version: string): void;
@@ -113,9 +114,15 @@ export function installCodexReplayer(): InstalledCodexReplayer {
   const windows = process.platform === "win32";
   const executablePath = join(directory, windows ? "codex.cmd" : "codex");
   const identityPath = join(directory, windows ? "codex.mjs" : "codex");
+  const windowsShimPath = join(directory, "codex.cmd");
   copyFileSync(source, identityPath);
-  if (windows) writeFileSync(executablePath, npmBunShim("codex.mjs"));
-  else chmodSync(executablePath, 0o755);
+  if (windows) {
+    writeFileSync(executablePath, npmBunShim("codex.mjs"));
+  } else {
+    chmodSync(executablePath, 0o755);
+    copyFileSync(source, join(directory, "codex.mjs"));
+    writeFileSync(windowsShimPath, npmBunShim("codex.mjs"));
+  }
 
   let executableVersion = fixtureRecording.executableVersion;
   let versionExitCode: number | undefined;
@@ -141,6 +148,7 @@ export function installCodexReplayer(): InstalledCodexReplayer {
   return {
     executablePath,
     identityPath,
+    windowsShimPath,
     path: `${directory}${delimiter}${process.env.PATH ?? ""}`,
     invocations: () => readInvocations(logPath),
     drift(version) {

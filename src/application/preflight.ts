@@ -13,6 +13,7 @@ import {
   CLAUDE_CODE_EXECUTABLE_ENV,
   CLAUDE_CODE_SERVED_CAPABILITIES,
   discoverClaudeCode,
+  type ClaudeCodeDiscovery,
 } from "../harness/harness.js";
 import { resolveExecutable } from "../process/process.js";
 import { isolatedGitEnvironment } from "../run/store/store.js";
@@ -52,6 +53,10 @@ export interface PreflightRequest {
    *  client cannot, so it refuses an `interactive-agent` routing with the TUI
    *  remedy; the TUI sets this true. Defaults to false. */
   readonly supportsInteractiveTurns?: boolean;
+  /** Discovery of the selected Harness. Composition uses the Harness-owned
+   *  implementation; tests inject a deterministic outcome without mutating the
+   *  process-wide environment shared by concurrently discovered test files. */
+  readonly discoverClaudeCode?: () => ClaudeCodeDiscovery;
 }
 
 export type PreflightResult =
@@ -99,7 +104,7 @@ export function preflight(request: PreflightRequest): PreflightResult {
     if (unmet.length > 0) {
       return { problem: harnessCapabilityUnmet(unmet) };
     }
-    const discovery = discoverClaudeCode();
+    const discovery = (request.discoverClaudeCode ?? discoverClaudeCode)();
     if (discovery.kind === "unsupported-shim") {
       return {
         problem: harnessUnsupportedShim(discovery.attempt.name, discovery.path),

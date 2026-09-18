@@ -25,6 +25,7 @@ import {
 import { openRunGroup, type RunGroup } from "../run/store/store.js";
 import {
   createClaudeCodeAdapter,
+  type ClaudeCodeDiscovery,
   type HarnessAdapter,
   type PreparedHarness,
 } from "../harness/harness.js";
@@ -80,6 +81,9 @@ export interface WiringOverrides {
    *  root sets this true; the headless root leaves it false so an interactive-agent
    *  Bundle is refused at Preflight. Defaults to false. */
   readonly supportsInteractiveTurns?: boolean;
+  /** Deterministic Harness discovery for tests. Production leaves this absent and
+   *  Preflight uses the Harness-owned environment/PATH discovery. */
+  readonly discoverClaudeCode?: () => ClaudeCodeDiscovery;
 }
 
 export interface Wiring extends Application {
@@ -131,6 +135,9 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
         // The headless client cannot relay human turn-taking; an interactive-agent
         // Bundle is refused at Preflight (#116). The TUI root sets this true.
         supportsInteractiveTurns: overrides.supportsInteractiveTurns ?? false,
+        ...(overrides.discoverClaudeCode !== undefined
+          ? { discoverClaudeCode: overrides.discoverClaudeCode }
+          : {}),
         runExecution: makeRunExecution(catalog, host ?? "linux", adapter),
         prepareRunInteractiveStep: makePrepareRunInteractiveStep(adapter),
       });

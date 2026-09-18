@@ -5,6 +5,7 @@ import {
   type Budgets,
 } from "../bundle/bundle.js";
 import type { Catalog } from "../catalog/catalog.js";
+import type { ClaudeCodeDiscovery } from "../harness/harness.js";
 import {
   flattenSteps,
   routingNeedsHarness,
@@ -287,6 +288,9 @@ export interface ApplicationDependencies {
    *  cannot, so it refuses an `interactive-agent` Bundle at Preflight; the TUI sets
    *  this true. Defaults to false. */
   readonly supportsInteractiveTurns?: boolean;
+  /** Harness-owned synchronous discovery used by Preflight. Tests inject the
+   *  outcome so parallel suites never coordinate through process.env. */
+  readonly discoverClaudeCode?: () => ClaudeCodeDiscovery;
 }
 
 export interface Application {
@@ -1194,6 +1198,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
       hostPlatform: deps.hostPlatform,
       digest: entry.digest,
       supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
+      ...(deps.discoverClaudeCode !== undefined
+        ? { discoverClaudeCode: deps.discoverClaudeCode }
+        : {}),
     });
     if ("problem" in pre) {
       return { admitted: false, problem: pre.problem };
@@ -1304,6 +1311,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
       hostPlatform: deps.hostPlatform,
       digest,
       supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
+      ...(deps.discoverClaudeCode !== undefined
+        ? { discoverClaudeCode: deps.discoverClaudeCode }
+        : {}),
     });
     if ("problem" in pre) return { problem: pre.problem };
     const grant = catalog.getTrustGrant(digest, entry.installationGeneration);

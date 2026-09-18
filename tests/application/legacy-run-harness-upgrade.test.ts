@@ -4,10 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { Problem } from "../../src/application/projection-port.js";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
-import {
-  CLAUDE_CODE_EXECUTABLE_ENV,
-  type HarnessProfile,
-} from "../../src/harness/harness.js";
+import type { HarnessProfile } from "../../src/harness/harness.js";
 import type { RunOwner } from "../../src/run/store/store.js";
 import { createFake, type FakeScript } from "../harness/fake-adapter.js";
 import { ensureRuntimeOnPath, RUNTIME_NAME } from "../helpers/commandBundle.js";
@@ -194,6 +191,14 @@ function openFixture(
     secantHome: fixture.home,
     launchCwd: fixture.workspace,
     harnessAdapter: createFake(script)(),
+    discoverClaudeCode: () => ({
+      kind: "found",
+      attempt: {
+        source: "configured",
+        name: "fixture-claude",
+        description: "injected fixture discovery",
+      },
+    }),
   });
 }
 
@@ -211,14 +216,6 @@ function openRun(wiring: Wiring, runId: string): Problem | undefined {
 for (const afterAttempt of [false, true]) {
   test(`[legacy-run-harness-upgrade] an Agent Run ${afterAttempt ? "after" : "before"} its first Attempt upgrades before resume`, async (t) => {
     const fixture = createLegacyFixture("agent", afterAttempt);
-    const savedExecutable = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-    process.env[CLAUDE_CODE_EXECUTABLE_ENV] = process.execPath;
-    t.after(() => {
-      if (savedExecutable === undefined)
-        delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-      else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedExecutable;
-    });
-
     const first = openFixture(fixture);
     if (!afterAttempt) {
       assert.equal(openRun(first, fixture.runId), undefined);

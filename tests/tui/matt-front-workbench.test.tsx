@@ -68,26 +68,29 @@ function catalogView(
 }
 
 test("the Matt front runs in the TUI against the replayer to succeeded (#123)", async (t) => {
-  // Discover the recorded replayer by PATH, exactly as the headless e2e does; drop
-  // any configured executable so only the temporary PATH selects the fake Harness.
+  // Inject discovery and Adapter resolution for this replayer. Test files execute
+  // concurrently, so mutating process PATH here can redirect another file's child
+  // process (or remove Bun from its inherited PATH) before that process spawns.
   const replayer = installReplayer(REPLAYER_VERSION, MATT_FRONT_FIXTURE);
-  const savedPath = process.env.PATH;
-  const savedConfigured = process.env.SECANT_CLAUDE_CODE;
-  process.env.PATH = replayer.path;
-  delete process.env.SECANT_CLAUDE_CODE;
-  t.after(() => {
-    if (savedPath === undefined) delete process.env.PATH;
-    else process.env.PATH = savedPath;
-    if (savedConfigured === undefined) delete process.env.SECANT_CLAUDE_CODE;
-    else process.env.SECANT_CLAUDE_CODE = savedConfigured;
-  });
 
   const workspace = makeTempDir("secant-matt-front-ws-");
   const wired = wireApplication({
     secantHome: makeTempDir("secant-matt-front-home-"),
     launchCwd: workspace,
     supportsInteractiveTurns: true,
-    harnessAdapter: createClaudeCodeAdapter({ sessionId: () => SESSION_ID }),
+    discoverClaudeCode: () => ({
+      kind: "found",
+      attempt: {
+        source: "configured",
+        name: replayer.executablePath,
+        description: "injected Matt-front replayer",
+      },
+    }),
+    harnessAdapter: createClaudeCodeAdapter({
+      path: replayer.path,
+      env: {},
+      sessionId: () => SESSION_ID,
+    }),
   });
   t.after(() => {
     wired.runGroup.close();

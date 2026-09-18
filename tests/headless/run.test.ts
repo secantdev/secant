@@ -155,6 +155,8 @@ test("run show prints identity, state, progress, position, and timeline; --json 
   assert.match(text, /Position: at rest/);
   assert.match(text, /Timeline:/);
   assert.match(text, /run-created/);
+  assert.doesNotMatch(text, /Selected Harness:/);
+  assert.doesNotMatch(text, /Observed Harness:/);
 
   h.reset();
   assert.equal(
@@ -163,10 +165,21 @@ test("run show prints identity, state, progress, position, and timeline; --json 
   );
   const snapshot = JSON.parse(h.stdout()) as {
     family: string;
-    result: { found: boolean; run: { state: string } };
+    result: {
+      found: boolean;
+      run: {
+        state: string;
+        selectedHarness?: unknown;
+        harness?: unknown;
+        effectiveModel?: unknown;
+      };
+    };
   };
   assert.equal(snapshot.family, "run");
   assert.equal(snapshot.result.run.state, "succeeded");
+  assert.equal(snapshot.result.run.selectedHarness, undefined);
+  assert.equal(snapshot.result.run.harness, undefined);
+  assert.equal(snapshot.result.run.effectiveModel, undefined);
 });
 
 test("run launch of a Run that rests failed exits non-zero and shows the failed Step", async (t) => {

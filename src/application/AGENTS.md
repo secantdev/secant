@@ -79,9 +79,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   render "answered by client policy" (`run-projection`) without the Adapter knowing a client policy exists.
 - By design a client can receive live and preview updates for a Turn whose durable start it never saw: the late-join catch-up replays the current overlay at open, so a
   headless follower opening mid-Turn observes the live request even though its durable Turn-start snapshot predates the connection.
-- The Agent executor records the normalized Harness identity (name/executable/version) on that Attempt from the prepared profile (#125), so the `run`
-  Projection reads it back through `owner.harnessIdentity()` and exposes it as the additive `run.harness` view — one identity for the latest Agent-step
-  Attempt, no native id crossing the Port; absent for a Command-only Run.
+- The `run` Projection exposes the immutable stored semantic id as `run.selectedHarness` before any Attempt and
+  independently exposes the latest Agent-step Attempt's normalized name/executable/version as `run.harness` plus its sibling `effectiveModel` (#125, #147).
+  Resume may replace only the observed fields; Command-only Runs omit both selection and observations.
 - `send-interactive-turn`/`end-interactive-step` (#122) drive an interactive-agent Step the Run rests `blocked` at. The executor records **no** durable gate — the block is
   derived from the current Step being `interactive-agent` (the same signal the TUI blocked-basis reads), and no Attempt settles until End. `beginInteractive` reuses the held
   owner (a blocked Run keeps it) or resumes+acquires a reopened one, then re-derives to confirm the Run is blocked at the named Step. `send` drives one human Turn (origin

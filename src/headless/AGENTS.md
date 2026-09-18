@@ -25,9 +25,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   (from the `send-interactive-turn` Offer's `basis`), and the ephemeral Harness Request. The first two are durable `RunView` fields renderRun prints; the ephemeral
   request is never durable, so `showRun` peeks the live overlay (`peekLiveOverlay` — a bounded first-update read that returns the overlay buffered at open while a
   Turn is live here, else nothing) and names the outstanding request. All of it is additive to the frozen `--json`, whose shape is the durable snapshot alone.
-- `run show` renders the Harness identity of the latest Agent-step Attempt (#125) — `Harness:`/`Executable:`/`Version:` lines beside `Effective model:` — from the additive
-  `run.harness` view; the version prints unadorned (no `v` prefix, matching the TUI header) since a real version string can itself contain parentheses. The existing top-level
-  `effectiveModel` `--json` field is untouched and the new `harness` object is purely additive, so a Command-only Run's frozen shape is unchanged.
+- `run show` labels the immutable `run.selectedHarness` as `Selected Harness:` and the latest Agent-step Attempt's `run.harness`/`effectiveModel` facts as
+  `Observed Harness:`/`Observed executable:`/`Observed version:`/`Observed effective model:` (#125, #147). The version prints unadorned since it may contain
+  parentheses. `selectedHarness` is additive, the existing observed JSON fields stay unchanged, and Command-only Runs omit all of them so their frozen shape is unchanged.
 - The `run` command group lives in `run-commands.ts` and registers onto the program `buildProgram` passes (A25); it is handed `io`/`execute`/`fail`/`settle`
   and shares `settledOutcome` and `settleAndReportRun` (the await-settlement-then-report tail, A24). `splitSelector` lives there too and `bundle inspect`
   imports it (A24).

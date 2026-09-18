@@ -1985,7 +1985,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         const tracking = runs.get(input.runId);
         const evidence =
           tracking?.steer?.evidence ??
-          tracking?.owner?.harnessIdentity()?.steer?.evidence;
+          tracking?.owner?.harnessEvidence()?.identity?.steer?.evidence;
         return {
           status: "not-applied",
           problem: steerUnavailable(

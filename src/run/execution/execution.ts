@@ -27,7 +27,7 @@ import {
   type SpawnResult,
 } from "../../process/process.js";
 import {
-  attemptIdentity,
+  attemptEvidence,
   launchInputs,
   RunCancelledError,
   runAgent,
@@ -585,7 +585,7 @@ async function runStepAttempts(
           outputs: [],
           at: context.now(),
           advanceState: "halted",
-          ...attemptIdentity(result),
+          ...attemptEvidence(step.kind, result),
         }),
       );
       return "halted";
@@ -602,7 +602,7 @@ async function runStepAttempts(
           outputs: [],
           at: context.now(),
           advanceState: "halted",
-          ...attemptIdentity(result),
+          ...attemptEvidence(step.kind, result),
         }),
       );
       return "halted";
@@ -623,10 +623,7 @@ async function runStepAttempts(
         outputs: result.outputs,
         at: context.now(),
         advanceState,
-        ...(result.effectiveModel !== undefined
-          ? { effectiveModel: result.effectiveModel }
-          : {}),
-        ...attemptIdentity(result),
+        ...attemptEvidence(step.kind, result),
       }),
     );
     // A succeeded Attempt's `home: workspace` outputs are now canonical in the

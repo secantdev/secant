@@ -124,20 +124,23 @@ export function renderRun(run: RunView): string {
         ? "at rest"
         : `step ${run.position + 1} of ${run.progress.length}`
     }`,
+    ...(run.selectedHarness !== undefined
+      ? [`Selected Harness: ${run.selectedHarness}`]
+      : []),
     // The normalized Harness identity that qualified the current or latest Agent-step
     // Attempt (#125): name, resolved executable, and observed version. Omitted for a
     // Command-only Run; no value is invented when a fact is unavailable.
     ...(run.harness !== undefined
       ? [
-          `Harness: ${run.harness.name}`,
-          `Executable: ${run.harness.executable}`,
-          `Version: ${run.harness.executableVersion}`,
+          `Observed Harness: ${run.harness.name}`,
+          `Observed executable: ${run.harness.executable}`,
+          `Observed version: ${run.harness.executableVersion}`,
         ]
       : []),
     // The effective model the latest Agent-step Attempt ran under (#116), from the
     // Harness init message. Omitted for a Command-only Run.
     ...(run.effectiveModel !== undefined
-      ? [`Effective model: ${run.effectiveModel}`]
+      ? [`Observed effective model: ${run.effectiveModel}`]
       : []),
     ...(run.turnPosition !== undefined ? [`Turns: ${run.turnPosition}`] : []),
   ];

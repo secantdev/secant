@@ -261,7 +261,7 @@ test("[both-client-harness-selection] headless launch requires and accepts the s
   assert.equal(record.run.selectedHarness, "claude-code");
 });
 
-test("headless Codex preparation failure keeps JSON stable and resume reuses the durable selection", async (t) => {
+test("[selected-versus-observed-evidence] headless distinguishes durable selection before and after observed execution", async (t) => {
   const workspace = makeTempDir("secant-headless-codex-ws-");
   const successful = createFake({
     profile: codexProfile(),
@@ -364,6 +364,18 @@ test("headless Codex preparation failure keeps JSON stable and resume reuses the
   const runId = problem.details.runId;
   assert.equal(typeof runId, "string");
   out.length = 0;
+  err.length = 0;
+
+  const showFailureCode = await runHeadless(wired, ["run", "show", runId], io);
+  assert.equal(showFailureCode, 0, err.join(""));
+  const failedShow = out.join("");
+  assert.match(failedShow, /Selected Harness: codex/);
+  assert.doesNotMatch(failedShow, /Observed Harness:/);
+  assert.doesNotMatch(failedShow, /Observed executable:/);
+  assert.doesNotMatch(failedShow, /Observed version:/);
+  assert.doesNotMatch(failedShow, /Observed effective model:/);
+  out.length = 0;
+  err.length = 0;
 
   const resumeCode = await runHeadless(
     wired,
@@ -380,6 +392,7 @@ test("headless Codex preparation failure keeps JSON stable and resume reuses the
   assert.ok(Array.isArray(snapshot.result.run.timeline));
   assert.ok(Array.isArray(snapshot.result.run.outputs));
   assert.ok(Array.isArray(snapshot.result.run.actionOffers));
+  assert.equal(snapshot.result.run.selectedHarness, "codex");
   assert.equal(snapshot.result.run.harness.name, "Codex");
   const record = wired.runGroup.readRun(runId);
   assert.ok(record.ok);
@@ -456,7 +469,7 @@ test("a command -> agent -> command Bundle runs the plain Turn to succeeded (#11
   assert.equal(settled?.turnKind, "agent");
 });
 
-test("run show prints the Turn timeline, Session availability, and effective model (#116)", async (t) => {
+test("run show labels selected and observed Harness evidence separately", async (t) => {
   const { wired, runId } = await launchAgentRun(t);
   const shown = await runShow(wired, runId);
   assert.match(shown, /turn-started agent/); // the recorded Turn kind (#126)
@@ -464,12 +477,13 @@ test("run show prints the Turn timeline, Session availability, and effective mod
   assert.match(shown, /turn-settled agent/);
   assert.match(shown, /Sessions:/);
   assert.match(shown, /s: open/);
-  assert.match(shown, /Effective model: claude-/);
+  assert.match(shown, /Selected Harness: claude-code/);
+  assert.match(shown, /Observed effective model: claude-/);
   // The Harness identity the same `run` Projection carries (#125): name, executable,
   // and version rendered alongside the effective model.
-  assert.match(shown, /Harness: claude-code/);
-  assert.match(shown, /Executable: .+/);
-  assert.match(shown, /Version: 2\.1\.273/);
+  assert.match(shown, /Observed Harness: claude-code/);
+  assert.match(shown, /Observed executable: .+/);
+  assert.match(shown, /Observed version: 2\.1\.273/);
   assert.doesNotMatch(shown, /Transcript:/);
 });
 
@@ -494,6 +508,7 @@ test("run show --json gains additive Harness-identity fields (#125)", async (t) 
   const run = parsed.result.run;
   // Additive to the frozen `--json`: the existing `effectiveModel` stays, and a new
   // normalized `harness` object carries the identity — no native id crosses.
+  assert.equal(run.selectedHarness, "claude-code");
   assert.equal(run.harness.name, "claude-code");
   assert.match(run.harness.executableVersion, /2\.1\.273/);
   assert.ok(typeof run.harness.executable === "string");

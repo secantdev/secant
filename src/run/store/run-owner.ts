@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { asc, desc, eq, isNotNull, notInArray } from "drizzle-orm";
+import { asc, desc, eq, isNotNull, notInArray, or } from "drizzle-orm";
 import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite";
 import { z } from "zod";
 import { openArtifactRepo } from "./artifacts/artifacts.js";
@@ -150,25 +150,35 @@ const pendingGateRow = z.object({
   raised_at: z.string(),
 });
 
-const effectiveModelRow = z.object({ effective_model: z.string() });
-const harnessIdentityRow = z
-  .object({
-    harness: z.string(),
-    executable: z.string(),
-    executable_version: z.string(),
-  })
-  .and(
-    z.union([
-      z.object({
-        steer_available: z.null(),
-        steer_evidence: z.null(),
-      }),
-      z.object({
-        steer_available: z.boolean(),
-        steer_evidence: z.string(),
-      }),
-    ]),
-  );
+const harnessEvidenceRow = z.union([
+  z
+    .object({
+      effective_model: z.string().nullable(),
+      harness: z.string(),
+      executable: z.string(),
+      executable_version: z.string(),
+    })
+    .and(
+      z.union([
+        z.object({
+          steer_available: z.null(),
+          steer_evidence: z.null(),
+        }),
+        z.object({
+          steer_available: z.boolean(),
+          steer_evidence: z.string(),
+        }),
+      ]),
+    ),
+  z.object({
+    effective_model: z.string(),
+    harness: z.null(),
+    executable: z.null(),
+    executable_version: z.null(),
+    steer_available: z.null(),
+    steer_evidence: z.null(),
+  }),
+]);
 
 function toPendingGate(row: z.infer<typeof pendingGateRow>): PendingGateRecord {
   return {
@@ -470,7 +480,8 @@ function commitAttempt(params: TCommitAttemptParams): void {
         .run();
     }
   }
-  const identity = params.request.harnessIdentity;
+  const evidence = params.request.agentEvidence;
+  const identity = evidence?.identity;
   params.db
     .insert(attempts)
     .values({
@@ -478,7 +489,7 @@ function commitAttempt(params: TCommitAttemptParams): void {
       outcome: params.request.outcome,
       version_id: params.versionId ?? null,
       settled_at: at,
-      effective_model: params.request.effectiveModel ?? null,
+      effective_model: evidence?.effectiveModel ?? null,
       harness: identity?.harness ?? null,
       executable: identity?.executable ?? null,
       executable_version: identity?.executableVersion ?? null,
@@ -935,33 +946,13 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
     transcriptPage(request) {
       return readTranscriptPage(db, request);
     },
-    effectiveModel() {
-      // `attempt_id` is the tiebreaker so two Attempts settled in the same millisecond
-      // (a fast retry loop) resolve to one deterministic row, matching `harnessIdentity`.
-      const row = db
-        .select({ effective_model: attempts.effective_model })
-        .from(attempts)
-        .where(isNotNull(attempts.effective_model))
-        .orderBy(desc(attempts.settled_at), desc(attempts.attempt_id))
-        .limit(1)
-        .get();
-      return row === undefined
-        ? undefined
-        : effectiveModelRow.parse(row).effective_model;
-    },
-    harnessIdentity() {
-      // The latest Agent-step Attempt is the latest Attempt that recorded a Harness
-      // (its `harness` column is non-null); a Command/Gate Attempt records none. The
-      // three profile facts are written together, so `harness` non-null implies the
-      // other two are present. `attempt_id` is a deterministic tiebreaker for Attempts
-      // that share a `settled_at`. In M3 one prepared Harness serves a whole Run (ADR
-      // 0022), so every Agent-step Attempt carries the same executable and version — the
-      // identity is constant across the Run, and pairing it with `effectiveModel()`
-      // (which may resolve to a different row) is always coherent. A future second
-      // Harness or a mid-Run requalification would need identity and model co-sourced
-      // from one row here.
+    harnessEvidence() {
+      // Read one latest Agent-evidence row so identity and model cannot drift across
+      // resume/requalification. `effective_model` alone admits legacy rows written
+      // before Harness identity existed. `attempt_id` deterministically breaks ties.
       const row = db
         .select({
+          effective_model: attempts.effective_model,
           harness: attempts.harness,
           executable: attempts.executable,
           executable_version: attempts.executable_version,
@@ -969,23 +960,33 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
           steer_evidence: attempts.steer_evidence,
         })
         .from(attempts)
-        .where(isNotNull(attempts.harness))
+        .where(
+          or(isNotNull(attempts.harness), isNotNull(attempts.effective_model)),
+        )
         .orderBy(desc(attempts.settled_at), desc(attempts.attempt_id))
         .limit(1)
         .get();
       if (row === undefined) return undefined;
-      const parsed = harnessIdentityRow.parse(row);
+      const parsed = harnessEvidenceRow.parse(row);
+      if (parsed.harness === null) {
+        return { effectiveModel: parsed.effective_model };
+      }
       return {
-        harness: parsed.harness,
-        executable: parsed.executable,
-        executableVersion: parsed.executable_version,
-        ...(parsed.steer_available !== null && parsed.steer_evidence !== null
-          ? {
-              steer: {
-                available: parsed.steer_available,
-                evidence: parsed.steer_evidence,
-              },
-            }
+        identity: {
+          harness: parsed.harness,
+          executable: parsed.executable,
+          executableVersion: parsed.executable_version,
+          ...(parsed.steer_available !== null && parsed.steer_evidence !== null
+            ? {
+                steer: {
+                  available: parsed.steer_available,
+                  evidence: parsed.steer_evidence,
+                },
+              }
+            : {}),
+        },
+        ...(parsed.effective_model !== null
+          ? { effectiveModel: parsed.effective_model }
           : {}),
       };
     },

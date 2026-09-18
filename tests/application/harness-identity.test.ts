@@ -45,6 +45,18 @@ function profile(harness = "Claude Code"): HarnessProfile {
   };
 }
 
+function profileWithObservedIdentity(
+  harness: string,
+  executable: string,
+  executableVersion: string,
+): HarnessProfile {
+  return {
+    ...profile(harness),
+    executable,
+    executableVersion,
+  };
+}
+
 /** A single-Turn script that completes; `model` controls whether the Turn observed an
  *  effective model (missing-observation ⇒ undefined). */
 function completedScript(
@@ -69,7 +81,7 @@ function completedScript(
   };
 }
 
-function failedScript(): FakeScript {
+function failedScript(model?: string): FakeScript {
   return {
     profile: profile(),
     turns: [
@@ -83,7 +95,8 @@ function failedScript(): FakeScript {
               possibleEffects: "possible",
               diagnostics: "scripted failure",
             },
-            effectiveModel: { known: false },
+            effectiveModel:
+              model === undefined ? { known: false } : { known: true, model },
             session: {
               state: "detached",
               coordinate: { opaque: "s" },
@@ -404,6 +417,14 @@ async function launch(
   const created = wired.runGroup.readRun(runId);
   assert.ok(created.ok);
   assert.equal(created.run.selectedHarness, bundle.selectedHarness);
+  const createdView = readRun(wired, runId);
+  if (bundle.selectedHarness === undefined) {
+    assert.equal(createdView.selectedHarness, undefined);
+  } else {
+    assert.equal(createdView.selectedHarness, bundle.selectedHarness);
+    assert.equal(createdView.harness, undefined);
+    assert.equal(createdView.effectiveModel, undefined);
+  }
   const replay = wired.projectionPort.submit({
     operationId: "op-launch",
     operation: "launch-run",
@@ -445,6 +466,7 @@ test("[new-run-harness-selection] a new Agent Run pins Claude Code separately fr
     makeTempDir("secant-harness-id-ws-"),
   );
   assert.equal(run.state, "succeeded");
+  assert.equal(run.selectedHarness, "claude-code");
   assert.deepEqual(run.harness, {
     name: "Claude Code",
     executable: "/usr/bin/claude",
@@ -466,6 +488,7 @@ test("[both-client-harness-selection] a Codex selection prepares only the Codex 
   assert.ok(record.ok);
   assert.equal(record.run.selectedHarness, "codex");
   assert.equal(run.state, "succeeded");
+  assert.equal(run.selectedHarness, "codex");
   assert.deepEqual(run.harness, {
     name: "Codex",
     executable: "/usr/bin/claude",
@@ -572,6 +595,9 @@ test("[both-client-harness-selection] selected Harness authentication and protoc
   }
   const haltedAfterAuthentication = readRun(wired, admission.runId);
   assert.equal(haltedAfterAuthentication.state, "halted");
+  assert.equal(haltedAfterAuthentication.selectedHarness, "codex");
+  assert.equal(haltedAfterAuthentication.harness, undefined);
+  assert.equal(haltedAfterAuthentication.effectiveModel, undefined);
   assert.equal(
     haltedAfterAuthentication.problem?.code,
     "selected-harness-unavailable",
@@ -604,6 +630,9 @@ test("[both-client-harness-selection] selected Harness authentication and protoc
   assert.equal(prepareCount, 2);
   const haltedAfterProtocol = readRun(wired, admission.runId);
   assert.equal(haltedAfterProtocol.state, "halted");
+  assert.equal(haltedAfterProtocol.selectedHarness, "codex");
+  assert.equal(haltedAfterProtocol.harness, undefined);
+  assert.equal(haltedAfterProtocol.effectiveModel, undefined);
   assert.equal(
     haltedAfterProtocol.problem?.details?.category,
     "protocol-incompatible",
@@ -624,6 +653,7 @@ test("[new-run-harness-selection] a new Interactive-agent Run pins Claude Code b
     makeTempDir("secant-harness-id-ws-"),
   );
   assert.equal(run.state, "blocked");
+  assert.equal(run.selectedHarness, "claude-code");
   assert.equal(run.harness, undefined);
   assert.equal(run.effectiveModel, undefined);
 });
@@ -638,6 +668,7 @@ test("[new-run-harness-selection] an Agent nested in a Repeat group pins Claude 
     makeTempDir("secant-harness-id-ws-"),
   );
   assert.equal(run.state, "succeeded");
+  assert.equal(run.selectedHarness, "claude-code");
   assert.equal(run.harness, undefined);
   assert.equal(run.effectiveModel, undefined);
 });
@@ -668,12 +699,73 @@ test("the Harness identity is identical after the Run is reopened (#125)", async
   const reopenedRecord = reopened.runGroup.readRun(runId);
   assert.ok(reopenedRecord.ok);
   assert.equal(reopenedRecord.run.selectedHarness, "claude-code");
+  assert.equal(run.selectedHarness, "claude-code");
   assert.deepEqual(run.harness, {
     name: "Claude Code",
     executable: "/usr/bin/claude",
     executableVersion: "1.2.3",
   });
   assert.equal(run.effectiveModel, "fake-sonnet");
+});
+
+test("[selected-versus-observed-evidence] resume preserves selection while a later Attempt replaces observed evidence", async (t) => {
+  const home = makeTempDir("secant-harness-id-home-");
+  const workspace = makeTempDir("secant-harness-id-ws-");
+  const launched = await launch(
+    t,
+    failedScript("initial-model"),
+    writeAgentBundle(),
+    home,
+    workspace,
+  );
+  assert.equal(launched.run.selectedHarness, "claude-code");
+  assert.equal(launched.run.harness?.executableVersion, "1.2.3");
+
+  const resumedProfile = profileWithObservedIdentity(
+    "Claude Code Canary",
+    "/opt/claude-canary",
+    "2.0.0-canary",
+  );
+  const reopened = wireApplication({
+    secantHome: home,
+    launchCwd: workspace,
+    harnessAdapter: createFake({
+      profile: resumedProfile,
+      turns: [
+        {
+          result: {
+            kind: "completed",
+            detail: {
+              finalContent: "resumed",
+              effectiveModel: { known: false },
+              session: { state: "open" },
+            },
+          },
+        },
+      ],
+    })(),
+  });
+  t.after(() => {
+    reopened.runGroup.close();
+    reopened.catalog.close();
+  });
+
+  const resume = reopened.projectionPort.submit({
+    operationId: "op-resume-new-observation",
+    operation: "resume-run",
+    input: { runId: launched.runId },
+  });
+  assert.ok(resume.admitted, JSON.stringify(resume));
+  await awaitSettled(reopened.projectionPort, resume.operationId);
+
+  const run = readRun(reopened, launched.runId);
+  assert.equal(run.selectedHarness, "claude-code");
+  assert.deepEqual(run.harness, {
+    name: "Claude Code Canary",
+    executable: "/opt/claude-canary",
+    executableVersion: "2.0.0-canary",
+  });
+  assert.equal(run.effectiveModel, undefined);
 });
 
 test("a reopened Run's steer Offer uses the recorded profile evidence (#134 A12)", async (t) => {
@@ -777,6 +869,7 @@ test("a Turn that observed no model keeps the Harness identity but omits the mod
     makeTempDir("secant-harness-id-ws-"),
   );
   assert.equal(run.state, "succeeded");
+  assert.equal(run.selectedHarness, "claude-code");
   assert.deepEqual(run.harness, {
     name: "Claude Code",
     executable: "/usr/bin/claude",
@@ -796,6 +889,7 @@ test("[new-run-harness-selection] a Command-only Run selects, discovers, and pre
     makeTempDir("secant-harness-id-ws-"),
   );
   assert.equal(run.state, "succeeded");
+  assert.equal(run.selectedHarness, undefined);
   assert.equal(run.harness, undefined);
   assert.equal(run.effectiveModel, undefined);
 });

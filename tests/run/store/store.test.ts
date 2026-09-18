@@ -1302,10 +1302,18 @@ test("a Turn is admitted, events append, and the result settles immutably (#116)
     required: [],
     outputs: [],
     at: AT,
-    effectiveModel: "claude-opus-5",
+    agentEvidence: {
+      kind: "agent",
+      effectiveModel: "claude-opus-5",
+      identity: {
+        harness: "Claude Code",
+        executable: "/usr/bin/claude",
+        executableVersion: "1.2.3",
+      },
+    },
   });
   assert.ok(published.ok);
-  assert.equal(owner.effectiveModel(), "claude-opus-5");
+  assert.equal(owner.harnessEvidence()?.effectiveModel, "claude-opus-5");
 });
 
 test("a fenced owner refuses every Turn-side write and the authored pending gate, writing nothing (A51)", async (t) => {
@@ -1478,11 +1486,14 @@ test("the latest Agent-step Attempt's Harness identity is durable across reopeni
       required: [],
       outputs: [],
       at: new Date("2026-09-12T12:00:01.000Z"),
-      harnessIdentity: {
-        harness: "Claude Code",
-        executable: "/old/claude",
-        executableVersion: "0.9.0",
-        steer: { available: false, evidence: "old profile evidence" },
+      agentEvidence: {
+        kind: "agent",
+        identity: {
+          harness: "Claude Code",
+          executable: "/old/claude",
+          executableVersion: "0.9.0",
+          steer: { available: false, evidence: "old profile evidence" },
+        },
       },
     });
     // The latest Agent Attempt under the profile the identity must report — with an
@@ -1493,21 +1504,26 @@ test("the latest Agent-step Attempt's Harness identity is durable across reopeni
       required: [],
       outputs: [],
       at: new Date("2026-09-12T12:00:02.000Z"),
-      effectiveModel: "claude-opus-5",
-      harnessIdentity: {
+      agentEvidence: {
+        kind: "agent",
+        effectiveModel: "claude-opus-5",
+        identity: {
+          harness: "Claude Code",
+          executable: "/usr/bin/claude",
+          executableVersion: "1.2.3",
+          steer: { available: false, evidence: "print mode has no steer" },
+        },
+      },
+    });
+    assert.deepEqual(owner.harnessEvidence(), {
+      identity: {
         harness: "Claude Code",
         executable: "/usr/bin/claude",
         executableVersion: "1.2.3",
         steer: { available: false, evidence: "print mode has no steer" },
       },
+      effectiveModel: "claude-opus-5",
     });
-    assert.deepEqual(owner.harnessIdentity(), {
-      harness: "Claude Code",
-      executable: "/usr/bin/claude",
-      executableVersion: "1.2.3",
-      steer: { available: false, evidence: "print mode has no steer" },
-    });
-    assert.equal(owner.effectiveModel(), "claude-opus-5");
     owner.release();
     owner.close();
   }
@@ -1520,13 +1536,15 @@ test("the latest Agent-step Attempt's Harness identity is durable across reopeni
   const owner2 = reopened.acquireRun(created.runId);
   assert.ok(owner2 !== undefined);
   t.after(() => owner2.close());
-  assert.deepEqual(owner2.harnessIdentity(), {
-    harness: "Claude Code",
-    executable: "/usr/bin/claude",
-    executableVersion: "1.2.3",
-    steer: { available: false, evidence: "print mode has no steer" },
+  assert.deepEqual(owner2.harnessEvidence(), {
+    identity: {
+      harness: "Claude Code",
+      executable: "/usr/bin/claude",
+      executableVersion: "1.2.3",
+      steer: { available: false, evidence: "print mode has no steer" },
+    },
+    effectiveModel: "claude-opus-5",
   });
-  assert.equal(owner2.effectiveModel(), "claude-opus-5");
 });
 
 test("a Command-only Run has no Harness identity (#125)", async (t) => {
@@ -1544,7 +1562,35 @@ test("a Command-only Run has no Harness identity (#125)", async (t) => {
     outputs: [],
     at: AT,
   });
-  assert.equal(owner.harnessIdentity(), undefined);
+  assert.equal(owner.harnessEvidence(), undefined);
+});
+
+test("a legacy model-only Attempt remains readable as co-sourced Harness evidence", (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-legacy-model");
+  const owner = group.acquireRun(created.runId)!;
+  owner.publishAttempt({
+    attemptId: "0.0:legacy-agent",
+    outcome: "succeeded",
+    required: [],
+    outputs: [],
+    at: AT,
+  });
+  owner.close();
+
+  const raw = new Database(join(groupDirOf(home), created.runId, "run.db"));
+  raw
+    .query("UPDATE attempt SET effective_model = ? WHERE attempt_id = ?")
+    .run("legacy-model", "0.0:legacy-agent");
+  raw.close();
+
+  const reopened = group.acquireRun(created.runId)!;
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.harnessEvidence(), {
+    effectiveModel: "legacy-model",
+  });
 });
 
 test("a partial persisted steer capability is rejected at the Harness-identity read", (t) => {
@@ -1559,11 +1605,14 @@ test("a partial persisted steer capability is rejected at the Harness-identity r
     required: [],
     outputs: [],
     at: AT,
-    harnessIdentity: {
-      harness: "Claude Code",
-      executable: "/usr/bin/claude",
-      executableVersion: "1.2.3",
-      steer: { available: false, evidence: "profile evidence" },
+    agentEvidence: {
+      kind: "agent",
+      identity: {
+        harness: "Claude Code",
+        executable: "/usr/bin/claude",
+        executableVersion: "1.2.3",
+        steer: { available: false, evidence: "profile evidence" },
+      },
     },
   });
   owner.release();
@@ -1577,7 +1626,7 @@ test("a partial persisted steer capability is rejected at the Harness-identity r
 
   const corrupted = group.acquireRun(created.runId)!;
   t.after(() => corrupted.close());
-  assert.throws(() => corrupted.harnessIdentity());
+  assert.throws(() => corrupted.harnessEvidence());
 });
 
 test("Turn kind records both kinds in one Session, and a legacy row reads unknown (#126)", async (t) => {

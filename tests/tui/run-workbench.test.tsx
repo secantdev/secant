@@ -275,6 +275,9 @@ function runOf(over: Partial<RunView> = {}): RunView {
     ...(over.effectiveModel !== undefined
       ? { effectiveModel: over.effectiveModel }
       : {}),
+    ...(over.selectedHarness !== undefined
+      ? { selectedHarness: over.selectedHarness }
+      : {}),
     ...(over.harness !== undefined ? { harness: over.harness } : {}),
     ...(over.turnPosition !== undefined
       ? { turnPosition: over.turnPosition }
@@ -557,7 +560,10 @@ test("the header reports no model rather than inventing one, and omits the line 
     100,
     30,
   );
-  assert.doesNotMatch(commandOnly.t.captureCharFrame(), /model/);
+  const commandOnlyFrame = commandOnly.t.captureCharFrame();
+  assert.doesNotMatch(commandOnlyFrame, /Selected ·/);
+  assert.doesNotMatch(commandOnlyFrame, /Observed ·/);
+  assert.doesNotMatch(commandOnlyFrame, /model/);
 });
 
 test("the details panel toggles and shows identity, position, and resources", async () => {
@@ -679,10 +685,11 @@ test("the timeline follows the live edge as durable updates append events", asyn
   assert.match(t.captureCharFrame(), / e8/); // followed to the newest
 });
 
-test("live Turn preview and activity join the durable timeline, then authoritative content replaces the preview", async () => {
-  const { t, control } = await mountWorkbench(
+test("[selected-versus-observed-evidence] selected and observed Harness facts stay distinct through a live Turn", async () => {
+  const { t, control, renderer } = await mountWorkbench(
     runOf({
       progress: [{ id: "repair", kind: "agent", status: "running" }],
+      selectedHarness: "codex",
       effectiveModel: "claude-sonnet-4-5",
       harness: {
         name: "Claude Code",
@@ -713,15 +720,29 @@ test("live Turn preview and activity join the durable timeline, then authoritati
   });
   await t.renderOnce();
   const streaming = t.captureCharFrame();
-  assert.match(streaming, /Claude Code · \/usr\/bin\/claude · 1\.2\.3/);
+  assert.match(streaming, /Selected · codex/);
+  assert.match(
+    streaming,
+    /Observed · Claude Code · \/usr\/bin\/claude · 1\.2\.3/,
+  );
   assert.match(streaming, /model claude-sonnet-4-5/);
   assert.match(streaming, /Agent Turn · working/);
   assert.match(streaming, /Assistant preview · I am checking/);
   assert.match(streaming, /Activity · Edit src\/repair\.ts/);
 
+  renderer.resize(40, 24);
+  await t.renderOnce();
+  const compact = t.captureCharFrame();
+  assert.match(compact, /Selected · codex/);
+  assert.match(compact, /Observed · Claude Code/);
+  noOverflow(compact, 40);
+  renderer.resize(110, 24);
+  await t.renderOnce();
+
   control.setRun(
     runOf({
       progress: [{ id: "repair", kind: "agent", status: "succeeded" }],
+      selectedHarness: "codex",
       effectiveModel: "claude-sonnet-4-5",
       harness: {
         name: "Claude Code",
@@ -1341,6 +1362,7 @@ test("a halted Run shows the materialization conflict path as a top-level line, 
 test("a selected-Harness preparation Problem is visible without colour and survives narrow resize", async () => {
   const run = runOf({
     state: "halted",
+    selectedHarness: "codex",
     problem: {
       code: "selected-harness-unavailable",
       explanation: "Codex could not be prepared (authentication).",
@@ -1351,12 +1373,16 @@ test("a selected-Harness preparation Problem is visible without colour and survi
   });
   const { t, renderer } = await mountWorkbench(run, 100, 30);
   let frame = t.captureCharFrame();
+  assert.match(frame, /Selected · codex/);
+  assert.doesNotMatch(frame, /Observed ·/);
+  assert.doesNotMatch(frame, /model /);
   assert.match(frame, /selected-harness-unavailable/);
   assert.match(frame, /authentication/);
   assert.match(frame, /Log in separately through Codex/);
   renderer.resize(40, 24);
   await t.renderOnce();
   frame = t.captureCharFrame();
+  assert.match(frame, /Selected · codex/);
   assert.match(frame, /selected-harness-unavailable/);
   noOverflow(frame, 40);
 });

@@ -130,6 +130,7 @@ function runResult(
   if ("problem" in derived) return { found: false, problem: derived.problem };
   const facts = derived.facts;
   const trackedState = context.state ?? record.state;
+  const selectedHarness = record.selectedHarness;
   // Legality of cancel/delete is decided here, inside Secant (#87): an owned Run
   // can be cancelled; an unowned resting or terminal Run can be deleted. Read from the coordination record, which
   // is the same whether the Run is live in this process or another.
@@ -191,12 +192,13 @@ function runResult(
         : undefined;
     const turnEvents = owner?.turnEvents() ?? [];
     const sessions = owner?.harnessSessions() ?? [];
-    const effectiveModel = owner?.effectiveModel();
+    const harnessEvidence = owner?.harnessEvidence();
+    const effectiveModel = harnessEvidence?.effectiveModel;
     // The normalized Harness identity of the latest Agent-step Attempt (#125): durable
     // profile facts read back through the owner, empty for a Command-only Run (and for a
     // Run live elsewhere, read without an owner), so the frozen `--json` stays unchanged
     // for those.
-    const harnessIdentity = owner?.harnessIdentity();
+    const harnessIdentity = harnessEvidence?.identity;
     const steer = context.steer ?? harnessIdentity?.steer;
     return {
       found: true,
@@ -297,6 +299,7 @@ function runResult(
             }
           : {}),
         ...(effectiveModel !== undefined ? { effectiveModel } : {}),
+        ...(selectedHarness !== undefined ? { selectedHarness } : {}),
         ...(harnessIdentity !== undefined
           ? {
               harness: {

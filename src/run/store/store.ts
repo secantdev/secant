@@ -163,7 +163,8 @@ export interface CandidateOutput {
   readonly content: Uint8Array;
 }
 
-/** One Step Attempt's outcome and, when it succeeded, the outputs to publish. */
+/** One Step Attempt's outcome and evidence. Agent evidence is one bundled value,
+ *  so current writes cannot persist a model without its qualified identity. */
 export interface PublishAttemptRequest {
   readonly attemptId: string;
   readonly outcome: AttemptOutcome;
@@ -175,14 +176,15 @@ export interface PublishAttemptRequest {
   readonly at: Date;
   /** Optional canonical Run state to advance to in the same transaction. */
   readonly advanceState?: string;
-  /** The effective model an Agent-step Attempt ran under (#116), recorded on the
-   *  Attempt. Absent for a Command/Gate Attempt. */
+  /** Present for autonomous Agent Attempts; absent for Command/Gate and synthetic
+   *  interactive Attempts. */
+  readonly agentEvidence?: AgentAttemptEvidence;
+}
+
+export interface AgentAttemptEvidence {
+  readonly kind: "agent";
+  readonly identity: HarnessIdentityRecord;
   readonly effectiveModel?: string;
-  /** The normalized Harness identity an Agent-step Attempt qualified under, from the
-   *  prepared Harness profile (#125): Harness name, resolved executable, and observed
-   *  executable version. Recorded together on the Attempt so it survives reopening and
-   *  resume. Absent for a Command/Gate Attempt, which runs no Harness. */
-  readonly harnessIdentity?: HarnessIdentityRecord;
 }
 
 /** The normalized Harness identity recorded on an Agent-step Attempt (#125). Carries
@@ -196,6 +198,15 @@ export interface HarnessIdentityRecord {
    *  only on an Attempt written before the capability was persisted. */
   readonly steer?: SteerCapability;
 }
+
+/** One Attempt's co-sourced observed Harness evidence. The identity-less variant
+ *  is read compatibility for legacy model-only rows; current writes cannot create it. */
+export type HarnessEvidenceRecord =
+  | {
+      readonly identity: HarnessIdentityRecord;
+      readonly effectiveModel?: string;
+    }
+  | { readonly identity?: undefined; readonly effectiveModel: string };
 
 /** The outcome of a publication attempt. A fenced owner or an unstageable set
  *  moves no binding and settles nothing. */
@@ -505,13 +516,9 @@ export interface RunOwner {
    *  stable paging: it reads only the requested page, never the whole transcript,
    *  so inspecting a page never materializes the complete export. */
   transcriptPage(request: TranscriptPageRequest): TranscriptPage;
-  /** The most recent Attempt's effective model, or undefined when none ran a
-   *  Harness Turn. */
-  effectiveModel(): string | undefined;
-  /** The normalized Harness identity of the latest Agent-step Attempt (the latest
-   *  Attempt that recorded a Harness), or undefined when none ran a Harness Turn — a
-   *  Command-only Run (#125). */
-  harnessIdentity(): HarnessIdentityRecord | undefined;
+  /** The latest Agent-step Attempt's co-sourced identity and optional model, or
+   *  legacy model-only evidence. Undefined when no Attempt ran a Harness Turn. */
+  harnessEvidence(): HarnessEvidenceRecord | undefined;
   /** Release this Run only if this owner still holds the fencing epoch. A stale
    *  owner cannot clear ownership acquired by a takeover. */
   release(): WriteResult;

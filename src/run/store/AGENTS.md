@@ -82,10 +82,10 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   raw; the Projection narrows it to the client union at its read ingress (D7).
 - The `attempt` row also carries the normalized Harness identity and steer evidence of an Agent-step Attempt (#125, #134):
   `harness`/`executable`/`executable_version` plus `steer_available`/`steer_evidence`, written together by `publishAttempt` from the prepared profile (all null for a
-  Command/Gate Attempt). `harnessIdentity()` returns the latest Attempt with a
-  non-null `harness` — so `harness` non-null is what marks an Agent-step Attempt, independent of `effective_model` (which stays null when the Turn observed
-  no model). It is recorded on every autonomous Agent Step outcome, including `cancelled`/`indeterminate` and the recovery-refused failure; the interactive-agent
-  Step's synthetic Attempt (#122) records neither identity nor effective model, so a purely-interactive Run projects no identity — the same scope both facts share.
+  Command/Gate Attempt). The `PublishAttemptRequest` union permits an identity plus optional model or neither, never a new model-only row. `harnessEvidence()` reads both
+  facts from the one latest Agent-evidence row, so a model-less resumed Attempt clears the projected model rather than inheriting an older value. A non-null model still
+  admits an explicit legacy model-only row written before identity existed. Identity is recorded on every autonomous Agent Step outcome, including
+  `cancelled`/`indeterminate` and recovery refusal; the interactive-agent Step's synthetic Attempt (#122) records neither, so a purely-interactive Run projects none (#147).
 - Transcript ordering (#124): `transcript_entry.seq` is an `INTEGER PRIMARY KEY`, i.e. an alias for the database-wide rowid, so it is monotonic across the whole `run.db`, not
   per Session; a page filters it by Session key and pages upward by `seq` (`before`). The rowid alias is exactly why a page cursor stays stable — appending later rows never
   renumbers earlier ones — so an opaque `before` cursor keeps naming the same boundary.

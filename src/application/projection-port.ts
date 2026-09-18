@@ -713,6 +713,9 @@ export interface RunView {
   readonly sessions?: readonly RunSessionView[];
   /** The effective model the latest Agent-step Attempt ran under (#116). */
   readonly effectiveModel?: string;
+  /** The immutable semantic Harness selected for this Run before its first
+   *  Attempt. Additive to the frozen `--json`; absent for Command-only Runs. */
+  readonly selectedHarness?: HarnessChoice["id"];
   /** The normalized Harness identity that qualified the current or latest Agent-step
    *  Attempt (#125): Harness name, resolved executable, and observed executable
    *  version. Additive to the frozen `--json`; absent for a Command-only Run. */

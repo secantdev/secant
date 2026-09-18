@@ -8,8 +8,10 @@ import {
   type AssetKind,
   type AttemptOutcome,
   type Reference,
+  type StepKindName,
 } from "../../workflow/workflow.js";
 import type {
+  AgentAttemptEvidence,
   CandidateOutput,
   HarnessIdentityRecord,
   RunOwner,
@@ -854,15 +856,36 @@ function resultAvailability(
   return { state: "open" };
 }
 
-/** The Harness-identity fields to record on an Attempt (#125), spread into a
- *  `publishAttempt` request. Empty for a Command/Gate Attempt (no identity), so it
- *  adds nothing there. */
-export function attemptIdentity(result: StepAttempt): {
-  harnessIdentity?: HarnessIdentityRecord;
-} {
-  return result.harnessIdentity !== undefined
-    ? { harnessIdentity: result.harnessIdentity }
-    : {};
+/** The co-sourced Harness evidence to record on an autonomous Agent Attempt.
+ *  `runAgentStep` calls this only for Agent results, whose qualified profile must
+ *  always supply identity; a missing one is an internal invariant failure. */
+export function attemptEvidence(
+  stepKind: StepKindName,
+  result: StepAttempt,
+): { readonly agentEvidence?: AgentAttemptEvidence } {
+  if (stepKind !== "agent") {
+    if (
+      result.harnessIdentity !== undefined ||
+      result.effectiveModel !== undefined
+    ) {
+      throw new Error(
+        `run execution: a ${stepKind} Attempt carried Agent evidence.`,
+      );
+    }
+    return {};
+  }
+  if (result.harnessIdentity === undefined) {
+    throw new Error("run execution: an Agent Attempt has no Harness identity.");
+  }
+  return {
+    agentEvidence: {
+      kind: "agent",
+      identity: result.harnessIdentity,
+      ...(result.effectiveModel !== undefined
+        ? { effectiveModel: result.effectiveModel }
+        : {}),
+    },
+  };
 }
 
 /** The normalized Harness identity for an autonomous Agent Step Attempt (#125), read

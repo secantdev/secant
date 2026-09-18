@@ -94,6 +94,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; reuses the single-active-index selection model of `bundle-list.tsx`).
 - `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-screen status wording — keep it matching `headless/render.ts` so
   the TUI and headless surfaces say the same thing about the same fact.
-- The Workbench header's Harness line reads the durable `run.harness` view (#125) — name, executable, version, plus the effective model — never a hardcoded
-  "Claude Code"; the compact form drops the (long) executable path to fit. It renders only when `run.harness` is present (an Agent-step Attempt settled),
-  so a Command-only Run shows no line, and during the very first live Turn (before its Attempt settles) there is no identity to show yet.
+- The Workbench header renders durable `run.selectedHarness` on a worded `Selected` line and latest-Attempt `run.harness`/`effectiveModel` on a separate
+  `Observed` line (#125, #147). Before an Attempt only selection appears; the compact observed line drops the executable path. Command-only Runs show neither,
+  and `headerRows()` counts each independently so small layouts reserve exactly the rows they render.

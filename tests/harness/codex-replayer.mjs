@@ -5,6 +5,7 @@ import { appendFileSync, cpSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
+import { replayRecordedLine } from "./codex-replay-path.ts";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const recording = JSON.parse(
@@ -56,10 +57,7 @@ const outstandingApprovals = new Map();
 let steerNumber = 0;
 
 function replayLine(line) {
-  const escapedWorkspace = JSON.stringify(
-    requestedWorkspace ?? process.cwd(),
-  ).slice(1, -1);
-  return line.replaceAll("«WORKSPACE»", escapedWorkspace);
+  return replayRecordedLine(line, requestedWorkspace ?? process.cwd());
 }
 
 function expectedStdinLine(recordedLine, actualLine) {

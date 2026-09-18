@@ -17,6 +17,10 @@ const source = join(
   dirname(fileURLToPath(import.meta.url)),
   "codex-replayer.mjs",
 );
+const replayPathSource = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "codex-replay-path.ts",
+);
 const fixtureRoot = join(
   dirname(fileURLToPath(import.meta.url)),
   "fixtures",
@@ -227,6 +231,7 @@ export function installCodexReplayer(
     copyFileSync(source, join(directory, "codex.mjs"));
     writeFileSync(windowsShimPath, npmBunShim("codex.mjs"));
   }
+  copyFileSync(replayPathSource, join(directory, "codex-replay-path.ts"));
 
   let executableVersion = fixtureRecording.executableVersion;
   let versionExitCode: number | undefined;

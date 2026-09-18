@@ -6,8 +6,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 - The public entry (`harness.ts`) is the whole Interface surface: the Adapter Interface, the evidence-bearing profile, and the factory a
   composition root calls. No native frame, protocol type, or conversation-id value crosses it; the declared exceptions are the Workspace path
-  (`PrepareOptions.workspace`, the directory every Session runs against) and two named test seams — the session-id generator (`overrides.sessionId`) and
-  the Claude-native executable env constant (`CLAUDE_CODE_EXECUTABLE_ENV`, `SECANT_CLAUDE_CODE`). Recovery coordinates cross the Seam only as opaque values
+  (`PrepareOptions.workspace`, the directory every Session runs against), three named test seams — the session-id generator (`overrides.sessionId`), the
+  Session process spawn (`overrides.spawn`, a scripted stand-in for the process Module's child) and the Claude-native executable env constant
+  (`CLAUDE_CODE_EXECUTABLE_ENV`, `SECANT_CLAUDE_CODE`) — and the permission-bridge factory (`startPermissionBridge`), exported so the fixture recorder
+  composes the production bridge instead of a copy (#127 D3); its surface is launch flags, the bearer, a redactor and a teardown, never an MCP type.
+  Recovery coordinates cross the Seam only as opaque values
   (`RecoveryCoordinate`), never Run truth — nothing above the Seam decides anything from their contents. Native Adapters,
   protocol models, and qualification stay private to each Adapter and re-export nothing native.
 - No Routing, Step kind, retry budget, or Run policy knowledge lives here; those are above the Seam. A Turn is one mechanical exchange, not a
@@ -25,11 +28,17 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `close` is idempotent and returns the same report each call; cleanup failure is separate and cannot rewrite a settled Turn.
 - Secrets Secant itself introduces are redacted from failures and diagnostics. Excluding raw protocol, private reasoning, and duplicate transcript
   content is Interface design, not generic secret redaction — a `HarnessFailure` still preserves all useful Harness-originated diagnostics and its cause.
+- Steer is a profile capability like the others (`HarnessProfile.steer`, evidence-bearing). An Adapter derives its `steer` receipt from it rather than
+  hard-coding a second rejection; the Claude Code profile declares it unavailable (print mode has no same-Turn guidance frame) and the fake's script
+  decides it through the profile it supplies.
 
 ## Invariants (interrupt, recovery, cleanup)
 
 - Confirmed interruption uses the process Module's `interrupt(gracefulMs)`, which reports whether a forced escalation was needed. A graceful stop ends
-  the Turn `interrupted` (process-only); a force-kill or unconfirmed termination ends it `lost` with `interruption-unknown`. `onClosed` yields to an
+  the Turn `interrupted` (process-only); a force-kill or unconfirmed termination ends it `lost` with `interruption-unknown`. On Windows the graceful
+  stage is `taskkill /T` without `/F`, which only a window can honour, so a hidden console Claude Code (or replayer) survives it, the forced stage is
+  escalated, and every Windows interrupt of a live Turn truthfully settles `lost` after the graceful bound (#127 A6); the conformance
+  `interruptOutcome` option pins that per OS. `onClosed` yields to an
   in-flight interrupt so the two never race the result: a confirmed interrupt claims the process before awaiting, and the close path (`onClosed`) returns
   early when `this.process !== owned`, leaving the interrupt to settle the one authoritative result.
 - Recovery is caller- and history-driven: a relaunch of a Session that already ran, or any Turn carrying `resume`, spawns with `--resume` (never a fresh
@@ -45,8 +54,14 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   path with identical bytes ⇒ the probed version cannot have changed, so the cached profile is reused without re-running `--version`; any drift in path or
   identity requalifies, and folding the source into the key stops a reused profile reporting a stale source.
 - The permission bridge mints a 256-bit per-Run bearer token for its loopback MCP server; the token lives only in the `--mcp-config` argv and the server's
-  constant-time auth check. `redactSecret` (`redactToken`) is the one place it is scrubbed — from a spawn error's cause, whose argv would otherwise carry
-  it back as a diagnostic.
+  constant-time auth check. The Session holds the bridge's `redactSecret` from launch and routes every failure cause originating below launch through it
+  (`scrub` on each close observation; the stdin-write and stdout-read errors and the captured stderr text too), so the rule is "redact at the Seam",
+  not one spawn-error path (#127 A22).
+- The stream-json protocol model is the private `claude-code/frames.ts`: one `zod` schema per known frame type (`init`, `assistant`, `user`,
+  `stream_event`, `result`, `telemetry`), parsed per frame by `parseFrame`, with the pure readers and the only raw-field accessors. Only the fields dispatch
+  iterates over are structurally required (a message's content array, a stream event's object; a `result` always settles, a missing `subtype` as
+  `unknown-result`); every other field degrades to absent (`.catch(undefined)`), unknown fields pass through, and a known type whose
+  parse fails or an unknown type is generic activity — never protocol corruption. `claude-code.ts` dispatches on `ParsedFrame` and reads no raw field.
 - `OwnedProcess.writeStdin` resolves only after both the write callback has fired without error and the stream has drained (it waits for the `drain` event
   when `write` returned `false`); an error rejects. The Turn's bytes are accepted before the write promise settles, which is what the durable-admission
   ordering rests on.
@@ -69,16 +84,19 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   synthetic) `tests/harness/fixtures/<harness>/<case>/` tree, its `recording.json` sidecar, and the opt-in `record.ts` tool.
 - The conformance suite is the Seam's executable specification, parameterized by an Adapter factory. `runPrepareProfileCases` and `runTurnLifecycleCases`
   and `runInterruptRecoveryCases` (interrupt, unresponsive-interrupt, lost-completion, resume ack/no-ack, close-mid-Turn) and `runApprovalRequestCases`
-  run against both the fake and the Claude Code Adapter over the replayer. Only four tail cases stay fake-only: native steer, structured clarifications,
-  the after-acceptance recovery checkpoint, and the caller-contract violations (the only things this Interface throws for). The fake must exhibit
-  behaviours a real Harness never will (native steer, structured clarifications, load-with-replay recovery, several concurrent requests, every `lost`
-  variant) and is never the only end-to-end double (ADR 0027).
+  run against both the fake and the Claude Code Adapter over the replayer. Only five tail cases stay fake-only: native steer, structured clarifications,
+  the after-acceptance recovery checkpoint, load-with-replay recovery, and the caller-contract violations (the only things this Interface throws for).
+  The fake must exhibit behaviours a real Harness never will (native steer, structured clarifications, load-with-replay recovery, several concurrent
+  requests, every `lost` variant) and is never the only end-to-end double (ADR 0027). The fake performs load-with-replay rather than advertising it: a
+  resumed Turn re-emits the Session's transcript history (`assistant-content`, `tool-activity`), drops a scripted entry that repeats a replayed one, then
+  emits `REPLAY_BARRIER` (an `activity`) before any live event — history is historical by position, inside the closed vocabulary.
 - **`bun test` startup-signal race:** a Bun child's `process.on("SIGTERM")` handler is only honoured once installed — a SIGTERM delivered before the
   child's top-level code runs hits the default disposition and kills it (this is a startup race, not a `bun test` limitation; plain `bun` shows the same
   window). So the replayer installs its SIGTERM handler at startup, and interrupt/close cases wait for the `session` event (init observed) before
   interrupting. Never signal a freshly spawned child before it has announced readiness.
-- The replayer's `case.json` carries the interrupt/recovery vocabulary: `ignoreSigterm` (swallow SIGTERM → force-kill path), per-turn `exitAfter` (exit
-  without a result → lost/corruption), and a `resume` section replayed when the launch has `--resume`.
+- The replayer's `case.json` carries the interrupt/recovery vocabulary: `ignoreSigterm` (swallow SIGTERM → force-kill path; moot on Windows, where the
+  hidden console child survives the graceful stage regardless), per-turn `exitAfter` (exit without a result → lost/corruption), and a `resume` section
+  replayed when the launch has `--resume`.
 
 ## Read next
 

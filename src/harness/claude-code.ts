@@ -2,8 +2,9 @@
 // from `harness.ts` only through its factory. It discovers and qualifies the
 // executable, then owns named stream-json Sessions and normalizes their Turns.
 // Process spawning, pipe backpressure, and cleanup stay in the `process` Module;
-// Claude-native frames and identifiers stay behind this Seam. The MCP permission
-// bridge and detached-Session recovery land in later slices.
+// Claude-native frames and identifiers stay behind this Seam: the stream-json
+// protocol model (schemas and pure readers) is the private `claude-code/frames.ts`,
+// and this file only dispatches on what it parsed.
 
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
@@ -15,6 +16,20 @@ import {
   type OwnedProcess,
   type OwnedProcessClose,
 } from "../process/process.js";
+import {
+  contentBlocks,
+  encodeTurn,
+  genericActivity,
+  isAuthenticationResult,
+  parseFrame,
+  sessionFacts,
+  usageObservation,
+  type InitFrame,
+  type MessageFrame,
+  type ParsedFrame,
+  type ResultFrame,
+  type StreamEventFrame,
+} from "./claude-code/frames.js";
 import { APPROVAL_DECISIONS } from "./harness.js";
 import type {
   CleanupReport,
@@ -34,13 +49,13 @@ import type {
   RequestId,
   SessionAvailability,
   SessionFacts,
+  SteerCapability,
   SteerInput,
   TurnEvent,
   TurnEventListener,
   TurnRequest,
   TurnResult,
   TurnSubscription,
-  UsageObservation,
 } from "./harness.js";
 import {
   EXPIRED_MESSAGE,
@@ -94,6 +109,10 @@ export interface ClaudeCodeAdapterOverrides {
   readonly probeTimeoutMs?: number;
   /** Override UUID generation for deterministic protocol replay. */
   readonly sessionId?: () => string;
+  /** Replace the Session process spawn, so a scripted process can hand the
+   *  Adapter close observations (a cleanup error, an unconfirmed kill) that a
+   *  real child cannot be made to produce on demand. */
+  readonly spawn?: typeof spawnOwnedProcess;
 }
 
 /** The factory a composition root calls. Satisfies `HarnessAdapterFactory` when
@@ -163,6 +182,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
           target,
           options.workspace,
           this.overrides.sessionId ?? randomUUID,
+          this.overrides.spawn ?? spawnOwnedProcess,
         ),
       };
     }
@@ -179,6 +199,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
         target,
         options.workspace,
         this.overrides.sessionId ?? randomUUID,
+        this.overrides.spawn ?? spawnOwnedProcess,
       ),
     };
   }
@@ -314,6 +335,7 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
     private readonly target: DiscoveredTarget,
     private readonly workspace: string,
     private readonly createSessionId: () => string,
+    private readonly spawn: typeof spawnOwnedProcess,
   ) {}
 
   /** Memoized bridge start. Its router raises each permission prompt on whatever
@@ -363,12 +385,18 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
         this.workspace,
         coordinate,
         () => this.ensureBridge(),
+        this.spawn,
       );
       this.sessions.set(request.session, session);
     }
-    const turn = new ClaudeCodeTurn(request, session, () => {
-      if (this.active === turn) this.active = undefined;
-    });
+    const turn = new ClaudeCodeTurn(
+      request,
+      session,
+      this.profile.steer,
+      () => {
+        if (this.active === turn) this.active = undefined;
+      },
+    );
     this.active = turn;
     session.start(turn);
     return turn;
@@ -455,6 +483,13 @@ class ClaudeCodeSession {
   private unusableReason: string | undefined;
   private effectiveModel: ModelObservation = { known: false };
   private stderr = "";
+  /** The bridge's bearer redactor, held from launch so every failure cause that
+   *  originates below launch — a close while a Turn is live, an unconfirmed
+   *  interrupt, a cleanup error, a pipe failure — crosses the Seam scrubbed
+   *  (#127 A22). The rule is "redact at the Seam", not "redact where a leak was
+   *  found". Identity until a bridge exists: before launch no Secant secret has
+   *  been introduced. */
+  private redact: (value: unknown) => unknown = (value) => value;
 
   constructor(
     readonly name: string,
@@ -462,6 +497,7 @@ class ClaudeCodeSession {
     private readonly workspace: string,
     sessionId: string,
     private readonly ensureBridge: () => Promise<PermissionBridge>,
+    private readonly spawn: typeof spawnOwnedProcess,
   ) {
     this.coordinate = { opaque: sessionId };
   }
@@ -514,7 +550,7 @@ class ClaudeCodeSession {
     this.active = undefined;
     const outcome = await owned.interrupt(DEFAULT_CLEANUP_TIMEOUT_MS);
     if (turn.settled) return;
-    const close = outcome.close;
+    const close = this.scrub(outcome.close);
     if (close.kind === "cleanup-error" || close.kind === "cleanup-timeout") {
       turn.settleLost("interruption", turn.lastObservation, {
         phase: "control",
@@ -561,7 +597,9 @@ class ClaudeCodeSession {
         availability: this.detached(),
       };
     }
-    const result = await owned.closeStdin(DEFAULT_CLEANUP_TIMEOUT_MS);
+    const result = this.scrub(
+      await owned.closeStdin(DEFAULT_CLEANUP_TIMEOUT_MS),
+    );
     const clean = isCleanClose(result);
     const detail = describeClose(this.name, result);
     const availability: SessionAvailability =
@@ -644,7 +682,7 @@ class ClaudeCodeSession {
         phase: "turn",
         category: "stdin-write",
         possibleEffects: "possible",
-        cause: error,
+        cause: this.redact(error),
       });
       void this.interrupt(turn);
       return;
@@ -668,6 +706,7 @@ class ClaudeCodeSession {
     if (this.closed) {
       return { ok: false, category: "closed-before-launch", cause: undefined };
     }
+    this.redact = (value) => bridge.redactSecret(value);
     // A first launch mints the Session with `--session-id`; any relaunch (an
     // explicit resume coordinate, or a Session that already ran and detached)
     // reattaches with `--resume`, never a silent fresh conversation.
@@ -679,7 +718,7 @@ class ClaudeCodeSession {
     const sessionArgs = resuming
       ? ["--resume", this.coordinate.opaque]
       : ["--session-id", this.coordinate.opaque];
-    const launched = await spawnOwnedProcess({
+    const launched = await this.spawn({
       executable: this.target.executable,
       args: [
         ...this.target.prefixArgs,
@@ -691,13 +730,10 @@ class ClaudeCodeSession {
         "--verbose",
         "--include-partial-messages",
         ...sessionArgs,
-        // The MCP permission bridge: Claude relays every permission prompt to
-        // this loopback tool and waits on it. The inline config carries the
-        // per-Run bearer token; it is the only place the token appears.
-        "--mcp-config",
-        bridge.mcpConfigArg,
-        "--permission-prompt-tool",
-        bridge.toolName,
+        // The permission bridge: Claude relays every permission prompt to this
+        // loopback tool and waits on it. The inline config carries the per-Run
+        // bearer token; it is the only place the token appears.
+        ...bridge.launchArgs,
       ],
       cwd: this.workspace,
       env: process.env,
@@ -709,20 +745,21 @@ class ClaudeCodeSession {
       return {
         ok: false,
         category: launched.failure.kind,
-        cause: bridge.redactSecret(launched.failure.cause),
+        cause: this.redact(launched.failure.cause),
       };
     }
 
     const owned = launched.process;
     this.process = owned;
     void this.consumeStdout(owned).catch((error) => {
+      const redacted = this.redact(error);
       this.active?.protocolCorruption(
-        `stdout read failed: ${describe(error)}`,
-        error,
+        `stdout read failed: ${describe(redacted)}`,
+        redacted,
       );
     });
     void this.consumeStderr(owned).catch((error) => {
-      this.stderr += ` stderr read failed: ${describe(error)}`;
+      this.stderr += ` stderr read failed: ${describe(this.redact(error))}`;
     });
     void owned.closed().then((result) => this.onClosed(owned, result));
     return { ok: true };
@@ -772,17 +809,22 @@ class ClaudeCodeSession {
     try {
       frame = JSON.parse(trimmed);
     } catch (error) {
-      this.active?.protocolCorruption("malformed JSON frame", error);
+      this.active?.protocolCorruption(
+        "malformed JSON frame",
+        this.redact(error),
+      );
       return;
     }
-    if (!isRecord(frame)) return;
-    this.active?.acceptFrame(frame);
+    const parsed = parseFrame(frame);
+    if (parsed === undefined) return;
+    this.active?.acceptFrame(parsed);
   }
 
-  private onClosed(owned: OwnedProcess, result: OwnedProcessClose): void {
+  private onClosed(owned: OwnedProcess, close: OwnedProcessClose): void {
     // A confirmed interrupt claims the process before awaiting, so once it is in
     // flight `this.process !== owned` and the interrupt owns the result here.
     if (this.process !== owned) return;
+    const result = this.scrub(close);
     this.process = undefined;
     const turn = this.active;
     this.active = undefined;
@@ -810,12 +852,24 @@ class ClaudeCodeSession {
     });
   }
 
+  /** A close observation with its cause passed through the bearer redactor, so
+   *  both the cause and every diagnostic string derived from it are scrubbed. */
+  private scrub(close: OwnedProcessClose): OwnedProcessClose {
+    if (close.kind === "cleanup-error" || close.kind === "spawn-error") {
+      return { kind: close.kind, cause: this.redact(close.cause) };
+    }
+    return close;
+  }
+
   private detached(): SessionAvailability {
     return { state: "detached", coordinate: this.coordinate };
   }
 
+  /** Captured stderr as a diagnostic suffix, scrubbed like every other text
+   *  that crosses the Seam from below launch: a child that echoed its argv on
+   *  failure would otherwise carry the bearer back verbatim. */
   private diagnostics(): string {
-    const text = this.stderr.trim();
+    const text = String(this.redact(this.stderr)).trim();
     return text.length === 0 ? "" : ` stderr: ${text}`;
   }
 }
@@ -850,6 +904,7 @@ class ClaudeCodeTurn implements HarnessTurn {
   constructor(
     request: TurnRequest,
     private readonly session: ClaudeCodeSession,
+    private readonly steerCapability: SteerCapability,
     private readonly onSettled: () => void,
   ) {
     this.request = request;
@@ -869,11 +924,10 @@ class ClaudeCodeTurn implements HarnessTurn {
   }
 
   steer(_input: SteerInput): Promise<ControlReceipt> {
-    return Promise.resolve(
-      this.settled || this.interrupting
-        ? { outcome: "rejected", reason: "expired" }
-        : { outcome: "rejected", reason: "unsupported" },
-    );
+    if (this.settled || this.interrupting) {
+      return Promise.resolve({ outcome: "rejected", reason: "expired" });
+    }
+    return Promise.resolve(steerReceipt(this.steerCapability));
   }
 
   async interrupt(): Promise<ControlReceipt> {
@@ -1002,34 +1056,35 @@ class ClaudeCodeTurn implements HarnessTurn {
     }, timeoutMs);
   }
 
-  acceptFrame(frame: Record<string, unknown>): void {
+  /** Dispatch one parsed frame. A known type whose schema failed arrives as
+   *  `other` and is generic activity, never corruption (frames.ts). */
+  acceptFrame(parsed: ParsedFrame): void {
     if (this.settled) return;
-    const type = stringField(frame, "type");
-    if (type === "system" && stringField(frame, "subtype") === "init") {
-      this.acceptInit(frame);
+    if (parsed.kind === "init") {
+      this.acceptInit(parsed.frame);
       return;
     }
     if (!this.session.isInitialized()) {
-      if (type !== "result") this.emit(genericActivity(type));
+      if (parsed.kind !== "result") this.emit(genericActivity(parsed.type));
       return;
     }
-    switch (type) {
+    switch (parsed.kind) {
       case "assistant":
-        this.acceptAssistant(frame);
+        this.acceptAssistant(parsed.frame);
         return;
       case "user":
-        this.acceptToolResults(frame);
+        this.acceptToolResults(parsed.frame);
         return;
-      case "stream_event":
-        this.acceptStreamEvent(frame);
+      case "stream-event":
+        this.acceptStreamEvent(parsed.frame);
         return;
       case "result":
-        this.acceptResult(frame);
+        this.acceptResult(parsed.frame);
         return;
       case "telemetry":
         return;
-      default:
-        this.emit(genericActivity(type));
+      case "other":
+        this.emit(genericActivity(parsed.type));
     }
   }
 
@@ -1127,9 +1182,9 @@ class ClaudeCodeTurn implements HarnessTurn {
     });
   }
 
-  private acceptInit(frame: Record<string, unknown>): void {
+  private acceptInit(frame: InitFrame): void {
     this.clearHandshake();
-    const nativeSessionId = stringField(frame, "session_id");
+    const nativeSessionId = frame.session_id;
     if (nativeSessionId !== this.session.coordinate.opaque) {
       // A resume that the Harness does not acknowledge is a recovery failure that
       // makes the Session unusable — never a silent fresh conversation. A fresh
@@ -1151,7 +1206,7 @@ class ClaudeCodeTurn implements HarnessTurn {
       void this.session.interrupt(this);
       return;
     }
-    const modelName = stringField(frame, "model");
+    const modelName = frame.model;
     const model: ModelObservation =
       modelName === undefined
         ? { known: false }
@@ -1164,12 +1219,12 @@ class ClaudeCodeTurn implements HarnessTurn {
     this.emit({ kind: "activity", description: describeSessionFacts(facts) });
   }
 
-  private acceptAssistant(frame: Record<string, unknown>): void {
-    const parentActivity = optionalString(frame.parent_tool_use_id);
+  private acceptAssistant(frame: MessageFrame): void {
+    const parentActivity = frame.parent_tool_use_id ?? undefined;
     for (const block of contentBlocks(frame)) {
-      const blockType = stringField(block, "type");
+      const blockType = block.type;
       if (blockType === "text") {
-        const content = stringField(block, "text");
+        const content = block.text;
         if (content !== undefined) {
           this.clearPreview();
           this.lastObservation = `assistant content: ${truncate(content)}`;
@@ -1182,8 +1237,8 @@ class ClaudeCodeTurn implements HarnessTurn {
         continue;
       }
       if (blockType !== "tool_use") continue;
-      const tool = stringField(block, "name") ?? "unknown tool";
-      const id = stringField(block, "id");
+      const tool = block.name ?? "unknown tool";
+      const id = block.id;
       if (id !== undefined) this.tools.set(id, tool);
       this.emit({
         kind: "tool-activity",
@@ -1197,11 +1252,11 @@ class ClaudeCodeTurn implements HarnessTurn {
     }
   }
 
-  private acceptToolResults(frame: Record<string, unknown>): void {
-    const parentActivity = optionalString(frame.parent_tool_use_id);
+  private acceptToolResults(frame: MessageFrame): void {
+    const parentActivity = frame.parent_tool_use_id ?? undefined;
     for (const block of contentBlocks(frame)) {
-      if (stringField(block, "type") !== "tool_result") continue;
-      const id = stringField(block, "tool_use_id");
+      if (block.type !== "tool_result") continue;
+      const id = block.tool_use_id;
       const tool = id === undefined ? undefined : this.tools.get(id);
       this.emit({
         kind: "tool-activity",
@@ -1215,17 +1270,17 @@ class ClaudeCodeTurn implements HarnessTurn {
     }
   }
 
-  private acceptStreamEvent(frame: Record<string, unknown>): void {
-    if (!isRecord(frame.event) || !isRecord(frame.event.delta)) return;
-    if (stringField(frame.event.delta, "type") !== "text_delta") return;
-    const text = stringField(frame.event.delta, "text");
+  private acceptStreamEvent(frame: StreamEventFrame): void {
+    const delta = frame.event.delta;
+    if (delta === undefined || delta.type !== "text_delta") return;
+    const text = delta.text;
     if (text !== undefined) this.emitPreview(text);
   }
 
-  private acceptResult(frame: Record<string, unknown>): void {
+  private acceptResult(frame: ResultFrame): void {
     const usage = usageObservation(frame);
     if (usage !== undefined) this.emit({ kind: "usage", observation: usage });
-    const subtype = stringField(frame, "subtype") ?? "unknown-result";
+    const subtype = frame.subtype ?? "unknown-result";
     // Authentication is recognized before the success branch: #115's recording
     // pinned the real signal — the not-logged-in result arrives as
     // `subtype:"success"` but with `is_error:true`, zero cost, and empty usage, and
@@ -1255,7 +1310,7 @@ class ClaudeCodeTurn implements HarnessTurn {
       return;
     }
     if (subtype === "success") {
-      const finalContent = stringField(frame, "result");
+      const finalContent = frame.result;
       this.settle({
         kind: "completed",
         detail: {
@@ -1274,8 +1329,8 @@ class ClaudeCodeTurn implements HarnessTurn {
           phase: "turn",
           category: subtype,
           possibleEffects: "possible",
-          ...(stringField(frame, "result") !== undefined
-            ? { partialOutput: stringField(frame, "result") }
+          ...(frame.result !== undefined
+            ? { partialOutput: frame.result }
             : {}),
         },
         effectiveModel: this.session.model(),
@@ -1329,50 +1384,6 @@ class ClaudeCodeTurn implements HarnessTurn {
   }
 }
 
-function encodeTurn(request: TurnRequest): Uint8Array {
-  return new TextEncoder().encode(
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: request.input.text },
-      parent_tool_use_id: null,
-    })}\n`,
-  );
-}
-
-function contentBlocks(
-  frame: Record<string, unknown>,
-): Record<string, unknown>[] {
-  if (!isRecord(frame.message) || !Array.isArray(frame.message.content)) {
-    return [];
-  }
-  return frame.message.content.filter(isRecord);
-}
-
-function sessionFacts(
-  frame: Record<string, unknown>,
-  coordinate: RecoveryCoordinate,
-): SessionFacts {
-  const tools = Array.isArray(frame.tools)
-    ? frame.tools.filter((tool): tool is string => typeof tool === "string")
-    : [];
-  const mcp = Array.isArray(frame.mcp_servers)
-    ? frame.mcp_servers.filter(isRecord).flatMap((server) => {
-        const name = stringField(server, "name");
-        const status = stringField(server, "status");
-        return name === undefined || status === undefined
-          ? []
-          : [{ name, status }];
-      })
-    : [];
-  const executableVersion = stringField(frame, "claude_code_version");
-  return {
-    recoveryCoordinate: coordinate,
-    tools,
-    mcp,
-    ...(executableVersion !== undefined ? { executableVersion } : {}),
-  };
-}
-
 function describeSessionFacts(facts: SessionFacts): string {
   const version = facts.executableVersion ?? "unknown version";
   const tools = facts.tools.length === 0 ? "no tools" : facts.tools.join(", ");
@@ -1381,32 +1392,6 @@ function describeSessionFacts(facts: SessionFacts): string {
       ? "no MCP servers"
       : facts.mcp.map((server) => `${server.name}=${server.status}`).join(", ");
   return `Claude Code ${version}; tools: ${tools}; MCP: ${mcp}`;
-}
-
-function usageObservation(
-  frame: Record<string, unknown>,
-): UsageObservation | undefined {
-  const parts: string[] = [];
-  if (isRecord(frame.usage)) {
-    const input = numberField(frame.usage, "input_tokens");
-    const output = numberField(frame.usage, "output_tokens");
-    if (input !== undefined) parts.push(`input ${input}`);
-    if (output !== undefined) parts.push(`output ${output} tokens`);
-  }
-  const cost = numberField(frame, "total_cost_usd");
-  if (cost !== undefined) parts.push(`cost estimate USD ${cost}`);
-  if (parts.length === 0) return undefined;
-  return {
-    estimate: true,
-    summary: parts.join(", ").replace(", cost", "; cost"),
-  };
-}
-
-function genericActivity(type: string | undefined): TurnEvent {
-  return {
-    kind: "activity",
-    description: `Claude Code activity: ${type ?? "unknown"}`,
-  };
 }
 
 function summarize(value: unknown): string {
@@ -1423,6 +1408,20 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The steer receipt the profile implies. The profile is the one statement of
+ *  native steer (#127 A12): this Adapter declares it unavailable in `buildProfile`
+ *  because the print-mode contract has no same-Turn guidance frame, and it has
+ *  no send path. A profile claiming steer here would be an Adapter bug, so it is
+ *  refused loudly rather than half-honoured. */
+function steerReceipt(capability: SteerCapability): ControlReceipt {
+  if (capability.available) {
+    throw new Error(
+      "Claude Code Adapter: the profile declares native steer this Adapter cannot send",
+    );
+  }
+  return { outcome: "rejected", reason: "unsupported" };
+}
+
 function truncate(text: string, max = 200): string {
   const trimmed = text.trim();
   return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}…`;
@@ -1436,51 +1435,6 @@ function processCode(result: OwnedProcessClose): { nativeCode?: string } {
     return { nativeCode: result.signal };
   }
   return {};
-}
-
-/** Claude Code reports a not-logged-in run as its stdout result (research:
- *  "missing authentication ... emitted as the stdout result"). No typed auth field
- *  exists in the documented print-mode contract, so this recognises the documented
- *  not-logged-in remediation phrasings only — bare words like "unauthorized" or
- *  "credential" are deliberately excluded so a task result that merely mentions
- *  them keeps its real diagnostics rather than being masked by the login message.
- *  #115's recording pinned the signal: a not-logged-in run returns `subtype:"success"`
- *  with `result:"Not logged in · Please run /login"`, so this is checked before the
- *  success branch. The matched text is never surfaced — only `AUTHENTICATION_REQUIRED`. */
-function isAuthenticationResult(frame: Record<string, unknown>): boolean {
-  const text = [
-    stringField(frame, "subtype") ?? "",
-    stringField(frame, "result") ?? "",
-    stringField(frame, "error") ?? "",
-  ].join(" ");
-  return /\bnot\s+logged\s+in\b|please (run \/login|log ?in)|\binvalid api key\b|\bauthentication (required|failed|error)\b|\bnot authenticated\b/i.test(
-    text,
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stringField(
-  value: Record<string, unknown>,
-  field: string,
-): string | undefined {
-  return optionalString(value[field]);
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function numberField(
-  value: Record<string, unknown>,
-  field: string,
-): number | undefined {
-  const found = value[field];
-  return typeof found === "number" && Number.isFinite(found)
-    ? found
-    : undefined;
 }
 
 function isCleanClose(result: OwnedProcessClose): boolean {
@@ -1579,6 +1533,11 @@ function buildProfile(
       available: false,
       evidence:
         "Claude Code exposes no raw-CLI question callback; structured clarifications are never emulated.",
+    },
+    steer: {
+      available: false,
+      evidence:
+        "Claude Code's stream-json print mode has no same-Turn guidance frame: a further user message queues as the next Turn, so steer is rejected unsupported and never emulated.",
     },
     modelSelection: {
       at: "unavailable",

@@ -28,6 +28,12 @@ import {
   type TurnEvent,
   type TurnRequest,
 } from "../../src/harness/harness.js";
+import type {
+  OwnedProcess,
+  OwnedProcessClose,
+  ProcessInterruption,
+  spawnOwnedProcess,
+} from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import {
   runApprovalRequestCases,
@@ -413,9 +419,12 @@ test(
 
 // The shared interrupt, lost, recovery, and cleanup cases over the real replayer.
 // A fresh replayer per scenario keeps invocations isolated; each fixed session id
-// matches the id its fixture's init acknowledges. The unresponsive-interrupt case
-// is POSIX-only: on Windows `taskkill /T /F` always force-kills the tree, so a
-// process cannot ignore the graceful signal for the escalation to be observable.
+// matches the id its fixture's init acknowledges. Every case runs on every OS.
+// On Windows the process Module's graceful stage is `taskkill /T` (no `/F`),
+// which closes windows; the replayer is a hidden console child with none, so it
+// survives that stage, the forced stage is reported as escalated, and the
+// Adapter truthfully settles the interrupted Turn `lost` with interruption
+// unknown (ADR 0022) — the same escalation the `unresponsive` case models.
 const AUTHENTICATION_REQUIRED =
   "Authentication required for Claude Code. Log in separately through Claude Code, then retry.";
 
@@ -454,7 +463,7 @@ const interruptScenarios: InterruptRecoveryScenarios = {
   ),
 };
 runInterruptRecoveryCases(interruptScenarios, {
-  skipUnresponsiveInterrupt: process.platform === "win32",
+  interruptOutcome: process.platform === "win32" ? "lost" : "interrupted",
 });
 
 /** Drive one Turn against a protocol case over the real replayer, returning the
@@ -547,6 +556,249 @@ test("exit without a result loses the Turn with completion-unknown, the exit cod
   assert.match(result.detail.lastObservation, /working on it/);
   await harness.close();
 });
+
+// --- Lenient frame parsing and redaction below launch (scripted process) -----
+
+// A scripted stand-in for the process Module's owned child, injected through the
+// Adapter's `spawn` seam. It hands the Adapter frames a real child cannot be made
+// to emit on demand (a malformed known frame) and close observations it cannot be
+// made to produce (a cleanup error quoting the launch argv). `token()` recovers
+// the bridge bearer from the launch argv the Adapter passed, so a scripted cause
+// can quote exactly the secret the Seam must scrub.
+interface ScriptedProcess {
+  readonly spawn: typeof spawnOwnedProcess;
+  /** End stdout and settle `closed()` with the scripted close observation. */
+  end(): void;
+  /** The bearer recovered from the launch argv the Adapter passed. */
+  token(): string;
+}
+
+function scriptedProcess(script: {
+  readonly frames: readonly unknown[];
+  readonly close?: (token: string) => OwnedProcessClose;
+  readonly interrupt?: (token: string) => ProcessInterruption;
+  readonly closeStdin?: (token: string) => OwnedProcessClose;
+}): ScriptedProcess {
+  let launchArgs: readonly string[] = [];
+  const token = (): string => {
+    const config = JSON.parse(
+      launchArgs[launchArgs.indexOf("--mcp-config") + 1]!,
+    );
+    return config.mcpServers[
+      "secant-permissions"
+    ].headers.Authorization.replace("Bearer ", "");
+  };
+  let resolveClose!: (close: OwnedProcessClose) => void;
+  const closed = new Promise<OwnedProcessClose>((resolve) => {
+    resolveClose = resolve;
+  });
+  let endStdout!: () => void;
+  const stdoutEnded = new Promise<void>((resolve) => {
+    endStdout = resolve;
+  });
+  async function* stdout(): AsyncGenerator<Uint8Array> {
+    for (const frame of script.frames) {
+      yield new TextEncoder().encode(`${JSON.stringify(frame)}\n`);
+    }
+    await stdoutEnded;
+  }
+  // eslint-disable-next-line require-yield
+  async function* stderr(): AsyncGenerator<Uint8Array> {
+    await stdoutEnded;
+  }
+  const settle = (close: OwnedProcessClose): OwnedProcessClose => {
+    endStdout();
+    resolveClose(close);
+    return close;
+  };
+  const exit0: OwnedProcessClose = { kind: "exited", status: 0 };
+  const owned: OwnedProcess = {
+    stdout: stdout(),
+    stderr: stderr(),
+    writeStdin: () => Promise.resolve(),
+    closeStdin: () =>
+      Promise.resolve(settle(script.closeStdin?.(token()) ?? exit0)),
+    terminate: () => Promise.resolve(settle(exit0)),
+    interrupt: () => {
+      const interruption = script.interrupt?.(token()) ?? {
+        close: { kind: "exited", status: 143 },
+        escalated: false,
+      };
+      settle(interruption.close);
+      return Promise.resolve(interruption);
+    },
+    closed: () => closed,
+  };
+  return {
+    spawn: (options) => {
+      launchArgs = options.args;
+      return Promise.resolve({ ok: true, process: owned });
+    },
+    end: () => {
+      settle(script.close?.(token()) ?? exit0);
+    },
+    token,
+  };
+}
+
+const SCRIPTED_SESSION = "99999999-9999-4999-8999-999999999999";
+const scriptedInit = {
+  type: "system",
+  subtype: "init",
+  session_id: SCRIPTED_SESSION,
+  model: "scripted-model",
+  tools: ["Read"],
+  mcp_servers: [],
+  claude_code_version: "0.0.0-scripted",
+};
+
+/** Prepare the Adapter over the replayer for qualification but launch the
+ *  Session on the scripted process; resolve once the Turn is live (init seen). */
+async function scriptedTurn(scripted: ScriptedProcess) {
+  const replayer = installReplayer(VERSION, protocolCase("completed"));
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => SCRIPTED_SESSION,
+    spawn: scripted.spawn,
+  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+  const turn = prepared.harness.startTurn(bridgeTurn("scripted"));
+  const events: TurnEvent[] = [];
+  const live = new Promise<void>((resolve) => {
+    turn.subscribe((event) => {
+      events.push(event);
+      if (event.kind === "session") resolve();
+    });
+  });
+  return { harness: prepared.harness, turn, events, live };
+}
+
+/** The bearer must be absent from everything a caller can observe — the JSON of
+ *  the value and, for an Error cause (whose message is not enumerable), its
+ *  message and stack — while the cause itself is preserved. */
+function assertScrubbed(value: unknown, cause: unknown, token: string): void {
+  assert.equal(token.length >= 32, true);
+  assert.equal(JSON.stringify(value).includes(token), false);
+  assert.ok(cause instanceof Error, "the cause is preserved as an Error");
+  assert.equal(cause.message.includes(token), false);
+  assert.equal((cause.stack ?? "").includes(token), false);
+  assert.match(cause.message, /redacted-bearer-token/);
+}
+
+test("a known frame with an unrecognised extra field, or with a required field of the wrong type, is generic activity and never protocol corruption", async () => {
+  const scripted = scriptedProcess({
+    frames: [
+      scriptedInit,
+      // Known type, one field the model does not know: still a normal frame.
+      {
+        type: "assistant",
+        message: { content: [{ type: "text", text: "hello" }] },
+        novel_field: { nested: true },
+      },
+      // Known types whose required field has the wrong type: lenient fallthrough.
+      { type: "assistant", message: "not an object" },
+      { type: "stream_event", event: 5 },
+      { type: "result", subtype: "success", result: "done", is_error: false },
+    ],
+  });
+  const { harness, turn, events } = await scriptedTurn(scripted);
+  const result = await turn.result();
+  await harness.close();
+
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") throw new Error("unreachable");
+  assert.equal(result.detail.finalContent, "done");
+  assert.deepEqual(
+    events.filter((event) => event.kind === "assistant-content"),
+    [{ kind: "assistant-content", content: "hello" }],
+  );
+  const activity = events.flatMap((event) =>
+    event.kind === "activity" ? [event.description] : [],
+  );
+  assert.ok(activity.includes("Claude Code activity: assistant"));
+  assert.ok(activity.includes("Claude Code activity: stream_event"));
+});
+
+test("a close before a result carries its cause with the bearer redacted", async () => {
+  const scripted = scriptedProcess({
+    frames: [scriptedInit],
+    close: (token) => ({
+      kind: "cleanup-error",
+      cause: new Error(`pipe error after spawn: Bearer ${token}`),
+    }),
+  });
+  const { harness, turn, live } = await scriptedTurn(scripted);
+  await live;
+  scripted.end();
+  const result = await turn.result();
+  await harness.close();
+
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "completion-unknown");
+  const token = tokenOf(scripted);
+  assertScrubbed(result, result.detail.failure?.cause, token);
+  assert.match(
+    result.detail.failure?.diagnostics ?? "",
+    /pipe error after spawn/,
+  );
+});
+
+test("an unconfirmed interrupt carries its cause with the bearer redacted", async () => {
+  const scripted = scriptedProcess({
+    frames: [scriptedInit],
+    interrupt: (token) => ({
+      close: {
+        kind: "cleanup-error",
+        cause: new Error(`kill failed: Bearer ${token}`),
+      },
+      escalated: true,
+    }),
+  });
+  const { harness, turn, live } = await scriptedTurn(scripted);
+  await live;
+  assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
+  const result = await turn.result();
+  await harness.close();
+
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.unknown, "interruption");
+  assert.equal(result.detail.failure?.category, "interruption-unknown");
+  assertScrubbed(result, result.detail.failure?.cause, tokenOf(scripted));
+});
+
+test("a cleanup failure carries its cause with the bearer redacted", async () => {
+  const scripted = scriptedProcess({
+    frames: [scriptedInit],
+    closeStdin: (token) => ({
+      kind: "cleanup-error",
+      cause: new Error(`stdin close failed: Bearer ${token}`),
+    }),
+  });
+  const { harness, turn, live } = await scriptedTurn(scripted);
+  await live;
+  const cleanup = await harness.close();
+  const result = await turn.result();
+
+  assert.equal(cleanup.clean, false);
+  assert.equal(cleanup.failure?.phase, "cleanup");
+  const token = tokenOf(scripted);
+  assertScrubbed(cleanup, cleanup.failure?.cause, token);
+  assert.match(cleanup.detail, /stdin close failed/);
+  assert.equal(cleanup.sessions?.[0]?.availability.state, "unusable");
+  // The live Turn that the cleanup ended is scrubbed on its own route too.
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assertScrubbed(result, result.detail.failure?.cause, token);
+});
+
+/** The bearer the scripted process saw on its launch argv. */
+function tokenOf(scripted: ScriptedProcess): string {
+  return scripted.token();
+}
 
 // --- Real recorded Turns (#115) ----------------------------------------------
 

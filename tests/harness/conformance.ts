@@ -9,6 +9,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 import {
   LOST_UNKNOWNS,
   type DurableTurnRecorder,
@@ -20,6 +21,7 @@ import {
   type TurnAdmission,
   type TurnEvent,
   type TurnRequest,
+  type TurnResult,
 } from "../../src/harness/harness.js";
 
 /**
@@ -104,7 +106,31 @@ export interface ConformanceScenarios
   lost(unknown: LostUnknown): HarnessAdapterFactory;
   /** Two Turns: the first detaches, the second resumes and completes. */
   resumable(): HarnessAdapterFactory;
+  /** Load-with-replay recovery (ADR 0022): the first Turn emits transcript
+   *  content then blocks and is interrupted; the second resumes and must replay
+   *  that history before a barrier, reconcile one repeated entry, then progress. */
+  loadWithReplay(): ReplayScenario;
 }
+
+/** What a load-with-replay provider promises the suite can observe on resume. */
+export interface ReplayScenario {
+  readonly factory: HarnessAdapterFactory;
+  /** The transcript events the first Turn emits, in order — the history. */
+  readonly history: readonly TurnEvent[];
+  /** One history entry the resumed Turn also carries live; it must appear once. */
+  readonly repeated: TurnEvent;
+  /** The live events the resumed Turn emits after the barrier, in order. */
+  readonly live: readonly TurnEvent[];
+  /** The one barrier event between history and live progress. */
+  readonly barrier: TurnEvent;
+}
+
+/** How an interrupt of unconfirmed active work settles for a provider. A
+ *  provider that can stop its process on a graceful signal settles `interrupted`;
+ *  one whose graceful stage cannot reach the process (a hidden Windows console
+ *  child has no window for `taskkill /T` to close) escalates to a forced kill and
+ *  truthfully settles `lost` with interruption unknown (ADR 0022). */
+export type InterruptOutcome = "interrupted" | "lost";
 
 export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
@@ -186,18 +212,21 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
 
 /**
  * Run the request-free interrupt, lost, recovery, and cleanup cases against one
- * provider. Both the fake and the Claude Code Adapter over the replayer call it;
- * `skipUnresponsiveInterrupt` is set where a real process cannot be made to ignore
- * the graceful signal (Windows force-kills the tree, so escalation is unobservable).
+ * provider. Both the fake and the Claude Code Adapter over the replayer call it.
+ * `interruptOutcome` names how the provider's confirmed interrupt of a blocking
+ * Turn settles (default `interrupted`); the escalation case runs everywhere.
  */
 export function runInterruptRecoveryCases(
   scenarios: InterruptRecoveryScenarios,
-  options: { readonly skipUnresponsiveInterrupt?: boolean } = {},
+  options: { readonly interruptOutcome?: InterruptOutcome } = {},
 ): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+  const outcome = options.interruptOutcome ?? "interrupted";
 
   test(
-    name("a graceful interrupt stops a blocking Turn and detaches the Session"),
+    name(
+      `an interrupt stops a blocking Turn, settles ${outcome}, and detaches the Session`,
+    ),
     async () => {
       const prepared = await prepare(scenarios.blockingTurn());
       const turn = prepared.startTurn(request(recorder().recorder));
@@ -206,9 +235,7 @@ export function runInterruptRecoveryCases(
       const receipt = await turn.interrupt();
       assert.deepEqual(receipt, { outcome: "accepted" });
       const result = await turn.result();
-      assert.equal(result.kind, "interrupted");
-      if (result.kind !== "interrupted") throw new Error("unreachable");
-      assert.equal(result.detail.session.state, "detached");
+      detachedCoordinate(result, outcome);
       // New inputs are rejected after an accepted interrupt.
       const late = await turn.steer({ text: "too late" });
       assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
@@ -218,7 +245,6 @@ export function runInterruptRecoveryCases(
 
   test(
     name("a process that ignores the graceful signal is force-killed and lost"),
-    { skip: options.skipUnresponsiveInterrupt === true },
     async () => {
       const prepared = await prepare(scenarios.unresponsiveInterrupt());
       const turn = prepared.startTurn(request(recorder().recorder));
@@ -255,12 +281,7 @@ export function runInterruptRecoveryCases(
       const events1 = observe(turn1);
       await events1.waitForSession();
       await turn1.interrupt();
-      const result1 = await turn1.result();
-      assert.equal(result1.kind, "interrupted");
-      if (result1.kind !== "interrupted") throw new Error("unreachable");
-      if (result1.detail.session.state !== "detached")
-        throw new Error("unreachable");
-      const coordinate = result1.detail.session.coordinate;
+      const coordinate = detachedCoordinate(await turn1.result(), outcome);
 
       const second = recorder();
       const turn2 = prepared.startTurn(
@@ -286,12 +307,7 @@ export function runInterruptRecoveryCases(
       const events1 = observe(turn1);
       await events1.waitForSession();
       await turn1.interrupt();
-      const result1 = await turn1.result();
-      assert.equal(result1.kind, "interrupted");
-      if (result1.kind !== "interrupted") throw new Error("unreachable");
-      if (result1.detail.session.state !== "detached")
-        throw new Error("unreachable");
-      const coordinate = result1.detail.session.coordinate;
+      const coordinate = detachedCoordinate(await turn1.result(), outcome);
 
       const turn2 = prepared.startTurn(
         request(recorder().recorder, { resume: coordinate }),
@@ -330,6 +346,27 @@ const TURN_RESULT_SETTLED = new Set([
   "lost",
 ]);
 
+/** Assert an interrupted blocking Turn settled as the provider promised and
+ *  detached its Session; return the coordinate a resume needs. A `lost` outcome
+ *  must say the interruption is what is unknown. */
+function detachedCoordinate(
+  result: TurnResult,
+  expected: InterruptOutcome,
+): RecoveryCoordinate {
+  assert.equal(result.kind, expected);
+  if (result.kind === "lost") {
+    assert.equal(result.detail.unknown, "interruption");
+    assert.equal(result.detail.failure?.category, "interruption-unknown");
+  } else if (result.kind !== "interrupted") {
+    throw new Error("unreachable");
+  }
+  assert.equal(result.detail.session.state, "detached");
+  if (result.detail.session.state !== "detached") {
+    throw new Error("unreachable");
+  }
+  return result.detail.session.coordinate;
+}
+
 /** Run the prepare/profile cases against one provider. Both the full suite and
  *  a prepare-only provider (the Claude Code Adapter over the replayer) call it. */
 export function runPrepareProfileCases(
@@ -347,6 +384,7 @@ export function runPrepareProfileCases(
     assert.ok(profile.interruption.evidence.length > 0);
     assert.ok(profile.approvals.evidence.length > 0);
     assert.ok(profile.clarifications.evidence.length > 0);
+    assert.ok(profile.steer.evidence.length > 0);
     assert.ok(profile.modelSelection.evidence.length > 0);
     assert.ok(profile.recoveryCoordinate.evidence.length > 0);
     assert.ok(profile.skillDelivery.evidence.length > 0);
@@ -548,6 +586,58 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
     assert.deepEqual(second.admissions[0].resume, coordinate);
     await prepared.close();
   });
+
+  test(
+    name(
+      "a load-with-replay resume replays history before one barrier, reconciles a repeat, then progresses",
+    ),
+    async () => {
+      const scenario = scenarios.loadWithReplay();
+      const prepared = await prepare(scenario.factory);
+      assert.equal(prepared.profile.recovery.mode, "load-with-replay");
+
+      const turn1 = prepared.startTurn(request(recorder().recorder));
+      const events1 = observe(turn1);
+      await events1.waitForSession();
+      await turn1.interrupt();
+      const coordinate = detachedCoordinate(
+        await turn1.result(),
+        "interrupted",
+      );
+
+      const turn2 = prepared.startTurn(
+        request(recorder().recorder, { resume: coordinate }),
+      );
+      const events2 = observe(turn2);
+      assert.equal((await turn2.result()).kind, "completed");
+
+      const all = events2.all;
+      const barriers = all.filter((event) =>
+        isDeepStrictEqual(event, scenario.barrier),
+      );
+      assert.equal(barriers.length, 1, "exactly one history/live barrier");
+      const barrierAt = all.findIndex((event) =>
+        isDeepStrictEqual(event, scenario.barrier),
+      );
+      assert.deepEqual(
+        all.slice(0, barrierAt),
+        scenario.history,
+        "every historical event precedes the barrier, in order",
+      );
+      assert.deepEqual(
+        all.slice(barrierAt + 1),
+        scenario.live,
+        "no live event precedes the barrier",
+      );
+      assert.equal(
+        all.filter((event) => isDeepStrictEqual(event, scenario.repeated))
+          .length,
+        1,
+        "a repeated entry appears once",
+      );
+      await prepared.close();
+    },
+  );
 }
 
 // --- Driving helpers ---------------------------------------------------------

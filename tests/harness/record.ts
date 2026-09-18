@@ -1,8 +1,9 @@
 // The opt-in Claude Code recorder (#115). It drives a named scenario against the
 // installed `claude`, reproducing the exact launch contract Secant's Claude Code
-// Adapter builds (src/harness/claude-code.ts `launch`) and an equivalent loopback
-// MCP approve-bridge (src/harness/permission-bridge.ts), so the bytes it captures
-// on stdout are exactly what the Adapter's `consumeStdout` would read. Per case it
+// Adapter builds (src/harness/claude-code.ts `launch`) against the production
+// permission bridge itself — composed through the Harness entry with a recording
+// approval router (#127 D3) — so the bytes it captures on stdout are exactly what
+// the Adapter's `consumeStdout` would read. Per case it
 // writes the byte-faithful stdout stream(s), the stdin frame(s) it sent, the bridge
 // calls and their ordering relative to stdout, a per-Turn Workspace patch (git diff
 // of the scenario Workspace across the Turn), and the `recording.json` sidecar.
@@ -27,7 +28,6 @@ import {
   spawnSync,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -35,12 +35,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type IncomingMessage, type Server } from "node:http";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { startPermissionBridge } from "../../src/harness/harness.js";
 import {
   assertNoCredentials,
   envSecrets,
@@ -51,17 +48,6 @@ import {
 
 const FIXTURES = join(import.meta.dirname, "fixtures", "claude-code");
 const HARNESS = "claude-code";
-
-/** Constant-time bearer comparison (D2), mirroring the production bridge. */
-function bearerMatches(
-  presented: string | undefined,
-  expected: string,
-): boolean {
-  if (presented === undefined) return false;
-  const a = Buffer.from(presented);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
 
 /** Canonical per-case session ids — the same ids the Adapter tests mint, so the
  *  recorded frames echo exactly what a test's `--session-id`/`--resume` carries. */
@@ -77,11 +63,7 @@ const SESSION_IDS = {
 
 // --- The launch contract (must mirror src/harness/claude-code.ts `launch`) ----
 
-function launchArgs(
-  sessionArgs: string[],
-  mcpConfigArg: string,
-  toolName: string,
-): string[] {
+function launchArgs(sessionArgs: string[], bridge: RecorderBridge): string[] {
   return [
     "-p",
     "--input-format",
@@ -98,10 +80,7 @@ function launchArgs(
     // the Adapter treats as generic activity, so the protocol shape is the same.
     "--restricted",
     ...sessionArgs,
-    "--mcp-config",
-    mcpConfigArg,
-    "--permission-prompt-tool",
-    toolName,
+    ...bridge.launchArgs,
   ];
 }
 
@@ -113,17 +92,7 @@ function userFrame(text: string): string {
   })}\n`;
 }
 
-// --- The recorder-local approve-bridge (mirrors permission-bridge.ts) ----------
-
-// ponytail: this bridge intentionally re-implements the shape of
-// src/harness/permission-bridge.ts rather than importing it — that module is
-// private to the Harness Module and the import-boundary check forbids a test from
-// reaching past a Module's public entry. Keep the server name, tool name, and
-// allow/deny payload in sync with permission-bridge.ts by hand; if that contract
-// changes, update both. The recorded bytes only depend on this matching what
-// Claude Code is launched against, which the shared SERVER_NAME/TOOL_NAME ensure.
-const SERVER_NAME = "secant-permissions";
-const TOOL_NAME = "approve";
+// --- The permission bridge, composed with a recording router --------------------
 
 interface BridgeCall {
   readonly tool_name: string;
@@ -139,138 +108,52 @@ interface BridgeCall {
 }
 
 interface RecorderBridge {
-  readonly mcpConfigArg: string;
-  readonly toolName: string;
+  /** The production bridge's launch flags, spliced into the launch argv. */
+  readonly launchArgs: readonly string[];
+  /** The bridge's bearer, listed as a known secret so the recording redacts it. */
   readonly token: string;
   readonly calls: BridgeCall[];
   close(): Promise<void>;
 }
 
-/** Start one loopback MCP approve-bridge. `answer` decides each call; `offset`
- *  reports the current stdout byte count so calls can be ordered against stdout. */
-function startBridge(
+/** Start the production permission bridge with a recording router: every call is
+ *  logged with the stdout byte count `offset` reports when it arrived, so calls
+ *  can be ordered against stdout, then answered by `answer`. */
+async function startBridge(
   answer: (call: { tool_name: string; input: unknown }) => {
     behavior: "allow" | "deny";
     message?: string;
   },
   offset: () => number,
 ): Promise<RecorderBridge> {
-  const token = randomBytes(32).toString("hex");
-  const authHeader = `Bearer ${token}`;
   const calls: BridgeCall[] = [];
-  const sessions = new Map<string, StreamableHTTPServerTransport>();
-  const servers = new Set<McpServer>();
-
-  const build = (): McpServer => {
-    const server = new McpServer({ name: SERVER_NAME, version: "1.0.0" });
-    server.registerTool(
-      TOOL_NAME,
-      {
-        description: "Secant permission bridge (recorder).",
-        inputSchema: {
-          tool_name: z.string(),
-          input: z.unknown().optional(),
-          tool_use_id: z.string().optional(),
-        },
-      },
-      async (args) => {
-        calls.push({
-          tool_name: args.tool_name,
-          input: args.input ?? {},
-          stdoutOffset: offset(),
-        });
-        const verdict = answer({
-          tool_name: args.tool_name,
-          input: args.input,
-        });
-        const payload =
-          verdict.behavior === "allow"
-            ? { behavior: "allow", updatedInput: args.input ?? {} }
-            : { behavior: "deny", message: verdict.message ?? "denied" };
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-        };
-      },
+  const bridge = await startPermissionBridge((request) => {
+    const input = toolInput(request.input);
+    calls.push({ tool_name: request.tool, input, stdoutOffset: offset() });
+    const verdict = answer({ tool_name: request.tool, input });
+    return Promise.resolve(
+      verdict.behavior === "allow"
+        ? { decision: "allow" }
+        : { decision: "deny", message: verdict.message ?? "denied" },
     );
-    return server;
+  });
+  return {
+    launchArgs: bridge.launchArgs,
+    token: bridge.bearer,
+    calls,
+    close: () => bridge.close(),
   };
-
-  const http: Server = createServer((req, res) => {
-    if (!bearerMatches(req.headers.authorization, authHeader)) {
-      res.writeHead(401).end(JSON.stringify({ error: "unauthorized" }));
-      return;
-    }
-    const id = sessionIdOf(req);
-    const existing = id === undefined ? undefined : sessions.get(id);
-    if (existing !== undefined) {
-      void existing
-        .handleRequest(req, res)
-        .catch(() => res.writeHead(500).end());
-      return;
-    }
-    if (id !== undefined) {
-      res.writeHead(404).end(JSON.stringify({ error: "unknown session" }));
-      return;
-    }
-    const server = build();
-    servers.add(server);
-    const transport: StreamableHTTPServerTransport =
-      new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomBytes(16).toString("hex"),
-        onsessioninitialized: (sid: string) => {
-          sessions.set(sid, transport);
-        },
-      });
-    transport.onclose = () => {
-      if (transport.sessionId !== undefined)
-        sessions.delete(transport.sessionId);
-      servers.delete(server);
-      void server.close().catch(() => {});
-    };
-    server
-      .connect(transport)
-      .then(() => transport.handleRequest(req, res))
-      .catch(() => res.writeHead(500).end());
-  });
-
-  return new Promise<RecorderBridge>((resolve, reject) => {
-    http.once("error", reject);
-    http.listen(0, "127.0.0.1", () => {
-      http.removeListener("error", reject);
-      const address = http.address();
-      if (address === null || typeof address === "string") {
-        reject(new Error("bridge did not bind a loopback port"));
-        return;
-      }
-      const mcpConfigArg = JSON.stringify({
-        mcpServers: {
-          [SERVER_NAME]: {
-            type: "http",
-            url: `http://127.0.0.1:${address.port}/mcp`,
-            headers: { Authorization: authHeader },
-          },
-        },
-      });
-      resolve({
-        mcpConfigArg,
-        toolName: `mcp__${SERVER_NAME}__${TOOL_NAME}`,
-        token,
-        calls,
-        close: () =>
-          new Promise<void>((done) => {
-            for (const t of sessions.values()) void t.close().catch(() => {});
-            http.close(() => done());
-          }),
-      });
-    });
-  });
 }
 
-function sessionIdOf(req: IncomingMessage): string | undefined {
-  const value = req.headers["mcp-session-id"];
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value[0];
-  return undefined;
+/** The bridge hands its router the tool input serialized to the request shape
+ *  (an object as JSON, a bare string as itself). The case needs the object back
+ *  so the replayer can call the bridge with it; a bare string stays a string. */
+function toolInput(serialized: string): unknown {
+  try {
+    return JSON.parse(serialized);
+  } catch {
+    return serialized;
+  }
 }
 
 // --- Spawning and capturing a real Turn ---------------------------------------
@@ -535,11 +418,7 @@ async function recordPlain(): Promise<void> {
   );
   try {
     const capture = await runTurn({
-      args: launchArgs(
-        ["--session-id", SESSION_IDS.plain],
-        bridge.mcpConfigArg,
-        bridge.toolName,
-      ),
+      args: launchArgs(["--session-id", SESSION_IDS.plain], bridge),
       cwd: ws,
       env: baseEnv(),
       input: userFrame(
@@ -590,11 +469,7 @@ async function recordTestRepair(): Promise<void> {
   );
   try {
     const capture = await runTurn({
-      args: launchArgs(
-        ["--session-id", SESSION_IDS["test-repair"]],
-        bridge.mcpConfigArg,
-        bridge.toolName,
-      ),
+      args: launchArgs(["--session-id", SESSION_IDS["test-repair"]], bridge),
       cwd: ws,
       env: baseEnv(),
       input: userFrame(
@@ -654,11 +529,7 @@ async function recordInterrupt(): Promise<void> {
   );
   try {
     const capture = await runTurn({
-      args: launchArgs(
-        ["--session-id", SESSION_IDS.interrupt],
-        bridge.mcpConfigArg,
-        bridge.toolName,
-      ),
+      args: launchArgs(["--session-id", SESSION_IDS.interrupt], bridge),
       cwd: ws,
       env: baseEnv(),
       input: userFrame(
@@ -705,11 +576,7 @@ async function recordResume(): Promise<void> {
   );
   try {
     const first = await runTurn({
-      args: launchArgs(
-        ["--session-id", SESSION_IDS.resume],
-        bridge.mcpConfigArg,
-        bridge.toolName,
-      ),
+      args: launchArgs(["--session-id", SESSION_IDS.resume], bridge),
       cwd: ws,
       env: baseEnv(),
       input: userFrame(
@@ -728,11 +595,7 @@ async function recordResume(): Promise<void> {
       },
     });
     const second = await runTurn({
-      args: launchArgs(
-        ["--resume", SESSION_IDS.resume],
-        bridge.mcpConfigArg,
-        bridge.toolName,
-      ),
+      args: launchArgs(["--resume", SESSION_IDS.resume], bridge),
       cwd: ws,
       env: baseEnv(),
       input: userFrame(
@@ -781,11 +644,7 @@ async function recordAuthentication(): Promise<void> {
   env.CLAUDE_CONFIG_DIR = config;
   try {
     const capture = await runTurn({
-      args: launchArgs(
-        ["--session-id", SESSION_IDS.authentication],
-        bridge.mcpConfigArg,
-        bridge.toolName,
-      ),
+      args: launchArgs(["--session-id", SESSION_IDS.authentication], bridge),
       cwd: ws,
       env,
       input: userFrame("Reply with exactly: hello."),
@@ -823,8 +682,7 @@ async function recordProtocolCorruption(): Promise<void> {
     const capture = await runTurn({
       args: launchArgs(
         ["--session-id", SESSION_IDS["protocol-corruption"]],
-        bridge.mcpConfigArg,
-        bridge.toolName,
+        bridge,
       ),
       cwd: ws,
       env: baseEnv(),
@@ -921,11 +779,7 @@ async function recordMattFront(): Promise<void> {
     // grill prompt itself is not sent for an interactive Step in v1 (the human
     // drives every Turn), so the frame text sets up the interview.
     const grill1 = await runTurn({
-      args: launchArgs(
-        ["--session-id", sid],
-        bridge.mcpConfigArg,
-        bridge.toolName,
-      ),
+      args: launchArgs(["--session-id", sid], bridge),
       cwd: ws,
       env: baseEnv(),
       input: userFrame(
@@ -936,7 +790,7 @@ async function recordMattFront(): Promise<void> {
     });
     // Grill Turn 2 resumes the same Session and concludes the interview.
     const grill2 = await runTurn({
-      args: launchArgs(["--resume", sid], bridge.mcpConfigArg, bridge.toolName),
+      args: launchArgs(["--resume", sid], bridge),
       cwd: ws,
       env: baseEnv(),
       input: userFrame(
@@ -950,7 +804,7 @@ async function recordMattFront(): Promise<void> {
     stdoutLen = 0;
     const callsBefore = bridge.calls.length;
     const spec = await runTurn({
-      args: launchArgs(["--resume", sid], bridge.mcpConfigArg, bridge.toolName),
+      args: launchArgs(["--resume", sid], bridge),
       cwd: ws,
       env: baseEnv(),
       input: userFrame(

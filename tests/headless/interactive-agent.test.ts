@@ -37,6 +37,7 @@ function profile(): HarnessProfile {
     interruption: { mode: "process-only", evidence: "scripted fake" },
     approvals: { available: true, evidence: "scripted fake" },
     clarifications: { available: false, evidence: "scripted fake" },
+    steer: { available: false, evidence: "scripted fake" },
     modelSelection: { at: "unavailable", evidence: "scripted fake" },
     recoveryCoordinate: {
       timing: "before-submission",

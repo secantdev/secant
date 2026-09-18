@@ -10,7 +10,15 @@
 // the caller's controls, never a timer. Terminal ordering is exact — remaining
 // events publish, outstanding requests expire, the producer closes, then the
 // one result settles, and nothing is emitted afterwards.
+//
+// Load-with-replay is performed, not just advertised (#127 A38): a resumed Turn
+// on a profile declaring that mode first re-emits the Session's recorded
+// transcript history, drops any scripted entry that repeats a replayed one, then
+// emits `REPLAY_BARRIER` before any live progress — all inside the closed event
+// vocabulary, so history is "visibly historical" by its position before the
+// barrier rather than by a new field.
 
+import { isDeepStrictEqual } from "node:util";
 import type {
   CleanupReport,
   ControlReceipt,
@@ -57,8 +65,6 @@ export interface FakeTurnScript {
   /** The result settled when the caller interrupts. Defaults to a plain
    *  `interrupted` result echoing the profile's interruption capability. */
   readonly interruptResult?: TurnResult;
-  /** Whether native steer is accepted. Absent means steer is `unsupported`. */
-  readonly supportsSteer?: boolean;
   /** A recovery coordinate revealed only after acceptance; recorded through the
    *  recorder's checkpoint and echoed on a `completed` result. */
   readonly revealCoordinateAfterAcceptance?: { readonly opaque: string };
@@ -78,6 +84,21 @@ const DEFAULT_CLEANUP: CleanupReport = {
   clean: true,
   detail: "fake harness closed",
 };
+
+/** The history/live barrier a load-with-replay resume emits once, after every
+ *  replayed history event and before any live event. */
+export const REPLAY_BARRIER: TurnEvent = {
+  kind: "activity",
+  description: "history/live barrier: replayed history ends here",
+};
+
+/** The event kinds that are transcript content, and so are replayed as history
+ *  on a load-with-replay resume. Request lifecycle, previews, and Session
+ *  availability are live facts of the Turn that produced them, not history. */
+const HISTORY_KINDS = new Set<TurnEvent["kind"]>([
+  "assistant-content",
+  "tool-activity",
+]);
 
 /** Build a factory for the fake Adapter from a script. */
 export function createFake(script: FakeScript): HarnessAdapterFactory {
@@ -107,6 +128,9 @@ class FakePreparedHarness implements PreparedHarness {
   private active: FakeTurn | undefined;
   private closed = false;
   private readonly cleanup: CleanupReport;
+  /** Per named Session, the transcript content every Turn so far emitted — what
+   *  a load-with-replay resume replays. */
+  private readonly history = new Map<string, TurnEvent[]>();
 
   constructor(private readonly script: FakeScript) {
     this.profile = script.profile;
@@ -124,7 +148,9 @@ class FakePreparedHarness implements PreparedHarness {
     if (!scripted) {
       throw new Error("startTurn beyond the scripted Turns");
     }
-    const turn = new FakeTurn(scripted, this.profile, request);
+    const history = this.history.get(request.session) ?? [];
+    this.history.set(request.session, history);
+    const turn = new FakeTurn(scripted, this.profile, request, history);
     this.active = turn;
     turn.begin();
     return turn;
@@ -162,6 +188,7 @@ class FakeTurn {
     private readonly script: FakeTurnScript,
     private readonly profile: HarnessProfile,
     private readonly request: TurnRequest,
+    private readonly history: TurnEvent[],
   ) {
     this.resultPromise = new Promise<TurnResult>((resolve) => {
       this.resolveResult = resolve;
@@ -195,7 +222,9 @@ class FakeTurn {
 
   async steer(_input: SteerInput): Promise<ControlReceipt> {
     if (this.terminal) return reject("expired");
-    if (!this.script.supportsSteer) return reject("unsupported");
+    // The profile is the one statement of native steer: a fake scripted with the
+    // capability accepts it, one without rejects it `unsupported`.
+    if (!this.profile.steer.available) return reject("unsupported");
     this.emit({ kind: "activity", description: "steer accepted" });
     return accept();
   }
@@ -246,7 +275,7 @@ class FakeTurn {
     }
 
     if (!this.terminal) {
-      for (const event of this.script.events ?? []) this.emit(event);
+      for (const event of this.liveEvents()) this.emit(event);
       if (this.script.requests?.length) {
         await this.raiseAndAwaitRequests();
       } else if (this.script.block) {
@@ -260,6 +289,26 @@ class FakeTurn {
       return;
     }
     this.settle(withCheckpoint(this.script.result, checkpoint));
+  }
+
+  /** The scripted events to emit live. On a load-with-replay resume the recorded
+   *  history is replayed first, a scripted entry that repeats a replayed one is
+   *  reconciled away (it appears once, as history), and the barrier follows the
+   *  history so every live event lands after it. */
+  private liveEvents(): readonly TurnEvent[] {
+    const scripted = this.script.events ?? [];
+    if (
+      this.request.resume === undefined ||
+      this.profile.recovery.mode !== "load-with-replay"
+    ) {
+      return scripted;
+    }
+    const replayed = [...this.history];
+    for (const event of replayed) this.emit(event, { record: false });
+    this.emit(REPLAY_BARRIER, { record: false });
+    return scripted.filter(
+      (event) => !replayed.some((past) => isDeepStrictEqual(past, event)),
+    );
   }
 
   private awaitInterrupt(): Promise<void> {
@@ -352,9 +401,15 @@ class FakeTurn {
     this.resolveResult(result);
   }
 
-  private emit(event: TurnEvent): void {
+  private emit(
+    event: TurnEvent,
+    options: { readonly record: boolean } = { record: true },
+  ): void {
     if (this.settled) throw new Error("emit after result: terminal ordering");
     this.buffer.push(event);
+    if (options.record && HISTORY_KINDS.has(event.kind)) {
+      this.history.push(event);
+    }
     for (const listener of this.listeners) listener(event);
   }
 

@@ -91,6 +91,13 @@ export type ClarificationsCapability =
   | { readonly available: true; readonly evidence: string }
   | { readonly available: false; readonly evidence: string };
 
+/** Whether native same-Turn guidance (`steer`) is accepted. Where unavailable,
+ *  `steer` is rejected `unsupported` and this evidence says why; it is never
+ *  emulated by queueing a next Turn. */
+export type SteerCapability =
+  | { readonly available: true; readonly evidence: string }
+  | { readonly available: false; readonly evidence: string };
+
 /** Where model selection can occur, or that Crucible cannot select a model. */
 export type ModelSelectionCapability =
   | { readonly at: "launch"; readonly evidence: string }
@@ -136,6 +143,7 @@ export interface HarnessProfile {
   readonly interruption: InterruptionCapability;
   readonly approvals: ApprovalsCapability;
   readonly clarifications: ClarificationsCapability;
+  readonly steer: SteerCapability;
   readonly modelSelection: ModelSelectionCapability;
   readonly recoveryCoordinate: RecoveryCoordinateTiming;
   readonly skillDelivery: SkillDelivery;
@@ -593,3 +601,15 @@ export {
   CLAUDE_CODE_EXECUTABLE_ENV,
 } from "./claude-code.js";
 export type { ClaudeCodeAdapterOverrides } from "./claude-code.js";
+
+// The permission bridge the Claude Code Adapter launches against. Exported so the
+// opt-in fixture recorder composes the production bridge (with its own approval
+// router) instead of carrying a copy (#127 D3). The surface is opaque strings and
+// launch flags: no MCP vocabulary or protocol type crosses this entry.
+export { startPermissionBridge } from "./permission-bridge.js";
+export type {
+  ApprovalOutcome,
+  ApprovalRequest,
+  ApprovalRouter,
+  PermissionBridge,
+} from "./permission-bridge.js";

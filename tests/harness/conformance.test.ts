@@ -7,6 +7,7 @@ import type {
   HarnessProfile,
   LostUnknown,
   RequestShape,
+  TurnEvent,
   TurnResult,
 } from "../../src/harness/harness.js";
 import {
@@ -15,6 +16,7 @@ import {
 } from "./conformance.js";
 import {
   createFake,
+  REPLAY_BARRIER,
   type FakeRequestSpec,
   type FakeScript,
   type FakeTurnScript,
@@ -37,6 +39,7 @@ function profile(overrides?: Partial<HarnessProfile>): HarnessProfile {
       available: true,
       evidence: "fake offers a question shape",
     },
+    steer: { available: false, evidence: "fake rejects steer unless scripted" },
     modelSelection: { at: "unavailable", evidence: "fake selects no model" },
     recoveryCoordinate: {
       timing: "before-submission",
@@ -247,6 +250,36 @@ const scenarios: ConformanceScenarios = {
         { result: FAILED_RECOVERY },
       ),
     ),
+  loadWithReplay: () => {
+    const said: TurnEvent = { kind: "assistant-content", content: "earlier" };
+    const read: TurnEvent = {
+      kind: "tool-activity",
+      activity: { tool: "Read", phase: "completed", summary: "read a file" },
+    };
+    const progress: TurnEvent = {
+      kind: "assistant-content",
+      content: "continuing after reattach",
+    };
+    return {
+      // Turn 1 emits the history then blocks; on resume the Harness "re-sends"
+      // the last entry (`read`) alongside its new progress, and the fake must
+      // reconcile that repeat into the one replayed copy.
+      factory: createFake(
+        fake(
+          {
+            events: [SESSION_OPEN, said, read],
+            block: true,
+            result: COMPLETED_OPEN,
+          },
+          { events: [read, SESSION_OPEN, progress], result: COMPLETED_OPEN },
+        ),
+      ),
+      history: [said, read],
+      repeated: read,
+      live: [SESSION_OPEN, progress],
+      barrier: REPLAY_BARRIER,
+    };
+  },
 };
 
 runConformanceSuite(scenarios);

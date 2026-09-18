@@ -36,6 +36,7 @@ function profile(): HarnessProfile {
       available: true,
       evidence: "fake offers a question shape",
     },
+    steer: { available: false, evidence: "scripted fake" },
     modelSelection: { at: "launch", evidence: "fake takes a model at launch" },
     recoveryCoordinate: {
       timing: "after-acceptance",
@@ -96,10 +97,12 @@ async function prepared(script: FakeScript): Promise<PreparedHarness> {
 
 test("native steer is accepted where the profile supports it", async () => {
   const harness = await prepared({
-    profile: profile(),
+    profile: {
+      ...profile(),
+      steer: { available: true, evidence: "scripted fake accepts steer" },
+    },
     turns: [
       {
-        supportsSteer: true,
         requests: [
           {
             id: "s",

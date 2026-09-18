@@ -33,7 +33,7 @@ const SERVER_NAME = "secant-permissions";
 const TOOL_NAME = "approve";
 
 /** The exact `--permission-prompt-tool` value Claude Code is launched with. */
-export const PERMISSION_TOOL = `mcp__${SERVER_NAME}__${TOOL_NAME}`;
+const PERMISSION_TOOL = `mcp__${SERVER_NAME}__${TOOL_NAME}`;
 
 /** The message returned to a bridge call whose Turn ended before it was
  *  answered. Claude sees this as an ordinary denial and stops the tool use. */
@@ -85,12 +85,17 @@ export type ApprovalRouter = (
   request: ApprovalRequest,
 ) => Promise<ApprovalOutcome>;
 
-/** A live bridge: the flags to launch Claude Code against it, and its teardown. */
+/** A live bridge: the flags to launch Claude Code against it, the bearer it
+ *  authenticates, a redactor for that bearer, and its teardown. */
 export interface PermissionBridge {
-  /** The `--permission-prompt-tool` value. */
-  readonly toolName: string;
-  /** The inline JSON for `--mcp-config`, naming the loopback server and bearer. */
-  readonly mcpConfigArg: string;
+  /** The exact argv fragment that points a Claude Code launch at this bridge
+   *  (the inline server config and the permission-prompt tool). It is the only
+   *  place the bearer appears on a launch. */
+  readonly launchArgs: readonly string[];
+  /** The per-bridge bearer token, a Secant-introduced secret: named here so a
+   *  composer can list it as a known secret rather than parse it back out of
+   *  `launchArgs`. */
+  readonly bearer: string;
   /** Scrub this bridge's bearer token out of a value about to become a
    *  diagnostic (typically a spawn error whose `spawnargs` carries the argv). */
   redactSecret(value: unknown): unknown;
@@ -177,8 +182,13 @@ export function startPermissionBridge(
       });
       let closed: Promise<void> | undefined;
       resolve({
-        toolName: PERMISSION_TOOL,
-        mcpConfigArg,
+        launchArgs: [
+          "--mcp-config",
+          mcpConfigArg,
+          "--permission-prompt-tool",
+          PERMISSION_TOOL,
+        ],
+        bearer: token,
         redactSecret: (value) => redactToken(value, token),
         close() {
           if (closed !== undefined) return closed;

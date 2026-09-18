@@ -4,9 +4,10 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Invariants
 
-- The `escalated` flag `interrupt(gracefulMs)` reports is always false on Windows: off Windows a graceful SIGTERM escalates to SIGKILL, but on Windows
-  `killGroup` runs `taskkill /T /F`, already forceful, so a Windows child stops within the graceful stage and is never reported `escalated: true`. Read the
-  flag as "a forced kill followed the graceful signal", meaningful only off Windows.
+- `killGroup` is two-stage on every OS (#127 A6): the graceful signal is SIGTERM to the group off Windows and `taskkill /T` without `/F` on Windows — a
+  close request to each window in the tree, which a windowless (hidden-console) child cannot observe and therefore survives; the forced signal is SIGKILL
+  or `taskkill /T /F`. So on Windows a hidden console child always waits out the graceful bound and is then reported `escalated: true`; only a child
+  owning a window (the spawn suite uses a PowerShell WinForms form) stops in the graceful stage there.
 - Interrupt and terminate are a two-stage shutdown that shares one `gracefulMs`: the process gets the whole bound to exit on the graceful signal, then the
   same bound again to die once force-killed. The bound is not split between the stages.
 - The single-PATH-walk comment (D1, `walkPath`) covers only this Module's executable resolution; it must not be read as excluding the three git spawn sites

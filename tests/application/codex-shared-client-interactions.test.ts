@@ -9,7 +9,7 @@ import type {
   RunView,
   SteerTurnOffer,
 } from "../../src/application/projection-port.js";
-import { installCodexReplayer } from "../harness/codex-replayer-install.js";
+import { installCodexReplayer } from "../harness/codex-replayer.js";
 import { ensureRuntimeOnPath } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";

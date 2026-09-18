@@ -57,11 +57,16 @@ test("test temp directories are allocated through the shared helper", async () =
   // the real-terminal lifecycle suite (#56) and the opt-in Claude Code recorder (#115).
   // The declaration-surface check (S2) is a pure architecture check that emits
   // declarations to a temp dir and removes it in a `finally`, so it is exempt too.
+  // The runtime-only Codex replayer installer (#149) is imported by both the
+  // `bun test` wrapper and the standalone package smoke, so it stays node:test-free
+  // and stages its shared schema through `mkdtempSync`; the codex-replayer.ts
+  // wrapper supplies the test-runner-cleaned per-install directory.
   const exempt = new Set([
     "helpers/tempDir.ts",
     "terminal/lifecycle.ts",
     "harness/record.ts",
     "harness/record-codex.ts",
+    "harness/codex-replayer-install.ts",
     "architecture/check-vendor-provenance.ts",
   ]);
 

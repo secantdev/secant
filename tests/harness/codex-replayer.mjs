@@ -77,6 +77,28 @@ function expectedStdinLine(recordedLine, actualLine) {
   return replayLine(recordedLine);
 }
 
+/** Strict stdin match, tolerating the one build-varying field. The Secant client
+ *  version differs by build (the `0.0.0-dev` dev sentinel under `bun test`, the
+ *  embedded release version from a compiled binary), so the same byte-faithful
+ *  recording must replay under any build. Every other field of `initialize` — and
+ *  every byte of every other frame — stays strictly matched. */
+function stdinFrameMatches(recordedLine, actualLine) {
+  const expected = expectedStdinLine(recordedLine, actualLine);
+  if (expected === `${actualLine}\n`) return true;
+  try {
+    const recorded = JSON.parse(expected);
+    const actual = JSON.parse(actualLine);
+    if (recorded.method !== "initialize" || actual.method !== "initialize") {
+      return false;
+    }
+    if (recorded.params?.clientInfo) delete recorded.params.clientInfo.version;
+    if (actual.params?.clientInfo) delete actual.params.clientInfo.version;
+    return JSON.stringify(recorded) === JSON.stringify(actual);
+  } catch {
+    return false;
+  }
+}
+
 function applyWorkspacePatch(path) {
   try {
     execFileSync(
@@ -118,7 +140,7 @@ for await (const line of lines) {
     if (
       expected === undefined ||
       expected.direction !== "stdin" ||
-      expectedStdinLine(expected.line, line) !== `${line}\n`
+      !stdinFrameMatches(expected.line, line)
     ) {
       process.stderr.write("recorded Codex stdin diverged\n");
       process.exit(3);

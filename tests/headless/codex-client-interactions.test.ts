@@ -5,7 +5,7 @@ import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import { createCodexAdapter } from "../../src/harness/harness.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
-import { installCodexReplayer } from "../harness/codex-replayer-install.js";
+import { installCodexReplayer } from "../harness/codex-replayer.js";
 import { ensureRuntimeOnPath } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 

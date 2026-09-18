@@ -30,7 +30,7 @@ import {
   installCodexReplayer,
   installSyntheticCodexReplayer,
   type InstalledCodexReplayer,
-} from "./codex-replayer-install.js";
+} from "./codex-replayer.js";
 import {
   CODEX_RECORDING_INPUT,
   codexTestRepairPrompt,

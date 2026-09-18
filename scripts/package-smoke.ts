@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import { TARGETS, hostTargetKey } from "./targets.js";
 import { installReplayerAt } from "../tests/harness/replayer-install.js";
+import { installCodexReplayerAt } from "../tests/harness/codex-replayer-install.js";
 import { seedTestRepairWorkspace } from "../tests/helpers/testRepairWorkspace.js";
 
 // Smokes the Bun compiled single-file executable (ADR 0030). It replaces the
@@ -496,34 +497,97 @@ try {
     );
   }
 
-  // Run the installed Test Repair Proof Bundle headlessly against the recorded
-  // Claude Code replayer on PATH (#119, stories 46-49). The failing baseline
-  // enters one repair iteration; the policy-approved Edit applies the recording's
-  // Workspace patch; the next Verdict passes; and the authored approve-commit
-  // gate keeps Git unchanged until a separate `run answer --continue` invocation.
-  // Both Run-driving commands use the frozen --json envelope from the compiled
-  // binary, and only the temporary PATH selects the fake Harness.
-  {
-    const replayer = installReplayerAt(
-      join(smokeRoot, "claude-replayer"),
-      "2.1.273 (Claude Code)",
-      join(
-        projectRoot,
-        "tests",
-        "harness",
-        "fixtures",
-        "claude-code",
-        "test-repair",
-      ),
+  // The `two-harness-proof-bundle` scenario (#149, replacing the M3 single-Harness
+  // #119 smoke). Run the one installed Test Repair Proof Bundle headlessly through
+  // both recorded replayers — Claude Code and Codex — in two fresh Workspaces with
+  // identical routing and launch-input shape, varying only the externally supplied
+  // `--harness` selection. For each: the failing baseline enters one repair
+  // iteration; the recording applies its Workspace patch; the next Verdict passes;
+  // and the authored approve-commit gate keeps Git unchanged until a separate
+  // `run answer --continue` invocation succeeds and makes the commit. Both
+  // Run-driving commands use the frozen --json envelope from the compiled binary,
+  // and only the temporary PATH selects each fake Harness. The two scenarios report
+  // different effective models, proving the compiled binary drives both Adapters.
+  // `evidence` asserts the Harness-specific observable identity that proves the
+  // compiled binary really drove that Adapter's own seam — not just that a Run
+  // reached the gate. This keeps the M3 permission-bridge invariant checked in the
+  // compiled binary specifically, generalized across the two Adapters.
+  type TimelineEvent = { event: string; detail?: string };
+  const twoHarnessScenarios: readonly {
+    harness: "claude-code" | "codex";
+    effectiveModel: string;
+    replayerDirectory: string;
+    install: () => void;
+    evidence: (timeline: readonly TimelineEvent[]) => boolean;
+  }[] = [
+    {
+      harness: "claude-code",
+      effectiveModel: "claude-opus-5[1m]",
+      replayerDirectory: join(smokeRoot, "claude-replayer"),
+      install() {
+        installReplayerAt(
+          this.replayerDirectory,
+          "2.1.273 (Claude Code)",
+          join(
+            projectRoot,
+            "tests",
+            "harness",
+            "fixtures",
+            "claude-code",
+            "test-repair",
+          ),
+        );
+      },
+      // Claude Code surfaces the Edit as an approval request the client answers by
+      // policy — the permission-bridge seam the M3 #119 smoke asserted.
+      evidence: (timeline) =>
+        timeline.some(
+          (event) =>
+            event.event === "request-raised" &&
+            /^Edit .*sum\.mjs/.test(event.detail ?? ""),
+        ) &&
+        timeline.some(
+          (event) =>
+            event.event === "request-answered" &&
+            event.detail === "answered by client policy (allow)",
+        ),
+    },
+    {
+      harness: "codex",
+      effectiveModel: "gpt-5.6-sol",
+      replayerDirectory: join(smokeRoot, "codex-replayer"),
+      install() {
+        installCodexReplayerAt(this.replayerDirectory, "test-repair");
+      },
+      // Codex auto-approves the edit internally: no approval request crosses to the
+      // client; the edit is observable only as a generic tool-activity event.
+      evidence: (timeline) =>
+        timeline.some(
+          (event) =>
+            event.event === "tool-activity" &&
+            event.detail === "file-change completed",
+        ) && !timeline.some((event) => event.event === "request-raised"),
+    },
+  ];
+  for (const scenario of twoHarnessScenarios) {
+    scenario.install();
+    // Canonicalize the Workspace so the `file` launch input (an absolute
+    // passthrough) names the same directory the Adapter is prepared against; the
+    // Codex replayer strict-redacts the Workspace path in the rendered prompt.
+    const proofWorkspaceRaw = join(
+      smokeRoot,
+      `two-harness-${scenario.harness}-workspace`,
     );
-    const proofWorkspace = join(smokeRoot, "test-repair-workspace");
+    await mkdir(proofWorkspaceRaw, { recursive: true });
+    const proofWorkspace = realpathSync.native(proofWorkspaceRaw);
     const { failingTest, baselineCommit } =
       seedTestRepairWorkspace(proofWorkspace);
     const proofEnv: NodeJS.ProcessEnv = {
       ...workspaceEnv,
-      PATH: `${replayer.dir}${delimiter}${workspaceEnv.PATH}`,
+      PATH: `${scenario.replayerDirectory}${delimiter}${workspaceEnv.PATH}`,
     };
     delete proofEnv.SECANT_CLAUDE_CODE;
+    delete proofEnv.SECANT_CODEX;
     run(binary, ["workspace", "approve"], {
       cwd: proofWorkspace,
       env: proofEnv,
@@ -540,7 +604,7 @@ try {
         "--trust",
         listed.digest,
         "--harness",
-        "claude-code",
+        scenario.harness,
         "--harness-requests",
         "allow",
         "--json",
@@ -562,20 +626,17 @@ try {
       !Array.isArray(proofRun.actionOffers) ||
       proofRun.pendingGate?.gate?.shape !== "approve-reject" ||
       proofRun.pendingGate?.gate?.stepId !== "approve-commit" ||
-      proofRun.effectiveModel !== "claude-opus-5[1m]" ||
-      !proofRun.timeline.some(
-        (event: { event: string; detail?: string }) =>
-          event.event === "request-raised" &&
-          /^Edit .*sum\.mjs/.test(event.detail ?? ""),
-      ) ||
-      !proofRun.timeline.some(
-        (event: { event: string; detail?: string }) =>
-          event.event === "request-answered" &&
-          event.detail === "answered by client policy (allow)",
-      )
+      proofRun.effectiveModel !== scenario.effectiveModel ||
+      proofRun.progress.find(
+        (step: { id: string; status: string }) => step.id === "fix",
+      )?.status !== "succeeded" ||
+      proofRun.timeline.filter(
+        (event: { event: string }) => event.event === "iteration",
+      ).length !== 1 ||
+      !scenario.evidence(proofRun.timeline as TimelineEvent[])
     ) {
       throw new Error(
-        `Installed Proof Bundle did not reach its authored gate with the frozen Run JSON fields: ${launchedJson}`,
+        `Installed Proof Bundle did not reach its authored gate through ${scenario.harness} with the frozen Run JSON fields: ${launchedJson}`,
       );
     }
     if (
@@ -583,7 +644,7 @@ try {
       baselineCommit
     ) {
       throw new Error(
-        "The Proof Bundle committed before its authored gate was approved.",
+        `The Proof Bundle committed before its authored gate was approved through ${scenario.harness}.`,
       );
     }
 
@@ -601,7 +662,7 @@ try {
       answered.result.run?.pendingGate !== undefined
     ) {
       throw new Error(
-        `Installed Proof Bundle did not exit 0 at succeeded with the frozen Run JSON fields: ${answeredJson}`,
+        `Installed Proof Bundle did not exit 0 at succeeded through ${scenario.harness} with the frozen Run JSON fields: ${answeredJson}`,
       );
     }
     if (
@@ -610,7 +671,7 @@ try {
       }).trim() !== "Repair failing test"
     ) {
       throw new Error(
-        "The approved Proof Bundle did not make its authored commit.",
+        `The approved Proof Bundle did not make its authored commit through ${scenario.harness}.`,
       );
     }
   }

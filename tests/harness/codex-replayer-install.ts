@@ -1,17 +1,23 @@
+// Runtime-only installer for the recorded Codex replayer. Like the Claude
+// replayer-install.ts, it deliberately has no node:test dependency so
+// package-smoke.ts can install the same fake from a plain Bun process; the
+// test-runner wrapper codex-replayer.ts adds temporary-directory cleanup.
+
 import {
   appendFileSync,
   chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { makeTempDir } from "../helpers/tempDir.js";
 
 const source = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -28,7 +34,11 @@ const fixtureRoot = join(
 );
 const qualificationFixtureDirectory = join(fixtureRoot, "codex-qualification");
 const SCHEMA_FILE = "stable-schema.generated.json";
-const sharedSchemaDirectory = makeTempDir("secant-codex-schema-source-");
+// Staged once per process on the temp volume. Node:test-free, so it is not
+// registered for test-runner cleanup; it is one small directory the OS reclaims.
+const sharedSchemaDirectory = mkdtempSync(
+  join(tmpdir(), "secant-codex-schema-source-"),
+);
 // Stage the immutable schema on the temp volume once. Normal qualification
 // cases then copy temp-to-temp; mutation cases still take an isolated copy.
 copyFileSync(
@@ -175,7 +185,8 @@ function readInvocations(logPath: string): readonly CodexInvocation[] {
   return Array.from(invocations.values());
 }
 
-export function installCodexReplayer(
+export function installCodexReplayerAt(
+  directory: string,
   caseName: string,
   syntheticFaultInjection = false,
 ): InstalledCodexReplayer {
@@ -183,10 +194,9 @@ export function installCodexReplayer(
   const fixtureRecording = JSON.parse(
     readFileSync(join(fixtureDirectory, "recording.json"), "utf8"),
   );
-  const directory = makeTempDir("secant-codex-replayer-");
+  mkdirSync(directory, { recursive: true });
   const logPath = join(directory, "invocations.log");
   writeFileSync(logPath, "");
-  mkdirSync(directory, { recursive: true });
   const installedFixtureDirectory = join(directory, "fixture");
   mkdirSync(installedFixtureDirectory);
   const qualificationCase = JSON.parse(
@@ -435,12 +445,6 @@ export function installCodexReplayer(
       writeFileSync(casePath, JSON.stringify(protocolCase));
     },
   };
-}
-
-/** Protocol-private deterministic fault injection. Real recorded cases must use
- * `installCodexReplayer(caseName)` and therefore strict playback. */
-export function installSyntheticCodexReplayer(): InstalledCodexReplayer {
-  return installCodexReplayer("codex-qualification", true);
 }
 
 function synchronizeTraffic(

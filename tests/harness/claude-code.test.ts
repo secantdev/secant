@@ -420,10 +420,9 @@ test(
 // The shared interrupt, lost, recovery, and cleanup cases over the real replayer.
 // A fresh replayer per scenario keeps invocations isolated; each fixed session id
 // matches the id its fixture's init acknowledges. Every case runs on every OS.
-// On Windows the process Module's graceful stage is `taskkill /T` (no `/F`),
-// which closes windows; the replayer is a hidden console child with none, so it
-// survives that stage, the forced stage is reported as escalated, and the
-// Adapter truthfully settles the interrupted Turn `lost` with interruption
+// On Windows the process Module has no graceful stage (a hidden console child
+// cannot observe one), so a live replayer is force-killed and reported escalated,
+// and the Adapter truthfully settles the interrupted Turn `lost` with interruption
 // unknown (ADR 0022) — the same escalation the `unresponsive` case models.
 const AUTHENTICATION_REQUIRED =
   "Authentication required for Claude Code. Log in separately through Claude Code, then retry.";
@@ -925,8 +924,8 @@ test("interrupting a live Turn spawns no resume and settles interrupted with a d
   });
   assert.deepEqual(await turn.interrupt(), { outcome: "accepted" });
   const result = await turn.result();
-  // On Windows the hidden console replayer survives the graceful stage, so the
-  // kill escalates and the Turn is truthfully `lost` (see the interrupt cases above).
+  // On Windows a live child is force-killed outright and reported escalated, so
+  // the Turn is truthfully `lost` (see the interrupt cases above).
   if (process.platform === "win32") {
     assert.equal(result.kind, "lost");
     if (result.kind !== "lost") throw new Error("unreachable");
@@ -980,8 +979,8 @@ test("a resumed Turn spawns with --resume and not --session-id", async () => {
   });
   await turn1.interrupt();
   const result1 = await turn1.result();
-  // `interrupted` off Windows, `lost` on it (the graceful stage cannot reach a
-  // hidden console child); either way the Session detaches with its coordinate.
+  // `interrupted` off Windows, `lost` on it (a live child is force-killed there);
+  // either way the Session detaches with its coordinate.
   assert.equal(
     result1.kind,
     process.platform === "win32" ? "lost" : "interrupted",

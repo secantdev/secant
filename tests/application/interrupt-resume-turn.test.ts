@@ -156,10 +156,10 @@ function runView(port: ProjectionPort, runId: string): RunView {
 }
 
 // How the real Claude Code Adapter settles an interrupted live Turn on this OS. On
-// Windows the process Module's graceful stage (`taskkill /T`, a close request to
-// each window) cannot reach the hidden console replayer, so the kill escalates and
-// the Adapter truthfully settles `lost` with interruption unknown (ADR 0022); the
-// Run still rests `halted` with the Session detached, and resume still works.
+// Windows a hidden console child cannot observe a graceful signal, so the process
+// Module force-kills it and reports escalated, and the Adapter truthfully settles
+// `lost` with interruption unknown (ADR 0022); the Run still rests `halted` with
+// the Session detached, and resume still works.
 const INTERRUPTED_KIND = process.platform === "win32" ? "lost" : "interrupted";
 
 test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Session, and settles the Turn interrupted (#118)", async (t) => {

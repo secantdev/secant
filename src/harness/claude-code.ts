@@ -1522,7 +1522,9 @@ function buildProfile(
     interruption: {
       mode: "process-only",
       evidence:
-        "SIGTERM ends the Turn and the process; the Session stays resumable.",
+        platform === "windows"
+          ? "A forced process-tree kill ends the Turn and the process; Windows offers a hidden console child no graceful signal, so an interrupt of live work is reported lost, never a confirmed interruption. The Session stays resumable."
+          : "SIGTERM ends the Turn and the process; the Session stays resumable.",
     },
     approvals: {
       available: true,

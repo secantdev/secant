@@ -127,9 +127,8 @@ export interface ReplayScenario {
 
 /** How an interrupt of unconfirmed active work settles for a provider. A
  *  provider that can stop its process on a graceful signal settles `interrupted`;
- *  one whose graceful stage cannot reach the process (a hidden Windows console
- *  child has no window for `taskkill /T` to close) escalates to a forced kill and
- *  truthfully settles `lost` with interruption unknown (ADR 0022). */
+ *  one that can only force-kill it (Windows offers a hidden console child no
+ *  graceful signal) truthfully settles `lost` with interruption unknown (ADR 0022). */
 export type InterruptOutcome = "interrupted" | "lost";
 
 export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {

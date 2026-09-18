@@ -219,10 +219,10 @@ export interface OwnedProcessOptions {
 }
 
 /** A graceful stop attempt: the close observation, and whether a forced kill was
- * needed because the process did not stop on the graceful signal within the bound.
- * `escalated: false` means the process stopped on the graceful stage (SIGTERM off
- * Windows, `taskkill /T` on Windows); `escalated: true` means the forced stage
- * (SIGKILL / `taskkill /T /F`) followed.
+ * needed. Off Windows `escalated: false` means the process stopped on SIGTERM and
+ * `escalated: true` means SIGKILL followed. Windows has no graceful stage (see
+ * `safeInterrupt`): a live child is force-killed outright and reported
+ * `escalated: true`; only a child already gone reports `false`.
  * A caller distinguishing a confirmed graceful stop from a force-kill needs this;
  * `terminate` alone cannot express it because it collapses both into one close. */
 export type ProcessInterruption = {
@@ -242,10 +242,11 @@ export interface OwnedProcess {
   closeStdin(timeoutMs: number): Promise<OwnedProcessClose>;
   /** Stop the process tree, escalating SIGTERM to SIGKILL within the bound. */
   terminate(timeoutMs: number): Promise<OwnedProcessClose>;
-  /** Signal the tree to stop gracefully (SIGTERM off Windows; `taskkill /T` on
-   * Windows) and wait up to `gracefulMs` for it to close. If it does not, escalate
-   * to a forced kill (SIGKILL; `taskkill /T /F`) within the same bound and report
-   * `escalated: true`. Repeated calls return the same interruption. */
+  /** Off Windows: SIGTERM the tree, wait up to `gracefulMs` for it to close, and if
+   * it does not, SIGKILL within the same bound and report `escalated: true`. On
+   * Windows: force-kill the tree (`taskkill /T /F`) at once and report
+   * `escalated: true` for a live child — no product child can observe a graceful
+   * request there. Repeated calls return the same interruption. */
   interrupt(gracefulMs: number): Promise<ProcessInterruption>;
   closed(): Promise<OwnedProcessClose>;
 }
@@ -433,12 +434,23 @@ class NodeOwnedProcess implements OwnedProcess {
     gracefulMs: number,
   ): Promise<ProcessInterruption> {
     try {
-      // Two stages on every OS (#127 A6). Off Windows the graceful stage is
-      // SIGTERM to the group; on Windows it is `taskkill /T` without `/F`, which
-      // asks each window in the tree to close. A hidden console child owns no
-      // window, so it survives that stage and the forced stage is reported as
-      // escalated — the Adapter then reports the Turn `lost`, never a confirmed
-      // `interrupted` it cannot vouch for.
+      if (process.platform === "win32") {
+        // No graceful stage on Windows (#127 A6, amended 2026-09-18). Windows'
+        // polite close (`taskkill` without `/F`) reaches only a window, and every
+        // child this Module spawns runs `windowsHide: true`, so none can observe
+        // it; a graceful wait could never change the outcome, only delay it. A
+        // live child is force-killed at once and reported escalated — the Adapter
+        // then reports the Turn `lost`, never a confirmed `interrupted` it cannot
+        // vouch for. A child already gone was not killed by us: not escalated.
+        const alive =
+          this.child.exitCode === null && this.child.signalCode === null;
+        killGroup(this.child, "SIGKILL");
+        const forced = await settleWithin(this.closePromise, gracefulMs);
+        return {
+          close: forced ?? { kind: "cleanup-timeout" },
+          escalated: alive,
+        };
+      }
       killGroup(this.child, "SIGTERM");
       const graceful = await settleWithin(this.closePromise, gracefulMs);
       if (graceful !== undefined) return { close: graceful, escalated: false };
@@ -513,10 +525,10 @@ async function settleWithin<T>(
  * Spawn a resolved Command target directly (never a shell), stream its output
  * under a byte cap, and settle to a typed SpawnResult. On POSIX the child is
  * detached so it leads its own process group; a timeout or cancel aborts, and the
- * whole group is signalled — `kill(-pid, SIGTERM)` on POSIX, `taskkill /T` on
- * Windows — escalating to a forced kill (SIGKILL; `taskkill /T /F`) after a grace
- * period so a grandchild holding stdout open cannot outlive its parent (D2, #21).
- * stdin is closed so a command that reads it gets EOF rather than hanging.
+ * whole group is killed — `kill(-pid, SIGTERM)` on POSIX, escalating to SIGKILL
+ * after a grace period, and `taskkill /T /F` outright on Windows — so a grandchild
+ * holding stdout open cannot outlive its parent (D2, #21). stdin is closed so a
+ * command that reads it gets EOF rather than hanging.
  */
 export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
   return new Promise<SpawnResult>((resolve) => {
@@ -610,18 +622,18 @@ export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
 }
 
 /** Signal a spawned child and everything under it. On POSIX the negative pid
- *  targets the whole process group (the child was detached to lead one); on
- *  Windows `taskkill /T` walks the process tree — without `/F` for the graceful
- *  signal (a close request to each window; a windowless console child is left
- *  running), with `/F` for the forced one. A not-found error means the child had
- *  already exited between the liveness check and the kill — swallow it (D2). */
+ *  targets the whole process group (the child was detached to lead one). On
+ *  Windows both signals are `taskkill /T /F`: the polite form (no `/F`) only
+ *  reaches a window, and a `windowsHide: true` child has none, so a graceful
+ *  request would be sent into the void (#127 A6, verified on a Windows desktop
+ *  2026-09-18). A not-found error means the child had already exited between the
+ *  liveness check and the kill — swallow it (D2). */
 function killGroup(child: ChildProcess, signal: "SIGTERM" | "SIGKILL"): void {
   const pid = child.pid;
   if (pid === undefined) return;
   if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === "win32") {
-    const force = signal === "SIGKILL" ? ["/F"] : [];
-    const killer = spawn("taskkill", ["/pid", String(pid), "/T", ...force], {
+    const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
       windowsHide: true,
       stdio: "ignore",
     });

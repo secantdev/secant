@@ -35,10 +35,10 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 ## Invariants (interrupt, recovery, cleanup)
 
 - Confirmed interruption uses the process Module's `interrupt(gracefulMs)`, which reports whether a forced escalation was needed. A graceful stop ends
-  the Turn `interrupted` (process-only); a force-kill or unconfirmed termination ends it `lost` with `interruption-unknown`. On Windows the graceful
-  stage is `taskkill /T` without `/F`, which only a window can honour, so a hidden console Claude Code (or replayer) survives it, the forced stage is
-  escalated, and every Windows interrupt of a live Turn truthfully settles `lost` after the graceful bound (#127 A6); the conformance
-  `interruptOutcome` option pins that per OS. `onClosed` yields to an
+  the Turn `interrupted` (process-only); a force-kill or unconfirmed termination ends it `lost` with `interruption-unknown`. On Windows the process
+  Module has no graceful stage (a hidden console child cannot observe one, #127 A6 amended), so a live Claude Code is force-killed at once and every
+  Windows interrupt of a live Turn truthfully settles `lost`; the profile's interruption evidence says so there, and the conformance `interruptOutcome`
+  option pins it per OS. `onClosed` yields to an
   in-flight interrupt so the two never race the result: a confirmed interrupt claims the process before awaiting, and the close path (`onClosed`) returns
   early when `this.process !== owned`, leaving the interrupt to settle the one authoritative result.
 - Recovery is caller- and history-driven: a relaunch of a Session that already ran, or any Turn carrying `resume`, spawns with `--resume` (never a fresh
@@ -94,9 +94,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   child's top-level code runs hits the default disposition and kills it (this is a startup race, not a `bun test` limitation; plain `bun` shows the same
   window). So the replayer installs its SIGTERM handler at startup, and interrupt/close cases wait for the `session` event (init observed) before
   interrupting. Never signal a freshly spawned child before it has announced readiness.
-- The replayer's `case.json` carries the interrupt/recovery vocabulary: `ignoreSigterm` (swallow SIGTERM → force-kill path; moot on Windows, where the
-  hidden console child survives the graceful stage regardless), per-turn `exitAfter` (exit without a result → lost/corruption), and a `resume` section
-  replayed when the launch has `--resume`.
+- The replayer's `case.json` carries the interrupt/recovery vocabulary: `ignoreSigterm` (swallow SIGTERM → force-kill path; moot on Windows, where every
+  live child is force-killed regardless), per-turn `exitAfter` (exit without a result → lost/corruption), and a `resume` section replayed when the launch
+  has `--resume`.
 
 ## Read next
 

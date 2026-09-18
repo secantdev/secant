@@ -42,19 +42,14 @@ test(
 // that stops on the graceful stage reports `escalated:false`; one that survives it
 // must be force-killed and reports `escalated:true`. Each child announces "ready"
 // on stdout once it can observe the graceful stage; the test waits for that before
-// signalling, so the signal never races child startup. The graceful stage is
-// SIGTERM off Windows and `taskkill /T` (a close request to each window) on
-// Windows (#127 A6). Bounded and deterministic: a regression flips the boolean,
-// never hangs.
+// signalling, so the signal never races child startup. Bounded and deterministic: a
+// regression flips the boolean, never hangs.
 //
-// Named gap (testing.md): the graceful-stop proof runs off Windows only. On the
-// Windows CI runner a PowerShell child owning a shown WinForms window announced
-// `ready` and still survived `taskkill /T` for the whole 5 s bound (run
-// 35297175838), so no child there is known to honour the close request and the
-// case cannot be asserted deterministically. The escalation proof below does run
-// on Windows and pins the half that matters to the Adapter: the graceful stage
-// does not kill a hidden console child, and only the forced stage reports
-// escalated.
+// Windows has no graceful stage by design (#127 A6, amended): Windows' polite close
+// reaches only a window and every child this Module spawns is `windowsHide: true`,
+// so a live child is force-killed outright and reported escalated. The graceful-stop
+// proof is therefore POSIX-only; the escalation proof runs on every OS and on
+// Windows pins that a live hidden console child is reported escalated.
 async function awaitReady(process: {
   readonly stdout: AsyncIterable<Uint8Array>;
 }): Promise<boolean> {
@@ -98,10 +93,9 @@ test(
   "interrupt: a child that survives the graceful stage is force-killed and escalated",
   { timeout: 20_000 },
   async () => {
-    // Swallows SIGTERM off Windows, so only SIGKILL stops it; on Windows it is a
-    // hidden console child with no window for `taskkill /T` to close, so it
-    // survives the graceful stage the same way. It announces readiness after the
-    // handler is installed so the graceful signal cannot arrive before it.
+    // Swallows SIGTERM off Windows, so only SIGKILL stops it; on Windows every
+    // live child is force-killed and reported escalated. It announces readiness
+    // after the handler is installed so the signal cannot arrive before it.
     const launched = await spawnOwnedProcess({
       executable: process.execPath,
       args: [

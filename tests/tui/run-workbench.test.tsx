@@ -158,6 +158,13 @@ function makeRunView(initial: RunSnapshot) {
     createSignal<AnswerOutcome>({ kind: "pending" });
   const sends: { runId: string; stepId: string; text: string }[] = [];
   const ends: { runId: string; stepId: string }[] = [];
+  // The steer seam (#148) is hand-driven the same way: it records each dispatch and
+  // returns the shared outcome accessor a test advances (pending → applied/refused),
+  // so tests exercise the blank guard, the applied close, and the refusal-keeps-draft.
+  const [steerOutcome, setSteerOutcome] = createSignal<AnswerOutcome>({
+    kind: "pending",
+  });
+  const steers: { runId: string; turnId: string; text: string }[] = [];
   const texts: { gate: RunGateReference; text: string }[] = [];
   const requests: {
     requestId: string;
@@ -187,6 +194,10 @@ function makeRunView(initial: RunSnapshot) {
     endInteractiveStep: (runId, stepId) => {
       ends.push({ runId, stepId });
       return interactiveOutcome;
+    },
+    steer: (runId, turnId, text) => {
+      steers.push({ runId, turnId, text });
+      return steerOutcome;
     },
     answerText: (gate, text) => {
       texts.push({ gate, text });
@@ -238,7 +249,9 @@ function makeRunView(initial: RunSnapshot) {
     setAnswerOutcome,
     sends,
     ends,
+    steers,
     setInteractiveOutcome,
+    setSteerOutcome,
     setRequestOutcome,
     setGateOutcome,
   };
@@ -2433,7 +2446,124 @@ test("Steer renders as unavailable with the exact reason and has no dispatch", a
   );
   // No key dispatches steer; the seam is never touched from the Workbench.
   await press(t, renderer, "s");
-  assert.equal(control.requests.length, 0);
+  assert.equal(control.steers.length, 0);
+});
+
+// A live Turn under a Harness that declares native steer (Codex): the Actions rail
+// names the `s` key, `s` opens a compose input, and Enter sends guidance (#148).
+const AVAILABLE_STEER_OFFER = {
+  action: "steer-turn" as const,
+  runId: "run-1",
+  turnId: "turn-7",
+  available: true as const,
+  consequence:
+    "send same-Turn guidance to the running agent without ending the Turn.",
+};
+function steerableRunOf(over: Partial<RunView> = {}): RunView {
+  return runOf({
+    state: "running",
+    progress: [{ id: "repair", kind: "agent", status: "running" }],
+    actionOffers: [INTERRUPT_OFFER, AVAILABLE_STEER_OFFER, CANCEL_OFFER],
+    ...over,
+  });
+}
+
+test("available Steer names the `s` key; `s` opens the compose input and Enter sends the guidance (#148)", async () => {
+  const wb = await mountWorkbench(steerableRunOf(), 100, 40, okActions());
+  // The Actions rail advertises the key and the consequence, readable without colour.
+  assert.match(wb.t.captureCharFrame(), /s steer — send same-Turn guidance/);
+
+  // `s` opens the compose input (the footer is replaced with the labelled field).
+  await press(wb.t, wb.renderer, "s");
+  assert.match(wb.t.captureCharFrame(), /Steer — guide the running Turn/);
+
+  // The guidance rides the native field; Enter sends exactly one steer at the live turnId.
+  await type(wb.t, "wrap it up");
+  assert.match(wb.t.captureCharFrame(), /> wrap it up/);
+  await press(wb.t, wb.renderer, "return");
+  assert.deepEqual(wb.control.steers, [
+    { runId: "run-1", turnId: "turn-7", text: "wrap it up" },
+  ]);
+});
+
+test("blank Steer guidance is not sent, and Esc backs out of the compose (#148)", async () => {
+  const wb = await mountWorkbench(steerableRunOf(), 100, 40, okActions());
+  await press(wb.t, wb.renderer, "s");
+  // Enter with an empty draft authors nothing.
+  await press(wb.t, wb.renderer, "return");
+  assert.equal(wb.control.steers.length, 0);
+  // Esc leaves the compose; the passive footer returns and no steer was sent.
+  await press(wb.t, wb.renderer, "escape");
+  assert.doesNotMatch(
+    wb.t.captureCharFrame(),
+    /Steer — guide the running Turn/,
+  );
+  assert.equal(wb.control.steers.length, 0);
+});
+
+test("a refused Steer keeps the typed guidance and surfaces the refusal (#148)", async () => {
+  const wb = await mountWorkbench(steerableRunOf(), 100, 40, okActions());
+  wb.control.setSteerOutcome({
+    kind: "refused",
+    problem: {
+      code: "steer-rejected",
+      explanation: "The live Turn rejected the guidance.",
+      remediation: "Steer the next live Turn.",
+      possibleEffects: "none",
+    },
+  });
+  await press(wb.t, wb.renderer, "s");
+  await type(wb.t, "keep going");
+  await press(wb.t, wb.renderer, "return");
+  const frame = wb.t.captureCharFrame();
+  // The draft survives a refusal (A9-style), and the refusal replaces the hint line.
+  assert.match(frame, /> keep going/);
+  assert.match(frame, /The live Turn rejected the guidance/);
+});
+
+test("reopening Steer after Escaping a still-pending send starts a clean, usable compose (#148)", async () => {
+  // The default steer outcome stays `pending`, so a dispatched steer never settles.
+  const wb = await mountWorkbench(steerableRunOf(), 100, 40, okActions());
+  await press(wb.t, wb.renderer, "s");
+  await type(wb.t, "first guidance");
+  await press(wb.t, wb.renderer, "return"); // dispatch — now pending ("… steering…")
+  assert.deepEqual(wb.control.steers, [
+    { runId: "run-1", turnId: "turn-7", text: "first guidance" },
+  ]);
+  assert.match(wb.t.captureCharFrame(), /steering/);
+
+  // Escape out while the send is still in flight, then reopen: the reopened compose
+  // must not inherit the abandoned send's pending state (which would blur the field
+  // and swallow keys). Typing lands and Enter dispatches the new guidance.
+  await press(wb.t, wb.renderer, "escape");
+  await press(wb.t, wb.renderer, "s");
+  await type(wb.t, "second guidance");
+  assert.match(wb.t.captureCharFrame(), /> second guidance/);
+  await press(wb.t, wb.renderer, "return");
+  assert.deepEqual(wb.control.steers[1], {
+    runId: "run-1",
+    turnId: "turn-7",
+    text: "second guidance",
+  });
+});
+
+test("the Steer compose stays within a narrow terminal and relays out on resize (#148)", async () => {
+  const { t, renderer } = await mountWorkbench(
+    steerableRunOf(),
+    40,
+    24,
+    okActions(),
+  );
+  await press(t, renderer, "s");
+  // A long guidance draft cannot push any line past the width.
+  await type(
+    t,
+    "please wrap up the current change and stop before touching anything else",
+  );
+  noOverflow(t.captureCharFrame(), 40);
+  renderer.resize(80, 24);
+  await t.renderOnce();
+  noOverflow(t.captureCharFrame(), 80);
 });
 
 test("Esc from Details returns focus to the timeline during a live Turn, never arming interrupt (A7) — fails at HEAD", async () => {

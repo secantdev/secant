@@ -21,6 +21,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   interrupt disarm). `interrupt-turn`/`steer-turn` offers stay present through an `awaiting-approval` Turn (run-projection derives them from liveness, not
   `TurnPhase`), so without this guard the request control and the "esc esc interrupt" hint collide over Esc. The interrupt/steer rows and the Esc arm are also
   hidden while an interactive Step owns the input (#122): its Esc leaves, so surfacing an Esc-driven interrupt there would collide too.
+- Native Steer (#148) is an on-demand compose, not a blocked-state modal like the gate/interactive inputs: while an agent Turn is live under a Harness that declares native
+  steer (Codex offers `steer-turn` `available`, Claude Code `available:false`), the Actions rail names the `s` key; `s` opens a native `<input>` (`SteerInput`) in the bottom
+  region with `focus === "steer"`, Enter dispatches `steer-turn` (blank refused, a refused steer keeps the draft), Escape backs out — the Turn keeps working either way. It is
+  mutually exclusive with the interactive input (a Turn is live vs. the Run is blocked) and yields to a request/gate modal (`modalControl` wins `bottomHeight`; an effect
+  closes the compose when the offer leaves or a modal appears). The `s`-open and steer-typing key routing sit beside the interactive `typing` branch (gated so
+  `q`/`t`/Run-Actions type as text while composing). An unavailable steer shows `steer — unavailable · <reason>` and `s` opens nothing.
 - The free-text gate control and the interactive input each mount a native OpenTUI `<input>` (`run-gate-control.tsx`, `run-workbench.tsx`; D9), not a hand-rolled
   buffer. The verified routing order is why this works on the Port-driven Workbench: OpenTUI delivers a keypress to the global listeners registered on `keyInput`
   **before** the focused renderable's own handler, and the production Renderer Port adapter (`renderer/renderer.ts`, `renderer.keyInput.on("keypress", …)`) is exactly

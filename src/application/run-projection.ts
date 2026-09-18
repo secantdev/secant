@@ -257,15 +257,18 @@ function runResult(
             : derivedRun.state === "halted" || derivedRun.state === "failed"
               ? [resumeRunOffer(runId, derivedRun.state)]
               : []),
-          // Turn-scoped controls (#118): while a Turn is live in this process, a
+          // Turn-scoped controls (#118, #148): while a Turn is live in this process, a
           // user can interrupt it (rests the Run `halted`, resumable) without
-          // cancelling the Run; an unavailable steer Offer carries the prepared or
-          // persisted profile evidence rather than Adapter-specific prose here.
+          // cancelling the Run, and steer it when the prepared profile declares native
+          // same-Turn guidance. The steer Offer is discriminated on that profile
+          // evidence (live first, then persisted with the Attempt) — a Harness with
+          // steer (Codex) offers it available, one without (Claude Code) offers it
+          // unavailable with the evidence, never Adapter-specific prose here.
           ...(isLive && liveTurn !== undefined
             ? [
                 interruptTurnOffer(runId, liveTurn.turnId),
-                ...(steer?.available === false
-                  ? [steerTurnOffer(runId, liveTurn.turnId, steer.evidence)]
+                ...(steer !== undefined
+                  ? [steerTurnOffer(runId, liveTurn.turnId, steer)]
                   : []),
               ]
             : []),
@@ -553,19 +556,30 @@ function interruptTurnOffer(runId: string, turnId: string): ActionOffer {
   };
 }
 
-/** An evidence-backed unavailable `steer-turn` offer for a live Turn (#118). */
+/** The `steer-turn` offer for a live Turn (#118, #148), discriminated on the
+ *  prepared Harness profile's steer evidence: `available` carries the live turnId a
+ *  client submits against; unavailable carries the evidence as its reason. */
 function steerTurnOffer(
   runId: string,
   turnId: string,
-  reason: string,
+  steer: RunSteerCapability,
 ): ActionOffer {
-  return {
-    action: "steer-turn",
-    runId,
-    turnId,
-    available: false,
-    reason,
-  };
+  return steer.available
+    ? {
+        action: "steer-turn",
+        runId,
+        turnId,
+        available: true,
+        consequence:
+          "send same-Turn guidance to the running agent without ending the Turn.",
+      }
+    : {
+        action: "steer-turn",
+        runId,
+        turnId,
+        available: false,
+        reason: steer.evidence,
+      };
 }
 
 /** The `delete-run` offer for a resting or terminal Run (#87). */

@@ -182,9 +182,10 @@ export interface InterruptTurnInput {
   readonly turnId: string;
 }
 
-/** Steer the live Turn with same-Turn guidance (spec story 20, #118). Claude Code
- *  has no same-Turn steer, so the offer is marked unavailable and a submission is
- *  rejected as a value (`not-applied`), never emulated. Idempotent per operation id. */
+/** Steer the live Turn with same-Turn guidance (spec story 19, #118, #148). A
+ *  Harness declaring native steer (Codex) accepts it and keeps working; a Harness
+ *  without it (Claude Code) rejects the submission as a value (`not-applied`) with
+ *  the profile's evidence, never emulated. Idempotent per operation id. */
 export interface SteerTurnSubmission {
   readonly operationId: string;
   readonly operation: "steer-turn";
@@ -859,18 +860,28 @@ export interface InterruptTurnOffer {
   readonly consequence: string;
 }
 
-/** Steer the live Turn (#118). Offered while a Turn is live, but marked
- *  unavailable for a Harness (Claude Code) that has no same-Turn steer: a client
- *  shows it disabled with `reason` and never submits it. `available` is `false`
- *  in M3 — ponytail: no `available: true` variant until a Harness supports steer,
- *  at which point this becomes a discriminated union carrying the live turnId. */
-export interface SteerTurnOffer {
-  readonly action: "steer-turn";
-  readonly runId: string;
-  readonly turnId: string;
-  readonly available: false;
-  readonly reason: string;
-}
+/** Steer the live Turn (#118, #148). Offered while a Turn is live, discriminated on
+ *  `available` by the prepared Harness profile's steer evidence — never by client
+ *  guesswork about which Harness is selected. A Harness with native same-Turn
+ *  guidance (Codex) offers it `available`, carrying the live turnId a client submits
+ *  `steer-turn` against; a Harness without it (Claude Code's print mode) offers it
+ *  `unavailable`, so a client shows it disabled with `reason` and never submits. */
+export type SteerTurnOffer =
+  | {
+      readonly action: "steer-turn";
+      readonly runId: string;
+      readonly turnId: string;
+      readonly available: true;
+      /** What steering does: sends same-Turn guidance without ending the Turn. */
+      readonly consequence: string;
+    }
+  | {
+      readonly action: "steer-turn";
+      readonly runId: string;
+      readonly turnId: string;
+      readonly available: false;
+      readonly reason: string;
+    };
 
 /** Send one human Turn to an interactive-agent Step (#122). Offered on the `run`
  *  Projection only while the Run is `blocked` at the Step and no Turn is live (a

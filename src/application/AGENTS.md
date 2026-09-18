@@ -45,8 +45,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   execution Module (owner of the reason strings, imported from there) translates into `turn.interrupt()` at the Harness Seam. All three reasons stop the live Turn; the reason
   decides the rest — `INTERRUPT_TURN_ABORT` and `SIGNAL_ABORT` map the interrupted/lost Turn to a `cancelled`/`indeterminate` Attempt that rests the Run `halted` in-process
   (no `RunCancelledError` thrown, so `runAndSettle` returns through its normal path), while `RUN_CANCEL_ABORT` throws `RunCancelledError` so cancel-run writes `cancelled`.
-  Both `interrupt-turn` and `steer-turn` are offered only while a live (unsettled) Turn exists in this process; a control naming a settled Turn is rejected as a value, and
-  the steer Offer's unavailability reason is the prepared profile's evidence (live first, then persisted with the Attempt), never Adapter prose above the Seam.
+  Both `interrupt-turn` and `steer-turn` are offered only while a live (unsettled) Turn exists in this process; a control naming a settled Turn is rejected as a value. The
+  steer Offer is discriminated on the prepared profile's steer evidence (live first, then persisted with the Attempt), never Adapter prose above the Seam: a Harness with
+  native steer (Codex) offers it `available` with the live turnId, one without (Claude Code) offers it `available:false` with the evidence as `reason` (#148). Unlike
+  interrupt, steer does **not** use the AbortController — it keeps the Turn working. `submitSteerTurn` refuses an unavailable profile with `steer-unavailable` before any
+  native call, else reaches the live Turn's `tracking.live.steer` (bound by `driveHarnessTurn` over `turn.steer` via the `RequestChannel.bindSteer` hook, unbound at Turn end
+  alongside `bindAnswer`); a native control race settles `steer-rejected`, a stale/settled turnId `turn-control-rejected`, an accepted steer `applied`, Run still running.
   `resume-run` continues a `detached` Session in the same Claude Code Session because the executor reads
   the stored Session availability and passes its coordinate as `resume`; a Session recorded `unusable` fails the Attempt without ever opening a fresh Session (ADR 0022).
   The one `AbortController` per Run means the three reasons race: a `cancel-run` and an `interrupt-turn` submitted concurrently for the same live Run both `abort()` it, and

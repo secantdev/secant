@@ -308,6 +308,24 @@ export function steerUnavailable(runId: string, reason: string): Problem {
   };
 }
 
+/** Steering reached the live Turn but the Harness rejected it as a native control
+ *  race (#148): the Turn settled or moved before the guidance landed. Distinct from
+ *  `steer-unavailable`, which is refused above the Seam before any native call. */
+export function steerRejected(
+  runId: string,
+  turnId: string,
+  reason: string,
+): Problem {
+  return {
+    code: "steer-rejected",
+    explanation: `The live Turn ${turnId} on Run ${runId} rejected the guidance (${reason}); nothing was applied.`,
+    remediation:
+      "The Turn settled or moved before the guidance landed; nothing was applied. Re-read the Run and steer the next live Turn.",
+    possibleEffects: "none",
+    details: { runId, turnId, reason },
+  };
+}
+
 /** A human interactive Turn was sent with blank or whitespace-only text (#122):
  *  Secant authors nothing, so an empty Turn is rejected before any stdin is sent. */
 export function interactiveTurnBlank(runId: string): Problem {

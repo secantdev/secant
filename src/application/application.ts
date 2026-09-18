@@ -73,6 +73,7 @@ import {
   runStoreDamaged,
   runSupportUnavailable,
   selectedHarnessUnavailable,
+  steerRejected,
   steerUnavailable,
   trustDigestMismatch,
   turnControlRejected,
@@ -1960,8 +1961,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
     });
   }
 
-  // Steer the live Turn (#118). M3 has no available steer Adapter, so a submission
-  // is rejected as a value with the recorded profile evidence — never emulated.
+  // Steer the live Turn (#118, #148). Admitted at once; relayed at settle time.
+  // A Harness declaring native steer (Codex) reaches the live Turn and keeps it
+  // working; a Harness without it (Claude Code) is refused above the Seam with the
+  // recorded profile evidence — never emulated. Idempotent per operation id.
   function submitSteerTurn(
     operationId: string,
     input: SteerTurnInput,
@@ -1981,23 +1984,61 @@ export function createApplication(deps: ApplicationDependencies): Application {
       outcome: { status: "pending" },
       observers: new Set<UpdateStream>(),
       runId: input.runId,
-      settle: (): OperationOutcome => {
-        const tracking = runs.get(input.runId);
-        const evidence =
-          tracking?.steer?.evidence ??
-          tracking?.owner?.harnessEvidence()?.identity?.steer?.evidence;
-        return {
-          status: "not-applied",
-          problem: steerUnavailable(
-            input.runId,
-            evidence ??
-              "No recorded Harness profile evidence permits same-Turn steer.",
-          ),
-        };
-      },
+      settle: () => steerTurnAndSettle(input),
     });
     scheduleSettlement(() => settleOperation(operationId));
     return { admitted: true, operationId, runId: input.runId };
+  }
+
+  // Relay same-Turn guidance to the live Turn (#148). The prepared profile decides
+  // availability: an unavailable Harness is refused with its evidence before any
+  // native call; an available Harness reaches the live Turn's bound steer function,
+  // and a native control race (`expired`/`already-settled`/`shape-mismatch`) settles
+  // `not-applied` precisely. The Turn keeps working either way — steer never rests
+  // the Run. A control naming a Turn that is no longer the live one is rejected as a
+  // value, exactly as interrupt is.
+  function steerTurnAndSettle(
+    input: SteerTurnInput,
+  ): OperationOutcome | Promise<OperationOutcome> {
+    const tracking = runs.get(input.runId);
+    const steer =
+      tracking?.steer ?? tracking?.owner?.harnessEvidence()?.identity?.steer;
+    if (steer === undefined || !steer.available) {
+      return {
+        status: "not-applied",
+        problem: steerUnavailable(
+          input.runId,
+          steer?.evidence ??
+            "No recorded Harness profile evidence permits same-Turn steer.",
+        ),
+      };
+    }
+    const owner =
+      tracking !== undefined && !tracking.done ? tracking.owner : undefined;
+    const live =
+      owner !== undefined
+        ? owner.turns().find((turn) => turn.resultKind === undefined)
+        : undefined;
+    if (
+      tracking === undefined ||
+      tracking.live.steer === undefined ||
+      live === undefined ||
+      live.turnId !== input.turnId
+    ) {
+      return {
+        status: "not-applied",
+        problem: turnControlRejected(input.runId, "steer-turn", input.turnId),
+      };
+    }
+    return tracking.live.steer(input.text).then((result) => {
+      if (result.outcome === "rejected") {
+        return {
+          status: "not-applied",
+          problem: steerRejected(input.runId, input.turnId, result.reason),
+        };
+      }
+      return { status: "applied" };
+    });
   }
 
   // --- Interactive-agent turn-taking (#122) --------------------------------

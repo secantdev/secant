@@ -85,6 +85,11 @@ export interface RunWorkbenchView {
   /** Ends the interactive-agent Step the Run is blocked at (#122): settles the Step
    *  succeeded and advances the Run. Offered only at a Turn boundary. */
   endInteractiveStep(runId: string, stepId: string): Accessor<AnswerOutcome>;
+  /** Steers the live Turn with same-Turn guidance (#148): the verbatim text reaches
+   *  the running agent without ending the Turn. Offered only when the prepared
+   *  Harness declares native steer. The accessor starts `pending` and settles once
+   *  the Operation resolves; a rejected or stale steer settles `refused`. */
+  steer(runId: string, turnId: string, text: string): Accessor<AnswerOutcome>;
   /** Answers a free-text Human Gate (#108): publishes `text` as the gate's declared
    *  `text` output and advances the Run. The accessor starts `pending` and settles
    *  once the Operation resolves; a shape mismatch or stale Gate settles `refused`. */
@@ -156,6 +161,16 @@ export function createLiveRunWorkbenchView(
         operationId: randomUUID(),
         operation: "end-interactive-step",
         input: { runId, stepId },
+      }),
+    // Same-Turn guidance (#148): Turn-scoped like an approval answer, so it must
+    // reach the live Turn before it settles. The Application refuses an unavailable
+    // Harness or a stale/rejected control as a value; an applied steer leaves the
+    // Turn running, and the open snapshot keeps following it.
+    steer: (runId, turnId, text) =>
+      submitAndSettle(port, {
+        operationId: randomUUID(),
+        operation: "steer-turn",
+        input: { runId, turnId, text },
       }),
     // A free-text gate answer publishes the text as the gate's declared output and
     // advances the Run in one Store boundary (#108); the open snapshot follows the

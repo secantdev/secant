@@ -66,6 +66,17 @@ export type RequestAnswerFn = (
   by: RequestAnswerBy,
 ) => Promise<LiveAnswerOutcome>;
 
+/** The outcome of steering the live Turn (#148): accepted, or a rejected native
+ *  control race carrying its reason. Mirrors {@link LiveAnswerOutcome}. */
+export type LiveSteerOutcome =
+  | { readonly outcome: "accepted" }
+  | { readonly outcome: "rejected"; readonly reason: string };
+
+/** Send same-Turn guidance to the live Turn (#148). Bound only while a Turn whose
+ *  Harness declares native steer is live; the Application reaches it for an
+ *  available `steer-turn`. */
+export type LiveSteerFn = (text: string) => Promise<LiveSteerOutcome>;
+
 /** Coalesced live observations for the overlay (never durable). */
 export interface LiveObservation {
   readonly activity?: string;
@@ -85,6 +96,10 @@ export interface RequestChannel {
   /** Bind (or, with `undefined`, unbind) the answer function for the active Turn.
    *  Bound before the first request can be raised, unbound when the Turn ends. */
   bindAnswer(answer: RequestAnswerFn | undefined): void;
+  /** Bind (or, with `undefined`, unbind) the steer function for the active Turn
+   *  (#148). Bound alongside the answer function and unbound when the Turn ends;
+   *  the Application reaches it for an available `steer-turn`. */
+  bindSteer(steer: LiveSteerFn | undefined): void;
   /** Merge live overlay observations (activity / preview / context / usage). */
   observe(observation: LiveObservation): void;
 }
@@ -339,6 +354,16 @@ async function driveHarnessTurn(
         ? { outcome: "accepted" }
         : { outcome: "rejected", reason: receipt.reason };
     });
+    // Same-Turn guidance (#148): a Harness declaring native steer accepts it while
+    // the Turn is live and keeps working. Bound for every Turn — the Application
+    // only reaches it when the prepared profile declares steer available, so a
+    // Harness without it (Claude Code) is never asked here.
+    channel.bindSteer(async (text) => {
+      const receipt = await turn.steer({ text });
+      return receipt.outcome === "accepted"
+        ? { outcome: "accepted" }
+        : { outcome: "rejected", reason: receipt.reason };
+    });
   }
   // A cancel signal aborting mid-Turn interrupts the live Turn at the Harness Seam
   // (interrupt-turn, Ctrl+C, story 38, #118): the Adapter's `interrupt` stops the
@@ -377,6 +402,7 @@ async function driveHarnessTurn(
     // the Application refuses it (the request has expired).
     if (signal !== undefined) signal.removeEventListener("abort", onAbort);
     channel?.bindAnswer(undefined);
+    channel?.bindSteer(undefined);
   }
 }
 

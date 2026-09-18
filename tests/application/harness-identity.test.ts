@@ -839,7 +839,7 @@ test("a reopened Run's steer Offer uses the recorded profile evidence (#134 A12)
     (offer) => offer.action === "steer-turn",
   );
   assert.ok(steer);
-  if (steer?.action === "steer-turn") {
+  if (steer?.action === "steer-turn" && steer.available === false) {
     assert.equal(steer.reason, profile().steer.evidence);
   }
 

@@ -56,6 +56,8 @@ export type {
   LiveAnswerOutcome,
   LiveObservation,
   LiveRequestView,
+  LiveSteerFn,
+  LiveSteerOutcome,
   RequestAnswerBy,
   RequestAnswerFn,
   RequestChannel,

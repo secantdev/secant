@@ -1,6 +1,7 @@
 import type {
   LiveObservation,
   LiveRequestView,
+  LiveSteerFn,
   RequestAnswerFn,
   RequestChannel,
 } from "../run/execution/execution.js";
@@ -17,6 +18,9 @@ export interface LiveOverlayState {
   phase: TurnPhase;
   readonly outstanding: Map<string, RunOutstandingRequest>;
   answer?: RequestAnswerFn;
+  /** The live Turn's steer function, bound while a Turn is live (#148). The
+   *  Application reaches it for an available `steer-turn`. */
+  steer?: LiveSteerFn;
   activity?: string;
   preview?: string;
   context?: { readonly usedTokens: number; readonly limitTokens: number };
@@ -106,6 +110,11 @@ export function createLiveOverlay(
         if (!tracking.live.outstanding.delete(requestId)) return;
         tracking.live.generation += 1;
         push(runId);
+      },
+      bindSteer(steer: LiveSteerFn | undefined): void {
+        const tracking = trackingFor(runId);
+        if (tracking === undefined) return;
+        tracking.live.steer = steer;
       },
       bindAnswer(answer: RequestAnswerFn | undefined): void {
         const tracking = trackingFor(runId);

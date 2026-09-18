@@ -101,6 +101,7 @@ function runViewOf(run: RunView): RunWorkbenchView {
     answer: () => () => ({ kind: "applied" }),
     sendInteractiveTurn: () => () => ({ kind: "applied" }),
     endInteractiveStep: () => () => ({ kind: "applied" }),
+    steer: () => () => ({ kind: "applied" }),
     answerText: () => () => ({ kind: "applied" }),
     answerRequest: () => () => ({ kind: "applied" }),
   };

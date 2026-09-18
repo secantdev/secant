@@ -99,6 +99,10 @@ const CHECKPOINT_HEIGHT = 7;
  *  the hint on its line) — three rows. Fixed so the timeline viewport shrinks to fit
  *  and nothing overflows. */
 const INTERACTIVE_HEIGHT = 3;
+/** Rows the Steer compose input occupies when it replaces the footer (#148): a
+ *  label, the native text-field line, and a hint/status line — three rows, like the
+ *  interactive input it mirrors. */
+const STEER_HEIGHT = 3;
 // REQUEST_HEIGHT and GATE_HEIGHT are owned by the split control files (A33), imported
 // above for the bottom-region precedence below.
 
@@ -110,7 +114,7 @@ const STEP_GLYPH: Record<RunStepStatus, string> = {
   blocked: "⏸",
 };
 
-type Focus = "timeline" | "details" | "checkpoint" | "interactive";
+type Focus = "timeline" | "details" | "checkpoint" | "interactive" | "steer";
 
 export function RunWorkbench(props: {
   runId: string;
@@ -382,6 +386,60 @@ export function RunWorkbench(props: {
     );
   };
 
+  // Native Steer (#148, spec story 19): while an agent Turn is live under a Harness
+  // that declares native same-Turn guidance, `s` opens a compose input in the bottom
+  // region; Enter sends the guidance without ending the Turn, Escape backs out. Only
+  // the available offer is composable — an unavailable Harness (Claude Code) shows the
+  // reason on the Actions rail and never opens the input.
+  const steerAvailable = () => offers().steer?.available === true;
+  const [steerComposing, setSteerComposing] = createSignal(false);
+  const [steerDraft, setSteerDraft] = createSignal("");
+  const [steerOutcome, setSteerOutcome] =
+    createSignal<Accessor<AnswerOutcome>>();
+  const [steerRefusal, setSteerRefusal] = createSignal<Problem | undefined>();
+  const steerPending = () => {
+    const accessor = steerOutcome();
+    return accessor !== undefined && accessor().kind === "pending";
+  };
+  // The Steer input owns the bottom region only when actually composing and the offer
+  // is still available; a request/gate modal (modalControl) always takes precedence.
+  const steerActive = () =>
+    steerComposing() && steerAvailable() && !modalControl();
+  const openSteer = () => {
+    const offer = offers().steer;
+    if (offer === undefined || !offer.available || modalControl()) return;
+    setSteerDraft("");
+    setSteerRefusal(undefined);
+    // Drop any still-pending prior submission so its late settlement never bleeds
+    // into this fresh compose (a `… steering…` pending would blur the reopened field
+    // and swallow every key). Steer is fire-and-forget: an abandoned in-flight steer
+    // may still land at the Harness, but the UI stops tracking it.
+    setSteerOutcome(undefined);
+    setSteerComposing(true);
+    setFocus("steer");
+  };
+  const leaveSteer = () => {
+    setSteerComposing(false);
+    // Stop tracking an in-flight submission on the way out, for the same reason: the
+    // settlement effect keys off `steerOutcome`, so clearing it here means an abandoned
+    // steer's applied/refused result cannot reach — and mis-attribute onto — a later
+    // compose. A refused settlement keeps the compose open, so it clears this itself.
+    setSteerOutcome(undefined);
+    setSteerRefusal(undefined);
+    if (focus() === "steer") setFocus("timeline");
+  };
+  const dispatchSteer = () => {
+    const offer = offers().steer;
+    if (offer === undefined || !offer.available || steerPending()) return;
+    // Secant authors nothing: blank or whitespace-only guidance is not sent.
+    if (steerDraft().trim() === "") return;
+    setSteerRefusal(undefined);
+    // Hold the draft until the steer applies: a refused steer (the Turn settled, a
+    // stale turnId) keeps the typed text; the settlement effect below clears it only
+    // on an applied send.
+    setSteerOutcome(() => view.steer(offer.runId, offer.turnId, steerDraft()));
+  };
+
   // One transcript openable per Session that has a recorded transcript (#124),
   // each opening that Session's newest page through its `page` Resource Reference.
   const transcriptTargets = createMemo<readonly Openable[]>(() => {
@@ -469,7 +527,9 @@ export function RunWorkbench(props: {
           ? CHECKPOINT_HEIGHT
           : interactiveStepActive()
             ? INTERACTIVE_HEIGHT
-            : 1;
+            : steerActive()
+              ? STEER_HEIGHT
+              : 1;
   const chrome = () =>
     headerRows() +
     (hasGateLine() ? 1 : 0) +
@@ -610,6 +670,30 @@ export function RunWorkbench(props: {
     setInteractiveOutcome(undefined);
   });
 
+  // Close the Steer compose whenever its offer leaves (the Turn settled or was lost)
+  // or a request/gate modal takes over, so the input never lingers over a Turn it can
+  // no longer steer or under the control that now owns Esc (#148).
+  createEffect(() => {
+    if (steerComposing() && (!steerAvailable() || modalControl())) leaveSteer();
+  });
+
+  // Follow a dispatched Steer to settlement (#148): a refusal (the Turn settled, a
+  // stale turnId, an unavailable Harness) surfaces in the input and keeps the draft;
+  // an applied steer clears the draft and closes the compose — the Turn keeps working
+  // and the live snapshot carries its progress in.
+  createEffect(() => {
+    const accessor = steerOutcome();
+    if (accessor === undefined) return;
+    const settled = accessor();
+    if (settled.kind === "pending") return;
+    if (settled.kind === "refused") setSteerRefusal(settled.problem);
+    else {
+      setSteerDraft("");
+      leaveSteer();
+    }
+    setSteerOutcome(undefined);
+  });
+
   // Tab cycles the focusable regions in a stable order: the checkpoint or interactive
   // input (while active), the timeline, then the details panel (while shown).
   const focusOrder = (): Focus[] => {
@@ -705,11 +789,14 @@ export function RunWorkbench(props: {
     // bare letter typed into a Turn must not fire its command, so `q`/`t` and the
     // Run Actions are gated on not typing.
     const typing = focus() === "interactive" && interactiveStepActive();
-    if (name === "q" && !typing) {
+    // The Steer compose input owns keys as text too (#148): a bare letter typed as
+    // guidance must not fire its command, so `q`/`t` and the Run Actions gate on it.
+    const steerTyping = focus() === "steer" && steerActive();
+    if (name === "q" && !typing && !steerTyping) {
       exit(); // quit — never reached inside a text-entry control above
       return;
     }
-    if (name === "t" && !typing) {
+    if (name === "t" && !typing && !steerTyping) {
       const target = transcriptTarget();
       if (target !== undefined) inspection.open(target);
       return;
@@ -738,6 +825,13 @@ export function RunWorkbench(props: {
       handleInteractiveKey(key);
       return;
     }
+    // The Steer compose owns keys the same way (#148): Enter sends the guidance,
+    // Escape backs out, and every other key reaches the native field as text.
+    if (steerTyping) {
+      if (name === "return") dispatchSteer();
+      else if (name === "escape") leaveSteer();
+      return;
+    }
     // Interrupt is a two-press Esc while an agent Turn is live (spec story 18): it
     // takes Esc over "leave the Workbench" only while the live-Turn Offer is present,
     // no interactive Step owns the interaction (its Esc leaves, #122), and the timeline
@@ -760,6 +854,19 @@ export function RunWorkbench(props: {
       return;
     }
     if (interruptArmed()) setInterruptArmed(false);
+    // Steer opens on `s` while an available steer Offer is present and the timeline
+    // holds focus (#148), mirroring the interrupt arm's gating so it never shadows the
+    // Details/checkpoint Esc regions. An unavailable Harness shows the reason but `s`
+    // opens nothing. Gated off while an interactive Step owns the interaction.
+    if (
+      name === "s" &&
+      steerAvailable() &&
+      !interactiveStepActive() &&
+      focus() === "timeline"
+    ) {
+      openSteer();
+      return;
+    }
     // Run Actions from any focus, gated on the Offer being present. A local resume
     // dispatches at once; takeover, Cancel, and Delete arm a confirmation first.
     if (name === "r" && offers().resume !== undefined) {
@@ -934,6 +1041,11 @@ export function RunWorkbench(props: {
               endStepArmed={() => pending() === "end-step"}
               interactivePending={interactivePending}
               interactiveRefusal={interactiveRefusal}
+              steerActive={steerActive}
+              steerDraft={steerDraft}
+              onSteerInput={(value) => setSteerDraft(value)}
+              steerPending={steerPending}
+              steerRefusal={steerRefusal}
               interruptArmed={interruptArmed}
               liveRequest={requestControl.active}
               requestDecision={requestControl.decision}
@@ -1029,6 +1141,11 @@ function Workbench(props: {
   endStepArmed: Accessor<boolean>;
   interactivePending: Accessor<boolean>;
   interactiveRefusal: Accessor<Problem | undefined>;
+  steerActive: Accessor<boolean>;
+  steerDraft: Accessor<string>;
+  onSteerInput: (value: string) => void;
+  steerPending: Accessor<boolean>;
+  steerRefusal: Accessor<Problem | undefined>;
   interruptArmed: Accessor<boolean>;
   liveRequest: Accessor<LiveRequest | undefined>;
   requestDecision: Accessor<ApprovalDecisionName>;
@@ -1201,7 +1318,8 @@ function Workbench(props: {
           </Show>
           {/* Interrupt (Esc twice) and Steer, shown only while an agent Turn is live
               and no interactive Step owns the interaction (its Esc leaves, #122).
-              Steer names its unavailable reason and never dispatches (story 19). */}
+              A Harness with native steer (Codex) names the `s` key; one without
+              (Claude Code) names its unavailable reason and never opens (story 19). */}
           <Show
             when={!props.interactiveActive() && props.actionOffers().interrupt}
           >
@@ -1212,11 +1330,18 @@ function Workbench(props: {
             )}
           </Show>
           <Show when={!props.interactiveActive() && props.actionOffers().steer}>
-            {(offer) => (
-              <text fg={theme.textMuted} flexShrink={0}>
-                {clip(`  steer — unavailable · ${offer().reason}`, w())}
-              </text>
-            )}
+            {(offer) => {
+              const o = offer();
+              return o.available ? (
+                <text fg={theme.text} flexShrink={0}>
+                  {clip(`  s steer — ${o.consequence}`, w())}
+                </text>
+              ) : (
+                <text fg={theme.textMuted} flexShrink={0}>
+                  {clip(`  steer — unavailable · ${o.reason}`, w())}
+                </text>
+              );
+            }}
           </Show>
           <Show when={!props.interactiveActive() && props.interruptArmed()}>
             <text fg={theme.warning} flexShrink={0}>
@@ -1307,9 +1432,24 @@ function Workbench(props: {
           <Show
             when={props.interactiveActive()}
             fallback={
-              <text fg={theme.textMuted} flexShrink={0}>
-                {clip(footer(), w())}
-              </text>
+              <Show
+                when={props.steerActive()}
+                fallback={
+                  <text fg={theme.textMuted} flexShrink={0}>
+                    {clip(footer(), w())}
+                  </text>
+                }
+              >
+                <SteerInput
+                  draft={props.steerDraft}
+                  onInput={props.onSteerInput}
+                  pending={props.steerPending}
+                  refusal={props.steerRefusal}
+                  focused={() => props.focus() === "steer"}
+                  width={props.innerW}
+                  theme={theme}
+                />
+              </Show>
             }
           >
             <InteractiveInput
@@ -1416,6 +1556,65 @@ function InteractiveInput(props: {
         flexShrink={0}
       >
         {clip("◇ Your Turn — you are driving this Session", w())}
+      </text>
+      <box flexDirection="row" flexShrink={0}>
+        <text fg={theme.text} flexShrink={0}>
+          {"> "}
+        </text>
+        <input
+          value={props.draft()}
+          onInput={props.onInput}
+          focused={fieldFocused()}
+          width={Math.max(1, w() - 2)}
+        />
+      </box>
+      <Show
+        when={props.refusal()}
+        fallback={
+          <text fg={theme.textMuted} flexShrink={0}>
+            {clip(hint(), w())}
+          </text>
+        }
+      >
+        {(problem) => (
+          <text fg={theme.error} flexShrink={0}>
+            {clip(`  ✗ ${problem().explanation}`, w())}
+          </text>
+        )}
+      </Show>
+    </box>
+  );
+}
+
+/** The Steer compose input (#148): a label, a native OpenTUI text field (D9 — the
+ *  field draws its own caret), and a hint/status line. Same-Turn guidance goes to the
+ *  running agent without ending the Turn. Every line is plain text so it reads
+ *  distinctly without colour (AC4). The field is blurred while a send is in flight so
+ *  a submitting Enter never types into it (D9 freeze). */
+function SteerInput(props: {
+  draft: Accessor<string>;
+  onInput: (value: string) => void;
+  pending: Accessor<boolean>;
+  refusal: Accessor<Problem | undefined>;
+  focused: Accessor<boolean>;
+  width: Accessor<number>;
+  theme: Theme;
+}) {
+  const { theme } = props;
+  const w = () => props.width();
+  const fieldFocused = () => props.focused() && !props.pending();
+  const hint = () => {
+    if (props.pending()) return "  … steering…";
+    return "  enter send guidance · esc back — the Turn keeps running";
+  };
+  return (
+    <box flexDirection="column" flexShrink={0}>
+      <text
+        fg={props.focused() ? theme.text : theme.textMuted}
+        attributes={props.focused() ? TextAttributes.BOLD : 0}
+        flexShrink={0}
+      >
+        {clip("➤ Steer — guide the running Turn", w())}
       </text>
       <box flexDirection="row" flexShrink={0}>
         <text fg={theme.text} flexShrink={0}>

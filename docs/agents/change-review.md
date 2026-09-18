@@ -17,3 +17,5 @@ Record a concise, relevance-driven summary on the implementing GitHub issue. Ide
 
 Omit irrelevant items. Mechanical checks remain the objective completion evidence. Use the issue until a later decision establishes another delivery
 review surface.
+Before considering the implementation complete, finish the downstream closure bookkeeping in [issue tracker](./issue-tracker.md); if it was the
+milestone's final implementation ticket, follow [milestones](./milestones.md).

@@ -1,0 +1,8 @@
+{
+  "harness": "codex",
+  "executableVersion": "codex-cli 0.154.0",
+  "protocolVersion": "codex-probe-2",
+  "recordedAt": "synthetic",
+  "redactions": [],
+  "refreshCommand": "synthetic -- hand-authored; exact client/server id collision and concurrent command/file approvals are not reliably inducible; see tests/harness/fixtures/README.md"
+}

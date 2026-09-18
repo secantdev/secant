@@ -91,6 +91,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - A fresh Session obtains `thread.id` before durable admission; a detached Session calls `thread/resume` on the retained connection and requires the
   exact requested id before admission. Missing, malformed, failed, or mismatched acknowledgement makes the Session permanently `unusable`, with no fresh fallback.
 - Fresh and resumed Turns preserve admission-before-content and matching terminal authority; completed items supersede delta previews.
+- Codex client RPC and reverse-request ids have separate private maps. Approvals expose exact actions; native resolution or terminal expiry wins late answers.
 - Codex inherits user environment/home; unauthenticated becomes the fixed separate-login remediation, and no account or credential crosses the Seam.
 
 ## Tests
@@ -98,9 +99,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - The `tests/harness` domain owns the deterministic fake Adapter, the shared conformance suite, and the `claude` replayer. Its argv parser and recorded
   `--version` landed in #111; #112 added per-Turn protocol replay. #115 replaced the hand-authored `protocol-cases/` tree with the recorded (and residual
   synthetic) `tests/harness/fixtures/<harness>/<case>/` tree, its `recording.json` sidecar, and the opt-in `record.ts` tool.
-- The conformance suite is the Seam's executable specification, parameterized by an Adapter factory. Prepare/lifecycle cases run all three Adapters and
-  exact-thread recovery runs Codex replay; control/request groups remain capability-specific. Five tail cases stay fake-only: native steer, clarifications,
-  the after-acceptance recovery checkpoint, load-with-replay recovery, and the caller-contract violations (the only things this Interface throws for).
+- The conformance suite is the Seam's executable specification. Prepare/lifecycle cases run all three Adapters; exact-thread recovery and non-interrupt
+  approvals run Codex replay; other control groups remain capability-specific. Five tail cases stay fake-only: native steer, clarifications,
+  after-acceptance checkpoint, load-with-replay, and caller-contract violations (the only things this Interface throws for).
   The fake must exhibit behaviours a real Harness never will (native steer, structured clarifications, load-with-replay recovery, several concurrent
   requests, every `lost` variant) and is never the only end-to-end double (ADR 0027). The fake performs load-with-replay rather than advertising it: a
   resumed Turn re-emits the Session's transcript history (`assistant-content`, `tool-activity`), drops a scripted entry that repeats a replayed one, then
@@ -115,5 +116,4 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Read next
 
-- [ADR 0022](../../docs/adr/0022-own-a-truthful-deep-harness-seam.md) is the Interface: read it whole before changing a shape here.
-- [Spec #107](https://github.com/secantdev/secant/issues/107) fixes the M3 event vocabulary, result names, and control race values.
+- Read [ADR 0022](../../docs/adr/0022-own-a-truthful-deep-harness-seam.md) before changing the Interface; [Spec #107](https://github.com/secantdev/secant/issues/107) fixes the M3 event vocabulary, result names, and control race values.

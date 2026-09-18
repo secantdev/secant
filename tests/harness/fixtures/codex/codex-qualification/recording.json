@@ -1,7 +1,7 @@
 {
   "harness": "codex",
   "executableVersion": "codex-cli 0.154.0",
-  "protocolVersion": "codex-probe-1",
+  "protocolVersion": "codex-probe-2",
   "recordedAt": "2026-09-18T12:05:26.500Z",
   "redactions": [
     {

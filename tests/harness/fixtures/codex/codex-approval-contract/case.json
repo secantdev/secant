@@ -1,0 +1,23 @@
+{
+  "turn": {
+    "approvals": [
+      {
+        "id": 5,
+        "kind": "command",
+        "itemId": "command-1",
+        "command": "bun test"
+      },
+      {
+        "id": "server-file-1",
+        "kind": "file",
+        "itemId": "file-change-1",
+        "changes": [
+          {
+            "path": "src/file.ts",
+            "kind": "update"
+          }
+        ]
+      }
+    ]
+  }
+}

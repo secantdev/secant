@@ -16,15 +16,12 @@ const source = join(
   dirname(fileURLToPath(import.meta.url)),
   "codex-replayer.mjs",
 );
-const fixtureDirectory = join(
+const fixtureRoot = join(
   dirname(fileURLToPath(import.meta.url)),
   "fixtures",
   "codex",
-  "codex-qualification",
 );
-const fixtureRecording = JSON.parse(
-  readFileSync(join(fixtureDirectory, "recording.json"), "utf8"),
-);
+const qualificationFixtureDirectory = join(fixtureRoot, "codex-qualification");
 
 export interface CodexInvocation {
   readonly args: readonly string[];
@@ -43,6 +40,20 @@ export interface InstalledCodexReplayer {
   changeVersionOnly(version: string): void;
   removeSchemaMethod(method: string): void;
   changeTurnStatusShape(): void;
+  changeApprovalSchemaShape(
+    field:
+      | "path"
+      | "kind"
+      | "move-path"
+      | "file-items"
+      | "command"
+      | "command-kind"
+      | "resolved-id"
+      | "resolved-thread"
+      | "command-kind-values"
+      | "request-id-types"
+      | "server-request-id",
+  ): void;
   corruptSchema(): void;
   failVersion(status: number): void;
   failCleanup(status: number): void;
@@ -62,6 +73,23 @@ export interface CodexTurnReplayOptions {
   readonly stallFirstTurn?: boolean;
   readonly malformedItem?: boolean;
   readonly malformedTerminal?: boolean;
+  readonly approvals?: readonly CodexApprovalReplay[];
+  readonly resolveFirstApproval?: boolean;
+  readonly completeWithOutstandingApproval?: boolean;
+  readonly duplicateFirstApproval?: boolean;
+}
+
+export interface CodexApprovalReplay {
+  readonly id: string | number;
+  readonly kind:
+    "command" | "file" | "unsupported-command" | "request-user-input";
+  readonly itemId: string;
+  readonly command?: string;
+  readonly changes?: readonly {
+    readonly path: string;
+    readonly kind: "add" | "delete" | "update";
+    readonly movePath?: string;
+  }[];
 }
 
 export interface CodexRecoveryReplayOptions {
@@ -114,19 +142,38 @@ function readInvocations(logPath: string): readonly CodexInvocation[] {
   return Array.from(invocations.values());
 }
 
-export function installCodexReplayer(): InstalledCodexReplayer {
+export function installCodexReplayer(
+  caseName = "codex-qualification",
+): InstalledCodexReplayer {
+  const fixtureDirectory = join(fixtureRoot, caseName);
+  const fixtureRecording = JSON.parse(
+    readFileSync(join(fixtureDirectory, "recording.json"), "utf8"),
+  );
   const directory = makeTempDir("secant-codex-replayer-");
   const logPath = join(directory, "invocations.log");
   writeFileSync(logPath, "");
   mkdirSync(directory, { recursive: true });
   const installedFixtureDirectory = join(directory, "fixture");
   mkdirSync(installedFixtureDirectory);
-  copyFileSync(
-    join(fixtureDirectory, "case.json"),
+  const qualificationCase = JSON.parse(
+    readFileSync(join(qualificationFixtureDirectory, "case.json"), "utf8"),
+  );
+  const selectedCase = JSON.parse(
+    readFileSync(join(fixtureDirectory, "case.json"), "utf8"),
+  );
+  writeFileSync(
     join(installedFixtureDirectory, "case.json"),
+    JSON.stringify({
+      ...qualificationCase,
+      ...selectedCase,
+      responses: {
+        ...qualificationCase.responses,
+        ...selectedCase.responses,
+      },
+    }),
   );
   copyFileSync(
-    join(fixtureDirectory, "stable-schema.generated.json"),
+    join(qualificationFixtureDirectory, "stable-schema.generated.json"),
     join(installedFixtureDirectory, "stable-schema.generated.json"),
   );
 
@@ -218,6 +265,59 @@ export function installCodexReplayer(): InstalledCodexReplayer {
       );
       const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
       schema.definitions.v2.Turn.properties.status = { type: "number" };
+      writeFileSync(schemaPath, JSON.stringify(schema));
+    },
+    changeApprovalSchemaShape(field) {
+      const schemaPath = join(
+        installedFixtureDirectory,
+        "stable-schema.generated.json",
+      );
+      const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+      if (field === "file-items") {
+        const fileChange = schema.definitions.v2.ThreadItem.oneOf.find(
+          (variant: { properties: { type: { enum: string[] } } }) =>
+            variant.properties.type.enum.includes("fileChange"),
+        );
+        fileChange.properties.changes.items = { type: "string" };
+      } else if (field === "command-kind-values") {
+        schema.definitions.CommandExecutionApprovalKind.enum = ["writeStdin"];
+      } else if (field === "request-id-types") {
+        schema.definitions.v2.RequestId.anyOf = [{ type: "boolean" }];
+      } else if (field === "server-request-id") {
+        const commandApproval = schema.definitions.ServerRequest.oneOf.find(
+          (variant: { properties: { method: { enum: string[] } } }) =>
+            variant.properties.method.enum.includes(
+              "item/commandExecution/requestApproval",
+            ),
+        );
+        commandApproval.properties.id = { type: "boolean" };
+      } else if (field === "command") {
+        schema.definitions.CommandExecutionRequestApprovalParams.properties.command =
+          { type: "number" };
+      } else if (field === "command-kind") {
+        schema.definitions.CommandExecutionRequestApprovalParams.properties.kind =
+          { type: "string" };
+      } else if (field === "resolved-id") {
+        schema.definitions.v2.ServerRequestResolvedNotification.properties.requestId =
+          { type: "number" };
+      } else if (field === "resolved-thread") {
+        schema.definitions.v2.ServerRequestResolvedNotification.properties.threadId =
+          { type: "number" };
+      } else if (field === "path") {
+        schema.definitions.v2.FileUpdateChange.properties.path = {
+          type: "number",
+        };
+      } else if (field === "kind") {
+        schema.definitions.v2.FileUpdateChange.properties.kind = {
+          type: "string",
+        };
+      } else {
+        const update = schema.definitions.v2.PatchChangeKind.oneOf.find(
+          (variant: { properties: { type: { enum: string[] } } }) =>
+            variant.properties.type.enum.includes("update"),
+        );
+        update.properties.move_path = { type: "number" };
+      }
       writeFileSync(schemaPath, JSON.stringify(schema));
     },
     corruptSchema() {

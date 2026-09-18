@@ -17,6 +17,9 @@ const shapeSchema = z.looseObject({
 const literalUnionSchema = z.looseObject({
   oneOf: z.array(z.looseObject({ enum: z.array(z.string()).optional() })),
 });
+const primitiveUnionSchema = z.looseObject({
+  anyOf: z.array(z.looseObject({ type: z.string().optional() })),
+});
 const generatedSchema = z.looseObject({
   definitions: z.looseObject({
     ClientRequest: variantsSchema,
@@ -28,6 +31,7 @@ const generatedSchema = z.looseObject({
     CommandExecutionRequestApprovalParams: shapeSchema,
     CommandExecutionRequestApprovalResponse: shapeSchema,
     CommandExecutionApprovalDecision: literalUnionSchema,
+    CommandExecutionApprovalKind: enumSchema,
     FileChangeRequestApprovalParams: shapeSchema,
     FileChangeRequestApprovalResponse: shapeSchema,
     FileChangeApprovalDecision: literalUnionSchema,
@@ -39,6 +43,8 @@ const generatedSchema = z.looseObject({
       DynamicToolCallStatus: enumSchema,
       CollabAgentToolCallStatus: enumSchema,
       ThreadItem: variantsSchema,
+      FileUpdateChange: shapeSchema,
+      PatchChangeKind: variantsSchema,
       Thread: shapeSchema,
       Turn: shapeSchema,
       ThreadStartParams: shapeSchema,
@@ -66,6 +72,7 @@ const generatedSchema = z.looseObject({
       FileChangePatchUpdatedNotification: shapeSchema,
       ServerRequestResolvedNotification: shapeSchema,
       McpToolCallProgressNotification: shapeSchema,
+      RequestId: primitiveUnionSchema,
     }),
   }),
 });
@@ -122,6 +129,11 @@ const THREAD_ITEMS: TRequiredVariants = {
 };
 
 const TURN_STATUSES = ["completed", "interrupted", "failed", "inProgress"];
+const FILE_CHANGE_KINDS: TRequiredVariants = {
+  add: ["type"],
+  delete: ["type"],
+  update: ["type"],
+};
 
 const CLIENT_REQUEST_PARAM_REFS: Readonly<Record<string, string>> = {
   initialize: "#/definitions/InitializeParams",
@@ -161,6 +173,11 @@ const SERVER_REQUEST_PARAM_REFS: Readonly<Record<string, string>> = {
     "#/definitions/FileChangeRequestApprovalParams",
 };
 
+const SERVER_REQUEST_ID_REFS: Readonly<Record<string, string>> = {
+  "item/commandExecution/requestApproval": "#/definitions/v2/RequestId",
+  "item/fileChange/requestApproval": "#/definitions/v2/RequestId",
+};
+
 const THREAD_ITEM_FIELD_TYPES: Readonly<
   Record<string, Readonly<Record<string, string>>>
 > = {
@@ -190,6 +207,12 @@ const THREAD_ITEM_FIELD_REFS: Readonly<
     status: "#/definitions/v2/CollabAgentToolCallStatus",
   },
   imageView: { path: "#/definitions/v2/LegacyAppPathString" },
+};
+
+const THREAD_ITEM_ARRAY_ITEM_REFS: Readonly<
+  Record<string, Readonly<Record<string, string>>>
+> = {
+  fileChange: { changes: "#/definitions/v2/FileUpdateChange" },
 };
 
 interface TSchemaFact {
@@ -425,6 +448,17 @@ const REQUIRED_SCHEMA_FACTS: readonly TSchemaFact[] = [
     "$ref",
   ),
   fact(
+    "command approval kind",
+    "#/definitions/CommandExecutionApprovalKind",
+    "definitions",
+    "CommandExecutionRequestApprovalParams",
+    "properties",
+    "kind",
+    "allOf",
+    "0",
+    "$ref",
+  ),
+  fact(
     "file approval decision",
     "#/definitions/FileChangeApprovalDecision",
     "definitions",
@@ -577,6 +611,46 @@ const REQUIRED_SCHEMA_FACTS: readonly TSchemaFact[] = [
     "turnId",
     "type",
   ),
+  fact(
+    "file change path",
+    "string",
+    "definitions",
+    "v2",
+    "FileUpdateChange",
+    "properties",
+    "path",
+    "type",
+  ),
+  fact(
+    "file change kind",
+    "#/definitions/v2/PatchChangeKind",
+    "definitions",
+    "v2",
+    "FileUpdateChange",
+    "properties",
+    "kind",
+    "$ref",
+  ),
+  fact(
+    "request resolution id",
+    "#/definitions/v2/RequestId",
+    "definitions",
+    "v2",
+    "ServerRequestResolvedNotification",
+    "properties",
+    "requestId",
+    "$ref",
+  ),
+  fact(
+    "request resolution thread id",
+    "string",
+    "definitions",
+    "v2",
+    "ServerRequestResolvedNotification",
+    "properties",
+    "threadId",
+    "type",
+  ),
 ];
 
 export type TSchemaValidation =
@@ -627,6 +701,23 @@ export function validateRequiredSchema(value: unknown): TSchemaValidation {
       THREAD_ITEMS,
       "thread item",
     ),
+    validateVariants(
+      definitions.v2.PatchChangeKind.oneOf,
+      "type",
+      FILE_CHANGE_KINDS,
+      "file change kind",
+    ),
+    validateShape(
+      definitions.v2.FileUpdateChange,
+      ["path", "kind"],
+      "file change",
+    ),
+    validateNullableStringField(
+      definitions.v2.PatchChangeKind.oneOf,
+      "update",
+      "move_path",
+      "file change kind",
+    ),
     validateVariantReferences(
       definitions.ClientRequest.oneOf,
       "method",
@@ -645,6 +736,13 @@ export function validateRequiredSchema(value: unknown): TSchemaValidation {
       SERVER_REQUEST_PARAM_REFS,
       "server request",
     ),
+    validateVariantFieldReferencesByDiscriminator(
+      definitions.ServerRequest.oneOf,
+      "method",
+      "id",
+      SERVER_REQUEST_ID_REFS,
+      "server request",
+    ),
     validateVariantFieldTypes(
       definitions.v2.ThreadItem.oneOf,
       THREAD_ITEM_FIELD_TYPES,
@@ -652,6 +750,10 @@ export function validateRequiredSchema(value: unknown): TSchemaValidation {
     validateVariantFieldReferences(
       definitions.v2.ThreadItem.oneOf,
       THREAD_ITEM_FIELD_REFS,
+    ),
+    validateVariantArrayItemReferences(
+      definitions.v2.ThreadItem.oneOf,
+      THREAD_ITEM_ARRAY_ITEM_REFS,
     ),
     validateMembers(
       definitions.v2.TurnStatus.enum,
@@ -813,6 +915,21 @@ export function validateRequiredSchema(value: unknown): TSchemaValidation {
       ["itemId", "threadId", "turnId"],
       "command approval params",
     ),
+    validateNullableStringProperty(
+      definitions.CommandExecutionRequestApprovalParams,
+      "command",
+      "command approval params",
+    ),
+    validateEnumMembers(
+      definitions.CommandExecutionApprovalKind.enum,
+      ["command"],
+      "command approval kind",
+    ),
+    validatePrimitiveUnion(
+      definitions.v2.RequestId,
+      ["string", "integer"],
+      "request id",
+    ),
     validateShape(
       definitions.CommandExecutionRequestApprovalResponse,
       ["decision"],
@@ -877,6 +994,28 @@ function validateVariants(
   return undefined;
 }
 
+function validateNullableStringField(
+  variants: readonly TVariant[],
+  variantName: string,
+  field: string,
+  label: string,
+): string | undefined {
+  const variant = variants.find((candidate) =>
+    candidate.properties.type?.enum.includes(variantName),
+  );
+  const property = variant?.properties[field];
+  if (!isRecord(property)) return `${label} '${variantName}' has no '${field}'`;
+  const types = property.type;
+  if (
+    !Array.isArray(types) ||
+    !types.includes("string") ||
+    !types.includes("null")
+  ) {
+    return `${label} '${variantName}.${field}' is no longer nullable string`;
+  }
+  return undefined;
+}
+
 function validateVariantReferences(
   variants: readonly TVariant[],
   discriminator: "method" | "type",
@@ -894,6 +1033,46 @@ function validateVariantReferences(
     }
   }
   return undefined;
+}
+
+function validateVariantFieldReferencesByDiscriminator(
+  variants: readonly TVariant[],
+  discriminator: "method" | "type",
+  field: string,
+  expectedRefs: Readonly<Record<string, string>>,
+  label: string,
+): string | undefined {
+  for (const [name, expectedRef] of Object.entries(expectedRefs)) {
+    const variant = variants.find((candidate) =>
+      candidate.properties[discriminator]?.enum.includes(name),
+    );
+    if (variant === undefined) continue;
+    if (schemaReference(variant.properties[field]) !== expectedRef) {
+      return `${label} '${name}.${field}' no longer references '${expectedRef}'`;
+    }
+  }
+  return undefined;
+}
+
+function validateEnumMembers(
+  actual: readonly string[],
+  required: readonly string[],
+  label: string,
+): string | undefined {
+  const missing = required.find((member) => !actual.includes(member));
+  return missing === undefined ? undefined : `${label} is missing '${missing}'`;
+}
+
+function validatePrimitiveUnion(
+  union: z.infer<typeof primitiveUnionSchema>,
+  required: readonly string[],
+  label: string,
+): string | undefined {
+  const actual = union.anyOf.flatMap((variant) =>
+    variant.type === undefined ? [] : [variant.type],
+  );
+  const missing = required.find((type) => !actual.includes(type));
+  return missing === undefined ? undefined : `${label} is missing '${missing}'`;
 }
 
 function validateVariantFieldTypes(
@@ -930,6 +1109,46 @@ function validateVariantFieldReferences(
         return `thread item '${name}.${field}' no longer references '${expectedRef}'`;
       }
     }
+  }
+  return undefined;
+}
+
+function validateVariantArrayItemReferences(
+  variants: readonly TVariant[],
+  expectedRefs: Readonly<Record<string, Readonly<Record<string, string>>>>,
+): string | undefined {
+  for (const [name, fields] of Object.entries(expectedRefs)) {
+    const variant = variants.find((candidate) =>
+      candidate.properties.type?.enum.includes(name),
+    );
+    if (variant === undefined) continue;
+    for (const [field, expectedRef] of Object.entries(fields)) {
+      const property = variant.properties[field];
+      if (
+        !isRecord(property) ||
+        schemaReference(property.items) !== expectedRef
+      ) {
+        return `thread item '${name}.${field}' items no longer reference '${expectedRef}'`;
+      }
+    }
+  }
+  return undefined;
+}
+
+function validateNullableStringProperty(
+  shape: z.infer<typeof shapeSchema>,
+  field: string,
+  label: string,
+): string | undefined {
+  const property = shape.properties?.[field];
+  if (!isRecord(property)) return `${label} has no schema for '${field}'`;
+  const types = property.type;
+  if (
+    !Array.isArray(types) ||
+    !types.includes("string") ||
+    !types.includes("null")
+  ) {
+    return `${label} '${field}' is no longer nullable string`;
   }
   return undefined;
 }

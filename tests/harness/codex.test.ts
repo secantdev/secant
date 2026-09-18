@@ -16,12 +16,15 @@ import type { OwnedProcess } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import {
   runExactThreadRecoveryCases,
+  runApprovalRequestCases,
   runPrepareProfileCases,
   runTurnLifecycleCases,
+  type ApprovalRequestScenarios,
 } from "./conformance.js";
 import {
   installCodexReplayer,
   type InstalledCodexReplayer,
+  type CodexApprovalReplay,
 } from "./codex-replayer-install.js";
 
 const replayer = installCodexReplayer();
@@ -52,6 +55,406 @@ runExactThreadRecoveryCases({
   label: "codex-exact-thread-recovery",
   resumeAcknowledged: () => exactRecoveryReplayer("thread-1"),
   resumeUnacknowledged: () => exactRecoveryReplayer("different-thread"),
+});
+
+const codexApprovalScenarios: ApprovalRequestScenarios = {
+  label: "codex-approval-contract",
+  concurrentCount: 2,
+  concurrentRequests: () => () =>
+    createCodexAdapter({
+      path: installCodexReplayer("codex-approval-contract").path,
+      env: {},
+    }),
+  awaitedApproval: () =>
+    approvalAdapter([
+      {
+        id: "server-command-1",
+        kind: "command",
+        itemId: "command-1",
+        command: "bun test",
+      },
+    ]),
+};
+
+runApprovalRequestCases(codexApprovalScenarios);
+
+function approvalAdapter(approvals: readonly CodexApprovalReplay[]) {
+  const installed = installCodexReplayer();
+  installed.configureTurn({ approvals });
+  return () => createCodexAdapter({ path: installed.path, env: {} });
+}
+
+test("Codex approval allow and deny map only to native accept and decline", async () => {
+  const installed = installCodexReplayer("codex-approval-contract");
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  await waitForRequestCount(turn, events, 2);
+  const requests = events.flatMap((event) =>
+    event.kind === "request-raised" ? [event.request] : [],
+  );
+  assert.deepEqual(
+    requests.map((request) => request.shape),
+    [
+      {
+        kind: "approval",
+        tool: "command",
+        input: "bun test",
+        decisions: ["allow", "deny"],
+      },
+      {
+        kind: "approval",
+        tool: "file-change",
+        input: "update src/file.ts",
+        decisions: ["allow", "deny"],
+      },
+    ],
+  );
+  await turn.answerRequest({
+    requestId: requests[0]!.requestId,
+    kind: "approval",
+    decision: "allow",
+  });
+  await turn.answerRequest({
+    requestId: requests[1]!.requestId,
+    kind: "approval",
+    decision: "deny",
+  });
+  assert.equal((await turn.result()).kind, "completed");
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const responses = appServer.stdinLines
+    .map((line) => JSON.parse(line))
+    .filter(
+      (message) => message.method === undefined && message.result !== undefined,
+    );
+  assert.deepEqual(responses.slice(-2), [
+    { id: 5, result: { decision: "accept" } },
+    { id: "server-file-1", result: { decision: "decline" } },
+  ]);
+  await prepared.close();
+});
+
+test("native approval resolution wins over a late answer while peers remain independent", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [
+      {
+        id: "resolved",
+        kind: "command",
+        itemId: "command-1",
+        command: "bun test",
+      },
+      {
+        id: "live",
+        kind: "file",
+        itemId: "file-change-1",
+        changes: [{ path: "src/file.ts", kind: "update" }],
+      },
+    ],
+    resolveFirstApproval: true,
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  await waitForExpiredRequestCount(turn, events, 1);
+  const requests = events.flatMap((event) =>
+    event.kind === "request-raised" ? [event.request] : [],
+  );
+  assert.deepEqual(
+    await turn.answerRequest({
+      requestId: requests[0]!.requestId,
+      kind: "approval",
+      decision: "allow",
+    }),
+    { outcome: "rejected", reason: "already-settled" },
+  );
+  assert.deepEqual(
+    await turn.answerRequest({
+      requestId: requests[1]!.requestId,
+      kind: "approval",
+      decision: "allow",
+    }),
+    { outcome: "accepted" },
+  );
+  assert.equal((await turn.result()).kind, "completed");
+  await prepared.close();
+});
+
+test("concurrent answers write exactly one native decision", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [
+      {
+        id: "one-answer",
+        kind: "command",
+        itemId: "command-1",
+        command: "bun test",
+      },
+    ],
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  await waitForRequestCount(turn, events, 1);
+  const request = events.find((event) => event.kind === "request-raised");
+  assert.ok(request?.kind === "request-raised");
+  const receipts = await Promise.all([
+    turn.answerRequest({
+      requestId: request.request.requestId,
+      kind: "approval",
+      decision: "allow",
+    }),
+    turn.answerRequest({
+      requestId: request.request.requestId,
+      kind: "approval",
+      decision: "deny",
+    }),
+  ]);
+  assert.deepEqual(receipts, [
+    { outcome: "accepted" },
+    { outcome: "rejected", reason: "already-settled" },
+  ]);
+  assert.equal((await turn.result()).kind, "completed");
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const nativeAnswers = appServer.stdinLines
+    .map((line) => JSON.parse(line))
+    .filter((message) => message.id === "one-answer");
+  assert.deepEqual(nativeAnswers, [
+    { id: "one-answer", result: { decision: "accept" } },
+  ]);
+  await prepared.close();
+});
+
+test("a duplicate native server request id fails the Turn closed", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [
+      {
+        id: "duplicate",
+        kind: "command",
+        itemId: "command-1",
+        command: "bun test",
+      },
+    ],
+    duplicateFirstApproval: true,
+  });
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "protocol-corruption");
+  assert.match(result.detail.failure?.diagnostics ?? "", /reused/);
+  await prepared.close();
+});
+
+test("a moved file approval exposes both exact paths", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [
+      {
+        id: "move-file",
+        kind: "file",
+        itemId: "file-change-1",
+        changes: [
+          {
+            path: "src/old.ts",
+            kind: "update",
+            movePath: "src/new.ts",
+          },
+        ],
+      },
+    ],
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  await waitForRequestCount(turn, events, 1);
+  const request = events.find((event) => event.kind === "request-raised");
+  assert.ok(request?.kind === "request-raised");
+  assert.equal(request.request.shape.kind, "approval");
+  if (request.request.shape.kind !== "approval") throw new Error("unreachable");
+  assert.equal(request.request.shape.input, "move src/old.ts to src/new.ts");
+  await turn.answerRequest({
+    requestId: request.request.requestId,
+    kind: "approval",
+    decision: "deny",
+  });
+  assert.equal((await turn.result()).kind, "completed");
+  await prepared.close();
+});
+
+for (const nativeRace of ["resolution", "terminal"] as const) {
+  test(`${nativeRace} wins while an approval answer write is in flight`, async () => {
+    const installed = installCodexReplayer();
+    const controlled = approvalRaceProcess();
+    const preparedResult = await createCodexAdapter({
+      path: installed.path,
+      env: {},
+      spawn: () => Promise.resolve({ ok: true, process: controlled.process }),
+    }).prepare({ workspace: process.cwd() });
+    assert.equal(preparedResult.ok, true);
+    if (!preparedResult.ok) throw new Error("unreachable");
+    const prepared = preparedResult.harness;
+    const turn = prepared.startTurn(turnRequest());
+    const events = observeEvents(turn);
+    await waitForRequestCount(turn, events, 1);
+    const request = events.find((event) => event.kind === "request-raised");
+    assert.ok(request?.kind === "request-raised");
+    const answer = turn.answerRequest({
+      requestId: request.request.requestId,
+      kind: "approval",
+      decision: "allow",
+    });
+    await controlled.responseWriteStarted;
+    if (nativeRace === "resolution") {
+      controlled.emitResolution();
+      await waitForExpiredRequestCount(turn, events, 1);
+      controlled.releaseResponseWrite();
+      assert.deepEqual(await answer, {
+        outcome: "rejected",
+        reason: "already-settled",
+      });
+      controlled.emitTerminal();
+    } else {
+      controlled.emitTerminal();
+      assert.equal((await turn.result()).kind, "completed");
+      controlled.releaseResponseWrite();
+      assert.deepEqual(await answer, {
+        outcome: "rejected",
+        reason: "expired",
+      });
+    }
+    assert.equal((await turn.result()).kind, "completed");
+    assert.equal(
+      events.filter((event) => event.kind === "request-expired").length,
+      1,
+    );
+    await prepared.close();
+  });
+}
+
+test("approval response write failure preserves its cause and expires the request", async () => {
+  const installed = installCodexReplayer();
+  const controlled = approvalRaceProcess();
+  const preparedResult = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+    spawn: () => Promise.resolve({ ok: true, process: controlled.process }),
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(preparedResult.ok, true);
+  if (!preparedResult.ok) throw new Error("unreachable");
+  const prepared = preparedResult.harness;
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  await waitForRequestCount(turn, events, 1);
+  const request = events.find((event) => event.kind === "request-raised");
+  assert.ok(request?.kind === "request-raised");
+  const answer = turn.answerRequest({
+    requestId: request.request.requestId,
+    kind: "approval",
+    decision: "allow",
+  });
+  await controlled.responseWriteStarted;
+  const cause = new Error("scripted approval response write failure");
+  controlled.rejectResponseWrite(cause);
+  assert.deepEqual(await answer, { outcome: "rejected", reason: "expired" });
+  const result = await turn.result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.cause, cause);
+  assert.equal(
+    events.filter((event) => event.kind === "request-expired").length,
+    1,
+  );
+  await prepared.close();
+});
+
+test("terminal truth expires an outstanding approval before settling", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [
+      {
+        id: "expired",
+        kind: "command",
+        itemId: "command-1",
+        command: "bun test",
+      },
+    ],
+    completeWithOutstandingApproval: true,
+  });
+  const prepared = await prepareCodex(installed.path);
+  const turn = prepared.startTurn(turnRequest());
+  const events = observeEvents(turn);
+  assert.equal((await turn.result()).kind, "completed");
+  const request = events.find((event) => event.kind === "request-raised");
+  assert.ok(request?.kind === "request-raised");
+  assert.equal(
+    events.filter((event) => event.kind === "request-expired").length,
+    1,
+  );
+  assert.deepEqual(
+    await turn.answerRequest({
+      requestId: request.request.requestId,
+      kind: "approval",
+      decision: "allow",
+    }),
+    { outcome: "rejected", reason: "expired" },
+  );
+  await prepared.close();
+});
+
+test("unsupported mandatory Codex approval shapes fail closed", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [
+      { id: "unsupported", kind: "unsupported-command", itemId: "stdin-1" },
+    ],
+  });
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "protocol-corruption");
+  await prepared.close();
+});
+
+test("a file approval without exact file-change context fails closed", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [{ id: "file", kind: "file", itemId: "missing-file-change" }],
+  });
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "protocol-corruption");
+  assert.match(
+    result.detail.failure?.diagnostics ?? "",
+    /without exact action context/,
+  );
+  await prepared.close();
+});
+
+test("experimental request-user-input remains disabled and fails closed", async () => {
+  const installed = installCodexReplayer();
+  installed.configureTurn({
+    approvals: [
+      { id: "request-input", kind: "request-user-input", itemId: "input-1" },
+    ],
+  });
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "protocol-corruption");
+  assert.equal(prepared.profile.clarifications.available, false);
+  await prepared.close();
 });
 
 function failedTurnReplayer() {
@@ -539,6 +942,38 @@ function observeEvents(
   return events;
 }
 
+async function waitForRequestCount(
+  turn: ReturnType<PreparedHarness["startTurn"]>,
+  events: readonly TurnEvent[],
+  count: number,
+): Promise<void> {
+  await waitForEventCount(turn, events, "request-raised", count);
+}
+
+async function waitForExpiredRequestCount(
+  turn: ReturnType<PreparedHarness["startTurn"]>,
+  events: readonly TurnEvent[],
+  count: number,
+): Promise<void> {
+  await waitForEventCount(turn, events, "request-expired", count);
+}
+
+async function waitForEventCount(
+  turn: ReturnType<PreparedHarness["startTurn"]>,
+  events: readonly TurnEvent[],
+  kind: TurnEvent["kind"],
+  count: number,
+): Promise<void> {
+  if (events.filter((event) => event.kind === kind).length >= count) return;
+  await new Promise<void>((resolve) => {
+    const subscription = turn.subscribe(() => {
+      if (events.filter((event) => event.kind === kind).length < count) return;
+      subscription.unsubscribe();
+      resolve();
+    });
+  });
+}
+
 test("codex-qualification initializes once without creating a conversation", async () => {
   const installed = installCodexReplayer();
   const result = await createCodexAdapter({
@@ -661,11 +1096,11 @@ test("Codex profile is truthful and user-compatible", async () => {
   if (!result.ok) throw new Error("unreachable");
   const { profile } = result.harness;
   assert.equal(profile.harness, "codex");
-  assert.equal(profile.adapterRevision, "codex-probe-1");
+  assert.equal(profile.adapterRevision, "codex-probe-2");
   assert.equal(profile.recovery.mode, "native-reattach");
   assert.match(profile.recovery.evidence, /thread\/resume.*exact/i);
   assert.equal(profile.interruption.mode, "unavailable");
-  assert.equal(profile.approvals.available, false);
+  assert.equal(profile.approvals.available, true);
   assert.equal(profile.clarifications.available, false);
   assert.equal(profile.steer.available, false);
   assert.equal(profile.modelSelection.at, "launch-and-per-turn");
@@ -711,6 +1146,36 @@ test("a changed required schema field type fails closed", async () => {
   assert.equal(result.failure.category, "protocol-incompatible");
   assert.match(result.failure.diagnostics ?? "", /Turn status/);
 });
+
+for (const field of [
+  "path",
+  "kind",
+  "move-path",
+  "file-items",
+  "command",
+  "command-kind",
+  "resolved-id",
+  "resolved-thread",
+  "command-kind-values",
+  "request-id-types",
+  "server-request-id",
+] as const) {
+  test(`changed approval ${field} schema fails qualification closed`, async () => {
+    const installed = installCodexReplayer();
+    installed.changeApprovalSchemaShape(field);
+    const result = await createCodexAdapter({
+      path: installed.path,
+      env: {},
+    }).prepare({ workspace: process.cwd() });
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("unreachable");
+    assert.equal(result.failure.category, "protocol-incompatible");
+    assert.match(
+      result.failure.diagnostics ?? "",
+      /file.?change|command approval|request resolution|request id|server request/i,
+    );
+  });
+}
 
 test("version and generated-schema probe failures stay typed", async () => {
   const versionFailure = installCodexReplayer();
@@ -921,7 +1386,7 @@ test("cached schema evidence is reused but every prepare initializes a fresh chi
 test("cache evidence invalidates on source, path, version, platform, and probe revision", async () => {
   const installed = installCodexReplayer();
   let cachePlatform: HarnessPlatform = "windows";
-  let probeRevision = "codex-probe-1";
+  let probeRevision = "codex-probe-2";
   const adapter = createCodexAdapter({
     path: installed.path,
     env: {},
@@ -956,7 +1421,7 @@ test("cache evidence invalidates on source, path, version, platform, and probe r
   await qualify(installed.windowsShimPath);
   cachePlatform = "linux";
   await qualify(installed.windowsShimPath);
-  probeRevision = "codex-probe-2";
+  probeRevision = "codex-probe-3";
   await qualify(installed.windowsShimPath);
 
   const another = installCodexReplayer();
@@ -993,6 +1458,192 @@ function stalledProcess(): OwnedProcess {
         escalated: false,
       }),
     closed: () => Promise.resolve({ kind: "exited", status: 0 }),
+  };
+}
+
+interface TControlledApprovalProcess {
+  readonly process: OwnedProcess;
+  readonly responseWriteStarted: Promise<void>;
+  emitResolution(): void;
+  emitTerminal(): void;
+  releaseResponseWrite(): void;
+  rejectResponseWrite(cause: unknown): void;
+}
+
+function approvalRaceProcess(): TControlledApprovalProcess {
+  const output = asyncByteQueue();
+  const responseWriteStarted = deferred<void>();
+  const responseWrite = deferred<void>();
+  const encoder = new TextEncoder();
+  const enqueue = (message: object): void => {
+    output.push(encoder.encode(`${JSON.stringify(message)}\n`));
+  };
+  const writeStdin = (bytes: Uint8Array): Promise<void> => {
+    const message = JSON.parse(new TextDecoder().decode(bytes));
+    switch (message.method) {
+      case "initialize":
+        enqueue({
+          id: message.id,
+          result: {
+            userAgent: "recorded",
+            codexHome: "/recorded",
+            platformFamily: "unix",
+            platformOs: "linux",
+          },
+        });
+        return Promise.resolve();
+      case "initialized":
+        return Promise.resolve();
+      case "account/read":
+        enqueue({
+          id: message.id,
+          result: {
+            account: { type: "apiKey" },
+            requiresOpenaiAuth: true,
+          },
+        });
+        return Promise.resolve();
+      case "model/list":
+        enqueue({
+          id: message.id,
+          result: {
+            data: [
+              {
+                id: "model",
+                model: "model",
+                displayName: "Model",
+                hidden: false,
+                isDefault: true,
+              },
+            ],
+          },
+        });
+        return Promise.resolve();
+      case "thread/start":
+        enqueue({
+          id: message.id,
+          result: { model: "model", thread: { id: "thread-1" } },
+        });
+        return Promise.resolve();
+      case "turn/start":
+        enqueue({
+          id: "native-approval",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            command: "bun test",
+            itemId: "command-1",
+            kind: "command",
+            startedAtMs: 1,
+            threadId: "thread-1",
+            turnId: "turn-1",
+          },
+        });
+        enqueue({
+          id: message.id,
+          result: { turn: { id: "turn-1", items: [], status: "inProgress" } },
+        });
+        return Promise.resolve();
+      default:
+        if (message.id === "native-approval" && message.result !== undefined) {
+          responseWriteStarted.resolve();
+          return responseWrite.promise;
+        }
+        return Promise.resolve();
+    }
+  };
+  const noBytes = async function* (): AsyncIterable<Uint8Array> {};
+  const process: OwnedProcess = {
+    stdout: output.iterable,
+    stderr: noBytes(),
+    writeStdin,
+    closeStdin: () => {
+      output.end();
+      return Promise.resolve({ kind: "exited", status: 0 });
+    },
+    terminate: () => {
+      output.end();
+      return Promise.resolve({ kind: "exited", status: 0 });
+    },
+    interrupt: () =>
+      Promise.resolve({
+        close: { kind: "exited", status: 0 },
+        escalated: false,
+      }),
+    closed: () => Promise.resolve({ kind: "exited", status: 0 }),
+  };
+  return {
+    process,
+    responseWriteStarted: responseWriteStarted.promise,
+    emitResolution() {
+      enqueue({
+        method: "serverRequest/resolved",
+        params: { requestId: "native-approval", threadId: "thread-1" },
+      });
+    },
+    emitTerminal() {
+      enqueue({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: { id: "turn-1", items: [], status: "completed" },
+        },
+      });
+    },
+    releaseResponseWrite: () => responseWrite.resolve(),
+    rejectResponseWrite: (cause) => responseWrite.reject(cause),
+  };
+}
+
+interface TDeferred<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (cause: unknown) => void;
+}
+
+function deferred<T>(): TDeferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function asyncByteQueue(): {
+  readonly iterable: AsyncIterable<Uint8Array>;
+  push(bytes: Uint8Array): void;
+  end(): void;
+} {
+  const buffered: Uint8Array[] = [];
+  const waiting: ((result: IteratorResult<Uint8Array>) => void)[] = [];
+  let ended = false;
+  return {
+    iterable: {
+      [Symbol.asyncIterator]() {
+        return {
+          next(): Promise<IteratorResult<Uint8Array>> {
+            const bytes = buffered.shift();
+            if (bytes !== undefined) {
+              return Promise.resolve({ done: false, value: bytes });
+            }
+            if (ended) return Promise.resolve({ done: true, value: undefined });
+            return new Promise((resolve) => waiting.push(resolve));
+          },
+        };
+      },
+    },
+    push(bytes) {
+      const resolve = waiting.shift();
+      if (resolve !== undefined) resolve({ done: false, value: bytes });
+      else buffered.push(bytes);
+    },
+    end() {
+      ended = true;
+      for (const resolve of waiting.splice(0)) {
+        resolve({ done: true, value: undefined });
+      }
+    },
   };
 }
 

@@ -72,8 +72,9 @@ export interface ApprovalRequestScenarios {
   concurrentRequests(): HarnessAdapterFactory;
   /** A Turn that raises one approval request and awaits its answer. */
   awaitedApproval(): HarnessAdapterFactory;
-  /** A Turn that raises one awaited request and can be interrupted. */
-  interruptible(): HarnessAdapterFactory;
+  /** A Turn that raises one awaited request and can be interrupted. Adapters
+   *  whose native interrupt slice has not landed omit this scenario. */
+  interruptible?: () => HarnessAdapterFactory;
 }
 
 /**
@@ -539,39 +540,42 @@ export function runApprovalRequestCases(
     },
   );
 
-  test(
-    name(`interrupt is confirmed and the result is ${outcome}`),
-    async () => {
-      const prepared = await prepare(scenarios.interruptible());
-      const turn = prepared.startTurn(request(recorder().recorder));
-      const events = observe(turn);
-      await events.waitForRequests(1);
-      const receipt = await turn.interrupt();
-      assert.deepEqual(receipt, { outcome: "accepted" });
-      detachedCoordinate(await turn.result(), outcome);
-      // New inputs are rejected after an accepted interrupt.
-      const late = await turn.steer({ text: "too late" });
-      assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
-      await prepared.close();
-    },
-  );
+  const interruptible = scenarios.interruptible;
+  if (interruptible !== undefined) {
+    test(
+      name(`interrupt is confirmed and the result is ${outcome}`),
+      async () => {
+        const prepared = await prepare(interruptible());
+        const turn = prepared.startTurn(request(recorder().recorder));
+        const events = observe(turn);
+        await events.waitForRequests(1);
+        const receipt = await turn.interrupt();
+        assert.deepEqual(receipt, { outcome: "accepted" });
+        detachedCoordinate(await turn.result(), outcome);
+        // New inputs are rejected after an accepted interrupt.
+        const late = await turn.steer({ text: "too late" });
+        assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
+        await prepared.close();
+      },
+    );
 
-  test(
-    name("an outstanding request expires when the Turn is interrupted"),
-    async () => {
-      const prepared = await prepare(scenarios.interruptible());
-      const turn = prepared.startTurn(request(recorder().recorder));
-      const events = observe(turn);
-      await events.waitForRequests(1);
-      await turn.interrupt();
-      const result = await turn.result();
-      // The expiry event precedes the result: it is in the buffer already.
-      const expired = events.all.filter((e) => e.kind === "request-expired");
-      assert.equal(expired.length, 1);
-      assert.equal(result.kind, outcome);
-      await prepared.close();
-    },
-  );
+    test(
+      name("an outstanding request expires when the Turn is interrupted"),
+      async () => {
+        const prepared = await prepare(interruptible());
+        const turn = prepared.startTurn(request(recorder().recorder));
+        const events = observe(turn);
+        await events.waitForRequests(1);
+        await turn.interrupt();
+        const result = await turn.result();
+        // The expiry event precedes the result: it is in the buffer already.
+        const expired = events.all.filter((e) => e.kind === "request-expired");
+        assert.equal(expired.length, 1);
+        assert.equal(result.kind, outcome);
+        await prepared.close();
+      },
+    );
+  }
 }
 
 /** Run the whole suite against one provider. */

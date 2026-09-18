@@ -99,6 +99,13 @@ export class CodexJsonlConnection {
     });
   }
 
+  respondToServerRequest(id: string | number, result: object): Promise<void> {
+    if (!this.runtimeStarted) {
+      return Promise.reject(new Error("Codex runtime reader is not started"));
+    }
+    return this.write({ id, result });
+  }
+
   private async consume(handlers: CodexRuntimeHandlers): Promise<void> {
     try {
       for (;;) {
@@ -255,7 +262,15 @@ const commandItemSchema = z.looseObject({
   status: z.enum(["inProgress", "completed", "failed", "declined"]),
 });
 const fileChangeItemSchema = z.looseObject({
-  changes: z.array(z.unknown()),
+  changes: z.array(
+    z.looseObject({
+      path: z.string().min(1),
+      kind: z.looseObject({
+        type: z.enum(["add", "delete", "update"]),
+        move_path: z.string().nullable().optional(),
+      }),
+    }),
+  ),
   status: z.enum(["inProgress", "completed", "failed", "declined"]),
 });
 const mcpItemSchema = z.looseObject({
@@ -276,6 +291,18 @@ const imageGenerationItemSchema = z.looseObject({ status: z.string() });
 const errorNotificationSchema = correlatedParamsSchema.extend({
   error: z.looseObject({ message: z.string().min(1) }),
   willRetry: z.boolean(),
+});
+const commandApprovalSchema = correlatedParamsSchema.extend({
+  itemId: z.string().min(1),
+  command: z.string().min(1),
+  kind: z.literal("command").optional(),
+});
+const fileApprovalSchema = correlatedParamsSchema.extend({
+  itemId: z.string().min(1),
+});
+const requestResolvedSchema = z.looseObject({
+  requestId: rpcIdSchema,
+  threadId: z.string().min(1),
 });
 
 export type CodexRuntimeNotification =
@@ -301,7 +328,9 @@ export type CodexRuntimeNotification =
       readonly kind: "item-event";
       readonly threadId: string;
       readonly turnId: string;
+      readonly itemId: string;
       readonly event?: TurnEvent;
+      readonly approvalInput?: string;
     }
   | {
       readonly kind: "error";
@@ -311,14 +340,56 @@ export type CodexRuntimeNotification =
       readonly willRetry: boolean;
     }
   | { readonly kind: "activity"; readonly description: string }
-  | { readonly kind: "server-request"; readonly method: string };
+  | {
+      readonly kind: "approval-request";
+      readonly nativeRequestId: string | number;
+      readonly threadId: string;
+      readonly turnId: string;
+      readonly tool: "command" | "file-change";
+      readonly itemId: string;
+      readonly input?: string;
+    }
+  | {
+      readonly kind: "server-request-resolved";
+      readonly nativeRequestId: string | number;
+      readonly threadId: string;
+    }
+  | {
+      readonly kind: "unsupported-server-request";
+      readonly method: string;
+    };
 
 export function parseRuntimeNotification(
   message: CodexRpcEnvelope,
 ): CodexRuntimeNotification | undefined {
   const method = message.method;
   if (method === undefined) return undefined;
-  if (message.id !== undefined) return { kind: "server-request", method };
+  if (message.id !== undefined) {
+    if (method === "item/commandExecution/requestApproval") {
+      const params = parseResult(message.params, commandApprovalSchema, method);
+      return {
+        kind: "approval-request",
+        nativeRequestId: message.id,
+        threadId: params.threadId,
+        turnId: params.turnId,
+        tool: "command",
+        itemId: params.itemId,
+        input: params.command,
+      };
+    }
+    if (method === "item/fileChange/requestApproval") {
+      const params = parseResult(message.params, fileApprovalSchema, method);
+      return {
+        kind: "approval-request",
+        nativeRequestId: message.id,
+        threadId: params.threadId,
+        turnId: params.turnId,
+        tool: "file-change",
+        itemId: params.itemId,
+      };
+    }
+    return { kind: "unsupported-server-request", method };
+  }
   switch (method) {
     case "turn/started": {
       const params = parseResult(message.params, turnStartedSchema, method);
@@ -356,7 +427,7 @@ export function parseRuntimeNotification(
         kind: "item-event",
         threadId: params.threadId,
         turnId: params.turnId,
-        event: normalizeItem(params.item, method === "item/started"),
+        ...normalizeItem(params.item, method === "item/started"),
       };
     }
     case "error": {
@@ -373,6 +444,14 @@ export function parseRuntimeNotification(
         willRetry: params.willRetry,
       };
     }
+    case "serverRequest/resolved": {
+      const params = parseResult(message.params, requestResolvedSchema, method);
+      return {
+        kind: "server-request-resolved",
+        nativeRequestId: params.requestId,
+        threadId: params.threadId,
+      };
+    }
     default:
       return {
         kind: "activity",
@@ -384,21 +463,25 @@ export function parseRuntimeNotification(
 function normalizeItem(
   value: unknown,
   started: boolean,
-): TurnEvent | undefined {
+): {
+  readonly itemId: string;
+  readonly event?: TurnEvent;
+  readonly approvalInput?: string;
+} {
   const item = parseResult(
     value,
     z.looseObject({ id: z.string().min(1), type: z.string().min(1) }),
     "item lifecycle",
   );
   const type = item.type;
-  if (type === "reasoning") return undefined;
+  if (type === "reasoning") return { itemId: item.id };
   if (type === "userMessage") {
     parseResult(
       item,
       z.looseObject({ content: z.array(z.unknown()) }),
       "userMessage item",
     );
-    return undefined;
+    return { itemId: item.id };
   }
   if (type === "agentMessage") {
     const message = parseResult(
@@ -406,9 +489,17 @@ function normalizeItem(
       z.looseObject({ text: z.string() }),
       "agentMessage item",
     );
-    return !started
-      ? { kind: "assistant-content", content: message.text }
-      : undefined;
+    return {
+      itemId: item.id,
+      ...(!started
+        ? {
+            event: {
+              kind: "assistant-content",
+              content: message.text,
+            } as const,
+          }
+        : {}),
+    };
   }
   const phase = started ? "started" : "completed";
   switch (type) {
@@ -418,7 +509,10 @@ function normalizeItem(
         commandItemSchema,
         "commandExecution item",
       );
-      return toolActivity("command", phase, command.command);
+      return {
+        itemId: item.id,
+        event: toolActivity("command", phase, command.command),
+      };
     }
     case "fileChange": {
       const fileChange = parseResult(
@@ -426,19 +520,26 @@ function normalizeItem(
         fileChangeItemSchema,
         "fileChange item",
       );
-      return toolActivity(
-        "file-change",
-        phase,
-        changeSummary(fileChange.changes.length),
-      );
+      return {
+        itemId: item.id,
+        event: toolActivity(
+          "file-change",
+          phase,
+          changeSummary(fileChange.changes.length),
+        ),
+        approvalInput: fileChangeApprovalInput(fileChange.changes),
+      };
     }
     case "mcpToolCall": {
       const call = parseResult(item, mcpItemSchema, "mcpToolCall item");
-      return toolActivity(
-        `mcp:${call.server}/${call.tool}`,
-        phase,
-        call.status,
-      );
+      return {
+        itemId: item.id,
+        event: toolActivity(
+          `mcp:${call.server}/${call.tool}`,
+          phase,
+          call.status,
+        ),
+      };
     }
     case "collabAgentToolCall": {
       const call = parseResult(
@@ -446,7 +547,10 @@ function normalizeItem(
         collabItemSchema,
         "collabAgentToolCall item",
       );
-      return toolActivity("subagent", phase, call.status);
+      return {
+        itemId: item.id,
+        event: toolActivity("subagent", phase, call.status),
+      };
     }
     case "dynamicToolCall": {
       const call = parseResult(
@@ -454,15 +558,24 @@ function normalizeItem(
         dynamicToolItemSchema,
         "dynamicToolCall item",
       );
-      return toolActivity(`dynamic:${call.tool}`, phase, call.status);
+      return {
+        itemId: item.id,
+        event: toolActivity(`dynamic:${call.tool}`, phase, call.status),
+      };
     }
     case "webSearch": {
       const search = parseResult(item, webSearchItemSchema, "webSearch item");
-      return toolActivity("web-search", phase, search.query);
+      return {
+        itemId: item.id,
+        event: toolActivity("web-search", phase, search.query),
+      };
     }
     case "imageView": {
       const image = parseResult(item, imageViewItemSchema, "imageView item");
-      return toolActivity("image-view", phase, image.path);
+      return {
+        itemId: item.id,
+        event: toolActivity("image-view", phase, image.path),
+      };
     }
     case "imageGeneration": {
       const image = parseResult(
@@ -470,14 +583,33 @@ function normalizeItem(
         imageGenerationItemSchema,
         "imageGeneration item",
       );
-      return toolActivity("image-generation", phase, image.status);
+      return {
+        itemId: item.id,
+        event: toolActivity("image-generation", phase, image.status),
+      };
     }
     default:
       return {
-        kind: "activity",
-        description: `Codex ${type} ${phase}`,
+        itemId: item.id,
+        event: {
+          kind: "activity",
+          description: `Codex ${type} ${phase}`,
+        },
       };
   }
+}
+
+function fileChangeApprovalInput(
+  changes: z.infer<typeof fileChangeItemSchema>["changes"],
+): string {
+  return changes
+    .map((change) => {
+      if (change.kind.type !== "update" || change.kind.move_path == null) {
+        return `${change.kind.type} ${change.path}`;
+      }
+      return `move ${change.path} to ${change.kind.move_path}`;
+    })
+    .join("; ");
 }
 
 function toolActivity(

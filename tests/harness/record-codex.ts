@@ -16,7 +16,7 @@ const FIXTURE_DIRECTORY = join(
   "codex",
   "codex-qualification",
 );
-const PROBE_REVISION = "codex-probe-1";
+const PROBE_REVISION = "codex-probe-2";
 const CODEX_HOME_PLACEHOLDER = "/recorded/codex-home";
 const ACCOUNT_EMAIL_PLACEHOLDER = "recorded@example.invalid";
 

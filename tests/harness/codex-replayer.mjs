@@ -46,6 +46,8 @@ const scenario = JSON.parse(
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 let trafficAt = 0;
 let turnNumber = 0;
+let activeTurnId;
+const outstandingApprovals = new Map();
 for await (const line of lines) {
   log({ type: "stdin", line });
   if (Array.isArray(scenario.traffic)) {
@@ -67,6 +69,11 @@ for await (const line of lines) {
     }
   }
   const request = JSON.parse(line);
+  if (request.method === undefined && outstandingApprovals.has(request.id)) {
+    outstandingApprovals.delete(request.id);
+    if (outstandingApprovals.size === 0) completeActiveTurn();
+    continue;
+  }
   if (request.method === "initialized") continue;
   if (request.method === "thread/start") {
     process.stdout.write(
@@ -91,6 +98,7 @@ for await (const line of lines) {
   if (request.method === "turn/start") {
     turnNumber += 1;
     const turnId = `turn-${turnNumber}`;
+    activeTurnId = turnId;
     if (scenario.turn?.stallFirstTurn === true && turnNumber === 1) continue;
     if (scenario.turn?.stallFirstTurn === true && turnNumber === 2) {
       emitTurnStarted("turn-1");
@@ -101,6 +109,38 @@ for await (const line of lines) {
       items: [],
       status: "inProgress",
     };
+    if (scenario.turn?.approvals !== undefined) {
+      for (const approval of scenario.turn.approvals) {
+        if (approval.kind === "file" && approval.changes !== undefined) {
+          emitFileChangeStarted(approval, turnId);
+        }
+        outstandingApprovals.set(approval.id, approval);
+        emitApprovalRequest(approval, turnId);
+      }
+      if (scenario.turn.duplicateFirstApproval === true) {
+        const [first] = scenario.turn.approvals;
+        if (first !== undefined) emitApprovalRequest(first, turnId);
+      }
+      if (scenario.turn.resolveFirstApproval === true) {
+        const [first] = scenario.turn.approvals;
+        if (first !== undefined) {
+          outstandingApprovals.delete(first.id);
+          process.stdout.write(
+            `${JSON.stringify({
+              method: "serverRequest/resolved",
+              params: { requestId: first.id, threadId: "thread-1" },
+            })}\n`,
+          );
+        }
+      }
+      process.stdout.write(
+        `${JSON.stringify({ id: request.id, result: { turn } })}\n`,
+      );
+      if (scenario.turn.completeWithOutstandingApproval === true) {
+        completeActiveTurn();
+      }
+      continue;
+    }
     process.stdout.write(
       `${JSON.stringify({ id: request.id, result: { turn } })}\n`,
     );
@@ -243,7 +283,13 @@ function emitActivityItems() {
     {
       id: "files",
       type: "fileChange",
-      changes: [{ path: "file.ts" }],
+      changes: [
+        {
+          path: "file.ts",
+          diff: "recorded diff",
+          kind: { type: "update" },
+        },
+      ],
       status: "completed",
     },
     {
@@ -295,6 +341,33 @@ function emitActivityItems() {
   }
 }
 
+function emitFileChangeStarted(approval, turnId) {
+  const changes = approval.changes.map((change) => ({
+    path: change.path,
+    diff: "recorded diff",
+    kind: {
+      type: change.kind,
+      ...(change.movePath === undefined ? {} : { move_path: change.movePath }),
+    },
+  }));
+  process.stdout.write(
+    `${JSON.stringify({
+      method: "item/started",
+      params: {
+        startedAtMs: 1,
+        item: {
+          id: approval.itemId,
+          type: "fileChange",
+          changes,
+          status: "inProgress",
+        },
+        threadId: "thread-1",
+        turnId,
+      },
+    })}\n`,
+  );
+}
+
 function emitTurnStarted(turnId) {
   process.stdout.write(
     `${JSON.stringify({
@@ -317,4 +390,33 @@ function emitTurnCompleted(turnId, status) {
       },
     })}\n`,
   );
+}
+
+function emitApprovalRequest(approval, turnId) {
+  const method =
+    approval.kind === "file"
+      ? "item/fileChange/requestApproval"
+      : approval.kind === "request-user-input"
+        ? "item/tool/requestUserInput"
+        : "item/commandExecution/requestApproval";
+  const params = {
+    itemId: approval.itemId,
+    startedAtMs: 1,
+    threadId: "thread-1",
+    turnId,
+    ...(approval.kind === "command"
+      ? { command: approval.command, kind: "command" }
+      : approval.kind === "unsupported-command"
+        ? { command: null, kind: "writeStdin" }
+        : {}),
+  };
+  process.stdout.write(
+    `${JSON.stringify({ id: approval.id, method, params })}\n`,
+  );
+}
+
+function completeActiveTurn() {
+  if (activeTurnId === undefined) return;
+  emitTurnCompleted(activeTurnId, "completed");
+  activeTurnId = undefined;
 }

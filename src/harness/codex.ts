@@ -8,18 +8,21 @@ import {
   type OwnedProcess,
 } from "../process/process.js";
 import {
+  APPROVAL_DECISIONS,
   type CleanupReport,
   type ControlReceipt,
   type HarnessAdapter,
   type HarnessFailure,
   type HarnessPlatform,
   type HarnessProfile,
+  type HarnessRequest,
   type HarnessTurn,
   type ModelObservation,
   type PrepareOptions,
   type PrepareResult,
   type PreparedHarness,
   type RecoveryCoordinate,
+  type RequestId,
   type RequestAnswer,
   type SessionAvailability,
   type SteerCapability,
@@ -56,7 +59,7 @@ import {
 export type { CodexQualificationObserver } from "./codex/qualification.js";
 
 const HARNESS_NAME = "codex";
-const PROBE_REVISION = "codex-probe-1";
+const PROBE_REVISION = "codex-probe-2";
 const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
 const DEFAULT_LAUNCH_TIMEOUT_MS = 15_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
@@ -536,6 +539,13 @@ class CodexSession {
     this.detached = true;
   }
 
+  respondToServerRequest(
+    id: string | number,
+    decision: "accept" | "decline",
+  ): Promise<void> {
+    return this.connection.respondToServerRequest(id, { decision });
+  }
+
   private async submit(turn: CodexTurn): Promise<void> {
     if (this.unusableFailure !== undefined) {
       turn.settleRecoveryFailure(this.unusableFailure, this.model);
@@ -651,6 +661,12 @@ type RuntimeNotification = NonNullable<
   ReturnType<typeof parseRuntimeNotification>
 >;
 
+interface PendingCodexApproval {
+  readonly request: HarnessRequest;
+  readonly nativeRequestId: string | number;
+  status: "outstanding" | "answering" | "settled";
+}
+
 class CodexTurn implements HarnessTurn {
   settled = false;
   readonly request: TurnRequest;
@@ -670,6 +686,13 @@ class CodexTurn implements HarnessTurn {
   private previewIndex: number | undefined;
   private lastObservation = "no authoritative Codex Turn observation";
   private recoveryPending = false;
+  private readonly approvals = new Map<string, PendingCodexApproval>();
+  private readonly approvalsByNativeId = new Map<
+    string,
+    PendingCodexApproval
+  >();
+  private readonly approvalInputsByItemId = new Map<string, string>();
+  private approvalSequence = 0;
 
   constructor(
     request: TurnRequest,
@@ -704,8 +727,44 @@ class CodexTurn implements HarnessTurn {
     return Promise.resolve({ outcome: "rejected", reason: "unsupported" });
   }
 
-  answerRequest(_answer: RequestAnswer): Promise<ControlReceipt> {
-    return Promise.resolve({ outcome: "rejected", reason: "expired" });
+  async answerRequest(answer: RequestAnswer): Promise<ControlReceipt> {
+    if (this.settled) return { outcome: "rejected", reason: "expired" };
+    const pending = this.approvals.get(answer.requestId.opaque);
+    if (pending === undefined) {
+      return { outcome: "rejected", reason: "expired" };
+    }
+    if (pending.status !== "outstanding") {
+      return { outcome: "rejected", reason: "already-settled" };
+    }
+    if (answer.kind !== "approval") {
+      return { outcome: "rejected", reason: "shape-mismatch" };
+    }
+    pending.status = "answering";
+    try {
+      await this.session.respondToServerRequest(
+        pending.nativeRequestId,
+        answer.decision === "allow" ? "accept" : "decline",
+      );
+    } catch (cause) {
+      if (pending.status === "answering") pending.status = "outstanding";
+      this.protocolFailure(
+        "Codex approval response could not be written to app-server.",
+        cause,
+      );
+      return { outcome: "rejected", reason: "expired" };
+    }
+    if (this.settled) return { outcome: "rejected", reason: "expired" };
+    if (pending.status !== "answering") {
+      return { outcome: "rejected", reason: "already-settled" };
+    }
+    pending.status = "settled";
+    this.emit({
+      kind: "request-answered",
+      requestId: answer.requestId,
+      by: "human",
+      answer,
+    });
+    return { outcome: "accepted" };
   }
 
   recovering(): void {
@@ -776,13 +835,21 @@ class CodexTurn implements HarnessTurn {
       this.emit({ kind: "activity", description: notification.description });
       return;
     }
-    if (notification.kind === "server-request") {
+    if (notification.kind === "unsupported-server-request") {
       this.protocolFailure(
         `Codex raised unsupported server request '${notification.method}'.`,
       );
       return;
     }
     if (notification.threadId !== this.threadId) return;
+    if (notification.kind === "server-request-resolved") {
+      if (this.turnId === undefined) {
+        this.pendingNotifications.push(notification);
+        return;
+      }
+      this.resolveNativeRequest(notification.nativeRequestId);
+      return;
+    }
     if (notification.kind === "turn-started" && this.turnId === undefined) {
       this.pendingNotifications.push(notification);
       return;
@@ -792,6 +859,10 @@ class CodexTurn implements HarnessTurn {
       return;
     }
     if (!this.matchesTurn(notification.turnId)) return;
+    if (notification.kind === "approval-request") {
+      this.raiseApproval(notification);
+      return;
+    }
     if (notification.kind === "turn-started") {
       this.lastObservation = "Codex emitted matching turn/started";
       return;
@@ -802,6 +873,12 @@ class CodexTurn implements HarnessTurn {
         this.emitPreview(notification.delta);
         return;
       case "item-event":
+        if (notification.approvalInput !== undefined) {
+          this.approvalInputsByItemId.set(
+            notification.itemId,
+            notification.approvalInput,
+          );
+        }
         if (notification.event !== undefined) {
           if (notification.event.kind === "assistant-content") {
             this.clearPreview();
@@ -941,6 +1018,71 @@ class CodexTurn implements HarnessTurn {
     return this.turnId === turnId;
   }
 
+  private raiseApproval(
+    notification: Extract<
+      RuntimeNotification,
+      { readonly kind: "approval-request" }
+    >,
+  ): void {
+    const nativeKey = nativeRequestKey(notification.nativeRequestId);
+    if (this.approvalsByNativeId.has(nativeKey)) {
+      this.protocolFailure("Codex reused an outstanding server request id.");
+      return;
+    }
+    const input =
+      notification.input ??
+      this.approvalInputsByItemId.get(notification.itemId);
+    if (input === undefined || input.length === 0) {
+      this.protocolFailure(
+        `Codex raised ${notification.tool} approval without exact action context.`,
+      );
+      return;
+    }
+    const requestId: RequestId = {
+      opaque: `codex-approval-${this.approvalSequence++}`,
+    };
+    const request: HarnessRequest = {
+      requestId,
+      shape: {
+        kind: "approval",
+        tool: notification.tool,
+        input,
+        decisions: [...APPROVAL_DECISIONS],
+      },
+    };
+    const pending: PendingCodexApproval = {
+      request,
+      nativeRequestId: notification.nativeRequestId,
+      status: "outstanding",
+    };
+    this.approvals.set(requestId.opaque, pending);
+    this.approvalsByNativeId.set(nativeKey, pending);
+    this.emit({ kind: "request-raised", request });
+  }
+
+  private resolveNativeRequest(nativeRequestId: string | number): void {
+    const pending = this.approvalsByNativeId.get(
+      nativeRequestKey(nativeRequestId),
+    );
+    if (pending === undefined || pending.status === "settled") return;
+    pending.status = "settled";
+    this.emit({
+      kind: "request-expired",
+      requestId: pending.request.requestId,
+    });
+  }
+
+  private expireOutstanding(): void {
+    for (const pending of this.approvals.values()) {
+      if (pending.status === "settled") continue;
+      pending.status = "settled";
+      this.emit({
+        kind: "request-expired",
+        requestId: pending.request.requestId,
+      });
+    }
+  }
+
   private flushPendingNotifications(): void {
     for (const notification of this.pendingNotifications.splice(0)) {
       this.accept(notification);
@@ -1032,11 +1174,16 @@ class CodexTurn implements HarnessTurn {
   private settle(result: TurnResult): void {
     if (this.settled) return;
     this.clearPreview();
+    this.expireOutstanding();
     this.settled = true;
     this.listeners.clear();
     this.onSettled();
     this.resolveResult(result);
   }
+}
+
+function nativeRequestKey(id: string | number): string {
+  return `${typeof id}:${String(id)}`;
 }
 
 function steerReceipt(capability: SteerCapability): ControlReceipt {
@@ -1149,9 +1296,9 @@ function buildProfile(options: TBuildProfile): HarnessProfile {
         "Native Turn interruption is not exposed until exact control correlation lands.",
     },
     approvals: {
-      available: false,
+      available: true,
       evidence:
-        "Native approval requests remain unavailable until exact-scope response mapping lands.",
+        "Qualified command and file approvals expose exact actions; allow accepts once and deny declines once.",
     },
     clarifications: {
       available: false,

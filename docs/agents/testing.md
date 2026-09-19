@@ -78,8 +78,8 @@ induced: doing so deterministically would require a private installer hook or an
 
 The `posix-installer-consumer` job ([check.yml](../../.github/workflows/check.yml)) gives root `install.sh` the local candidate without a product runtime.
 macOS arm64 and Linux x64 install under fixed `~/.secant/bin` in isolated homes and retain the declined-PATH instruction; macOS pins Terminal guidance.
-Windows x64 proves refusal before candidate access. `tests/release/posix-installer.test.ts` covers target/identity, checksum/layout/version/legal refusal,
-failed-update preservation, `SECANT_HOME` independence, latest/exact versions, and idempotent PATH changes.
+Windows x64 and the source suite there prove only refusal before candidate access. On POSIX, `tests/release/posix-installer.test.ts` also covers
+target/identity, checksum/layout/version/legal refusal, failed-update preservation, `SECANT_HOME` independence, latest/exact versions, and PATH changes.
 
 Test observable behavior through the same Interface callers use. Internal refactoring should not require test rewrites. When shallow Modules are
 replaced by a deeper Module, replace their implementation-coupled tests rather than retaining both suites.

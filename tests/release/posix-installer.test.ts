@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import test from "node:test";
+import nodeTest from "node:test";
 import {
   CHECKSUMS_FILE,
   LICENSE_FILE,
@@ -22,6 +22,7 @@ import { makeTempDir } from "../helpers/tempDir.js";
 const PROJECT_ROOT = resolve(import.meta.dirname, "../..");
 const INSTALLER = join(PROJECT_ROOT, "install.sh");
 const VERSION = "9.8.7-test";
+const test = process.platform === "win32" ? nodeTest.skip : nodeTest;
 
 function fakeSystemCommands(os: string, cpu: string): string {
   const directory = makeTempDir("secant-installer-commands-");
@@ -182,17 +183,20 @@ function makeCandidate(options?: {
   return { archive: archivePath, directory, executable };
 }
 
-test("the POSIX installer refuses an unsupported target before download", () => {
-  const result = runInstaller({
-    os: "MINGW64_NT-10.0",
-    cpu: "x86_64",
-    args: ["--candidate-dir", "/does/not/exist"],
-  });
+nodeTest(
+  "the POSIX installer refuses an unsupported target before download",
+  () => {
+    const result = runInstaller({
+      os: "MINGW64_NT-10.0",
+      cpu: "x86_64",
+      args: ["--candidate-dir", "/does/not/exist"],
+    });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /Unsupported platform: windows-x64/);
-  assert.doesNotMatch(result.stderr, /does\/not\/exist/);
-});
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Unsupported platform: windows-x64/);
+    assert.doesNotMatch(result.stderr, /does\/not\/exist/);
+  },
+);
 
 test("the POSIX installer verifies and installs a local Linux candidate", () => {
   const candidate = makeCandidate();

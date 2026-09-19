@@ -2,6 +2,56 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnCommand, spawnOwnedProcess } from "../../src/process/process.js";
 
+const workerMarkerProbe =
+  "console.log(JSON.stringify({bun:process.env.BUN_TEST_WORKER_ID,jest:process.env.JEST_WORKER_ID,visible:process.env.SECANT_VISIBLE}))";
+
+const workerMarkerEnv = {
+  ...process.env,
+  BUN_TEST_WORKER_ID: "1",
+  JEST_WORKER_ID: "1",
+  SECANT_VISIBLE: "yes",
+};
+
+// A Bun test worker's coordination environment belongs to the test runner, not
+// to a Secant-owned Command or Harness child. Inheriting it can make Bun children
+// stall under parallel test load; unrelated command environment remains intact.
+test("owned children do not inherit Bun test-worker markers", async () => {
+  const command = await spawnCommand({
+    executable: process.execPath,
+    args: ["-e", workerMarkerProbe],
+    cwd: undefined,
+    env: workerMarkerEnv,
+    timeoutMs: 10_000,
+    maxCaptureBytes: 4 * 1024 * 1024,
+    truncationMarker: "\n[truncated]\n",
+  });
+  assert.equal(command.kind, "exited");
+  if (command.kind !== "exited") throw new Error("unreachable");
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(command.text)), {
+    visible: "yes",
+  });
+
+  const launched = await spawnOwnedProcess({
+    executable: process.execPath,
+    args: ["-e", workerMarkerProbe],
+    cwd: process.cwd(),
+    env: workerMarkerEnv,
+    launchTimeoutMs: 10_000,
+  });
+  assert.equal(launched.ok, true);
+  if (!launched.ok) throw new Error("unreachable");
+  const output: Uint8Array[] = [];
+  for await (const chunk of launched.process.stdout) output.push(chunk);
+  assert.deepEqual(
+    JSON.parse(new TextDecoder().decode(Buffer.concat(output))),
+    { visible: "yes" },
+  );
+  assert.deepEqual(await launched.process.closed(), {
+    kind: "exited",
+    status: 0,
+  });
+});
+
 // The process Module's direct spawn/kill Interface (AC4). A per-child kill would
 // leave a grandchild holding the capture pipe open, so `close` would never fire and
 // spawnCommand would never settle — the test would hang past its own timeout. The

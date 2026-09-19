@@ -273,7 +273,7 @@ export function spawnOwnedProcess(
   try {
     child = spawn(options.executable, [...options.args], {
       cwd: options.cwd,
-      env: options.env,
+      env: withoutBunTestWorker(options.env),
       stdio,
       windowsHide: true,
       detached: process.platform !== "win32",
@@ -540,7 +540,7 @@ export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
 
     const child = spawn(options.executable, [...options.args], {
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
-      env: options.env,
+      env: withoutBunTestWorker(options.env),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       // A detached POSIX child leads its own process group, so `kill(-pid, ...)`
@@ -548,7 +548,6 @@ export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
       // the tree instead, so detaching there would only orphan the child.
       detached: process.platform !== "win32",
     });
-
     // Stream stdout then stderr under a shared cap: past it, chunks are dropped and
     // a marker is appended (D3). Buffers preserve the "stdout first" ordering the
     // synchronous path had, without holding unbounded output in memory.
@@ -619,6 +618,15 @@ export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
       finish({ kind: "exited", status: code, text });
     });
   });
+}
+
+/** Bun's test coordinator marks its workers in the inherited environment. A
+ * directly spawned child belongs to this Module, not to that coordinator. */
+function withoutBunTestWorker(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const childEnv = { ...env };
+  delete childEnv.BUN_TEST_WORKER_ID;
+  delete childEnv.JEST_WORKER_ID;
+  return childEnv;
 }
 
 /** Signal a spawned child and everything under it. On POSIX the negative pid

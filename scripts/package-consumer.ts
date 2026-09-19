@@ -10,7 +10,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import which from "which";
 import { LICENSE_FILE, NOTICES_FILE, sha256 } from "./assemble.js";
 import {
   PACKAGE_MANIFEST_FILE,
@@ -27,7 +28,44 @@ import {
 // npm is the channel under test, so this consumer drives it directly. Run against
 // the matching-OS package on the Windows x64, macOS arm64, and Linux x64 matrix.
 
-const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
+/** Install a tarball through npm, never routing a Windows `.cmd` through cmd.exe —
+ *  this repo spawns the real target directly rather than through a shell (#21,
+ *  src/process; Bun raises EINVAL for a bare `.cmd` spawn just as Node does). On
+ *  Windows that means Node on the `npm-cli.js` that ships beside the resolved `npm`
+ *  shim (its own directory, so both the bundled and a global npm layout resolve);
+ *  on POSIX the `npm` launcher runs directly. Verified end-to-end only on the
+ *  three-OS CI job. */
+function npmInstall(
+  tarballPath: string,
+  cwd: string,
+): ReturnType<typeof spawnSync> {
+  const args = [
+    "install",
+    tarballPath,
+    "--ignore-scripts",
+    "--no-save",
+    "--no-package-lock",
+    "--no-audit",
+    "--no-fund",
+  ];
+  if (process.platform !== "win32") {
+    return spawnSync("npm", args, { cwd, encoding: "utf8" });
+  }
+  const npmShim = which.sync("npm");
+  const npmCli = join(
+    dirname(npmShim),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  if (!existsSync(npmCli)) {
+    throw new Error(
+      `npm CLI not found beside ${npmShim} (looked for ${npmCli}).`,
+    );
+  }
+  return spawnSync("node", [npmCli, ...args], { cwd, encoding: "utf8" });
+}
 
 /** Verify an installed package directory against the manifest — everything short
  *  of running the binary: exact version and os/cpu (AC1), no lifecycle script and
@@ -183,19 +221,7 @@ export function verifyPlatformPackage(options: {
       join(installDir, "package.json"),
       `${JSON.stringify({ name: "secant-package-consumer", private: true }, null, 2)}\n`,
     );
-    const install = spawnSync(
-      NPM,
-      [
-        "install",
-        tarballPath,
-        "--ignore-scripts",
-        "--no-save",
-        "--no-package-lock",
-        "--no-audit",
-        "--no-fund",
-      ],
-      { cwd: installDir, encoding: "utf8" },
-    );
+    const install = npmInstall(tarballPath, installDir);
     if (install.error) throw install.error;
     if (install.status !== 0) {
       throw new Error(

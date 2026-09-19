@@ -63,6 +63,17 @@ refusals against a hand-staged directory (stale version, lifecycle script, unexp
 `verifyInstalledPackage`) — and spawns no subprocess, for the same Bun 1.4.2 child-lifecycle reason (#149). Only the `bun pm pack` → `npm install` → run
 round-trip on real binaries (npm's own os/cpu gating, mode preservation, native execution, macOS signature) is left to this CI job.
 
+## PowerShell Installer Consumer
+
+The separate `powershell-installer-consumer` job ([check.yml](../../.github/workflows/check.yml)) supplies the assembled
+candidate through a network-free local-candidate seam. The macOS arm64 and Linux x64 legs exercise native unsupported-target
+detection before candidate access. The Windows x64 leg installs into an isolated home, runs the installed executable,
+exercises latest and exact versions, executes the declined PATH instruction twice, and checks idempotent default PATH changes.
+It preserves the installed bytes across missing input, malformed manifest/version, target-identity, checksum, layout,
+inner-binary, legal-material, and executable-version failures. The scenario invokes native PowerShell and the standalone
+candidate only; it requires no Git Bash, Node, Bun, credentials, or network. A directory-swap failure is deliberately not
+induced: doing so deterministically would require a private installer hook or an inherently racy Windows file lock.
+
 Test observable behavior through the same Interface callers use. Internal refactoring should not require test rewrites. When shallow Modules are
 replaced by a deeper Module, replace their implementation-coupled tests rather than retaining both suites.
 

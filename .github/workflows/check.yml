@@ -163,6 +163,34 @@ jobs:
           path: dist/packages
       - run: bun scripts/package-consumer.ts dist/packages ${{ matrix.target }}
 
+  # The `powershell-installer-consumer` scenario (#154): macOS and Linux exercise
+  # native unsupported-target detection before candidate access. Windows
+  # installs the exact local archive into an isolated home, verifies the fixed
+  # layout and executable, exercises latest/exact selection and PATH behavior,
+  # and proves download/validation failures preserve the working installation.
+  # It downloads no release bytes and requires no Git Bash, Node, or Bun.
+  powershell-installer-consumer:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: dist/release
+      - name: Refuse unsupported targets before reading candidates
+        if: runner.os != 'Windows'
+        shell: pwsh
+        run: ./scripts/powershell-installer-consumer.ps1 -CandidateDirectory dist/release -Scenario unsupported
+      - name: Install and run the local Windows x64 candidate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/powershell-installer-consumer.ps1 -CandidateDirectory dist/release -Scenario supported
+
   # The real-terminal lifecycle suite (#56), a separate blocking three-OS job
   # outside `bun run check` (ADR 0027 / ADR 0030). It drives the cross-compiled
   # binary for this OS under a `Bun.Terminal` pseudo-terminal and proves one

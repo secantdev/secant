@@ -8,6 +8,8 @@ node_modules
 # Prettier has no parser for them.
 bundles/**/*.sh
 bundles/**/*.ps1
+install.ps1
+scripts/powershell-installer-consumer.ps1
 
 # Byte-faithful output of the installed Codex stable-schema generator.
 tests/harness/fixtures/codex/codex-qualification/stable-schema.generated.json

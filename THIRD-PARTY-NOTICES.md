@@ -10,9 +10,9 @@ recorded in the top-level [`UPSTREAM`](./UPSTREAM) file. This notices file and
 
 ## OpenCode
 
-A reduced subset of OpenCode's presentation layer is vendored into
+A reduced subset of `OpenCode`'s presentation layer is vendored into
 `src/tui/vendor/` (see `UPSTREAM` for the per-file inventory), copied from the
-OpenCode project at commit `1ead9e3d7f`.
+`OpenCode` project at commit `1ead9e3d7f`.
 
 ```
 MIT License
@@ -74,14 +74,16 @@ The copyright line above is reproduced from the `LICENSE` file shipped in the
 `@opentui/core@0.4.5` package (the `anomalyco/opentui` project). All three
 `@opentui/*` packages are published at `0.4.5` under the MIT licence.
 
-`@opentui/core@0.4.5` also pulls eight per-platform native packages
-(`@opentui/core-{darwin,linux,win32}-*@0.4.5`, optional dependencies whose Zig
-library is embedded in the compiled binary) and the bundled transitive
-`bun-ffi-structs@0.2.4` (MIT). These are declared transitively, not directly, so
-they are outside the notices-to-dependencies cross-check that guards this file
-(which is scoped to Secant's declared runtime dependencies). Their per-package
-licence text is deferred to the M4 licence gate, which inventories the transitive
-closure of the shipped artifact.
+`@opentui/core@0.4.5` also pulls eight per-platform native packages (optional
+dependencies whose Zig library is embedded in the compiled binary), of which one
+is shipped per gated target (ADR 0030). The three that ship —
+`@opentui/core-win32-x64`, `@opentui/core-darwin-arm64`, and
+`@opentui/core-linux-x64`, all `0.4.5` under the MIT licence above — are covered
+by the M4 release legal-closure gate (spec #137), which inventories the transitive
+closure actually embedded per target. The five other native variants and the
+historical `bun-ffi-structs@0.2.4` are not in that shipped closure (the compiler
+does not admit them into the executable's module graph); they remain listed as
+harmless historical entries, which the gate tolerates.
 
 ---
 
@@ -552,6 +554,117 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+---
+
+## Bun Runtime (`bun`)
+
+Secant ships as a Bun single-file executable (ADR 0030), so the Bun runtime
+`1.4.2` is embedded as redistributed material in every target's binary. Bun is
+distributed under the MIT licence by Oven, and bundles JavaScriptCore and other
+components under their own upstream terms.
+
+```
+MIT License
+
+Copyright (c) 2021-present Oven
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
+## Bundled Transitive Runtime Components
+
+The components below are pulled transitively (chiefly by `@modelcontextprotocol/sdk`,
+`@opentui/core`, `string-width`, and `strip-ansi`) and admitted by the compiler
+into the shipped executable's module graph. The M4 release legal-closure gate
+(spec #137) inventories this closure from the actual build inputs and verifies
+their coverage here; their versions are the exact bytes shipped, which for a
+nested duplicate can differ from a declared top-level pin.
+
+MIT-licensed (the MIT licence text above applies):
+
+- `@hono/node-server` `1.19.17`
+- `ajv` `8.20.0`
+- `ajv-formats` `3.0.1`
+- `ansi-regex` `6.3.0`
+- `emoji-regex` `10.6.0`
+- `fast-deep-equal` `3.1.3`
+- `get-east-asian-width` `1.6.0`
+- `json-schema-traverse` `1.0.0`
+
+ISC-licensed (the ISC licence text above applies):
+
+- `isexe` `2.0.0`
+- `which` `2.0.2` (a nested transitive copy, distinct from the declared `which` `6.0.1` above)
+- `zod-to-json-schema` `3.25.2`
+
+### `entities` `7.0.1` — BSD 2-Clause
+
+```
+BSD 2-Clause License
+
+Copyright (c) Felix Böhm
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+THIS IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS,
+EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### `fast-uri` `3.1.8` — BSD 3-Clause
+
+```
+BSD 3-Clause License
+
+Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
+Copyright (c) 2021-present The Fastify team <https://github.com/fastify/fastify#team>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * The names of any contributors may not be used to endorse or promote
+      products derived from this software without specific prior written
+      permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS AND CONTRIBUTORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ---

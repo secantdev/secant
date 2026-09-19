@@ -11,19 +11,30 @@ import { TARGETS, hostTargetKey } from "./targets.js";
 // embedded as a build-time define — a single-file executable has no on-disk
 // package.json to read.
 
-async function compile(
-  triple: Bun.Build.CompileTarget,
-  outfile: string,
-): Promise<void> {
-  const result = await Bun.build({
+// The compiler inputs every gated target's binary is built from — entrypoint,
+// resolution conditions, the Solid transform, and the version define. The release
+// legal-closure inventory (scripts/inventory.ts) walks the exact same input so its
+// dependency inventory can never drift from what is actually compiled in; only the
+// per-target `compile` field and (for the inventory) `sourcemap` differ.
+export function sharedBuildInput(): Bun.BuildConfig {
+  return {
     entrypoints: ["./src/cli/main.ts"],
     conditions: ["bun", "node"],
     tsconfig: "./tsconfig.json",
     plugins: [createSolidTransformPlugin()],
     format: "esm",
     splitting: true,
-    compile: { target: triple, outfile: `dist/${outfile}` },
     define: { __SECANT_VERSION__: JSON.stringify(pkg.version) },
+  };
+}
+
+async function compile(
+  triple: Bun.Build.CompileTarget,
+  outfile: string,
+): Promise<void> {
+  const result = await Bun.build({
+    ...sharedBuildInput(),
+    compile: { target: triple, outfile: `dist/${outfile}` },
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);
@@ -32,15 +43,17 @@ async function compile(
   console.log(`Built dist/${outfile} (${triple}).`);
 }
 
-const buildAll = process.argv.includes("--all");
-const keys = buildAll
-  ? Object.keys(TARGETS)
-  : [hostTargetKey(process.platform, process.arch)];
-for (const key of keys) {
-  if (key === undefined) {
-    throw new Error(
-      `No gated target for ${process.platform}-${process.arch}; the three targets are ${Object.keys(TARGETS).join(", ")}.`,
-    );
+if (import.meta.main) {
+  const buildAll = process.argv.includes("--all");
+  const keys = buildAll
+    ? Object.keys(TARGETS)
+    : [hostTargetKey(process.platform, process.arch)];
+  for (const key of keys) {
+    if (key === undefined) {
+      throw new Error(
+        `No gated target for ${process.platform}-${process.arch}; the three targets are ${Object.keys(TARGETS).join(", ")}.`,
+      );
+    }
+    await compile(TARGETS[key].triple, TARGETS[key].outfile);
   }
-  await compile(TARGETS[key].triple, TARGETS[key].outfile);
 }

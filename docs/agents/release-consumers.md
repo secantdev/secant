@@ -56,6 +56,28 @@ answered reach `succeeded` and make the authored commit. `tests/release/launcher
 install → launch → Proof Bundle round-trip on real binaries is left to this CI job. Real-platform unsupported-target detection is not exercised here
 (a real spawn cannot spoof `process.platform`); the `selectTarget` unsupported branch is proven deterministically in `bun test` instead.
 
+## Release Legal Closure
+
+The `release-legal-closure` job ([check.yml](../../.github/workflows/check.yml)) is the M4 artifact-level legal gate (spec
+[#137](https://github.com/secantdev/secant/issues/137) stories 99/100, [#156](https://github.com/secantdev/secant/issues/156)). It extends
+the fast declared-dependency notices check — `checkNoticesCoverage` in [tests/architecture/check-vendor-provenance.ts](../../tests/architecture/check-vendor-provenance.ts),
+which **stays** in `bun run check` — into a target-specific release gate. The build job emits `inventory-manifest.json` beside the release
+archives (`scripts/inventory.ts`): it derives the transitive runtime closure **actually embedded** for each target from the actual compiler
+inputs (a real `Bun.build` of the shared build input, walked through the sourcemap `sources`, each embedded file's version and licence read from
+the package that owns it on disk — the deepest `node_modules/` segment, so a hoisted or nested duplicate reports the bytes actually shipped), adds
+the one `@opentui/core-<os>-<cpu>` native per target from the one target manifest (`scripts/targets.ts`), and names the embedded Bun runtime and the
+vendored OpenCode subset as fixed members. On the Windows x64, macOS arm64, and Linux x64 matrix, `scripts/release-legal-closure-consumer.ts` verifies
+two things: that `THIRD-PARTY-NOTICES.md` covers the unioned inventory — every shipped component named, its shipped version named, and its licence
+family's text present, failing closed on a missing component, a stale version, or an unrecognised licence identity — and that the exact source-of-truth
+legal material is what every consumer channel ships (the three archives, three platform packages, and launcher package, extracted as a consumer
+receives them; the installer results stage the archive's verified legal bytes, which the installer-consumer jobs re-check against the same digests).
+Harmless historical or grouped extra notices are tolerated (a named entry no longer in the closure, e.g. `bun-ffi-structs`, does not fail). Licence
+identity is verified at licence-family granularity — an unrecognised SPDX identity fails closed, but a per-package prose mislabel within a known family
+is a named limitation, not caught. `tests/release/legal-closure.test.ts` unit-tests the pure logic — the notices-coverage checks (`verifyClosureNotices`),
+the staged-channel legal check (`verifyStagedLegal`), and the inventory's pure resolvers (`packageDirOfSource`, `nativePackageFor`) — and spawns no
+subprocess. Only the closure derivation (a real build) and the archive/tarball extraction round-trip on real artifacts are left to the CI job, for the
+same Bun 1.4.2 child-lifecycle reason (#149) that keeps the sibling consumers' round-trips out of `bun test`.
+
 ## PowerShell Installer Consumer
 
 The separate `powershell-installer-consumer` job ([check.yml](../../.github/workflows/check.yml)) supplies the assembled

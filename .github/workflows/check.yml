@@ -49,6 +49,12 @@ jobs:
       # bytes through the one target manifest, emitting the candidate manifest and
       # SHA256SUMS (#150). Never rebuilds an input; fails closed on disagreement.
       - run: bun run scripts/assemble.ts
+      # Derive the target-specific runtime legal-closure inventory (#156) from the
+      # actual compiler inputs (a real build of the shared input) and the installed
+      # package metadata, emitting inventory-manifest.json beside the archives. This
+      # runner has every platform's @opentui native installed, so the per-target
+      # natives resolve. It rides in the release-archives artifact.
+      - run: bun run scripts/inventory.ts
       - uses: actions/upload-artifact@v4
         with:
           name: release-archives
@@ -195,6 +201,38 @@ jobs:
           name: platform-packages
           path: dist/packages
       - run: bun scripts/launcher-consumer.ts dist/packages
+
+  # The `release-legal-closure` scenario (#156): verify that THIRD-PARTY-NOTICES.md
+  # covers the target-specific runtime closure actually embedded (the inventory the
+  # build job emitted from the real compiler inputs) — every shipped component, its
+  # shipped version, and its licence family — and that the exact source-of-truth
+  # legal material is what every shipped channel carries (the three archives, three
+  # platform packages, and launcher package; installer results stage the archive's
+  # verified legal bytes, which the installer-consumer jobs re-check). The existing
+  # fast declared-dependency check stays in `bun run check`. It reads the assembled
+  # artifacts and the checked-out repo only, so this artifact-only runner needs no
+  # `bun install`. The scenario is enumerated once in docs/agents/release-consumers.md.
+  release-legal-closure:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: dist/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: platform-packages
+          path: dist/packages
+      - run: bun scripts/release-legal-closure-consumer.ts dist/release dist/packages
 
   # The `powershell-installer-consumer` scenario (#154): macOS and Linux exercise
   # native unsupported-target detection before candidate access. Windows

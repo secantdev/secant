@@ -45,6 +45,15 @@ jobs:
           name: binaries
           path: dist/secant-*
           if-no-files-found: error
+      # Assemble the three release archives once from the just-built candidate
+      # bytes through the one target manifest, emitting the candidate manifest and
+      # SHA256SUMS (#150). Never rebuilds an input; fails closed on disagreement.
+      - run: bun run scripts/assemble.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-archives
+          path: dist/release
+          if-no-files-found: error
 
   # Each cross-compiled binary is smoked on its own OS with the compiled-binary
   # smoke, plus codesign --verify on macOS. The scenarios it covers are
@@ -81,6 +90,36 @@ jobs:
         if: runner.os != 'Windows'
         run: chmod +x "dist/${{ matrix.binary }}"
       - run: bun scripts/package-smoke.ts "dist/${{ matrix.binary }}"
+
+  # The `release-archive-consumer` scenario (#150): each final release archive is
+  # extracted and verified on its own OS exactly as a consumer receives it —
+  # layout, executable mode, inner-binary digest, bundled legal material, native
+  # execution and version, and (macOS) the strict ad-hoc signature. It reads the
+  # candidate manifest assembly emitted, so it verifies the same bytes the smoke
+  # ran. No runtime deps, so this artifact-only runner needs no `bun install`.
+  release-archive-consumer:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            archive: secant-windows-x64.zip
+          - os: macos-latest
+            archive: secant-darwin-arm64.zip
+          - os: ubuntu-latest
+            archive: secant-linux-x64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: dist/release
+      - run: bun scripts/release-consumer.ts "dist/release/${{ matrix.archive }}"
 
   # The real-terminal lifecycle suite (#56), a separate blocking three-OS job
   # outside `bun run check` (ADR 0027 / ADR 0030). It drives the cross-compiled

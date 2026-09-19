@@ -5,6 +5,7 @@
   "type": "module",
   "packageManager": "bun@1.4.2",
   "scripts": {
+    "assemble": "bun run scripts/assemble.ts",
     "build": "bun run scripts/build.ts",
     "check": "bun run migrations:check && bun run typecheck && bun run format:check && bun run lint && bun run test && bun run build && bun run test:package",
     "check:claude-code": "bun scripts/release-checks/installed-harness.ts claude-code",

@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { CANDIDATE_CHECK_JOBS } from "../../scripts/release-gate.js";
 import {
   CI_WORKFLOW,
+  checkReleaseProtection,
   checkValidationWorkflow,
 } from "./check-release-workflow.js";
 
@@ -21,6 +23,25 @@ function parseYaml(text: string): unknown {
 test("the real CI workflow satisfies the candidate-validation policy", () => {
   const text = readFileSync(join(repoRoot, CI_WORKFLOW), "utf8");
   assert.deepEqual(checkValidationWorkflow(parseYaml(text)), []);
+});
+
+test("the real CI workflow satisfies the release-protection policy", () => {
+  const text = readFileSync(join(repoRoot, CI_WORKFLOW), "utf8");
+  assert.deepEqual(checkReleaseProtection(parseYaml(text)), []);
+});
+
+test("the approval summary's blocking-jobs list matches release-approval's needs", () => {
+  // The reviewer-facing CANDIDATE_CHECK_JOBS list and the workflow's actual gating
+  // edges must not drift; checkReleaseProtection guards the needs graph, this guards
+  // the display copy.
+  const text = readFileSync(join(repoRoot, CI_WORKFLOW), "utf8");
+  const jobs = (
+    parseYaml(text) as { jobs: Record<string, { needs: string[] }> }
+  ).jobs;
+  assert.deepEqual(
+    [...CANDIDATE_CHECK_JOBS].sort(),
+    [...jobs["release-approval"]!.needs].sort(),
+  );
 });
 
 // A minimal workflow that passes every guard. Each negative case below breaks
@@ -56,6 +77,22 @@ function valid(): Record<string, unknown> {
           { uses: "actions/download-artifact@v4" },
           { run: "bun scripts/package-smoke.ts dist/secant-linux-x64" },
         ],
+      },
+      "release-approval": {
+        needs: ["check", "build", "smoke"],
+        if: "startsWith(github.ref, 'refs/tags/v')",
+        "runs-on": "ubuntu-latest",
+        steps: [
+          { uses: "actions/download-artifact@v4" },
+          { run: "bun scripts/release-gate.ts dist/release" },
+        ],
+      },
+      promote: {
+        needs: "release-approval",
+        if: "startsWith(github.ref, 'refs/tags/v')",
+        "runs-on": "ubuntu-latest",
+        environment: "release",
+        steps: [{ run: 'echo approved >> "$GITHUB_STEP_SUMMARY"' }],
       },
     },
   };
@@ -272,6 +309,113 @@ test("a retry action is rejected", () => {
   assert.ok(
     checkValidationWorkflow(workflow).some((issue) =>
       issue.message.includes("re-run"),
+    ),
+  );
+});
+
+// --- release-protection-policy scenario (#158) -----------------------------------
+// The same valid() workflow passes protection too, so each negative below isolates one
+// protection guard.
+
+test("the minimal valid workflow passes release protection", () => {
+  assert.deepEqual(checkReleaseProtection(valid()), []);
+});
+
+test("release protection fails closed on a non-mapping workflow", () => {
+  assert.ok(checkReleaseProtection("nope").length > 0);
+  assert.ok(checkReleaseProtection(null).length > 0);
+});
+
+test("a workflow without a promote job is rejected", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  delete jobs.promote;
+  assert.ok(
+    checkReleaseProtection(workflow).some((issue) =>
+      issue.message.includes("no promote job"),
+    ),
+  );
+});
+
+test("a promote job without the protected release environment is rejected", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  delete jobs.promote.environment;
+  assert.ok(
+    checkReleaseProtection(workflow).some((issue) =>
+      issue.message.includes("environment: release"),
+    ),
+  );
+});
+
+test("a promote job targeting the wrong environment is rejected", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  jobs.promote.environment = "staging";
+  assert.ok(
+    checkReleaseProtection(workflow).some((issue) =>
+      issue.message.includes("environment: release"),
+    ),
+  );
+});
+
+test("a candidate check that does not gate promotion is rejected", () => {
+  // smoke drops out of the dependency chain, so the protected environment could be
+  // reached without it.
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  jobs["release-approval"].needs = ["check", "build"];
+  assert.ok(
+    checkReleaseProtection(workflow).some((issue) =>
+      issue.message.includes("smoke does not gate it"),
+    ),
+  );
+});
+
+test("a promote job not gated on a tag ref is rejected", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  delete jobs.promote.if;
+  assert.ok(
+    checkReleaseProtection(workflow).some((issue) =>
+      issue.message.includes("tag ref"),
+    ),
+  );
+});
+
+test("a job gated on a non-`v` tag ref is rejected", () => {
+  // `refs/tags/` alone is not enough: the `v*` shape is part of the invariant.
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  jobs.promote.if = "startsWith(github.ref, 'refs/tags/')";
+  assert.ok(
+    checkReleaseProtection(workflow).some((issue) =>
+      issue.message.includes("tag ref"),
+    ),
+  );
+});
+
+test("an approval job that never runs the tag/version gate is rejected", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  jobs["release-approval"].steps = [{ uses: "actions/download-artifact@v4" }];
+  assert.ok(
+    checkReleaseProtection(workflow).some((issue) =>
+      issue.message.includes("release-gate.ts"),
+    ),
+  );
+});
+
+test("a publication credential on a pre-approval promotion job is rejected", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  (jobs["release-approval"].steps as Record<string, unknown>[]).push({
+    env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_PUBLISH_TOKEN }}" },
+    run: "echo x",
+  });
+  assert.ok(
+    checkReleaseProtection(workflow).some((issue) =>
+      issue.message.includes("no publication credential"),
     ),
   );
 });

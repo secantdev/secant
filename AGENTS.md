@@ -19,6 +19,7 @@ Read the line that matches your task, then the file it names. The canonical gate
 - Before changing dependencies, composition, or allowed import direction, read `docs/agents/dependencies.md`.
 - Before changing tests or fixtures, read `docs/agents/testing.md`.
 - Before changing a release-channel consumer scenario (archive, platform package, npm launcher, or installer) or its CI job, read `docs/agents/release-consumers.md`.
+- Before changing the release workflow's shape or policy (candidate validation, tag admission, protected promotion) or its CI jobs, read `docs/agents/release-workflow.md`.
 - Before handling external or persisted input or translating external failures, read `docs/agents/validation.md`.
 - Before starting or changing a prototype, read `docs/agents/prototypes.md`.
 - Before replacing legacy behavior, read `docs/agents/refactoring.md`.

@@ -96,20 +96,5 @@ macOS arm64 and Linux x64 install under fixed `~/.secant/bin` in isolated homes 
 Windows x64 and the source suite there prove only refusal before candidate access. On POSIX, `tests/release/posix-installer.test.ts` also covers
 target/identity, checksum/layout/version/legal refusal, failed-update preservation, `SECANT_HOME` independence, latest/exact versions, and PATH changes.
 
-## Candidate Validation
-
-The `candidate-validation` scenario (M4 spec [#137](https://github.com/secantdev/secant/issues/137) stories 85/89,
-[#157](https://github.com/secantdev/secant/issues/157)) is the manual-dispatch mode of the one CI gate ([check.yml](../../.github/workflows/check.yml)),
-not a second workflow: a `workflow_dispatch` run executes the whole gate on one commit — the three-OS canonical check, the cross-build/assemble, the
-compiled-binary smoke, every consumer scenario above, the terminal lifecycle, the evidence contract, and the legal closure — against the single candidate
-the `build` job assembles once. It adds the one thing a push/PR run cannot: a separately configured read-only npm identity (`secrets.NPM_READONLY_TOKEN`,
-no publication authority) authenticates and publish-dry-runs every platform package first and the launcher last (`scripts/npm-dry-run.ts`), so the npm
-release path is proven end to end with no route to publication. The dry-run is registry-facing and OS-independent, so it folds into the `build` job's
-final step under `if: github.event_name == 'workflow_dispatch'`, gating the credential to that one manual run rather than paying for its own runner.
-
-The deterministic release-workflow policy check (`tests/architecture/check-release-workflow.ts`, run under `bun test`) proves, over the parsed workflow,
-that the candidate is assembled once and reused (job dependencies and download-not-rebuild), that the read-only identity is the only secret and is
-dispatch-gated, and that no publication credential, real publish, GitHub-release step, retry, or public-asset path exists anywhere in it. Publication
-itself — the tag-triggered, protected-`release`-environment job — is [#158](https://github.com/secantdev/secant/issues/158)/[#159](https://github.com/secantdev/secant/issues/159),
-out of scope here. `tests/release/npm-dry-run.test.ts` unit-tests the pure dry-run ordering and spawns no subprocess; only the real `npm` round-trip runs
-in the dispatched `build` job.
+The manual-dispatch candidate validation and the tag-triggered protected promotion are workflow-shape policy, not consumer round-trips; they live in
+[release-workflow.md](./release-workflow.md).

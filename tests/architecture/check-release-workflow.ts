@@ -10,11 +10,14 @@
 // The validation path is not a second workflow: it is the manual-dispatch mode of
 // the one CI gate (check.yml), which assembles the candidate once and adds the
 // authenticated npm dry-run in the build job under `if: workflow_dispatch`. So the
-// guards run over that one workflow. Scope: this ticket owns the non-publishing
-// validation. The tag-triggered publication job, its protected `release`
-// environment, and the partial-rerun rules are #158/#159 — which is why an
-// `environment:` key or a publish step appearing here is a policy failure, not a
-// feature.
+// guards run over that one workflow — and, since #158, so does the tag-triggered
+// promotion. `checkValidationWorkflow` owns the non-publishing validation; the
+// `release-protection-policy` scenario (`checkReleaseProtection`, #158) owns the
+// tag-admission and protected-`release`-environment boundary that rides in the same
+// workflow. The two are complementary: validation forbids an `environment` on every
+// job EXCEPT the one protected promotion job, and the protection scenario requires it
+// there. Publication of the bytes themselves — a real publish step and its
+// publication credential — is #159, still out of scope in both.
 
 export interface WorkflowIssue {
   file: string;
@@ -26,6 +29,17 @@ export const CI_WORKFLOW = ".github/workflows/check.yml";
 // The candidate is assembled ONCE on the build job; only it may run these. Any other
 // job running one would rebuild downstream instead of reusing the immutable artifact.
 const BUILD_JOB = "build";
+// The tag-admission and protected-promotion jobs (#158). The `release-approval` job
+// gathers the candidate evidence and runs the tag/version gate; the `promote` job
+// carries the protected `release` environment and is the human approval boundary.
+const APPROVAL_JOB = "release-approval";
+const PROMOTE_JOB = "promote";
+const RELEASE_ENVIRONMENT = "release";
+// The tag/version gate the approval job runs, and the ref form that gates both jobs to
+// a `v*` tag so promotion never runs on a branch or a non-`v` tag. The `v` prefix is
+// part of the invariant, so the guard requires it — not just any `refs/tags/`.
+const TAG_GATE_SCRIPT = "scripts/release-gate.ts";
+const TAG_REF_GUARD = /refs\/tags\/v/;
 const ASSEMBLY_SCRIPTS = [
   "scripts/build.ts",
   "scripts/assemble.ts",
@@ -167,8 +181,12 @@ export function checkValidationWorkflow(workflow: unknown): WorkflowIssue[] {
 
     // 2. Job dependencies + immutable reuse. Every job but the canonical `check`
     //    gate and the `build` job that assembles the candidate must depend on
-    //    `build` and consume its artifact — download it, never re-assemble.
-    if (name !== "check" && name !== BUILD_JOB) {
+    //    `build` and consume its artifact — download it, never re-assemble. The
+    //    protected `promote` job is exempt: it is the human approval gate, not an
+    //    artifact consumer, and it depends on the `release-approval` job (which does
+    //    download the candidate) rather than on `build` directly. Its full
+    //    dependency closure is proven by `checkReleaseProtection`.
+    if (name !== "check" && name !== BUILD_JOB && name !== PROMOTE_JOB) {
       if (!needsOf(job).has(BUILD_JOB)) {
         add(
           `Job ${name} must \`needs: ${BUILD_JOB}\` to consume the one candidate`,
@@ -222,11 +240,14 @@ export function checkValidationWorkflow(workflow: unknown): WorkflowIssue[] {
       }
     }
 
-    // 4. Non-publication. No protected environment, no real publish, no GitHub
-    //    release, no retry wrapper — nothing that could publish or hide a flake.
-    if ("environment" in job) {
+    // 4. Non-publication. Only the protected `promote` job (#158) may carry an
+    //    environment; any other job declaring one would be a second protected/publish
+    //    surface. No real publish, no GitHub release, no retry wrapper — nothing that
+    //    could publish or hide a flake. (`promote` HAVING `environment: release` is
+    //    required by `checkReleaseProtection`.)
+    if ("environment" in job && name !== PROMOTE_JOB) {
       add(
-        `Job ${name} declares an environment; the protected release environment is publication (#158/#159), out of scope here`,
+        `Job ${name} declares an environment; only the protected ${PROMOTE_JOB} job may (#158), and publication of bytes is #159`,
       );
     }
     if (/npm\s+publish/.test(runs) && !/--dry-run/.test(runs)) {
@@ -250,6 +271,131 @@ export function checkValidationWorkflow(workflow: unknown): WorkflowIssue[] {
           `Job ${name} uses retry action ${action}; a flaky release step is fixed, not re-run`,
         );
       }
+    }
+  }
+
+  return issues;
+}
+
+/** The environment name a job targets, whether written as a string or a mapping with
+ *  a `name`, or undefined when the job declares none. */
+function environmentName(job: Record<string, unknown>): string | undefined {
+  const environment = job.environment;
+  if (typeof environment === "string") return environment;
+  if (isRecord(environment) && typeof environment.name === "string") {
+    return environment.name;
+  }
+  return undefined;
+}
+
+/** The transitive `needs` closure of a job: every job that must complete before it,
+ *  directly or through the chain. Missing referents are ignored (fail closed elsewhere). */
+function transitiveNeeds(
+  jobs: Record<string, unknown>,
+  start: string,
+): Set<string> {
+  const closure = new Set<string>();
+  const queue = [
+    ...needsOf(
+      isRecord(jobs[start]) ? (jobs[start] as Record<string, unknown>) : {},
+    ),
+  ];
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (closure.has(name)) continue;
+    closure.add(name);
+    const job = jobs[name];
+    if (isRecord(job)) queue.push(...needsOf(job));
+  }
+  return closure;
+}
+
+/** The `release-protection-policy` scenario (#158, spec #137 "Release artifact set and
+ *  publication workflow"): over the same parsed workflow, prove the tag-admission and
+ *  protected-`release`-environment boundary — tag matching, dependency edges,
+ *  environment placement, and credential boundaries. Pure over the parsed YAML, so the
+ *  real workflow and synthetic violations both exercise it. */
+export function checkReleaseProtection(workflow: unknown): WorkflowIssue[] {
+  const issues: WorkflowIssue[] = [];
+  const add = (message: string) => issues.push({ file: CI_WORKFLOW, message });
+
+  if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
+    add("CI workflow has no jobs to check for release protection");
+    return issues;
+  }
+  const jobs = workflow.jobs;
+
+  const promote = jobs[PROMOTE_JOB];
+  if (!isRecord(promote)) {
+    add(
+      `CI workflow has no ${PROMOTE_JOB} job to gate publication behind the protected ${RELEASE_ENVIRONMENT} environment`,
+    );
+    return issues;
+  }
+  const approval = jobs[APPROVAL_JOB];
+  if (!isRecord(approval)) {
+    add(
+      `CI workflow has no ${APPROVAL_JOB} job to run the tag/version gate and write the approval summary`,
+    );
+    return issues;
+  }
+
+  // Environment placement: the promote job targets the protected `release`
+  // environment, so a human approval stands between the candidate and any later
+  // publication.
+  if (environmentName(promote) !== RELEASE_ENVIRONMENT) {
+    add(
+      `Job ${PROMOTE_JOB} must target the protected \`environment: ${RELEASE_ENVIRONMENT}\``,
+    );
+  }
+
+  // Dependency edges: the promote job's transitive needs must include every other
+  // job, so the protected environment is unreachable until every candidate check is
+  // green. (checkValidationWorkflow forbids any OTHER job carrying an environment.)
+  const closure = transitiveNeeds(jobs, PROMOTE_JOB);
+  for (const name of Object.keys(jobs)) {
+    if (name === PROMOTE_JOB) continue;
+    if (!closure.has(name)) {
+      add(
+        `Job ${PROMOTE_JOB} must (transitively) \`needs\` every candidate check; ${name} does not gate it`,
+      );
+    }
+  }
+
+  // Tag matching: both jobs are gated to a `v*` tag ref so promotion never runs on a
+  // branch, and the approval job runs the tag/version gate that admits a tag only
+  // when it exactly matches the package version.
+  for (const [name, job] of [
+    [APPROVAL_JOB, approval] as const,
+    [PROMOTE_JOB, promote] as const,
+  ]) {
+    const guard = typeof job.if === "string" ? job.if : "";
+    if (!TAG_REF_GUARD.test(guard)) {
+      add(
+        `Job ${name} must be gated on a \`${TAG_REF_GUARD.source}\` tag ref so promotion never runs on a branch`,
+      );
+    }
+  }
+  if (!runScripts(approval).includes(TAG_GATE_SCRIPT)) {
+    add(
+      `Job ${APPROVAL_JOB} must run ${TAG_GATE_SCRIPT} to admit a tag only when it matches the package version`,
+    );
+  }
+
+  // Credential boundary: no publication credential is reachable before approval. In
+  // this ticket the promote job introduces no credential of its own (publication of
+  // bytes is #159), and neither pre-approval promotion job references any secret; the
+  // only secret in the workflow stays the read-only npm identity checkValidationWorkflow
+  // confines to the dispatch-gated build step.
+  for (const [name, job] of [
+    [APPROVAL_JOB, approval] as const,
+    [PROMOTE_JOB, promote] as const,
+  ]) {
+    const secrets = secretsIn(job);
+    if (secrets.length > 0) {
+      add(
+        `Job ${name} references a secret (${secrets.join(", ")}); no publication credential exists before the protected boundary in #158 (publication is #159)`,
+      );
     }
   }
 

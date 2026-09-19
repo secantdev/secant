@@ -191,6 +191,56 @@ jobs:
         shell: pwsh
         run: ./scripts/powershell-installer-consumer.ps1 -CandidateDirectory dist/release -Scenario supported
 
+  # The `posix-installer-consumer` scenario (#153) consumes the assembled local
+  # candidate without network access. macOS arm64 and Linux x64 install, verify,
+  # and run their matching archive from an isolated HOME; the Windows leg proves
+  # target refusal happens before candidate access.
+  posix-installer-consumer:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: dist/release
+      - name: Install and run the local candidate
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          isolated_home="$(mktemp -d)"
+          application_home="$isolated_home/application-data"
+          output="$(HOME="$isolated_home" SECANT_HOME="$application_home" sh ./install.sh --candidate-dir dist/release --no-modify-path)"
+          printf '%s\n' "$output"
+          test -x "$isolated_home/.secant/bin/secant"
+          test ! -e "$application_home/bin/secant"
+          expected_version="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' dist/release/candidate-manifest.json | head -n 1)"
+          test "$("$isolated_home/.secant/bin/secant" --version)" = "$expected_version"
+          grep -F 'export PATH="$HOME/.secant/bin:$PATH"' <<<"$output"
+          if [ "${{ runner.os }}" = 'macOS' ]; then
+            grep -F 'Run Secant from Terminal; do not double-click a downloaded executable.' <<<"$output"
+          fi
+      - name: Refuse the unsupported Windows target before candidate access
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          hidden_candidate="$RUNNER_TEMP/not-present"
+          if output="$(sh ./install.sh --candidate-dir "$hidden_candidate" 2>&1)"; then
+            echo 'Expected the POSIX installer to refuse Windows.' >&2
+            exit 1
+          fi
+          grep -F 'Unsupported platform: windows-x64' <<<"$output"
+          if grep -F "$hidden_candidate" <<<"$output"; then
+            echo 'The installer accessed its candidate source before refusing Windows.' >&2
+            exit 1
+          fi
+
   # The real-terminal lifecycle suite (#56), a separate blocking three-OS job
   # outside `bun run check` (ADR 0027 / ADR 0030). It drives the cross-compiled
   # binary for this OS under a `Bun.Terminal` pseudo-terminal and proves one

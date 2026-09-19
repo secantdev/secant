@@ -3,6 +3,11 @@ name: Check
 on:
   push:
   pull_request:
+  # The candidate-validation entrypoint (#157): a manual dispatch runs this whole
+  # gate on one commit and adds the authenticated npm dry-run in the build job below
+  # (spec #137 stories 85/89, ADR 0027). Validation reuses the gate rather than
+  # duplicating it into a second workflow, and publishes nothing.
+  workflow_dispatch:
 
 jobs:
   # The whole canonical gate on all three OS (Windows x64, macOS arm64, Linux x64
@@ -77,6 +82,26 @@ jobs:
       # The fast declared-dependency check stays in `bun run check`. Enumerated once
       # in docs/agents/release-consumers.md.
       - run: bun run scripts/inventory.ts
+      # The candidate-validation dry-run (#157): ONLY on a manual dispatch, a
+      # separately configured READ-ONLY npm identity (no publication authority)
+      # authenticates (`npm whoami`) and publish-dry-runs every platform package
+      # first and the launcher last, against the one candidate just packed above —
+      # proving the npm release path end to end with no route to publication (spec
+      # #137 stories 85/89). It rehearses the packed bytes in place, so it folds into
+      # this job rather than paying for its own runner; it is registry-facing and
+      # OS-independent, so it needs no matrix. `--dry-run` skips only the upload, the
+      # identity cannot publish regardless, and the credential is scoped to this one
+      # dispatch-gated step. No publication credential, publish step, GitHub-release
+      # step, retry, or public-asset path exists anywhere in this workflow; the
+      # release-workflow policy check proves it. Enumerated in release-consumers.md.
+      - name: Dry-run the npm candidate under the read-only identity
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_READONLY_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
+          bun scripts/npm-dry-run.ts dist/packages
 
   # Each cross-compiled binary is smoked on its own OS with the compiled-binary
   # smoke, plus codesign --verify on macOS. The scenarios it covers are

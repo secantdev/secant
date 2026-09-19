@@ -134,7 +134,7 @@ function Read-CandidateTarget {
   $HasVersion = $null -ne $Manifest.PSObject.Properties["version"] -and [bool]$Manifest.version
   $HasTargets = $null -ne $Manifest.PSObject.Properties["targets"] -and [bool]$Manifest.targets
   if (-not $HasVersion -or -not $HasTargets) {
-    throw "Malformed $ManifestName: version or targets is missing."
+    throw "Malformed ${ManifestName}: version or targets is missing."
   }
   try {
     $CandidateVersion = ConvertTo-SemanticVersion ([string]$Manifest.version)
@@ -148,7 +148,7 @@ function Read-CandidateTarget {
 
   $Matches = @($Manifest.targets | Where-Object { [string]$_.key -eq "windows-x64" })
   if ($Matches.Count -ne 1) {
-    throw "Malformed $ManifestName: expected exactly one windows-x64 target."
+    throw "Malformed ${ManifestName}: expected exactly one windows-x64 target."
   }
   $Target = $Matches[0]
   $Identity = @{

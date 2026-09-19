@@ -202,6 +202,23 @@ What was taken and changed:
              the two-press Esc interrupt are suppressed -- the disabled-prompt rule,
              which replaces the passive footer input rather than merely skipping it.
 
+Added 2026-09-19 for the thin npm launcher (#152). `bin/secant.mjs` is a
+standalone Node launcher; no OpenCode source crosses (it lives outside
+src/tui/vendor/ and is authored fresh). What was studied and changed:
+
+  bin/secant.mjs (studied against packages/opencode/bin/opencode):
+    Taken:   the signal-forwarding and exit-status shape — forward SIGINT/SIGTERM/
+             SIGHUP to the spawned child, and on the child's exit re-raise its death
+             signal on this process or exit with its code.
+    Changed: resolution is Secant's own script-free, resolve-in-place design —
+             OpenCode's postinstall binary-copy (the `.opencode` cache and the
+             error-shim `.exe`) is deliberately rejected (spec #137). The launcher
+             reads a pack-time-generated host-key map and resolves the matching
+             per-platform package via `createRequire` from its canonicalized path
+             (so pnpm layouts work), never downloading or copying a binary, and
+             fails before spawn with distinct unsupported-target and
+             missing-optional-package diagnostics.
+
 
 THEME ASSETS (25 vendored, unmodified palettes)
 -----------------------------------------------

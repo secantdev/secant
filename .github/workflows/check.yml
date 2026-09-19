@@ -59,6 +59,11 @@ jobs:
       # archive candidate manifest, never rebuilds an input, and fails closed on
       # any drift from that candidate; `bun pm pack` needs no Node toolchain.
       - run: bun run scripts/pack.ts
+      # Pack the thin, script-free npm launcher (@secantdev/secant, #152) beside the
+      # platform packages it declares as exact-version optional dependencies. It
+      # carries the Node launcher and legal material but no candidate executable, and
+      # pins the same assembled release version. It rides in the same artifact.
+      - run: bun run scripts/pack-launcher.ts
       - uses: actions/upload-artifact@v4
         with:
           name: platform-packages
@@ -162,6 +167,34 @@ jobs:
           name: platform-packages
           path: dist/packages
       - run: bun scripts/package-consumer.ts dist/packages ${{ matrix.target }}
+
+  # The `npm-launcher-consumer` scenario (#152): the thin, script-free npm launcher
+  # installed with lifecycle scripts disabled, resolving the matching per-platform
+  # package IN PLACE under npm-flat and pnpm-symlinked layouts, forwarding arguments,
+  # stdio, and the native exit status, failing before spawn on a missing optional
+  # package, and completing the Proof Bundle smoke (the M3 gate) end to end THROUGH
+  # the launched command on its own OS. npm is the channel under test, so this job
+  # drives it directly. It needs `bun install` for the recorded-replayer test helpers
+  # (like the `smoke` job), and Node/npm/git ship on the runners. The scenario is
+  # enumerated once in docs/agents/release-consumers.md (the one home) — not restated here.
+  npm-launcher-consumer:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: platform-packages
+          path: dist/packages
+      - run: bun scripts/launcher-consumer.ts dist/packages
 
   # The `powershell-installer-consumer` scenario (#154): macOS and Linux exercise
   # native unsupported-target detection before candidate access. Windows

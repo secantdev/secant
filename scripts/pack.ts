@@ -39,11 +39,12 @@ export const PACKAGE_MANIFEST_FILE = "package-manifest.json";
 // npm gates install on `os`/`cpu`, but its `os` tokens are not the support-matrix
 // names the target manifest owns (the `cpu` tokens x64/arm64 already match). Keyed
 // by that os union so a new target OS fails to compile until it is mapped here.
-const NPM_OS: Record<CompileTarget["os"], "win32" | "darwin" | "linux"> = {
-  windows: "win32",
-  macos: "darwin",
-  linux: "linux",
-};
+export const NPM_OS: Record<CompileTarget["os"], "win32" | "darwin" | "linux"> =
+  {
+    windows: "win32",
+    macos: "darwin",
+    linux: "linux",
+  };
 
 export interface PlatformPackage {
   readonly key: string;
@@ -223,7 +224,7 @@ export function assertPackagesAgree(
 /** Pack the staged package into an npm tarball with `bun pm pack` (Bun's own
  *  packer — no Node toolchain, ADR 0030), then move it beside the manifest and
  *  return its filename. */
-function packTarball(stageDir: string, outDir: string): string {
+export function packTarball(stageDir: string, outDir: string): string {
   const before = new Set(readdirSync(stageDir));
   const result = spawnSync("bun", ["pm", "pack"], {
     cwd: stageDir,

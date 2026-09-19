@@ -1,26 +1,18 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import test from "node:test";
-import { LICENSE_FILE, NOTICES_FILE, sha256 } from "../../scripts/assemble.js";
 import {
   nativePackageFor,
-  packageDirOfSource,
-  type ClosureComponent,
-} from "../../scripts/inventory.js";
-import {
+  verifyChannelLegalDigests,
   verifyClosureNotices,
-  verifyStagedLegal,
-  type SourceOfTruth,
-} from "../../scripts/release-legal-closure-consumer.js";
+  type ClosureComponent,
+  packageDirOfSource,
+} from "../../scripts/inventory.js";
 import { TARGETS } from "../../scripts/targets.js";
-import { makeTempDir } from "../helpers/tempDir.js";
 
-// Pure legal-closure logic only; spawns NO subprocess. The archive/tarball
-// extraction round-trip on real channel artifacts is proven end to end by the
-// three-OS `release-legal-closure` CI job (docs/agents/release-consumers.md),
-// deliberately kept out of `bun test` for the Bun 1.4.2 child-lifecycle reason
-// (#149), as the sibling consumers are.
+// Pure legal-closure logic only; spawns NO subprocess and runs no build. The real
+// closure derivation (a Bun.build) and the whole gate run as the final step of the
+// Linux `build` job (docs/agents/release-consumers.md), the one place that has
+// cross-compiled every target and installed every platform's native.
 
 const UNION: ClosureComponent[] = [
   { name: "commander", version: "14.0.2", license: "MIT" },
@@ -28,6 +20,7 @@ const UNION: ClosureComponent[] = [
   { name: "drizzle-orm", version: "1.0.0-rc.4", license: "Apache-2.0" },
   { name: "entities", version: "7.0.1", license: "BSD-2-Clause" },
   { name: "fast-uri", version: "3.1.8", license: "BSD-3-Clause" },
+  { name: "isexe", version: "4.0.0", license: "BlueOak-1.0.0" },
 ];
 
 /** A notices string that covers every component and licence family in UNION. */
@@ -37,11 +30,13 @@ const COVERING_NOTICES = [
   "`drizzle-orm` `1.0.0-rc.4`",
   "`entities` `7.0.1`",
   "`fast-uri` `3.1.8`",
+  "`isexe` `4.0.0`",
   "MIT License",
   "The ISC License",
   "Apache License",
   "BSD 2-Clause",
   "BSD 3-Clause",
+  "Blue Oak Model License",
 ].join("\n");
 
 test("verifyClosureNotices passes when every component and licence family is covered", () => {
@@ -69,9 +64,9 @@ test("verifyClosureNotices fails a stale shipped version", () => {
 });
 
 test("verifyClosureNotices fails when a shipped licence family's text is absent", () => {
-  const noBsd3 = COVERING_NOTICES.replace("BSD 3-Clause", "");
-  const problems = verifyClosureNotices(UNION, noBsd3);
-  assert.ok(problems.some((p) => /No BSD-3-Clause licence text/.test(p)));
+  const noBlueOak = COVERING_NOTICES.replace("Blue Oak Model License", "");
+  const problems = verifyClosureNotices(UNION, noBlueOak);
+  assert.ok(problems.some((p) => /No BlueOak-1\.0\.0 licence text/.test(p)));
 });
 
 test("verifyClosureNotices fails closed on an unrecognised licence identity", () => {
@@ -86,47 +81,27 @@ test("verifyClosureNotices fails closed on an unrecognised licence identity", ()
   );
 });
 
-/** Stage a channel's legal material as a consumer receives it. */
-function stageLegal(
-  license = "L",
-  notices = "N",
-): {
-  dir: string;
-  truth: SourceOfTruth;
-} {
-  const dir = makeTempDir("secant-legal-staged-");
-  writeFileSync(join(dir, LICENSE_FILE), license);
-  writeFileSync(join(dir, NOTICES_FILE), notices);
-  return {
-    dir,
-    truth: {
-      licenseSha256: sha256(join(dir, LICENSE_FILE)),
-      noticesSha256: sha256(join(dir, NOTICES_FILE)),
+const TRUTH = { licenseSha256: "aaa", noticesSha256: "bbb" };
+
+test("verifyChannelLegalDigests passes when every channel ships the source of truth", () => {
+  const channels = ["Release archives", "Platform packages", "Launcher"].map(
+    (label) => ({ label, ...TRUTH }),
+  );
+  assert.deepEqual(verifyChannelLegalDigests(channels, TRUTH), []);
+});
+
+test("verifyChannelLegalDigests fails a channel with drifted legal material", () => {
+  const channels = [
+    { label: "Release archives", ...TRUTH },
+    {
+      label: "Platform packages",
+      licenseSha256: "aaa",
+      noticesSha256: "wrong",
     },
-  };
-}
-
-test("verifyStagedLegal accepts channel material identical to the source of truth", () => {
-  const { dir, truth } = stageLegal();
-  assert.deepEqual(verifyStagedLegal("chan", dir, truth), []);
-});
-
-test("verifyStagedLegal fails on absent legal material", () => {
-  const { dir, truth } = stageLegal();
-  rmSync(join(dir, NOTICES_FILE));
-  const problems = verifyStagedLegal("chan", dir, truth);
-  assert.ok(
-    problems.some((p) => new RegExp(`missing ${NOTICES_FILE}`).test(p)),
-  );
-});
-
-test("verifyStagedLegal fails on tampered legal bytes", () => {
-  const { dir, truth } = stageLegal();
-  writeFileSync(join(dir, LICENSE_FILE), "tampered");
-  const problems = verifyStagedLegal("chan", dir, truth);
-  assert.ok(
-    problems.some((p) => new RegExp(`unexpected ${LICENSE_FILE}`).test(p)),
-  );
+  ];
+  const problems = verifyChannelLegalDigests(channels, TRUTH);
+  assert.equal(problems.length, 1);
+  assert.ok(/Platform packages.*THIRD-PARTY-NOTICES/.test(problems[0]));
 });
 
 test("packageDirOfSource resolves the deepest node_modules segment", () => {

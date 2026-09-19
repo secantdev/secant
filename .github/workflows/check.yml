@@ -377,27 +377,42 @@ jobs:
           path: dist/release
       - run: bun scripts/release-gate.ts dist/release
 
-  # The protected promotion boundary (#158, spec #137 stories 90/100): on a `v*` tag
-  # ONLY, this job targets the GitHub `release` environment, so it pauses until Rohan —
-  # configured out of band as the sole required reviewer (docs/agents/release-consumers.md)
-  # — approves the summary the release-approval job wrote. It depends on that job (and so,
-  # transitively, on every candidate check) and holds no credential and no publish step:
-  # publication of the bytes and its publication credential, scoped to this environment,
-  # are #159. This ticket ships only the human gate on the exact validated tag candidate.
+  # The `release-promotion-state-machine` scenario (#159, spec #137 stories 86-90):
+  # on a `v*` tag ONLY, this job targets the GitHub `release` environment, so it
+  # pauses until Rohan — configured out of band as the sole required reviewer
+  # (docs/agents/release-workflow.md) — approves the release-approval summary. It
+  # downloads the already-built archive and npm-package artifacts, re-verifies every
+  # manifest and digest, and never rebuilds or repacks. The state machine accepts an
+  # existing npm version only when its registry tarball bytes match, publishes every
+  # platform package before the launcher, stages approved GitHub assets on a draft,
+  # and exposes that release only after npm succeeds. The publication identity is an
+  # environment-scoped secret unavailable to every earlier job.
   promote:
     needs: release-approval
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      contents: write
     steps:
-      # Pass the tag and actor through env, never interpolated into the shell: a tag
-      # name may legally contain shell metacharacters, and tag-push is the same trust
-      # level that reaches this job, so `${{ github.ref_name }}` spliced into `run:`
-      # would be code execution inside the one job #159 gives a publication credential.
-      - name: Record the approved candidate
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: dist/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: platform-packages
+          path: dist/packages
+      - name: Publish the approved candidate npm-first and GitHub-last
         env:
-          TAG: ${{ github.ref_name }}
-          ACTOR: ${{ github.actor }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/secant-promotion.npmrc
         run: |
-          echo "Tag $TAG approved for promotion by $ACTOR." >> "$GITHUB_STEP_SUMMARY"
-          echo "Publication of the candidate bytes is #159; this job is the protected human gate only." >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$NPM_CONFIG_USERCONFIG"
+          bun scripts/release-promote.ts dist/release dist/packages

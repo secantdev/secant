@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { CANDIDATE_CHECK_JOBS } from "../../scripts/release-gate.js";
 import {
   CI_WORKFLOW,
+  checkReleasePromotion,
   checkReleaseProtection,
   checkValidationWorkflow,
 } from "./check-release-workflow.js";
@@ -28,6 +29,11 @@ test("the real CI workflow satisfies the candidate-validation policy", () => {
 test("the real CI workflow satisfies the release-protection policy", () => {
   const text = readFileSync(join(repoRoot, CI_WORKFLOW), "utf8");
   assert.deepEqual(checkReleaseProtection(parseYaml(text)), []);
+});
+
+test("the real CI workflow satisfies the release-promotion state-machine policy", () => {
+  const text = readFileSync(join(repoRoot, CI_WORKFLOW), "utf8");
+  assert.deepEqual(checkReleasePromotion(parseYaml(text)), []);
 });
 
 test("the approval summary's blocking-jobs list matches release-approval's needs", () => {
@@ -92,7 +98,25 @@ function valid(): Record<string, unknown> {
         if: "startsWith(github.ref, 'refs/tags/v')",
         "runs-on": "ubuntu-latest",
         environment: "release",
-        steps: [{ run: 'echo approved >> "$GITHUB_STEP_SUMMARY"' }],
+        permissions: { contents: "write" },
+        steps: [
+          { uses: "actions/checkout@v4" },
+          {
+            uses: "actions/download-artifact@v4",
+            with: { name: "release-archives", path: "dist/release" },
+          },
+          {
+            uses: "actions/download-artifact@v4",
+            with: { name: "platform-packages", path: "dist/packages" },
+          },
+          {
+            env: {
+              NODE_AUTH_TOKEN: "${{ secrets.NPM_PUBLISH_TOKEN }}",
+              GH_TOKEN: "${{ github.token }}",
+            },
+            run: "bun scripts/release-promote.ts dist/release dist/packages",
+          },
+        ],
       },
     },
   };
@@ -416,6 +440,157 @@ test("a publication credential on a pre-approval promotion job is rejected", () 
   assert.ok(
     checkReleaseProtection(workflow).some((issue) =>
       issue.message.includes("no publication credential"),
+    ),
+  );
+});
+
+// --- release-promotion-state-machine scenario (#159) -----------------------------
+
+test("the minimal valid workflow passes release promotion", () => {
+  assert.deepEqual(checkReleasePromotion(valid()), []);
+});
+
+test("release promotion fails closed on a non-mapping workflow", () => {
+  assert.ok(checkReleasePromotion("nope").length > 0);
+  assert.ok(checkReleasePromotion(null).length > 0);
+});
+
+test("release promotion requires the protected promote job and environment", () => {
+  const missing = valid();
+  const missingJobs = missing.jobs as Record<string, Record<string, unknown>>;
+  delete missingJobs.promote;
+  assert.ok(
+    checkReleasePromotion(missing).some((issue) =>
+      issue.message.includes("no promote job"),
+    ),
+  );
+
+  const wrongEnvironment = valid();
+  const wrongJobs = wrongEnvironment.jobs as Record<
+    string,
+    Record<string, unknown>
+  >;
+  wrongJobs.promote.environment = "staging";
+  assert.ok(
+    checkReleasePromotion(wrongEnvironment).some((issue) =>
+      issue.message.includes("environment: release"),
+    ),
+  );
+});
+
+test("promotion must run the one release state-machine script", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  const steps = jobs.promote.steps as Record<string, unknown>[];
+  steps[3]!.run = "echo approved";
+  assert.ok(
+    checkReleasePromotion(workflow).some((issue) =>
+      issue.message.includes("release-promote.ts"),
+    ),
+  );
+});
+
+test("promotion must download both approved candidate artifacts", () => {
+  for (const missing of ["release-archives", "platform-packages"]) {
+    const workflow = valid();
+    const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+    jobs.promote.steps = (
+      jobs.promote.steps as Record<string, unknown>[]
+    ).filter(
+      (step) =>
+        (step.with as Record<string, unknown> | undefined)?.name !== missing,
+    );
+    assert.ok(
+      checkReleasePromotion(workflow).some((issue) =>
+        issue.message.includes(missing),
+      ),
+    );
+  }
+});
+
+test("the publication credential must exist only on the protected promote step", () => {
+  const missingCredential = valid();
+  const missingJobs = missingCredential.jobs as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const promotionStep = (
+    missingJobs.promote.steps as Record<string, unknown>[]
+  )[3]!;
+  promotionStep.env = { GH_TOKEN: "${{ github.token }}" };
+  assert.ok(
+    checkReleasePromotion(missingCredential).some((issue) =>
+      issue.message.includes("NPM_PUBLISH_TOKEN"),
+    ),
+  );
+
+  const duplicateCredential = valid();
+  const duplicateJobs = duplicateCredential.jobs as Record<
+    string,
+    Record<string, unknown>
+  >;
+  (duplicateJobs.promote.steps as Record<string, unknown>[]).push({
+    env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_PUBLISH_TOKEN }}" },
+    run: "bun scripts/release-promote.ts duplicate",
+  });
+  assert.ok(
+    checkReleasePromotion(duplicateCredential).some((issue) =>
+      issue.message.includes("exactly one NPM_PUBLISH_TOKEN"),
+    ),
+  );
+
+  const earlyCredential = valid();
+  const earlyJobs = earlyCredential.jobs as Record<
+    string,
+    Record<string, unknown>
+  >;
+  (earlyJobs.smoke.steps as Record<string, unknown>[]).push({
+    env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_PUBLISH_TOKEN }}" },
+    run: "echo leaked",
+  });
+  assert.ok(
+    checkReleasePromotion(earlyCredential).some((issue) =>
+      issue.message.includes("only on the protected promote job"),
+    ),
+  );
+
+  const extraCredential = valid();
+  const extraJobs = extraCredential.jobs as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const extraStep = (extraJobs.promote.steps as Record<string, unknown>[])[3]!;
+  extraStep.env = {
+    ...(extraStep.env as Record<string, unknown>),
+    EXTRA_TOKEN: "${{ secrets.EXTRA_TOKEN }}",
+  };
+  assert.ok(
+    checkReleasePromotion(extraCredential).some((issue) =>
+      issue.message.includes("unexpected secret EXTRA_TOKEN"),
+    ),
+  );
+});
+
+test("the promotion state machine cannot run outside protected promote", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  (jobs.smoke.steps as Record<string, unknown>[]).push({
+    run: "bun scripts/release-promote.ts dist/release dist/packages",
+  });
+  assert.ok(
+    checkReleasePromotion(workflow).some((issue) =>
+      issue.message.includes("only in the protected promote job"),
+    ),
+  );
+});
+
+test("promotion needs GitHub contents write permission for release assets", () => {
+  const workflow = valid();
+  const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
+  jobs.promote.permissions = { contents: "read" };
+  assert.ok(
+    checkReleasePromotion(workflow).some((issue) =>
+      issue.message.includes("contents: write"),
     ),
   );
 });

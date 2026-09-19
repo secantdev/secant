@@ -17,7 +17,7 @@
 // workflow. The two are complementary: validation forbids an `environment` on every
 // job EXCEPT the one protected promotion job, and the protection scenario requires it
 // there. Publication of the bytes themselves — a real publish step and its
-// publication credential — is #159, still out of scope in both.
+// publication credential — is owned by `checkReleasePromotion` (#159).
 
 export interface WorkflowIssue {
   file: string;
@@ -48,10 +48,12 @@ const ASSEMBLY_SCRIPTS = [
 ];
 // The authenticated dry-run the validation path adds, and where it must live.
 const DRY_RUN_SCRIPT = "scripts/npm-dry-run.ts";
+const PROMOTION_SCRIPT = "scripts/release-promote.ts";
+const PUBLISH_SECRET = "NPM_PUBLISH_TOKEN";
 
-// The read-only npm identity is the ONLY secret the workflow may name, and only on
-// the dispatch-gated dry-run step in the build job (spec #137: no publication
-// credential, and the read-only credential is exposed only when validation runs).
+// The read-only npm identity is the ONLY pre-approval secret the workflow may name,
+// and only on the dispatch-gated dry-run step in the build job. The publication
+// credential is confined separately to protected promotion by checkReleasePromotion.
 // Its secret name must read as read-only so a publish-capable token cannot be
 // dropped in under the same reference.
 const READONLY_SECRET = /READ_?ONLY/i;
@@ -220,11 +222,12 @@ export function checkValidationWorkflow(workflow: unknown): WorkflowIssue[] {
     for (const step of stepsOf(job)) {
       const secrets = secretsIn(step);
       if (secrets.length === 0) continue;
-      if (name !== BUILD_JOB) {
+      if (name !== BUILD_JOB && name !== PROMOTE_JOB) {
         add(
           `Job ${name} references a secret; only the ${BUILD_JOB} dry-run step may hold the read-only npm identity`,
         );
       }
+      if (name === PROMOTE_JOB) continue;
       const guard = typeof step.if === "string" ? step.if : "";
       if (!DISPATCH_GATE.test(guard)) {
         add(
@@ -250,18 +253,22 @@ export function checkValidationWorkflow(workflow: unknown): WorkflowIssue[] {
         `Job ${name} declares an environment; only the protected ${PROMOTE_JOB} job may (#158), and publication of bytes is #159`,
       );
     }
-    if (/npm\s+publish/.test(runs) && !/--dry-run/.test(runs)) {
+    if (
+      name !== PROMOTE_JOB &&
+      /npm\s+publish/.test(runs) &&
+      !/--dry-run/.test(runs)
+    ) {
       add(
         `Job ${name} runs a real \`npm publish\`; validation publishes only with --dry-run`,
       );
     }
-    if (/gh\s+release\s+/.test(runs)) {
+    if (name !== PROMOTE_JOB && /gh\s+release\s+/.test(runs)) {
       add(
         `Job ${name} runs \`gh release\`; validation exposes no public release`,
       );
     }
     for (const action of usesActions(job)) {
-      if (RELEASE_ACTIONS.test(action)) {
+      if (name !== PROMOTE_JOB && RELEASE_ACTIONS.test(action)) {
         add(
           `Job ${name} uses release action ${action}; validation exposes no public release`,
         );
@@ -382,19 +389,122 @@ export function checkReleaseProtection(workflow: unknown): WorkflowIssue[] {
     );
   }
 
-  // Credential boundary: no publication credential is reachable before approval. In
-  // this ticket the promote job introduces no credential of its own (publication of
-  // bytes is #159), and neither pre-approval promotion job references any secret; the
-  // only secret in the workflow stays the read-only npm identity checkValidationWorkflow
-  // confines to the dispatch-gated build step.
-  for (const [name, job] of [
-    [APPROVAL_JOB, approval] as const,
-    [PROMOTE_JOB, promote] as const,
-  ]) {
-    const secrets = secretsIn(job);
-    if (secrets.length > 0) {
+  // Credential boundary: the approval job is before the protected environment and
+  // must remain credential-free. The protected promote job's publication credential
+  // is required and confined by checkReleasePromotion (#159).
+  const approvalSecrets = secretsIn(approval);
+  if (approvalSecrets.length > 0) {
+    add(
+      `Job ${APPROVAL_JOB} references a secret (${approvalSecrets.join(", ")}); no publication credential may exist before the protected boundary`,
+    );
+  }
+
+  return issues;
+}
+
+function downloadedArtifactNames(job: Record<string, unknown>): Set<string> {
+  const names = new Set<string>();
+  for (const step of stepsOf(job)) {
+    if (
+      typeof step.uses !== "string" ||
+      !step.uses.startsWith("actions/download-artifact") ||
+      !isRecord(step.with) ||
+      typeof step.with.name !== "string"
+    ) {
+      continue;
+    }
+    names.add(step.with.name);
+  }
+  return names;
+}
+
+/** The `release-promotion-state-machine` scenario (#159, spec #137 "Release
+ * artifact set and publication workflow"): the protected job alone receives the
+ * publication identity, downloads both immutable candidate artifacts, and invokes
+ * the one state machine that verifies and publishes npm-first/GitHub-last. The
+ * script's deterministic suite proves fresh, partial, identical-rerun, and conflict
+ * behavior on every canonical test OS; this check proves its CI placement. */
+export function checkReleasePromotion(workflow: unknown): WorkflowIssue[] {
+  const issues: WorkflowIssue[] = [];
+  const add = (message: string) => issues.push({ file: CI_WORKFLOW, message });
+
+  if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
+    add("CI workflow has no jobs to check for release promotion");
+    return issues;
+  }
+  const jobs = workflow.jobs;
+  const promote = jobs[PROMOTE_JOB];
+  if (!isRecord(promote)) {
+    add(`CI workflow has no ${PROMOTE_JOB} job for release promotion`);
+    return issues;
+  }
+
+  if (environmentName(promote) !== RELEASE_ENVIRONMENT) {
+    add(
+      `Job ${PROMOTE_JOB} must target the protected \`environment: ${RELEASE_ENVIRONMENT}\` before publication`,
+    );
+  }
+  const runs = runScripts(promote);
+  if (!runs.includes(PROMOTION_SCRIPT)) {
+    add(
+      `Job ${PROMOTE_JOB} must run ${PROMOTION_SCRIPT} as the one publication state machine`,
+    );
+  }
+  const artifacts = downloadedArtifactNames(promote);
+  for (const name of ["release-archives", "platform-packages"]) {
+    if (!artifacts.has(name)) {
       add(
-        `Job ${name} references a secret (${secrets.join(", ")}); no publication credential exists before the protected boundary in #158 (publication is #159)`,
+        `Job ${PROMOTE_JOB} must download the approved ${name} artifact without rebuilding it`,
+      );
+    }
+  }
+  const permissions = isRecord(promote.permissions)
+    ? promote.permissions
+    : undefined;
+  if (permissions?.contents !== "write") {
+    add(
+      `Job ${PROMOTE_JOB} needs \`permissions: contents: write\` to expose approved GitHub release assets`,
+    );
+  }
+
+  let promotionCredentialCount = 0;
+  for (const [name, jobValue] of Object.entries(jobs)) {
+    if (!isRecord(jobValue)) continue;
+    for (const step of stepsOf(jobValue)) {
+      const secrets = secretsIn(step);
+      for (const secret of secrets) {
+        if (name === PROMOTE_JOB && secret !== PUBLISH_SECRET) {
+          add(
+            `Job ${PROMOTE_JOB} references unexpected secret ${secret}; only ${PUBLISH_SECRET} belongs on the protected state-machine step`,
+          );
+          continue;
+        }
+        if (secret !== PUBLISH_SECRET) continue;
+        if (
+          name === PROMOTE_JOB &&
+          typeof step.run === "string" &&
+          step.run.includes(PROMOTION_SCRIPT)
+        ) {
+          promotionCredentialCount += 1;
+        } else {
+          add(
+            `Publication credential ${PUBLISH_SECRET} may appear only on the protected promote job's state-machine step`,
+          );
+        }
+      }
+    }
+  }
+  if (promotionCredentialCount !== 1) {
+    add(
+      `The protected promote state-machine step must reference exactly one ${PUBLISH_SECRET} environment secret`,
+    );
+  }
+
+  for (const [name, jobValue] of Object.entries(jobs)) {
+    if (name === PROMOTE_JOB || !isRecord(jobValue)) continue;
+    if (runScripts(jobValue).includes(PROMOTION_SCRIPT)) {
+      add(
+        `${PROMOTION_SCRIPT} may run only in the protected promote job, never a developer-facing validation job`,
       );
     }
   }

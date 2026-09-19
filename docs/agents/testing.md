@@ -39,8 +39,11 @@ archives (`scripts/assemble.ts`, #150) as a consumer receives them. Assembly run
 through the one target manifest (`scripts/targets.ts`), emitting the three archives, a candidate manifest, and `SHA256SUMS`; it never rebuilds an input
 and fails closed on any identity/version/digest disagreement. On the Windows x64, macOS arm64, and Linux x64 matrix, `scripts/release-consumer.ts`
 extracts the matching archive and proves layout, executable mode, inner-binary digest, bundled `LICENSE`/`THIRD-PARTY-NOTICES.md`, native execution and
-version, and — on macOS — the strict ad-hoc signature. The deterministic assembly and structural verification logic is unit-tested in
-`tests/release/assemble.test.ts` (POSIX only — Windows runners ship no `zip`); the native run and signature are proven only by this CI job.
+version, and — on macOS — the strict ad-hoc signature. `tests/release/assemble.test.ts` unit-tests the pure logic — manifest facts and digests
+(`computeCandidate`), the immutability/identity/version/digest checks (`assertAgrees`), and the consumer's pre-extraction refusals — and spawns no
+subprocess: creating or extracting real archives there would add a concurrent first-spawn worker that tips over the Bun 1.4.2 child-lifecycle defect on
+the constrained Linux runner (#149). The archive create → extract → run round-trip on real binaries is therefore proven only by this CI job, the way
+the compiled-binary smoke lives outside `bun test`.
 
 Test observable behavior through the same Interface callers use. Internal refactoring should not require test rewrites. When shallow Modules are
 replaced by a deeper Module, replace their implementation-coupled tests rather than retaining both suites.

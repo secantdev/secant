@@ -76,7 +76,10 @@ function createArchive(
   }
 }
 
-function assertAgrees(prior: CandidateManifest, next: CandidateManifest): void {
+export function assertAgrees(
+  prior: CandidateManifest,
+  next: CandidateManifest,
+): void {
   if (prior.version !== next.version) {
     throw new Error(
       `Candidate version disagreement: the existing manifest is ${prior.version}, the inputs are ${next.version}.`,
@@ -126,14 +129,17 @@ function assertAgrees(prior: CandidateManifest, next: CandidateManifest): void {
   }
 }
 
-export function assembleRelease(options: {
+/** Compute the candidate manifest facts from the target manifest and the
+ *  already-built binaries under dist/ — version, legal-material digests, and per
+ *  target the owned identity facts plus the input binary's SHA-256. Pure I/O
+ *  (hashing) with no subprocess: only `assembleRelease`'s archive creation
+ *  spawns tools, which is why this half is what the deterministic suite tests. */
+export function computeCandidate(options: {
   projectRoot: string;
   distDir?: string;
-  outDir?: string;
 }): CandidateManifest {
   const { projectRoot } = options;
   const distDir = options.distDir ?? join(projectRoot, "dist");
-  const outDir = options.outDir ?? join(distDir, "release");
 
   const version = JSON.parse(
     readFileSync(join(projectRoot, "package.json"), "utf8"),
@@ -172,12 +178,26 @@ export function assembleRelease(options: {
       archiveSha256: "",
     };
   });
-  const next: CandidateManifest = {
+  return {
     version,
     licenseSha256: sha256(licensePath),
     noticesSha256: sha256(noticesPath),
     targets,
   };
+}
+
+export function assembleRelease(options: {
+  projectRoot: string;
+  distDir?: string;
+  outDir?: string;
+}): CandidateManifest {
+  const { projectRoot } = options;
+  const distDir = options.distDir ?? join(projectRoot, "dist");
+  const outDir = options.outDir ?? join(distDir, "release");
+  const licensePath = join(projectRoot, LICENSE_FILE);
+  const noticesPath = join(projectRoot, NOTICES_FILE);
+
+  const next = computeCandidate({ projectRoot, distDir });
 
   // Immutability: a prior candidate manifest must agree on version, legal
   // material, and every input-binary digest. A disagreement means the inputs
@@ -202,7 +222,7 @@ export function assembleRelease(options: {
   }
 
   mkdirSync(outDir, { recursive: true });
-  for (const target of targets) {
+  for (const target of next.targets) {
     const source = join(distDir, TARGETS[target.key].outfile);
     const stageDir = join(outDir, `.stage-${target.key}`);
     rmSync(stageDir, { recursive: true, force: true });
@@ -225,7 +245,7 @@ export function assembleRelease(options: {
   writeFileSync(manifestPath, `${JSON.stringify(next, null, 2)}\n`);
   writeFileSync(
     join(outDir, CHECKSUMS_FILE),
-    `${targets.map((target) => `${target.archiveSha256}  ${target.archive}`).join("\n")}\n`,
+    `${next.targets.map((target) => `${target.archiveSha256}  ${target.archive}`).join("\n")}\n`,
   );
   return next;
 }

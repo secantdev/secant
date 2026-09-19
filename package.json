@@ -14,7 +14,7 @@
     "lint": "eslint .",
     "migrations:check": "bun scripts/check-migrations.ts",
     "migrations:generate": "bun drizzle-kit generate --config drizzle.catalog.config.ts && bun drizzle-kit generate --config drizzle.coordination.config.ts && bun drizzle-kit generate --config drizzle.run.config.ts",
-    "test": "bun test --parallel=3 --timeout 30000",
+    "test": "bun test --parallel=2 --timeout 30000",
     "test:package": "bun scripts/package-smoke.ts",
     "test:terminal": "bun tests/terminal/lifecycle.ts",
     "typecheck": "tsc --noEmit"

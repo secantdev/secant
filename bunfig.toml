@@ -7,7 +7,7 @@
 [test]
 preload = ["@opentui/solid/preload"]
 # The `test` package script supplies the runner settings that cannot live here:
-# three isolated file workers and a 30s per-test timeout. File isolation keeps
+# two isolated file workers and a 30s per-test timeout. File isolation keeps
 # module-level test helpers owned by one file, while the timeout covers Windows
 # process creation and Bun cold-start. This suite uses `node:test`, so the
 # `[test].timeout` key applies only to `bun:test` and never reached these tests

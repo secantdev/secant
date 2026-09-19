@@ -8,6 +8,7 @@ import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import {
   createClaudeCodeAdapter,
   createCodexAdapter,
+  discoverCodex,
 } from "../../src/harness/harness.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import {
@@ -200,6 +201,7 @@ function fixture(t: TestContext, scenario: Scenario): Fixture {
       path: codexReplayer.path,
       env: {},
     }),
+    discoverCodex: () => discoverCodex({ path: codexReplayer.path, env: {} }),
   });
   t.after(() => {
     wired.runGroup.close();

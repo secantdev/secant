@@ -12,12 +12,11 @@ export function makeTempDir(prefix: string): string {
   return directory;
 }
 
-// Under `bun test` every test file shares one process, so this cleanup can hit a
-// temp dir whose owning file has already closed its handles but whose files
-// Windows still briefly reports as locked (a just-closed SQLite database is the
-// usual culprit). Retry the removal until the lock clears; if it never does,
-// cleanup is best-effort — a leftover temp dir is reclaimed with the rest of the
-// OS temp directory and must not fail the gate.
+// The canonical test command isolates every file, so this registry and its
+// cleanup hook are file-owned. Keep that isolation: shared-global execution can
+// delete another file's live directory. Windows can still briefly report a
+// just-closed SQLite database as locked, so retry until the lock clears. Cleanup
+// remains best-effort; the OS eventually reclaims a leftover temp directory.
 async function removeTempDir(directory: string): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     try {

@@ -7,6 +7,9 @@ sleep, or other unstable external state. Tests requiring those resources are opt
 test runner (`bun test`), not `bun:test`; `bunfig.toml` records why the per-test timeout is a CLI `--timeout` flag rather than a `[test] timeout` key
 (that key applies only to `bun:test`, so it never reaches these tests).
 
+The canonical test script uses three isolated file workers. Isolation is load-bearing: module-level helpers and environment changes must not leak across
+files. Tests within each file remain sequential; do not replace file parallelism with `--concurrent`, which would race their shared fixtures.
+
 Package smoke tests copy the produced Bun compiled single-file executable out of `dist/` into an isolated temporary location and exercise it there. They
 are the CI acceptance seam for headless work and do not invoke a real Harness. This is the one home for the package-smoke enumeration — the support matrix
 and the `check.yml` `smoke` job point here rather than restating it. Beyond `--help`/`--version` and the no-TTY refusal, the smoke runs, on each of the

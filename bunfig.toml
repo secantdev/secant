@@ -6,10 +6,9 @@
 # loader.
 [test]
 preload = ["@opentui/solid/preload"]
-# The per-test timeout is raised to 30s via `--timeout` in the `test` package
-# script, not here: a command Step in a Run test spawns a real subprocess, and
-# Windows process creation plus Bun cold-start is ~10x POSIX, so a spawn-heavy
-# test can exceed Bun's 5s default on a slow CI Windows runner (a correct test
-# failing as a flake, not a hang). This whole suite uses `node:test`, and a
-# `[test] timeout` key here applies only to `bun:test`, so it never reached these
-# tests; the CLI flag does (#86, #89).
+# The `test` package script supplies the runner settings that cannot live here:
+# three isolated file workers and a 30s per-test timeout. File isolation keeps
+# module-level test helpers owned by one file, while the timeout covers Windows
+# process creation and Bun cold-start. This suite uses `node:test`, so the
+# `[test].timeout` key applies only to `bun:test` and never reached these tests
+# (#86, #89).

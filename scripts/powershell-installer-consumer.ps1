@@ -280,6 +280,7 @@ try {
   Expand-Archive -LiteralPath (Join-Path $LocalCandidate "secant-windows-x64.zip") -DestinationPath $LayoutDirectory
   Remove-Item -LiteralPath (Join-Path $LayoutDirectory "LICENSE")
   New-Item -ItemType Directory -Path (Join-Path $LayoutDirectory "LICENSE") | Out-Null
+  Set-Content -LiteralPath (Join-Path $LayoutDirectory "LICENSE/placeholder") -Value "not legal material"
   Remove-Item -LiteralPath (Join-Path $LocalCandidate "secant-windows-x64.zip")
   Compress-Archive -Path (Join-Path $LayoutDirectory "*") -DestinationPath (Join-Path $LocalCandidate "secant-windows-x64.zip")
   Update-LocalArchiveDigest

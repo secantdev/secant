@@ -1,12 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  copyFileSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -21,6 +14,7 @@ import {
 } from "../../scripts/release-promote.js";
 import { sha256 } from "../../scripts/assemble.js";
 import { launcherPlatforms } from "../../scripts/pack-launcher.js";
+import { makeTempDir } from "../helpers/tempDir.js";
 
 const packages: PackagePublication[] = [
   {
@@ -191,7 +185,7 @@ function approvedCandidateFixture(): {
   launcherManifest: string;
   checksums: string;
 } {
-  const root = mkdtempSync(join(tmpdir(), "secant-promotion-"));
+  const root = makeTempDir("secant-promotion-");
   const releaseDir = join(root, "release");
   const packagesDir = join(root, "packages");
   mkdirSync(releaseDir);
@@ -445,7 +439,7 @@ test("approved candidate loading fails closed on tag, checksum, and manifest ide
 });
 
 test("GitHub exposure stages only approved assets on a draft before making it visible", async () => {
-  const root = mkdtempSync(join(tmpdir(), "secant-github-release-"));
+  const root = makeTempDir("secant-github-release-");
   const firstPath = join(root, "first.zip");
   const secondPath = join(root, "SHA256SUMS");
   writeFileSync(firstPath, "first");
@@ -478,7 +472,7 @@ test("GitHub exposure stages only approved assets on a draft before making it vi
 });
 
 test("an identical visible GitHub release is an idempotent success", async () => {
-  const root = mkdtempSync(join(tmpdir(), "secant-github-rerun-"));
+  const root = makeTempDir("secant-github-rerun-");
   const assetPath = join(root, "candidate.zip");
   writeFileSync(assetPath, "approved bytes");
   const value: ApprovedCandidate = {
@@ -546,7 +540,7 @@ test("GitHub exposure fails closed on an unapproved existing asset", () => {
 });
 
 test("GitHub exposure resumes an exact partial draft before making it visible", async () => {
-  const root = mkdtempSync(join(tmpdir(), "secant-github-partial-"));
+  const root = makeTempDir("secant-github-partial-");
   const firstPath = join(root, "first.zip");
   const secondPath = join(root, "second.zip");
   writeFileSync(firstPath, "first approved");
@@ -590,7 +584,7 @@ test("GitHub exposure resumes an exact partial draft before making it visible", 
 });
 
 test("GitHub exposure rejects conflicting bytes and a visible partial release", () => {
-  const root = mkdtempSync(join(tmpdir(), "secant-github-conflict-"));
+  const root = makeTempDir("secant-github-conflict-");
   const assetPath = join(root, "candidate.zip");
   writeFileSync(assetPath, "approved");
   const value: ApprovedCandidate = {
@@ -660,7 +654,7 @@ test("a failed GitHub asset upload leaves the release in draft", () => {
 });
 
 test("registry inspection accepts an existing version only when downloaded bytes match", async () => {
-  const root = mkdtempSync(join(tmpdir(), "secant-registry-rerun-"));
+  const root = makeTempDir("secant-registry-rerun-");
   const tarball = join(root, "candidate.tgz");
   writeFileSync(tarball, "approved package bytes");
   const pkg: PackagePublication = {

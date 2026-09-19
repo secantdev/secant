@@ -1,8 +1,9 @@
 // The canonical test launcher. It runs Bun's test runner with two isolated file
-// workers on Linux and Windows, but ONE on macOS (`--parallel=1`), because of a
+// workers on Windows, but ONE on macOS and Linux (`--parallel=1`), because of a
 // Bun 1.4.2 defect — not a preference.
 //
-// The defect (#149): on the CPU-constrained macOS arm64 CI runner (3 vCPUs), when
+// The defect (#149): on a CPU-constrained CI runner — first the macOS arm64 runner
+// (3 vCPUs), then the ubuntu-latest runner (#150) — when
 // two isolated workers start and each spawns a child process at the same time, Bun
 // occasionally fails to wire up a child's lifecycle entirely. The child runs and
 // exits — Bun even populates `child.exitCode` — but the `exit` event, the `close`
@@ -21,14 +22,14 @@
 // removes the concurrent first-spawn window, so the race does not fire on the
 // runner. This is a mitigation of a runtime bug, not a cure: enough external CPU
 // pressure can still starve even a single worker's first spawn. Revisit — and
-// restore `--parallel=2` on macOS — when Bun fixes child-process lifecycle
-// delivery under load. Do NOT "fix" this with a retry, a sleep, or a larger
+// restore `--parallel=2` on macOS and Linux — when Bun fixes child-process
+// lifecycle delivery under load. Do NOT "fix" this with a retry, a sleep, or a larger
 // timeout (docs/agents/testing.md): those hide the defect instead of avoiding it.
 //
 // Extra arguments pass through, so `bun run test -- tests/foo.test.ts` still works.
 import { spawnSync } from "node:child_process";
 
-const parallel = process.platform === "darwin" ? "1" : "2";
+const parallel = process.platform === "win32" ? "2" : "1";
 const result = spawnSync(
   process.execPath,
   [

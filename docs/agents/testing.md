@@ -7,8 +7,12 @@ sleep, or other unstable external state. Tests requiring those resources are opt
 test runner (`bun test`), not `bun:test`; `bunfig.toml` records why the per-test timeout is a CLI `--timeout` flag rather than a `[test] timeout` key
 (that key applies only to `bun:test`, so it never reaches these tests).
 
-The canonical test script uses two isolated file workers. Isolation is load-bearing: module-level helpers and environment changes must not leak across
-files. Tests within each file remain sequential; do not replace file parallelism with `--concurrent`, which would race their shared fixtures.
+The canonical test script (`scripts/test.ts`) runs isolated file workers — two on Linux and Windows, but one on macOS (`--parallel=1`). Isolation is
+load-bearing: module-level helpers and environment changes must not leak across files, and every OS keeps it (one worker per file, just not concurrent on
+macOS). Tests within each file remain sequential; do not replace file parallelism with `--concurrent`, which would race their shared fixtures. The macOS
+serialization works around a Bun 1.4.2 defect, not a preference: on the CPU-constrained macOS arm64 CI runner, two workers each spawning a child at
+startup occasionally make Bun drop a child's `exit`/`close`/stdio events entirely (the child exits, but the spawn never settles and the test times out at
+30s). The launcher documents it in full; restore `--parallel=2` on macOS when Bun fixes child-process lifecycle delivery under load ([#149](https://github.com/secantdev/secant/issues/149)).
 
 Package smoke tests copy the produced Bun compiled single-file executable out of `dist/` into an isolated temporary location and exercise it there. They
 are the CI acceptance seam for headless work and do not invoke a real Harness. This is the one home for the package-smoke enumeration — the support matrix

@@ -54,6 +54,16 @@ jobs:
           name: release-archives
           path: dist/release
           if-no-files-found: error
+      # Pack the three per-platform npm packages from the same candidate bytes the
+      # archives carry, through the one target manifest (#151). It reads the
+      # archive candidate manifest, never rebuilds an input, and fails closed on
+      # any drift from that candidate; `bun pm pack` needs no Node toolchain.
+      - run: bun run scripts/pack.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-packages
+          path: dist/packages
+          if-no-files-found: error
 
   # Each cross-compiled binary is smoked on its own OS with the compiled-binary
   # smoke, plus codesign --verify on macOS. The scenarios it covers are
@@ -120,6 +130,38 @@ jobs:
           name: release-archives
           path: dist/release
       - run: bun scripts/release-consumer.ts "dist/release/${{ matrix.archive }}"
+
+  # The `platform-package-consumer` scenario (#151): each per-platform npm package
+  # is installed with lifecycle scripts disabled and verified on its own OS
+  # exactly as an npm consumer receives it — os/cpu constraint, exact version,
+  # contents (executable and legal material only), the absence of any lifecycle
+  # script, inner-binary digest against the archive candidate, executable mode,
+  # native execution and version, and (macOS) the strict ad-hoc signature. npm is
+  # the channel under test (ADR 0030), so this job drives it directly; the runners
+  # ship npm, so no Node setup or `bun install` is needed.
+  platform-package-consumer:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+          - os: macos-latest
+            target: darwin-arm64
+          - os: ubuntu-latest
+            target: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: platform-packages
+          path: dist/packages
+      - run: bun scripts/package-consumer.ts dist/packages ${{ matrix.target }}
 
   # The real-terminal lifecycle suite (#56), a separate blocking three-OS job
   # outside `bun run check` (ADR 0027 / ADR 0030). It drives the cross-compiled

@@ -30,3 +30,19 @@ only the M1 pass — no new pass is claimed here until a fresh report is recorde
 | Windows Terminal 1.24 | Windows 11 (10.0.26200), Bun 1.4.2 | M1 human real-terminal check, pass — quit binding and Ctrl+C both delivered, shell exited, terminal stayed responsive ([#48 report](https://github.com/secantdev/secant/issues/48#issuecomment-5645636636)) |
 
 Legacy conhost is deliberately **not** a claimed row: ADR 0030 removed it, and the M1 check observed conhost only (it "does not decide outcome").
+
+## Harnesses
+
+Harness support is claimed only from a digest-bound report produced against an
+installed, authenticated real Harness. The deterministic Claude Code and Codex
+recordings prove Adapter behavior against recorded bytes; they do **not** prove
+compatibility with a currently installed Harness and do not support a
+real-Harness or three-OS parity claim.
+
+No Harness row is currently claimed. Add one only after a passing
+`check:claude-code` or `check:codex` report names the exact installed Harness
+version and the candidate binary SHA-256.
+
+| Harness | OS/architecture | Installed version | Evidence                                         |
+| ------- | --------------- | ----------------- | ------------------------------------------------ |
+| _None_  | —               | —                 | No digest-bound real-Harness report recorded yet |

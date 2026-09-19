@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
-  createReadStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -14,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { formatWindowsTerminalReport } from "./windows-terminal-report.js";
+import { sha256File } from "./release-evidence.js";
 
 const HELP = `Windows Terminal human real-terminal check
 
@@ -22,7 +21,7 @@ Usage:
 
 Run this from a Windows Terminal tab after \`bun run check\`. The script checks
 the packed binary, guides both supported exit paths and the observed-only
-legacy-conhost run, then prints the ADR 0027 report for milestone #48.`;
+legacy-conhost run, then prints the digest-bound release evidence report.`;
 
 interface PackageManifest {
   readonly name: string;
@@ -71,12 +70,6 @@ function checkSpawn(result: SpawnSyncReturns<unknown>, action: string): void {
   if (result.error) fail(`Could not ${action}.`, result.error);
   if (result.signal)
     fail(`${action} was terminated by signal ${result.signal}.`);
-}
-
-async function sha256(path: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
-  return hash.digest("hex");
 }
 
 async function askYesNo(
@@ -201,7 +194,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const digest = await sha256(binary);
+  const digest = await sha256File(binary);
   const checkRoot = mkdtempSync(join(tmpdir(), "secant-human-terminal-"));
   const home = join(checkRoot, "home");
   const workspace = join(checkRoot, "workspace");
@@ -246,18 +239,30 @@ Observed-only legacy conhost row (this does not decide the outcome):
     );
 
     const report = formatWindowsTerminalReport({
-      osVersion: `${osVersion()} (${release()})`,
-      terminalVersion: `Windows Terminal ${terminalVersion}`,
-      runtimeVersion: `Bun ${bunPin}`,
-      packageVersion: `${manifest.name}@${manifest.version}`,
-      artefactDigest: digest,
-      timestamp: new Date().toISOString(),
+      report: {
+        checkName: "Windows Terminal human real-terminal check",
+        operatingSystem: {
+          name: "Windows",
+          version: `${osVersion()} (${release()})`,
+        },
+        subject: {
+          kind: "terminal",
+          name: "Windows Terminal",
+          version: terminalVersion,
+        },
+        bunVersion: bunPin,
+        secantVersion: manifest.version,
+        binarySha256: digest,
+        outcome: quitBindingPassed && ctrlCPassed ? "pass" : "fail",
+        timestamp: new Date().toISOString(),
+      },
+      evidence: { kind: "fresh" },
       quitBindingPassed,
       ctrlCPassed,
       conhostNoticeAppeared,
       conhostWindowSurvived,
     });
-    console.log("\nPaste the report below into milestone issue #48:\n");
+    console.log("\nPaste the report below into the release checklist:\n");
     console.log(report);
   } finally {
     prompt.close();

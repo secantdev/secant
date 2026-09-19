@@ -7,6 +7,8 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check": "bun run migrations:check && bun run typecheck && bun run format:check && bun run lint && bun run test && bun run build && bun run test:package",
+    "check:claude-code": "bun scripts/release-checks/installed-harness.ts claude-code",
+    "check:codex": "bun scripts/release-checks/installed-harness.ts codex",
     "check:windows-terminal": "bun scripts/release-checks/windows-terminal.ts",
     "dev": "bun src/cli/main.ts",
     "format": "prettier --write .",

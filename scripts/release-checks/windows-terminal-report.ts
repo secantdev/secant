@@ -1,10 +1,19 @@
+import {
+  formatReleaseEvidenceReport,
+  type ReleaseEvidenceReport,
+} from "./release-evidence.js";
+
+export type WindowsTerminalEvidence =
+  | { readonly kind: "fresh" }
+  | {
+      readonly kind: "carry-forward";
+      readonly report: string;
+      readonly comparison: string;
+    };
+
 export interface WindowsTerminalReport {
-  readonly osVersion: string;
-  readonly terminalVersion: string;
-  readonly runtimeVersion: string;
-  readonly packageVersion: string;
-  readonly artefactDigest: string;
-  readonly timestamp: string;
+  readonly report: ReleaseEvidenceReport;
+  readonly evidence: WindowsTerminalEvidence;
   readonly quitBindingPassed: boolean;
   readonly ctrlCPassed: boolean;
   readonly conhostNoticeAppeared: boolean;
@@ -22,17 +31,32 @@ function formatYesNo(value: boolean): "yes" | "no" {
 export function formatWindowsTerminalReport(
   report: WindowsTerminalReport,
 ): string {
-  const outcome =
+  const observedOutcome =
     report.quitBindingPassed && report.ctrlCPassed ? "pass" : "fail";
-  return `## Windows Terminal human real-terminal check
-
-- Check name: Windows Terminal human real-terminal check
-- OS and version: ${report.osVersion}
-- Terminal: ${report.terminalVersion}
-- Runtime version: ${report.runtimeVersion}
-- Package version and digest: ${report.packageVersion}; SHA-256 ${report.artefactDigest}
-- Outcome: ${outcome}
-- Timestamp: ${report.timestamp}
+  if (report.report.subject.kind !== "terminal") {
+    throw new Error("Windows Terminal evidence requires a terminal subject.");
+  }
+  if (report.report.outcome !== observedOutcome) {
+    throw new Error(
+      "Windows Terminal observations must agree with the common report outcome.",
+    );
+  }
+  if (
+    report.evidence.kind === "carry-forward" &&
+    (report.evidence.report.trim().length === 0 ||
+      report.evidence.comparison.trim().length === 0)
+  ) {
+    throw new Error(
+      "Carry-forward evidence requires a named prior report and comparison.",
+    );
+  }
+  const evidence =
+    report.evidence.kind === "fresh"
+      ? "- Evidence basis: fresh real-terminal check"
+      : `- Evidence basis: carry-forward from ${report.evidence.report}
+- Named comparison: ${report.evidence.comparison}`;
+  return `${formatReleaseEvidenceReport(report.report)}
+${evidence}
 
 | Host | Exit path | Observation | Result |
 | --- | --- | --- | --- |

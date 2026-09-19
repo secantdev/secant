@@ -4,12 +4,21 @@ import { formatWindowsTerminalReport } from "../../scripts/release-checks/window
 
 test("formats the ADR 0027 report with a non-deciding conhost observation", () => {
   const report = formatWindowsTerminalReport({
-    osVersion: "Windows 11 10.0.26100",
-    terminalVersion: "Windows Terminal 1.23.1234.0",
-    runtimeVersion: "Bun 1.4.2",
-    packageVersion: "@secantdev/secant@0.1.0",
-    artefactDigest: "a".repeat(64),
-    timestamp: "2026-09-12T12:34:56.000Z",
+    report: {
+      checkName: "Windows Terminal human real-terminal check",
+      operatingSystem: { name: "Windows 11", version: "10.0.26100" },
+      subject: {
+        kind: "terminal",
+        name: "Windows Terminal",
+        version: "1.23.1234.0",
+      },
+      bunVersion: "1.4.2",
+      secantVersion: "0.1.0",
+      binarySha256: "a".repeat(64),
+      outcome: "pass",
+      timestamp: "2026-09-12T12:34:56.000Z",
+    },
+    evidence: { kind: "fresh" },
     quitBindingPassed: true,
     ctrlCPassed: true,
     conhostNoticeAppeared: true,
@@ -23,10 +32,12 @@ test("formats the ADR 0027 report with a non-deciding conhost observation", () =
 - Check name: Windows Terminal human real-terminal check
 - OS and version: Windows 11 10.0.26100
 - Terminal: Windows Terminal 1.23.1234.0
-- Runtime version: Bun 1.4.2
-- Package version and digest: @secantdev/secant@0.1.0; SHA-256 ${"a".repeat(64)}
+- Bun version: 1.4.2
+- Secant version: 0.1.0
+- Binary SHA-256: ${"a".repeat(64)}
 - Outcome: pass
-- Timestamp: 2026-09-12T12:34:56.000Z
+- UTC timestamp: 2026-09-12T12:34:56.000Z
+- Evidence basis: fresh real-terminal check
 
 | Host | Exit path | Observation | Result |
 | --- | --- | --- | --- |

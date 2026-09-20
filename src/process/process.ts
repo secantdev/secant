@@ -64,14 +64,11 @@ export interface ResolveExecutableOptions {
   readonly path?: string;
   /** Override the host platform that gates the `.cmd`/`.bat` shim rule. */
   readonly platform?: NodeJS.Platform;
-  /** Replace both resolution probes, so Windows fallback and shim behavior are
-   *  testable on every host without depending on PATHEXT or `where.exe`. The
-   *  PATH probe returns one resolved path; the fallback probe returns the raw
-   *  stdout that `where.exe` would emit. */
-  readonly resolve?: (
-    name: string,
-    probe: "path" | "windows-fallback",
-  ) => string | undefined;
+  /** Replace the PATH walk entirely, so the shim rule is testable without PATHEXT. */
+  readonly resolve?: (name: string) => string | undefined;
+  /** Replace the Windows fallback's raw `where.exe` stdout. When `resolve`
+   *  replaces the PATH walk and this is omitted, the fallback stays disabled. */
+  readonly resolveWindowsFallback?: (name: string) => string | undefined;
 }
 
 /** The single PATH walk in `src/` (D1): `which` resolves the name to an absolute
@@ -81,7 +78,7 @@ function walkPath(
   name: string,
   options: ResolveExecutableOptions,
 ): string | undefined {
-  if (options.resolve !== undefined) return options.resolve(name, "path");
+  if (options.resolve !== undefined) return options.resolve(name);
   const result = which.sync(name, {
     nothrow: true,
     ...(options.path !== undefined ? { path: options.path } : {}),
@@ -97,9 +94,11 @@ function resolveWindowsFallback(
   options: ResolveExecutableOptions,
 ): string | undefined {
   const output =
-    options.resolve !== undefined
-      ? options.resolve(name, "windows-fallback")
-      : runWhere(name, options.path);
+    options.resolveWindowsFallback !== undefined
+      ? options.resolveWindowsFallback(name)
+      : options.resolve === undefined
+        ? runWhere(name, options.path)
+        : undefined;
   if (output === undefined) return undefined;
   const firstMatch = output.split(/\r?\n/, 1)[0]?.trim();
   return firstMatch === undefined || firstMatch.length === 0

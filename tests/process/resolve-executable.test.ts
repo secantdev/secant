@@ -80,11 +80,13 @@ test("on Windows a missing PATH result falls back to the first where.exe match",
 
   const resolution = resolveExecutable("pwsh", {
     platform: "win32",
-    resolve: (name, probe) => {
-      probes.push(`${probe}:${name}`);
-      return probe === "windows-fallback"
-        ? `${aliasPath}\r\n${laterMatch}\r\n`
-        : undefined;
+    resolve: (name) => {
+      probes.push(`path:${name}`);
+      return undefined;
+    },
+    resolveWindowsFallback: (name) => {
+      probes.push(`windows-fallback:${name}`);
+      return `${aliasPath}\r\n${laterMatch}\r\n`;
     },
   });
 
@@ -105,11 +107,12 @@ test("a Windows fallback .cmd result still goes through the shim rule", () => {
 
   const resolution = resolveExecutable("worker", {
     platform: "win32",
-    resolve: (name, probe) => {
-      if (name === "worker" && probe === "windows-fallback") return shimPath;
-      if (name === "node" && probe === "path") return fakeNode;
+    resolve: (name) => {
+      if (name === "node") return fakeNode;
       return undefined;
     },
+    resolveWindowsFallback: (name) =>
+      name === "worker" ? shimPath : undefined,
   });
 
   assert.deepEqual(resolution, {
@@ -124,9 +127,13 @@ test("an empty Windows fallback remains not-found", () => {
 
   const resolution = resolveExecutable("missing", {
     platform: "win32",
-    resolve: (name, probe) => {
-      probes.push(`${probe}:${name}`);
-      return probe === "windows-fallback" ? " \r\n" : undefined;
+    resolve: (name) => {
+      probes.push(`path:${name}`);
+      return undefined;
+    },
+    resolveWindowsFallback: (name) => {
+      probes.push(`windows-fallback:${name}`);
+      return " \r\n";
     },
   });
 
@@ -139,9 +146,13 @@ test("POSIX does not consult the Windows fallback after a PATH miss", () => {
 
   const resolution = resolveExecutable("missing", {
     platform: "linux",
-    resolve: (name, probe) => {
-      probes.push(`${probe}:${name}`);
-      return probe === "windows-fallback" ? "/unexpected" : undefined;
+    resolve: (name) => {
+      probes.push(`path:${name}`);
+      return undefined;
+    },
+    resolveWindowsFallback: (name) => {
+      probes.push(`windows-fallback:${name}`);
+      return "/unexpected";
     },
   });
 

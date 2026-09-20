@@ -60,6 +60,7 @@ test("Codex discovery shares configured-then-PATH order and served capabilities"
   const discovery = discoverCodex({
     configuredExecutable: "configured-codex",
     env: { SECANT_CODEX: "ignored-env-codex" },
+    platform: "win32",
     resolve(name) {
       resolved.push(name);
       return name === "codex" ? "/bin/codex" : undefined;
@@ -81,6 +82,7 @@ test("Claude Code discovery shares configured-then-PATH order and served capabil
   const discovery = discoverClaudeCode({
     configuredExecutable: "configured-claude",
     env: { SECANT_CLAUDE_CODE: "ignored-env-claude" },
+    platform: "win32",
     resolve(name) {
       resolved.push(name);
       return name === "claude" ? "/bin/claude" : undefined;

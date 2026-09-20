@@ -29,7 +29,7 @@
 // Extra arguments pass through, so `bun run test -- tests/foo.test.ts` still works.
 import { spawnSync } from "node:child_process";
 
-const parallel = process.platform === "win32" ? "2" : "1";
+const parallel = process.platform === "win32" ? "3" : "1";
 const result = spawnSync(
   process.execPath,
   [

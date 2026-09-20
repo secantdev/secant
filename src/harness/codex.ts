@@ -36,8 +36,8 @@ import {
 import {
   CODEX_EXECUTABLE_ENV,
   discoverCodex,
-  discoveredCodexTarget,
-  type DiscoveredCodexTarget,
+  discoveredHarnessTarget,
+  type DiscoveredHarnessTarget,
 } from "./discovery.js";
 import {
   CodexDiagnosticCapture,
@@ -102,7 +102,7 @@ export interface CodexAdapterOverrides {
   readonly recordingObserver?: CodexRecordingObserver;
 }
 
-interface TDiscoveredTarget extends DiscoveredCodexTarget {
+interface TDiscoveredTarget extends DiscoveredHarnessTarget {
   readonly source: string;
 }
 
@@ -214,7 +214,7 @@ class CodexAdapter implements HarnessAdapter {
     }
     const discovery = discoverCodex(discoveryOptions);
     if (discovery.kind === "found") {
-      const target = discoveredCodexTarget(discovery);
+      const target = discoveredHarnessTarget(discovery);
       return {
         ok: true,
         target: {

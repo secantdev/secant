@@ -646,6 +646,40 @@ test("a malformed runtime frame loses the Turn without fabricating completion", 
   await prepared.close();
 });
 
+test("a truncated runtime frame loses the Turn as protocol corruption", async () => {
+  const installed = installSyntheticCodexReplayer();
+  installed.configureTurn({ truncatedFrame: true });
+  const prepared = await prepareCodex(installed.path);
+  const result = await prepared.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "lost");
+  if (result.kind !== "lost") throw new Error("unreachable");
+  assert.equal(result.detail.failure?.category, "protocol-corruption");
+  await prepared.close();
+});
+
+test("a CRLF-delimited Codex terminal frame completes through the Adapter", async () => {
+  const installed = installSyntheticCodexReplayer();
+  installed.configureTurn({ terminalLineEnding: "crlf" });
+  const capture = createCodexRecordingCapture();
+  const preparedResult = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+    recordingObserver: capture.observer,
+  }).prepare({ workspace: process.cwd() });
+  assert.equal(preparedResult.ok, true);
+  if (!preparedResult.ok) throw new Error("unreachable");
+  const result = await preparedResult.harness.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "completed");
+  await preparedResult.harness.close();
+
+  const terminal = capture.traffic.find(
+    (entry) =>
+      entry.direction === "stdout" && entry.line.includes('"turn/completed"'),
+  );
+  assert.ok(terminal !== undefined);
+  assert.equal(terminal.line.endsWith("\r\n"), true);
+});
+
 test("supported Codex item lifecycles use semantic Harness events", async () => {
   const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ fullActivity: true });

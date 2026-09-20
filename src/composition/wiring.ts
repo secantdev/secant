@@ -24,9 +24,8 @@ import {
 } from "../run/execution/execution.js";
 import { openRunGroup, type RunGroup } from "../run/store/store.js";
 import {
-  type ClaudeCodeDiscovery,
-  type CodexDiscovery,
   type HarnessAdapter,
+  type HarnessDiscovery,
   type PreparedHarness,
 } from "../harness/harness.js";
 import {
@@ -85,9 +84,9 @@ export interface WiringOverrides {
   readonly supportsInteractiveTurns?: boolean;
   /** Deterministic Harness discovery for tests. Production leaves this absent and
    *  Preflight uses the Harness-owned environment/PATH discovery. */
-  readonly discoverClaudeCode?: () => ClaudeCodeDiscovery;
+  readonly discoverClaudeCode?: () => HarnessDiscovery;
   /** Deterministic Codex discovery for tests. */
-  readonly discoverCodex?: () => CodexDiscovery;
+  readonly discoverCodex?: () => HarnessDiscovery;
 }
 
 export interface Wiring extends Application {

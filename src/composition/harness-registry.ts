@@ -13,8 +13,7 @@ import {
   createCodexAdapter,
   discoverClaudeCode,
   discoverCodex,
-  type ClaudeCodeDiscovery,
-  type CodexDiscovery,
+  type HarnessDiscovery,
   type HarnessAdapter,
   type HarnessFailure,
 } from "../harness/harness.js";
@@ -23,8 +22,8 @@ import type { SelectedHarnessId } from "../run/store/store.js";
 export interface HarnessRegistryOverrides {
   readonly claudeCodeAdapter?: HarnessAdapter;
   readonly codexAdapter?: HarnessAdapter;
-  readonly discoverClaudeCode?: () => ClaudeCodeDiscovery;
-  readonly discoverCodex?: () => CodexDiscovery;
+  readonly discoverClaudeCode?: () => HarnessDiscovery;
+  readonly discoverCodex?: () => HarnessDiscovery;
 }
 
 interface THarnessRegistryEntry {
@@ -127,10 +126,8 @@ export class HarnessRegistry {
   }
 }
 
-type TNativeDiscovery = ClaudeCodeDiscovery | CodexDiscovery;
-
 function normalizeDiscovery(
-  discovery: TNativeDiscovery,
+  discovery: HarnessDiscovery,
   executableEnvironmentVariable: string,
 ): THarnessDiscovery {
   if (discovery.kind === "found") return { kind: "found" };

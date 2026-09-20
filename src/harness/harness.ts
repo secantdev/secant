@@ -611,12 +611,9 @@ export {
   discoverClaudeCode,
 } from "./discovery.js";
 export type {
-  ClaudeCodeDiscovery,
-  ClaudeCodeDiscoveryAttempt,
-  ClaudeCodeDiscoveryOptions,
-  CodexDiscovery,
-  CodexDiscoveryAttempt,
-  CodexDiscoveryOptions,
+  HarnessDiscovery,
+  HarnessDiscoveryAttempt,
+  HarnessDiscoveryOptions,
 } from "./discovery.js";
 
 // The permission bridge the Claude Code Adapter launches against. Exported so the

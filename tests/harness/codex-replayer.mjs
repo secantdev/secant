@@ -309,6 +309,10 @@ for await (const line of lines) {
       process.stdout.write("{malformed\n");
       process.exit(0);
     }
+    if (scenario.turn?.truncatedFrame === true) {
+      process.stdout.write('{"method":');
+      process.exit(0);
+    }
     if (scenario.turn?.mismatchedTerminal === true) {
       process.stdout.write(
         `${JSON.stringify({
@@ -320,24 +324,24 @@ for await (const line of lines) {
         })}\n`,
       );
     }
-    process.stdout.write(
-      `${JSON.stringify({
-        method: "turn/completed",
-        params: {
-          threadId: "thread-1",
-          turn: {
-            id: turnId,
-            items: [],
-            status:
-              scenario.turn?.malformedTerminal === true ? "failed" : status,
-            ...(scenario.turn?.malformedTerminal === true
-              ? { error: { message: 42 } }
-              : status === "failed"
-                ? { error: { message: scenario.turn.message } }
-                : {}),
-          },
+    const terminalLine = JSON.stringify({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: turnId,
+          items: [],
+          status: scenario.turn?.malformedTerminal === true ? "failed" : status,
+          ...(scenario.turn?.malformedTerminal === true
+            ? { error: { message: 42 } }
+            : status === "failed"
+              ? { error: { message: scenario.turn.message } }
+              : {}),
         },
-      })}\n`,
+      },
+    });
+    process.stdout.write(
+      `${terminalLine}${scenario.turn?.terminalLineEnding === "crlf" ? "\r\n" : "\n"}`,
     );
     continue;
   }

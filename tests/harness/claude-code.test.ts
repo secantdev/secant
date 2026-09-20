@@ -578,6 +578,8 @@ interface ScriptedProcess {
 
 function scriptedProcess(script: {
   readonly frames: readonly unknown[];
+  readonly lineEnding?: "\n" | "\r\n";
+  readonly splitUtf8Scalars?: boolean;
   readonly close?: (token: string) => OwnedProcessClose;
   readonly interrupt?: (token: string) => ProcessInterruption;
   readonly closeStdin?: (token: string) => OwnedProcessClose;
@@ -601,7 +603,16 @@ function scriptedProcess(script: {
   });
   async function* stdout(): AsyncGenerator<Uint8Array> {
     for (const frame of script.frames) {
-      yield new TextEncoder().encode(`${JSON.stringify(frame)}\n`);
+      const bytes = new TextEncoder().encode(
+        `${JSON.stringify(frame)}${script.lineEnding ?? "\n"}`,
+      );
+      const scalarStart = bytes.indexOf(0xe2);
+      if (script.splitUtf8Scalars === true && scalarStart >= 0) {
+        yield bytes.subarray(0, scalarStart + 1);
+        yield bytes.subarray(scalarStart + 1);
+      } else {
+        yield bytes;
+      }
     }
     await stdoutEnded;
   }
@@ -722,6 +733,29 @@ test("a known frame with an unrecognised extra field, or with a required field o
   );
   assert.ok(activity.includes("Claude Code activity: assistant"));
   assert.ok(activity.includes("Claude Code activity: stream_event"));
+});
+
+test("CRLF-delimited Claude Code frames preserve a UTF-8 scalar split across chunks", async () => {
+  const scripted = scriptedProcess({
+    frames: [
+      scriptedInit,
+      {
+        type: "result",
+        subtype: "success",
+        result: "done → intact",
+        is_error: false,
+      },
+    ],
+    lineEnding: "\r\n",
+    splitUtf8Scalars: true,
+  });
+  const { harness, turn } = await scriptedTurn(scripted);
+  const result = await turn.result();
+  await harness.close();
+
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") throw new Error("unreachable");
+  assert.equal(result.detail.finalContent, "done → intact");
 });
 
 test("a close before a result carries its cause with the bearer redacted", async () => {

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { OwnedProcess } from "../../process/process.js";
 import type { TurnEvent } from "../harness.js";
+import { JsonlLineReader } from "../jsonl.js";
 
 const rpcIdSchema = z.union([z.string(), z.number()]);
 const rpcEnvelopeSchema = z.looseObject({
@@ -54,10 +55,8 @@ export class CodexExchangeTimeoutError extends Error {}
  * sequence across qualification and runtime. Runtime starts exactly once after
  * the bounded qualification exchange has finished. */
 export class CodexJsonlConnection {
-  private readonly iterator: AsyncIterator<Uint8Array>;
-  private readonly decoder = new TextDecoder();
+  private readonly reader: JsonlLineReader;
   private readonly pending = new Map<number, PendingRequest>();
-  private remainder = "";
   private nextId = 1;
   private runtimeStarted = false;
 
@@ -65,7 +64,7 @@ export class CodexJsonlConnection {
     private readonly process: OwnedProcess,
     private readonly observer: CodexProtocolObserver | undefined,
   ) {
-    this.iterator = process.stdout[Symbol.asyncIterator]();
+    this.reader = new JsonlLineReader(process.stdout);
   }
 
   async qualificationRequest(method: string, params: object): Promise<unknown> {
@@ -194,25 +193,18 @@ export class CodexJsonlConnection {
 
   private async nextLine(): Promise<string> {
     for (;;) {
-      const newline = this.remainder.indexOf("\n");
-      if (newline >= 0) {
-        const rawLine = this.remainder.slice(0, newline + 1);
-        const line = rawLine.slice(0, -1).replace(/\r$/, "");
-        this.remainder = this.remainder.slice(newline + 1);
-        if (line.trim().length > 0) {
-          this.observer?.stdout(new TextEncoder().encode(rawLine));
-          return line;
+      const next = await this.reader.next();
+      if (next.kind === "line") {
+        if (next.value.trim().length > 0) {
+          this.observer?.stdout(new TextEncoder().encode(next.raw));
+          return next.value;
         }
         continue;
       }
-      const chunk = await this.iterator.next();
-      if (chunk.done) {
-        if (this.remainder.trim().length > 0) {
-          throw new CodexProtocolError("Codex emitted a truncated JSON frame");
-        }
-        throw new Error("Codex app-server stdout closed");
+      if (next.kind === "truncated" && next.value.trim().length > 0) {
+        throw new CodexProtocolError("Codex emitted a truncated JSON frame");
       }
-      this.remainder += this.decoder.decode(chunk.value, { stream: true });
+      throw new Error("Codex app-server stdout closed");
     }
   }
 }

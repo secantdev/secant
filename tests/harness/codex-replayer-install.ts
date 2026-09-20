@@ -89,6 +89,8 @@ export interface InstalledCodexReplayer {
 
 export interface CodexTurnReplayOptions {
   readonly stopAfter?: "accepted" | "item-completed";
+  readonly terminalLineEnding?: "crlf";
+  readonly truncatedFrame?: boolean;
   readonly fullActivity?: boolean;
   readonly retryingError?: string;
   readonly mismatchedTerminal?: boolean;

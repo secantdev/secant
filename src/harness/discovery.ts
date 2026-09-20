@@ -24,82 +24,35 @@ export const CODEX_SERVED_CAPABILITIES: Readonly<Record<string, true>> =
 const CLAUDE_CODE_PATH_NAME = "claude";
 const CODEX_PATH_NAME = "codex";
 
-export interface ClaudeCodeDiscoveryAttempt {
+export interface HarnessDiscoveryAttempt {
   readonly source: "configured" | "path";
   readonly name: string;
   readonly description: string;
 }
 
-export interface DiscoveredClaudeCodeTarget {
+export interface DiscoveredHarnessTarget {
   readonly executable: string;
   readonly prefixArgs: readonly string[];
   readonly identityPath: string;
   readonly shim: boolean;
 }
 
-export type ClaudeCodeDiscovery =
+export type HarnessDiscovery =
   | {
       readonly kind: "found";
-      readonly attempt: ClaudeCodeDiscoveryAttempt;
+      readonly attempt: HarnessDiscoveryAttempt;
     }
   | {
       readonly kind: "unsupported-shim";
-      readonly attempt: ClaudeCodeDiscoveryAttempt;
+      readonly attempt: HarnessDiscoveryAttempt;
       readonly path: string;
     }
   | {
       readonly kind: "not-found";
-      readonly attempts: readonly ClaudeCodeDiscoveryAttempt[];
+      readonly attempts: readonly HarnessDiscoveryAttempt[];
     };
 
-export interface ClaudeCodeDiscoveryOptions {
-  readonly configuredExecutable?: string;
-  readonly env?: NodeJS.ProcessEnv;
-  readonly path?: string;
-  readonly platform?: NodeJS.Platform;
-  readonly resolve?: (name: string) => string | undefined;
-}
-
-export interface CodexDiscoveryAttempt {
-  readonly source: "configured" | "path";
-  readonly name: string;
-  readonly description: string;
-}
-
-export interface DiscoveredCodexTarget {
-  readonly executable: string;
-  readonly prefixArgs: readonly string[];
-  readonly identityPath: string;
-  readonly shim: boolean;
-}
-
-export type CodexDiscovery =
-  | { readonly kind: "found"; readonly attempt: CodexDiscoveryAttempt }
-  | {
-      readonly kind: "unsupported-shim";
-      readonly attempt: CodexDiscoveryAttempt;
-      readonly path: string;
-    }
-  | {
-      readonly kind: "not-found";
-      readonly attempts: readonly CodexDiscoveryAttempt[];
-    };
-
-export interface CodexDiscoveryOptions {
-  readonly configuredExecutable?: string;
-  readonly env?: NodeJS.ProcessEnv;
-  readonly path?: string;
-  readonly platform?: NodeJS.Platform;
-  readonly resolve?: (name: string) => string | undefined;
-}
-
-interface TDiscoveryAttempt {
-  readonly source: "configured" | "path";
-  readonly name: string;
-  readonly description: string;
-}
-
-interface TDiscoveryOptions {
+export interface HarnessDiscoveryOptions {
   readonly configuredExecutable?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly path?: string;
@@ -108,7 +61,7 @@ interface TDiscoveryOptions {
 }
 
 interface TDiscoverExecutable {
-  readonly options: TDiscoveryOptions;
+  readonly options: HarnessDiscoveryOptions;
   readonly executableEnvironmentVariable: string;
   readonly pathName: string;
 }
@@ -116,27 +69,22 @@ interface TDiscoverExecutable {
 type TExecutableDiscovery =
   | {
       readonly kind: "found";
-      readonly attempt: TDiscoveryAttempt;
-      readonly target: DiscoveredCodexTarget;
+      readonly attempt: HarnessDiscoveryAttempt;
+      readonly target: DiscoveredHarnessTarget;
     }
   | {
       readonly kind: "unsupported-shim";
-      readonly attempt: TDiscoveryAttempt;
+      readonly attempt: HarnessDiscoveryAttempt;
       readonly path: string;
     }
   | {
       readonly kind: "not-found";
-      readonly attempts: readonly TDiscoveryAttempt[];
+      readonly attempts: readonly HarnessDiscoveryAttempt[];
     };
 
 const discoveredTargets = new WeakMap<
-  Extract<ClaudeCodeDiscovery, { kind: "found" }>,
-  DiscoveredClaudeCodeTarget
->();
-
-const discoveredCodexTargets = new WeakMap<
-  Extract<CodexDiscovery, { kind: "found" }>,
-  DiscoveredCodexTarget
+  Extract<HarnessDiscovery, { kind: "found" }>,
+  DiscoveredHarnessTarget
 >();
 
 /** Discover Claude Code synchronously. The configured command is tried first,
@@ -144,15 +92,15 @@ const discoveredCodexTargets = new WeakMap<
  *  than silently skipped. Callers translate the result into their own failure
  *  vocabulary. */
 export function discoverClaudeCode(
-  options: ClaudeCodeDiscoveryOptions = {},
-): ClaudeCodeDiscovery {
+  options: HarnessDiscoveryOptions = {},
+): HarnessDiscovery {
   const resolved = discoverExecutable({
     options,
     executableEnvironmentVariable: CLAUDE_CODE_EXECUTABLE_ENV,
     pathName: CLAUDE_CODE_PATH_NAME,
   });
   if (resolved.kind !== "found") return resolved;
-  const discovery: Extract<ClaudeCodeDiscovery, { kind: "found" }> = {
+  const discovery: Extract<HarnessDiscovery, { kind: "found" }> = {
     kind: "found",
     attempt: resolved.attempt,
   };
@@ -163,12 +111,12 @@ export function discoverClaudeCode(
 /** The spawn target attached to a successful discovery. Private to the Harness
  *  Module: the public entry re-exports the discovery outcome, never this native
  *  executable detail. */
-export function discoveredClaudeCodeTarget(
-  discovery: Extract<ClaudeCodeDiscovery, { kind: "found" }>,
-): DiscoveredClaudeCodeTarget {
+export function discoveredHarnessTarget(
+  discovery: Extract<HarnessDiscovery, { kind: "found" }>,
+): DiscoveredHarnessTarget {
   const target = discoveredTargets.get(discovery);
   if (target === undefined) {
-    throw new Error("harness: found Claude Code discovery has no target.");
+    throw new Error("harness: found discovery has no target.");
   }
   return target;
 }
@@ -177,31 +125,20 @@ export function discoveredClaudeCodeTarget(
  *  name second. An unsupported configured shim is terminal, never a reason to
  *  substitute another Harness or silently continue to PATH. */
 export function discoverCodex(
-  options: CodexDiscoveryOptions = {},
-): CodexDiscovery {
+  options: HarnessDiscoveryOptions = {},
+): HarnessDiscovery {
   const resolved = discoverExecutable({
     options,
     executableEnvironmentVariable: CODEX_EXECUTABLE_ENV,
     pathName: CODEX_PATH_NAME,
   });
   if (resolved.kind !== "found") return resolved;
-  const discovery: Extract<CodexDiscovery, { kind: "found" }> = {
+  const discovery: Extract<HarnessDiscovery, { kind: "found" }> = {
     kind: "found",
     attempt: resolved.attempt,
   };
-  discoveredCodexTargets.set(discovery, resolved.target);
+  discoveredTargets.set(discovery, resolved.target);
   return discovery;
-}
-
-/** Resolve the spawn detail hidden behind one successful Codex discovery. */
-export function discoveredCodexTarget(
-  discovery: Extract<CodexDiscovery, { kind: "found" }>,
-): DiscoveredCodexTarget {
-  const target = discoveredCodexTargets.get(discovery);
-  if (target === undefined) {
-    throw new Error("harness: found Codex discovery has no target.");
-  }
-  return target;
 }
 
 function discoverExecutable(
@@ -212,7 +149,7 @@ function discoverExecutable(
     options.options.configuredExecutable ??
     environment[options.executableEnvironmentVariable]
   )?.trim();
-  const attempts: TDiscoveryAttempt[] = [];
+  const attempts: HarnessDiscoveryAttempt[] = [];
   if (configured !== undefined && configured.length > 0) {
     attempts.push({
       source: "configured",

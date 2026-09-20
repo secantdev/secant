@@ -67,9 +67,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `OwnedProcess.writeStdin` resolves only after both the write callback has fired without error and the stream has drained (it waits for the `drain` event
   when `write` returned `false`); an error rejects. The Turn's bytes are accepted before the write promise settles, which is what the durable-admission
   ordering rests on.
-- `consumeStdout` is a hand-rolled NDJSON splitter (D15): it splits on `\n`, strips a trailing `\r`, and JSON-parses only a line that trims to something
-  starting with `{` (any other line is ignored; a parse error is a `malformed JSON frame`). After the stream ends, a final flush whose trimmed remainder
-  still starts with `{` is the distinct `truncated JSON frame` diagnostic a recorded protocol-corruption fixture pins.
+- `jsonl.ts` is the one private hand-rolled NDJSON splitter both native Adapters use (M3 D15, M4 D1): it splits on `\n`, strips a trailing `\r`, preserves
+  the terminated raw line for recording, and distinguishes a final unterminated remainder. Claude JSON-parses only a line that trims to something starting
+  with `{`; its recorded protocol-corruption fixture pins such a remainder as `truncated JSON frame`, while Codex rejects any nonblank remainder.
 - `acceptInit` compares the native `session_id` to the minted coordinate. A mismatch on a **resume** is a `recovery`-phase `recovery-unacknowledged` failure
   that marks the Session unusable (never a silent fresh conversation); a mismatch on a **fresh launch** is `not-started`/`init-session` — the minted id was
   simply never echoed, so the Turn never started.

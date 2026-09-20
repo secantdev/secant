@@ -219,6 +219,20 @@ src/tui/vendor/ and is authored fresh). What was studied and changed:
              fails before spawn with distinct unsupported-target and
              missing-optional-package diagnostics.
 
+Added 2026-09-20 during G2 for the M4 platform packages (#151). The slice's
+change review recorded the OpenCode comparison, but this studied-not-copied path
+was missing here. No OpenCode source crosses; `scripts/pack.ts` is authored fresh.
+
+  scripts/pack.ts (studied packages/opencode/script/build.ts and
+                   packages/opencode/script/publish.ts):
+    Taken:   the per-target npm-package shape (`os`, `cpu`, and
+             `preferUnplugged`), executable-mode restoration before packing, and
+             `bun pm pack`.
+    Changed: Secant packages only its three gated targets from the immutable
+             assembled candidate, verifies binary and legal-material digests,
+             carries no postinstall or other lifecycle script, and leaves
+             publication to the protected release state machine.
+
 
 THEME ASSETS (25 vendored, unmodified palettes)
 -----------------------------------------------

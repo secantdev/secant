@@ -2,21 +2,21 @@
 
 Every operating system, architecture, and terminal Secant claims to support, each with the evidence that backs the claim. A row without evidence is
 not claimed. Mandated by [ADR 0027](./adr/0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md) ("`docs/support-matrix.md` lists every
-claimed OS, architecture, and terminal row with its evidence source"); the [G1 gate](./agents/milestones.md) checklist requires it current. The three
+claimed OS, architecture, and terminal row with its evidence source"); the [refactoring-gate](./agents/milestones.md) checklist requires it current. The three
 gated build targets are fixed by [ADR 0030](./adr/0030-ship-the-shell-as-a-bun-compiled-single-file-executable.md), which also removed the
 legacy-conhost row.
 
 ## Operating systems and architectures
 
 Each cross-compiled single-file binary is built and then smoked on its own operating system inside the canonical three-OS gate, on every push and pull
-request. The `build` job cross-compiles all three targets; the `smoke` job runs the compiled-binary smoke against the matching binary on the matching
-runner. The scenarios it covers are enumerated once in [testing guidance](./agents/testing.md) — this row does not restate them.
+request. The `build` job cross-compiles all three targets; the `consumer` job's `Compiled-binary smoke` step runs against the matching binary on the
+matching runner. The scenarios it covers are enumerated once in [testing guidance](./agents/testing.md) — this row does not restate them.
 
-| OS      | Architecture | Binary                   | Evidence                                                                                                                                                                                             |
-| ------- | ------------ | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows | x64          | `secant-windows-x64.exe` | M4 candidate validation, native `smoke` job on `windows-latest`, pass ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868946))                             |
-| macOS   | arm64        | `secant-darwin-arm64`    | M4 candidate validation, native `smoke` job on `macos-latest`, pass including `codesign --verify` ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868927)) |
-| Linux   | x64          | `secant-linux-x64`       | M4 candidate validation, native `smoke` job on `ubuntu-latest`, pass ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868913))                              |
+| OS      | Architecture | Binary                   | Evidence                                                                                                                                                                                                              |
+| ------- | ------------ | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows | x64          | `secant-windows-x64.exe` | M4 candidate validation, native `Compiled-binary smoke` step on `windows-latest`, pass ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868946))                             |
+| macOS   | arm64        | `secant-darwin-arm64`    | M4 candidate validation, native `Compiled-binary smoke` step on `macos-latest`, pass including `codesign --verify` ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868927)) |
+| Linux   | x64          | `secant-linux-x64`       | M4 candidate validation, native `Compiled-binary smoke` step on `ubuntu-latest`, pass ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868913))                              |
 
 ## Terminals
 

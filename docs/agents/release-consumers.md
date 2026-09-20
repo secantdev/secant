@@ -1,17 +1,19 @@
 # Release-Channel Consumer Verification
 
-Read this before changing a release-channel consumer scenario — the archive, platform-package, npm-launcher, or installer jobs — or the scripts and CI
+Read this before changing a release-channel consumer scenario — the archive, platform-package, npm-launcher, or installer steps — or the scripts and CI
 they run through.
 
-Each shipped release channel is verified on the Windows x64, macOS arm64, and Linux x64 matrix (ADR 0027) by a standalone `bun scripts/*-consumer.ts` job
-in [check.yml](../../.github/workflows/check.yml), driving the channel exactly as a consumer receives it. The artifacts are assembled once on the Linux
-`build` job from the just-built candidate bytes through the one target manifest (`scripts/targets.ts`); each job's pure logic is unit-tested under `bun
-test` in `tests/release/` with no subprocess (the Bun 1.4.2 child-lifecycle defect, #149), and the real round-trip on real binaries is left to the CI job
-— the way the compiled-binary smoke ([testing](./testing.md)) lives outside `bun test`.
+Each shipped release channel is verified on the Windows x64, macOS arm64, and Linux x64 matrix (ADR 0027) by a named step of the per-OS `consumer` job in
+[check.yml](../../.github/workflows/check.yml), driving the channel exactly as a consumer receives it. That job downloads each candidate artifact once,
+runs the compiled-binary smoke, archive, platform-package, npm-launcher, PowerShell installer, POSIX installer, and terminal-lifecycle scenarios as seven
+independent `continue-on-error` steps, then always aggregates their outcomes so every result stays visible and any non-success fails the job. The artifacts
+are assembled once on the Linux `build` job from the just-built candidate bytes through the one target manifest (`scripts/targets.ts`). Release-channel
+pure logic is unit-tested under `bun test` in `tests/release/` with no subprocess (the Bun 1.4.2 child-lifecycle defect, #149); real round-trips on real
+binaries remain in the consumer job, the way the compiled-binary smoke ([testing](./testing.md)) lives outside `bun test`.
 
 ## Release Archive Consumer
 
-Separate from the package smoke, the `release-archive-consumer` job ([check.yml](../../.github/workflows/check.yml)) verifies the assembled release
+Separate from the package smoke, the `Release archive consumer` step ([check.yml](../../.github/workflows/check.yml)) verifies the assembled release
 archives (`scripts/assemble.ts`, #150) as a consumer receives them. Assembly runs once on the Linux `build` job from the just-built candidate bytes
 through the one target manifest (`scripts/targets.ts`), emitting the three archives, a candidate manifest, and `SHA256SUMS`; it never rebuilds an input
 and fails closed on any identity/version/digest disagreement. On the Windows x64, macOS arm64, and Linux x64 matrix, `scripts/release-consumer.ts`
@@ -24,7 +26,7 @@ the compiled-binary smoke lives outside `bun test`.
 
 ## Platform Package Consumer
 
-The `platform-package-consumer` job ([check.yml](../../.github/workflows/check.yml)) verifies the three per-platform npm packages (`scripts/pack.ts`,
+The `Platform package consumer` step ([check.yml](../../.github/workflows/check.yml)) verifies the three per-platform npm packages (`scripts/pack.ts`,
 #151) as an npm consumer receives them. Packing runs once on the Linux `build` job after assembly: `scripts/pack.ts` reads the archive candidate manifest
 (`scripts/assemble.ts`), fails closed unless every dist binary and the legal material are byte-identical to that candidate, and emits one exact-version,
 os/cpu-constrained npm tarball per target (built with `bun pm pack`, so the npm channel needs no Node toolchain) plus a `package-manifest.json`. Each
@@ -40,7 +42,7 @@ round-trip on real binaries (npm's own os/cpu gating, mode preservation, native 
 
 ## npm Launcher Consumer
 
-The `npm-launcher-consumer` job ([check.yml](../../.github/workflows/check.yml)) verifies the thin, script-free npm launcher `@secantdev/secant`
+The `npm launcher consumer` step ([check.yml](../../.github/workflows/check.yml)) verifies the thin, script-free npm launcher `@secantdev/secant`
 (`bin/secant.mjs`, packed by `scripts/pack-launcher.ts`, #152) as a consumer receives it. Packing runs once on the Linux `build` job after the platform
 packages: `scripts/pack-launcher.ts` pins the assembled release version, generates the host-key → package/executable map from the one target manifest
 (`scripts/targets.ts`), and stages the Node launcher, that map, and the legal material — no candidate executable, exact-version `optionalDependencies` on
@@ -71,7 +73,7 @@ hoisted or nested duplicate reports the bytes actually shipped), adds the one `@
 that `THIRD-PARTY-NOTICES.md` covers that union — every shipped component named, its shipped version named, and its licence family's text present,
 failing closed on a missing component, a stale version, or an unrecognised licence identity — and that the source-of-truth legal material is what every
 channel staged, by comparing each channel manifest's `licenseSha256`/`noticesSha256` (release archives, platform packages, launcher package) against the
-repository files. The sibling consumer jobs already prove the physical bytes in each channel match those manifest digests (and the installer results the
+repository files. The sibling consumer steps already prove the physical bytes in each channel match those manifest digests (and the installer results the
 archive's), so this need not re-extract them. Harmless historical or grouped extra notices are tolerated (a named entry no longer in the closure, e.g.
 `bun-ffi-structs`, does not fail). Licence identity is verified at licence-family granularity — an unrecognised SPDX identity fails closed, but a
 per-package prose mislabel within a known family is a named limitation, not caught. `tests/release/legal-closure.test.ts` unit-tests the pure logic
@@ -80,7 +82,7 @@ real build) runs in the `build` job.
 
 ## PowerShell Installer Consumer
 
-The separate `powershell-installer-consumer` job ([check.yml](../../.github/workflows/check.yml)) supplies the assembled
+The `PowerShell installer consumer` step ([check.yml](../../.github/workflows/check.yml)) supplies the assembled
 candidate through a network-free local-candidate seam. The macOS arm64 and Linux x64 legs exercise native unsupported-target
 detection before candidate access. The Windows x64 leg installs into an isolated home, runs the installed executable,
 exercises latest and exact versions, executes the declined PATH instruction twice, and checks idempotent default PATH changes.
@@ -91,7 +93,7 @@ induced: doing so deterministically would require a private installer hook or an
 
 ## POSIX Installer Consumer
 
-The `posix-installer-consumer` job ([check.yml](../../.github/workflows/check.yml)) gives root `install.sh` the local candidate without a product runtime.
+The `POSIX installer consumer` step ([check.yml](../../.github/workflows/check.yml)) gives root `install.sh` the local candidate without a product runtime.
 macOS arm64 and Linux x64 install under fixed `~/.secant/bin` in isolated homes and retain the declined-PATH instruction; macOS pins Terminal guidance.
 Windows x64 and the source suite there prove only refusal before candidate access. On POSIX, `tests/release/posix-installer.test.ts` also covers
 target/identity, checksum/layout/version/legal refusal, failed-update preservation, `SECANT_HOME` independence, latest/exact versions, and PATH changes.

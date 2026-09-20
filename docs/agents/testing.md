@@ -18,8 +18,8 @@ Linux when Bun fixes child-process lifecycle delivery under load.
 
 Package smoke tests copy the produced Bun compiled single-file executable out of `dist/` into an isolated temporary location and exercise it there. They
 are the CI acceptance seam for headless work and do not invoke a real Harness. This is the one home for the package-smoke enumeration — the support matrix
-and the `check.yml` `smoke` job point here rather than restating it. Beyond `--help`/`--version` and the no-TTY refusal, the smoke runs, on each of the
-three operating systems:
+and the `Compiled-binary smoke` step of `check.yml`'s per-OS `consumer` job point here rather than restating it. Beyond `--help`/`--version` and the no-TTY
+refusal, the smoke runs on each of the three operating systems:
 
 - The **M3 gate** ([#106](https://github.com/secantdev/secant/issues/106)): the headless Test Repair Proof Bundle Run launched from the installed binary
   against the recorded Claude Code replayer on PATH, reaching its authored Human Gate and, once answered, `succeeded` with the frozen Run `--json` fields.
@@ -34,7 +34,7 @@ three operating systems:
 - The **relocated pre-Drizzle home**: the checked-in pre-Drizzle fixture relocated beneath the isolated install, proving the compiled binary migrates and
   opens it through its embedded migration registries.
 
-Verifying each shipped release channel as a consumer receives it — the archive, platform-package, npm-launcher, and installer scenarios and their CI jobs
+Verifying each shipped release channel as a consumer receives it — the archive, platform-package, npm-launcher, and installer scenarios and their CI steps
 — is its own concern; see [release-consumers.md](./release-consumers.md).
 
 Test observable behavior through the same Interface callers use. Internal refactoring should not require test rewrites. When shallow Modules are

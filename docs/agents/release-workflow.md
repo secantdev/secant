@@ -6,7 +6,9 @@ promotion, or the deterministic checks that guard them. Consumer round-trips (ar
 
 The whole release path is **one** CI gate ([check.yml](../../.github/workflows/check.yml)), not a family of workflows. A `push`/`pull_request` run is the
 plain gate; a manual dispatch adds the authenticated npm dry-run; a `v*` tag adds the protected promotion. The candidate is assembled once on the Linux
-`build` job and every downstream job downloads it. Three deterministic checks prove the shape over the parsed YAML (`Bun.YAML`, no dependency) in
+`build` job. One three-OS `consumer` matrix downloads each artifact once per OS and runs the seven native scenarios as named steps; every scenario uses
+`continue-on-error`, and an always-run aggregation step fails the job if any outcome is not successful. Three deterministic checks prove the shape over
+the parsed YAML (`Bun.YAML`, no dependency) in
 [tests/architecture/check-release-workflow.ts](../../tests/architecture/check-release-workflow.ts): `checkValidationWorkflow`, `checkReleaseProtection`,
 and `checkReleasePromotion`.
 Each guard is proven by a synthetic
@@ -17,8 +19,8 @@ publishing.
 
 The `candidate-validation` scenario (spec [#137](https://github.com/secantdev/secant/issues/137) stories 85/89,
 [#157](https://github.com/secantdev/secant/issues/157)) is the manual-dispatch mode of the one gate: a `workflow_dispatch` run executes the whole gate on one
-commit — the three-OS canonical check, the cross-build/assemble, the compiled-binary smoke, every release-channel consumer scenario
-([release-consumers.md](./release-consumers.md)), the terminal lifecycle, the evidence contract, and the legal closure — against the single candidate the
+commit — the three-OS canonical check, the cross-build/assemble, and the per-OS consumer job's compiled-binary smoke, every release-channel consumer
+scenario ([release-consumers.md](./release-consumers.md)), and terminal-lifecycle steps, plus the evidence contract and legal closure — against the single candidate the
 `build` job assembles once. It adds the one thing a push/PR run cannot: a separately configured read-only npm identity (`secrets.NPM_READONLY_TOKEN`, no
 publication authority) authenticates and publish-dry-runs every platform package first and the launcher last (`scripts/npm-dry-run.ts`), so the npm release
 path is proven end to end with no route to publication. The dry-run is registry-facing and OS-independent, so it folds into the `build` job's final step under

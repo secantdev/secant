@@ -9,6 +9,12 @@ on:
   # duplicating it into a second workflow, and publishes nothing.
   workflow_dispatch:
 
+concurrency:
+  # A newer run supersedes stale work on the same branch or pull-request ref.
+  # Keep every default-branch and release-tag run as durable release evidence.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && !startsWith(github.ref, 'refs/tags/v') }}
+
 jobs:
   # The whole canonical gate on all three OS (Windows x64, macOS arm64, Linux x64
   # per ADR 0027): typecheck, format, lint, `bun test` with the Solid preload,
@@ -103,12 +109,11 @@ jobs:
           printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
           bun scripts/npm-dry-run.ts dist/packages
 
-  # Each cross-compiled binary is smoked on its own OS with the compiled-binary
-  # smoke, plus codesign --verify on macOS. The scenarios it covers are
-  # enumerated once in docs/agents/testing.md (the one home) — not restated here.
-  # The smoke harness runs under the pinned Bun; the binary it exercises is
-  # standalone.
-  smoke:
+  # One consumer runner per OS executes all seven native scenarios against the
+  # candidate assembled by `build`. Each scenario is allowed to finish independently
+  # so every result remains visible; the final aggregation step fails the job if any
+  # scenario did not succeed. The scripts, arguments, and assertions remain the same.
+  consumer:
     needs: build
     strategy:
       fail-fast: false
@@ -116,78 +121,15 @@ jobs:
         include:
           - os: windows-latest
             binary: secant-windows-x64.exe
-          - os: macos-latest
-            binary: secant-darwin-arm64
-          - os: ubuntu-latest
-            binary: secant-linux-x64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
-      # package-smoke replays the recorded Harness through the MCP permission
-      # bridge, so its source-side test adapter dependencies must be installed on
-      # this otherwise artifact-only runner as well as on the canonical check job.
-      - run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: binaries
-          path: dist
-      - name: Restore the executable bit
-        if: runner.os != 'Windows'
-        run: chmod +x "dist/${{ matrix.binary }}"
-      - run: bun scripts/package-smoke.ts "dist/${{ matrix.binary }}"
-
-  # The `release-archive-consumer` scenario (#150): each final release archive is
-  # extracted and verified on its own OS exactly as a consumer receives it —
-  # layout, executable mode, inner-binary digest, bundled legal material, native
-  # execution and version, and (macOS) the strict ad-hoc signature. It reads the
-  # candidate manifest assembly emitted, so it verifies the same bytes the smoke
-  # ran. No runtime deps, so this artifact-only runner needs no `bun install`.
-  release-archive-consumer:
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
             archive: secant-windows-x64.zip
-          - os: macos-latest
-            archive: secant-darwin-arm64.zip
-          - os: ubuntu-latest
-            archive: secant-linux-x64.tar.gz
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-archives
-          path: dist/release
-      - run: bun scripts/release-consumer.ts "dist/release/${{ matrix.archive }}"
-
-  # The `platform-package-consumer` scenario (#151): each per-platform npm package
-  # is installed with lifecycle scripts disabled and verified on its own OS
-  # exactly as an npm consumer receives it — os/cpu constraint, exact version,
-  # contents (executable and legal material only), the absence of any lifecycle
-  # script, inner-binary digest against the archive candidate, executable mode,
-  # native execution and version, and (macOS) the strict ad-hoc signature. npm is
-  # the channel under test (ADR 0030), so this job drives it directly; the runners
-  # ship npm, so no Node setup or `bun install` is needed.
-  platform-package-consumer:
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
             target: windows-x64
           - os: macos-latest
+            binary: secant-darwin-arm64
+            archive: secant-darwin-arm64.zip
             target: darwin-arm64
           - os: ubuntu-latest
+            binary: secant-linux-x64
+            archive: secant-linux-x64.tar.gz
             target: linux-x64
     runs-on: ${{ matrix.os }}
     steps:
@@ -195,150 +137,107 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
-      - uses: actions/download-artifact@v4
-        with:
-          name: platform-packages
-          path: dist/packages
-      - run: bun scripts/package-consumer.ts dist/packages ${{ matrix.target }}
-
-  # The `npm-launcher-consumer` scenario (#152): the thin, script-free npm launcher
-  # installed with lifecycle scripts disabled, resolving the matching per-platform
-  # package IN PLACE under npm-flat and pnpm-symlinked layouts, forwarding arguments,
-  # stdio, and the native exit status, failing before spawn on a missing optional
-  # package, and completing the Proof Bundle smoke (the M3 gate) end to end THROUGH
-  # the launched command on its own OS. npm is the channel under test, so this job
-  # drives it directly. It needs `bun install` for the recorded-replayer test helpers
-  # (like the `smoke` job), and Node/npm/git ship on the runners. The scenario is
-  # enumerated once in docs/agents/release-consumers.md (the one home) — not restated here.
-  npm-launcher-consumer:
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
+      # The compiled-binary smoke and npm-launcher consumer use the recorded
+      # Harness helpers; installing once also gives every scenario the pinned Bun.
       - run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: platform-packages
-          path: dist/packages
-      - run: bun scripts/launcher-consumer.ts dist/packages
-
-  # The `powershell-installer-consumer` scenario (#154): macOS and Linux exercise
-  # native unsupported-target detection before candidate access. Windows
-  # installs the exact local archive into an isolated home, verifies the fixed
-  # layout and executable, exercises latest/exact selection and PATH behavior,
-  # and proves download/validation failures preserve the working installation.
-  # It downloads no release bytes and requires no Git Bash, Node, or Bun.
-  powershell-installer-consumer:
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-archives
-          path: dist/release
-      - name: Refuse unsupported targets before reading candidates
-        if: runner.os != 'Windows'
-        shell: pwsh
-        run: ./scripts/powershell-installer-consumer.ps1 -CandidateDirectory dist/release -Scenario unsupported
-      - name: Install and run the local Windows x64 candidate
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/powershell-installer-consumer.ps1 -CandidateDirectory dist/release -Scenario supported
-
-  # The `posix-installer-consumer` scenario (#153) consumes the assembled local
-  # candidate without network access. macOS arm64 and Linux x64 install, verify,
-  # and run their matching archive from an isolated HOME; the Windows leg proves
-  # target refusal happens before candidate access.
-  posix-installer-consumer:
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-archives
-          path: dist/release
-      - name: Install and run the local candidate
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          isolated_home="$(mktemp -d)"
-          application_home="$isolated_home/application-data"
-          output="$(HOME="$isolated_home" SECANT_HOME="$application_home" sh ./install.sh --candidate-dir dist/release --no-modify-path)"
-          printf '%s\n' "$output"
-          test -x "$isolated_home/.secant/bin/secant"
-          test ! -e "$application_home/bin/secant"
-          expected_version="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' dist/release/candidate-manifest.json | head -n 1)"
-          test "$("$isolated_home/.secant/bin/secant" --version)" = "$expected_version"
-          grep -F 'export PATH="$HOME/.secant/bin:$PATH"' <<<"$output"
-          if [ "${{ runner.os }}" = 'macOS' ]; then
-            grep -F 'Run Secant from Terminal; do not double-click a downloaded executable.' <<<"$output"
-          fi
-      - name: Refuse the unsupported Windows target before candidate access
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          hidden_candidate="$RUNNER_TEMP/not-present"
-          if output="$(sh ./install.sh --candidate-dir "$hidden_candidate" 2>&1)"; then
-            echo 'Expected the POSIX installer to refuse Windows.' >&2
-            exit 1
-          fi
-          grep -F 'Unsupported platform: windows-x64' <<<"$output"
-          if grep -F "$hidden_candidate" <<<"$output"; then
-            echo 'The installer accessed its candidate source before refusing Windows.' >&2
-            exit 1
-          fi
-
-  # The real-terminal lifecycle suite (#56), a separate blocking three-OS job
-  # outside `bun run check` (ADR 0027 / ADR 0030). It drives the cross-compiled
-  # binary for this OS under a `Bun.Terminal` pseudo-terminal and proves one
-  # class — a terminal left broken after exit — over the quit, Ctrl+C, and
-  # (POSIX) SIGHUP paths. No retries: a flaky case is fixed or moved to the
-  # opt-in suite, never re-run to green.
-  terminal:
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            binary: secant-windows-x64.exe
-          - os: macos-latest
-            binary: secant-darwin-arm64
-          - os: ubuntu-latest
-            binary: secant-linux-x64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
       - uses: actions/download-artifact@v4
         with:
           name: binaries
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-archives
+          path: dist/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: platform-packages
+          path: dist/packages
       - name: Restore the executable bit
         if: runner.os != 'Windows'
         run: chmod +x "dist/${{ matrix.binary }}"
-      - run: bun tests/terminal/lifecycle.ts "dist/${{ matrix.binary }}"
+      - name: Compiled-binary smoke
+        id: compiled_binary_smoke
+        continue-on-error: true
+        run: bun scripts/package-smoke.ts "dist/${{ matrix.binary }}"
+      - name: Release archive consumer
+        id: release_archive_consumer
+        continue-on-error: true
+        run: bun scripts/release-consumer.ts "dist/release/${{ matrix.archive }}"
+      - name: Platform package consumer
+        id: platform_package_consumer
+        continue-on-error: true
+        run: bun scripts/package-consumer.ts dist/packages ${{ matrix.target }}
+      - name: npm launcher consumer
+        id: npm_launcher_consumer
+        continue-on-error: true
+        run: bun scripts/launcher-consumer.ts dist/packages
+      - name: PowerShell installer consumer
+        id: powershell_installer_consumer
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          if ("${{ runner.os }}" -eq "Windows") {
+            ./scripts/powershell-installer-consumer.ps1 -CandidateDirectory dist/release -Scenario supported
+          } else {
+            ./scripts/powershell-installer-consumer.ps1 -CandidateDirectory dist/release -Scenario unsupported
+          }
+      - name: POSIX installer consumer
+        id: posix_installer_consumer
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = 'Windows' ]; then
+            hidden_candidate="$RUNNER_TEMP/not-present"
+            if output="$(sh ./install.sh --candidate-dir "$hidden_candidate" 2>&1)"; then
+              echo 'Expected the POSIX installer to refuse Windows.' >&2
+              exit 1
+            fi
+            grep -F 'Unsupported platform: windows-x64' <<<"$output"
+            if grep -F "$hidden_candidate" <<<"$output"; then
+              echo 'The installer accessed its candidate source before refusing Windows.' >&2
+              exit 1
+            fi
+          else
+            isolated_home="$(mktemp -d)"
+            application_home="$isolated_home/application-data"
+            output="$(HOME="$isolated_home" SECANT_HOME="$application_home" sh ./install.sh --candidate-dir dist/release --no-modify-path)"
+            printf '%s\n' "$output"
+            test -x "$isolated_home/.secant/bin/secant"
+            test ! -e "$application_home/bin/secant"
+            expected_version="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' dist/release/candidate-manifest.json | head -n 1)"
+            test "$("$isolated_home/.secant/bin/secant" --version)" = "$expected_version"
+            grep -F 'export PATH="$HOME/.secant/bin:$PATH"' <<<"$output"
+            if [ "${{ runner.os }}" = 'macOS' ]; then
+              grep -F 'Run Secant from Terminal; do not double-click a downloaded executable.' <<<"$output"
+            fi
+          fi
+      - name: Terminal lifecycle
+        id: terminal_lifecycle
+        continue-on-error: true
+        run: bun tests/terminal/lifecycle.ts "dist/${{ matrix.binary }}"
+      - name: Require every consumer scenario to succeed
+        if: always()
+        shell: bash
+        run: |
+          failed=0
+          for result in \
+            "Compiled-binary smoke:${{ steps.compiled_binary_smoke.outcome }}" \
+            "Release archive consumer:${{ steps.release_archive_consumer.outcome }}" \
+            "Platform package consumer:${{ steps.platform_package_consumer.outcome }}" \
+            "npm launcher consumer:${{ steps.npm_launcher_consumer.outcome }}" \
+            "PowerShell installer consumer:${{ steps.powershell_installer_consumer.outcome }}" \
+            "POSIX installer consumer:${{ steps.posix_installer_consumer.outcome }}" \
+            "Terminal lifecycle:${{ steps.terminal_lifecycle.outcome }}"
+          do
+            name="${result%%:*}"
+            outcome="${result#*:}"
+            printf '%s: %s\n' "$name" "$outcome"
+            if [ "$outcome" != 'success' ]; then
+              failed=1
+            fi
+          done
+          exit "$failed"
 
   # The `release-protection-policy` scenario, runtime half (#158, spec #137 stories
   # 82/90/96/97): on a `v*` tag ONLY, admit the tag when it exactly matches the package
@@ -353,13 +252,7 @@ jobs:
     needs:
       - check
       - build
-      - smoke
-      - release-archive-consumer
-      - platform-package-consumer
-      - npm-launcher-consumer
-      - powershell-installer-consumer
-      - posix-installer-consumer
-      - terminal
+      - consumer
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

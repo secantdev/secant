@@ -23,17 +23,7 @@ import { MANIFEST_FILE } from "./assemble.js";
 /** The candidate-check jobs that must gate the protected promotion, named for the
  *  approval summary. The policy check independently proves the promotion job
  *  transitively depends on every one of them; this list is the reviewer-facing copy. */
-export const CANDIDATE_CHECK_JOBS = [
-  "check",
-  "build",
-  "smoke",
-  "release-archive-consumer",
-  "platform-package-consumer",
-  "npm-launcher-consumer",
-  "powershell-installer-consumer",
-  "posix-installer-consumer",
-  "terminal",
-];
+export const CANDIDATE_CHECK_JOBS = ["check", "build", "consumer"];
 
 /** The version a `v*` tag ref names, or null when the ref is not a release tag. */
 export function parseTagVersion(ref: string): string | null {

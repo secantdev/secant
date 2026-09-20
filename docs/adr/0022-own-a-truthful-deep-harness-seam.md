@@ -60,10 +60,11 @@ rejects new work, expires requests, attempts supported graceful interruption, cl
 Force-killing a Turn already proven complete is cleanup; killing unconfirmed active work produces `lost`. Cleanup failure is separate and cannot
 rewrite a settled Turn. Ownership transfers once from Preflight to the Run, so exactly one owner is always responsible for cleanup.
 
-This Interface is also the test surface: Codex, Claude Code, and Gemini implement it beside a deterministic fake; a shared conformance suite exercises
+This Interface is also the test surface: every shipped Harness Adapter implements it beside a deterministic fake; a shared conformance suite exercises
 ordering, requests, controls, recovery, failure, and cleanup, while private versioned protocol fixtures and opt-in pinned real-runtime qualification
-cover native drift. OpenCode supplied useful examples of exact IDs, durable admission, and session tracking, but its types, event vocabulary, state
-providers, and domain model do not cross the Seam, consistent with [ADR 0018](./0018-adopt-opencode-presentation-as-pinned-reduced-vendor.md). We
+cover native drift. The shipped Harness portfolio is a product-scope decision rather than part of this architecture. OpenCode supplied useful examples
+of exact IDs, durable admission, and session tracking, but its types, event vocabulary, state providers, and domain model do not cross the Seam,
+consistent with [ADR 0018](./0018-adopt-opencode-presentation-as-pinned-reduced-vendor.md). We
 rejected a minimal `qualify/turn/close` facade because it hides stateful interaction and recovery, a broad capability object graph because it leaks
 mechanism and invites caller coupling, and a whole-Step `execute` API because it drags orchestration below the Seam. The chosen prepared-Harness
 hybrid is narrower in vocabulary but deeper in guarantees; its cost is a stricter Adapter and conformance burden in exchange for truthful differences
@@ -88,3 +89,9 @@ The 2026-09-07 amendment above read as if the Adapter renders the prompt. It doe
 **mode** — `native` or `plain-path` for a skill, and the equivalent `FileDelivery` mode for file artifacts. Substituting Bundle artifacts into the prompt
 text is the **caller's**, because rendering needs the Bundle input and asset knowledge this ADR keeps out of the Adapter (the Adapter knows no Workflow
 Bundle). The caller renders the prompt text and hands it in as the Turn's semantic input; the Adapter chooses only how each declared asset is delivered.
+
+## Amendment (2026-09-21): Harness portfolio is product scope
+
+Recorded while [choosing whether OpenCode earns the third v1 Harness slot](https://github.com/secantdev/secant/issues/175). The original decision's
+named three-Adapter portfolio was a migration-plan fact, not an architectural constraint. The Harness Seam applies unchanged to every shipped Adapter;
+the current portfolio and any qualification condition live in the product-scope and sequencing decisions.

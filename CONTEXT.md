@@ -43,8 +43,8 @@ cluster that matches the task, followed by its related ADRs when the task needs 
 - **Test Repair Workflow** — the first **Proof Bundle**. Given a path to a failing test, it drives that test to green through bounded **Step
   Attempts**, instructs its fixing Agent not to commit, then routes an ordinary **Command step** to commit after a **Human Gate** approves. The
   ordering is a Bundle contract, not a Git invariant Crucible enforces around the **Harness**.
-- **Harness** — an external coding-agent runtime Crucible can select for workflow execution. Codex, Claude Code, and Gemini are the initial
-  Harnesses; their capabilities need not be identical.
+- **Harness** — an external coding-agent runtime Crucible can select for workflow execution. The shipped Harness portfolio is product scope rather
+  than part of this term; Harness capabilities need not be identical.
 - **Harness Adapter** — an Adapter at the Harness Seam that contains Harness-native control, event, and failure semantics behind a
   Crucible-owned Interface.
 - **Projection Port** — the single Crucible-owned application Interface shared by TUI and headless callers. It opens bounded **Projections**,

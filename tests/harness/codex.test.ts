@@ -2492,7 +2492,6 @@ function stalledProcess(): OwnedProcess {
     stderr: noBytes(),
     writeStdin: () => never,
     closeStdin: () => Promise.resolve({ kind: "exited", status: 0 }),
-    terminate: () => Promise.resolve({ kind: "exited", status: 0 }),
     interrupt: () =>
       Promise.resolve({
         close: { kind: "exited", status: 0 },
@@ -2601,10 +2600,6 @@ function approvalRaceProcess(): TControlledApprovalProcess {
       output.end();
       return Promise.resolve({ kind: "exited", status: 0 });
     },
-    terminate: () => {
-      output.end();
-      return Promise.resolve({ kind: "exited", status: 0 });
-    },
     interrupt: () =>
       Promise.resolve({
         close: { kind: "exited", status: 0 },
@@ -2708,7 +2703,6 @@ function notificationFloodProcess(): OwnedProcess {
       closed = true;
       return Promise.resolve({ kind: "exited", status: 0 });
     },
-    terminate: () => Promise.resolve({ kind: "exited", status: 0 }),
     interrupt: () =>
       Promise.resolve({
         close: { kind: "exited", status: 0 },
@@ -2748,11 +2742,6 @@ function qualificationProcess(options: TQualificationProcess): OwnedProcess {
     stderr,
     writeStdin: () => Promise.resolve(),
     closeStdin: () =>
-      Promise.resolve({
-        kind: "cleanup-error",
-        cause: options.cleanupCause,
-      }),
-    terminate: () =>
       Promise.resolve({
         kind: "cleanup-error",
         cause: options.cleanupCause,

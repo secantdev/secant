@@ -632,7 +632,6 @@ function scriptedProcess(script: {
     writeStdin: () => Promise.resolve(),
     closeStdin: () =>
       Promise.resolve(settle(script.closeStdin?.(token()) ?? exit0)),
-    terminate: () => Promise.resolve(settle(exit0)),
     interrupt: () => {
       const interruption = script.interrupt?.(token()) ?? {
         close: { kind: "exited", status: 143 },

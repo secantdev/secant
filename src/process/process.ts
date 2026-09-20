@@ -275,8 +275,8 @@ export interface OwnedProcessOptions {
  * `escalated: true` means SIGKILL followed. Windows has no graceful stage (see
  * `safeInterrupt`): a live child is force-killed outright and reported
  * `escalated: true`; only a child already gone reports `false`.
- * A caller distinguishing a confirmed graceful stop from a force-kill needs this;
- * `terminate` alone cannot express it because it collapses both into one close. */
+ * A caller distinguishing a confirmed graceful stop from a force-kill needs this
+ * evidence because a close observation alone cannot express the distinction. */
 export type ProcessInterruption = {
   readonly close: OwnedProcessClose;
   readonly escalated: boolean;
@@ -292,8 +292,6 @@ export interface OwnedProcess {
   /** Close stdin first, then bound the wait and escalate through the process
    * tree. Repeated calls return the same close observation. */
   closeStdin(timeoutMs: number): Promise<OwnedProcessClose>;
-  /** Stop the process tree, escalating SIGTERM to SIGKILL within the bound. */
-  terminate(timeoutMs: number): Promise<OwnedProcessClose>;
   /** Off Windows: SIGTERM the tree, wait up to `gracefulMs` for it to close, and if
    * it does not, SIGKILL within the same bound and report `escalated: true`. On
    * Windows: force-kill the tree (`taskkill /T /F`) at once and report
@@ -459,13 +457,7 @@ class NodeOwnedProcess implements OwnedProcess {
 
   closeStdin(timeoutMs: number): Promise<OwnedProcessClose> {
     if (this.shutdownPromise !== undefined) return this.shutdownPromise;
-    this.shutdownPromise = this.safeShutdown("stdin", timeoutMs);
-    return this.shutdownPromise;
-  }
-
-  terminate(timeoutMs: number): Promise<OwnedProcessClose> {
-    if (this.shutdownPromise !== undefined) return this.shutdownPromise;
-    this.shutdownPromise = this.safeShutdown("terminate", timeoutMs);
+    this.shutdownPromise = this.safeShutdown(timeoutMs);
     return this.shutdownPromise;
   }
 
@@ -517,40 +509,27 @@ class NodeOwnedProcess implements OwnedProcess {
     }
   }
 
-  private async shutdown(
-    first: "stdin" | "terminate",
-    timeoutMs: number,
-  ): Promise<OwnedProcessClose> {
+  private async shutdown(timeoutMs: number): Promise<OwnedProcessClose> {
     const deadline = Date.now() + timeoutMs;
     const stageTimeout = (stagesRemaining: number): number =>
       Math.max(0, Math.floor((deadline - Date.now()) / stagesRemaining));
-    if (first === "stdin") this.child.stdin.end();
-    else killGroup(this.child, "SIGTERM");
+    this.child.stdin.end();
 
-    const firstWait = await settleWithin(
-      this.closePromise,
-      stageTimeout(first === "stdin" ? 3 : 2),
-    );
+    const firstWait = await settleWithin(this.closePromise, stageTimeout(3));
     if (firstWait !== undefined) return firstWait;
-    killGroup(this.child, first === "stdin" ? "SIGTERM" : "SIGKILL");
+    killGroup(this.child, "SIGTERM");
 
-    const secondWait = await settleWithin(
-      this.closePromise,
-      stageTimeout(first === "stdin" ? 2 : 1),
-    );
+    const secondWait = await settleWithin(this.closePromise, stageTimeout(2));
     if (secondWait !== undefined) return secondWait;
-    if (first === "stdin") killGroup(this.child, "SIGKILL");
+    killGroup(this.child, "SIGKILL");
 
     const finalWait = await settleWithin(this.closePromise, stageTimeout(1));
     return finalWait ?? { kind: "cleanup-timeout" };
   }
 
-  private async safeShutdown(
-    first: "stdin" | "terminate",
-    timeoutMs: number,
-  ): Promise<OwnedProcessClose> {
+  private async safeShutdown(timeoutMs: number): Promise<OwnedProcessClose> {
     try {
-      return await this.shutdown(first, timeoutMs);
+      return await this.shutdown(timeoutMs);
     } catch (error) {
       return {
         kind: "cleanup-error",
@@ -564,6 +543,7 @@ async function settleWithin<T>(
   promise: Promise<T>,
   timeoutMs: number,
 ): Promise<T | undefined> {
+  // Unlike boundedCodexExchange (typed rejection) and AbortSignal.timeout (active abort), settleWithin only bounds observation and returns undefined.
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const elapsed = new Promise<undefined>((resolve) => {
     timeout = setTimeout(() => resolve(undefined), timeoutMs);
@@ -584,6 +564,7 @@ async function settleWithin<T>(
  */
 export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
   return new Promise<SpawnResult>((resolve) => {
+    // Unlike boundedCodexExchange (typed rejection) and settleWithin (undefined observation), AbortSignal.timeout actively aborts the command process tree.
     const timeoutSignal = AbortSignal.timeout(options.timeoutMs);
     const abort =
       options.cancelSignal !== undefined

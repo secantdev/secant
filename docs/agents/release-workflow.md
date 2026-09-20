@@ -15,6 +15,9 @@ Each guard is proven by a synthetic
 workflow that breaks exactly that guard, so a failure names the guard. All run under `bun test`, so all are proven on Windows, macOS, and Linux without
 publishing.
 
+The release scripts build the candidate once and download those artifacts everywhere else. After approval they never rebuild or repack: every promoted
+byte must equal the digest recorded for the approved candidate.
+
 ## Candidate Validation
 
 The `candidate-validation` scenario (spec [#137](https://github.com/secantdev/secant/issues/137) stories 85/89,

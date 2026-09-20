@@ -86,12 +86,12 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Every `prepare` observes `codex --version`; cached schema evidence is keyed by discovery source, path, SHA-256 identity, version, platform, and revision.
   The host platform driving discovery/profile is immutable; only the cache-key test seam varies platform evidence. A hit skips schema generation only.
 - Live qualification sends one `initialize` then `initialized`, runs bounded `account/read` and `model/list`, and transfers its child and connection.
-- A fresh Session obtains `thread.id` before durable admission; a detached Session calls `thread/resume` on the retained connection and requires the
-  exact requested id before admission. Missing, malformed, failed, or mismatched acknowledgement makes the Session permanently `unusable`, with no fresh fallback.
+- A fresh Session gets `thread.id` before admission; a detached Session requires its exact `thread/resume` id. Any bad acknowledgement makes it `unusable`; no fallback.
 - Fresh and resumed Turns preserve admission-before-content and matching terminal authority; completed items supersede delta previews.
 - Codex client RPC and reverse-request ids have separate private maps. Approvals expose exact actions; native resolution or terminal expiry wins late answers.
-- Native Steer and Interrupt wait for the exact active private `thread.id`/`turn.id` pair and use bounded RPC acknowledgement; only a matching interrupted
-  `turn/completed` proves interruption, while connection loss after acknowledgement remains `lost` with `interruption-unknown`.
+- Native Steer and Interrupt await bounded RPC acknowledgement for exact active ids. Only matching interrupted completion proves interruption; connection loss stays `lost`.
+- `CodexTurn` keeps approval correlation and native control together because both share terminal-ordering state. A third Harness needing the same shapes
+  triggers their split; before then, splitting only relocates coupling.
 - Codex close rejects new work, expires requests, attempts bounded native interruption, closes stdin, and reaps the tree; cleanup cannot rewrite Turn truth.
 - Codex inherits user environment/home; unauthenticated becomes the fixed separate-login remediation, and no account or credential crosses the Seam.
 

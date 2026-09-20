@@ -686,6 +686,7 @@ export async function boundedCodexExchange<T>(options: {
   readonly timeoutMs: number;
   readonly label: string;
 }): Promise<T> {
+  // Unlike settleWithin (undefined observation) and AbortSignal.timeout (active abort), boundedCodexExchange rejects a stalled protocol exchange with a typed timeout.
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {

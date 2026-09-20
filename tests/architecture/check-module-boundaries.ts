@@ -11,12 +11,14 @@ export interface BoundaryIssue {
 }
 
 // Test folders that do not mirror a source domain (S1): the architecture checks,
-// shared helpers, shared fixtures, the human release checks, and the real-terminal
-// suite. Every other `tests/<prefix>/` folder mirrors `src/<prefix>/`.
+// shared helpers, shared fixtures, the human release checks, release-script tests,
+// and the real-terminal suite. Every other `tests/<prefix>/` folder mirrors
+// `src/<prefix>/`.
 const NON_MIRRORING_TEST_FOLDERS = new Set([
   "architecture",
   "helpers",
   "fixtures",
+  "release",
   "release-checks",
   "terminal",
 ]);

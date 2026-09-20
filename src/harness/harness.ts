@@ -2,11 +2,12 @@
 // 0022): the contract every Harness Adapter — the deterministic fake here, the
 // Claude Code, Codex, and Gemini Adapters later — implements at the Harness
 // Seam. This file is the whole public surface: the Interface, the evidence-
-// bearing profile, and the factory a composition root calls. It names no native
-// conversation id, filesystem path, raw protocol frame, or protocol type; those
-// stay private to each Adapter. It knows nothing of Routing, Step kind, retry
-// budget, or Run policy, all of which live above the Seam. Native Adapter
-// implementations re-export only their deliberately public factories here.
+// bearing profile, factories, and normalized discovery/profile facts. It names no
+// native conversation-id value, raw protocol frame, or protocol type. The declared
+// crossings are the Workspace path, named native-Adapter test seams, and opaque
+// permission-bridge factory used by the recorder; the resolved spawn target stays
+// private. It knows nothing of Routing, Step kind, retry budget, or Run policy,
+// all of which live above the Seam.
 
 // ---------------------------------------------------------------------------
 // Opaque coordinates
@@ -591,9 +592,9 @@ export type HarnessAdapterFactory = () => HarnessAdapter;
 // ---------------------------------------------------------------------------
 // Native Adapters
 //
-// Each native Adapter keeps its discovery, qualification cache, and protocol
-// model private and re-exports only its factory through this entry. The Claude
-// Code Adapter (#111) is the first; Codex and Gemini follow.
+// Each native Adapter keeps its discovery implementation, qualification cache,
+// and protocol model private. This entry re-exports only the deliberate factories
+// and named normalized discovery/test seams above.
 // ---------------------------------------------------------------------------
 
 export { createClaudeCodeAdapter } from "./claude-code.js";

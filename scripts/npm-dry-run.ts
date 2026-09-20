@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PACKAGE_MANIFEST_FILE } from "./pack.js";
 import { LAUNCHER_MANIFEST_FILE } from "./pack-launcher.js";
+import { readManifest, record, text } from "./release-helpers.js";
 
 // The authenticated npm dry-run of the candidate-validation scenario (#157, spec
 // #137 stories 85/89): a separately configured read-only npm identity authenticates
@@ -28,19 +28,7 @@ export interface DryRunStep {
   readonly tarball: string;
 }
 
-function record(value: unknown, field: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`Invalid npm dry-run manifest field: ${field}.`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function text(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`Invalid npm dry-run manifest field: ${field}.`);
-  }
-  return value;
-}
+const FIELD_ERROR = "Invalid npm dry-run manifest field";
 
 /** The ordered publish-dry-run plan for the packed candidate: every platform
  *  package from the package manifest in its own order, then the launcher last.
@@ -50,7 +38,11 @@ export function dryRunPlan(
   packageManifest: unknown,
   launcherManifest: unknown,
 ): DryRunStep[] {
-  const manifest = record(packageManifest, "package-manifest");
+  const manifest = record({
+    value: packageManifest,
+    field: "package-manifest",
+    errorPrefix: FIELD_ERROR,
+  });
   const packages = manifest.packages;
   if (!Array.isArray(packages) || packages.length === 0) {
     throw new Error(
@@ -58,27 +50,46 @@ export function dryRunPlan(
     );
   }
   const steps: DryRunStep[] = packages.map((entry, index) => {
-    const pkg = record(entry, `package-manifest.packages[${index}]`);
+    const pkg = record({
+      value: entry,
+      field: `package-manifest.packages[${index}]`,
+      errorPrefix: FIELD_ERROR,
+    });
     return {
-      package: text(pkg.package, `package-manifest.packages[${index}].package`),
-      tarball: text(pkg.tarball, `package-manifest.packages[${index}].tarball`),
+      package: text({
+        value: pkg.package,
+        field: `package-manifest.packages[${index}].package`,
+        errorPrefix: FIELD_ERROR,
+        rejectWhitespace: true,
+      }),
+      tarball: text({
+        value: pkg.tarball,
+        field: `package-manifest.packages[${index}].tarball`,
+        errorPrefix: FIELD_ERROR,
+        rejectWhitespace: true,
+      }),
     };
   });
-  const launcher = record(launcherManifest, "launcher-manifest");
+  const launcher = record({
+    value: launcherManifest,
+    field: "launcher-manifest",
+    errorPrefix: FIELD_ERROR,
+  });
   steps.push({
-    package: text(launcher.package, "launcher-manifest.package"),
-    tarball: text(launcher.tarball, "launcher-manifest.tarball"),
+    package: text({
+      value: launcher.package,
+      field: "launcher-manifest.package",
+      errorPrefix: FIELD_ERROR,
+      rejectWhitespace: true,
+    }),
+    tarball: text({
+      value: launcher.tarball,
+      field: "launcher-manifest.tarball",
+      errorPrefix: FIELD_ERROR,
+      rejectWhitespace: true,
+    }),
   });
   return steps;
-}
-
-function readManifest(path: string): unknown {
-  if (!existsSync(path)) {
-    throw new Error(
-      `Package manifest missing: ${path}. Run \`bun run scripts/pack.ts\` and \`bun run scripts/pack-launcher.ts\` first; the dry-run rehearses the packed candidate, never a rebuild.`,
-    );
-  }
-  return JSON.parse(readFileSync(path, "utf8"));
 }
 
 /** Run npm in the packages directory and fail closed on a non-zero exit. This job
@@ -96,8 +107,14 @@ async function main(): Promise<void> {
     throw new Error("Usage: bun scripts/npm-dry-run.ts <packages-dir>");
   }
   const plan = dryRunPlan(
-    readManifest(join(packagesDir, PACKAGE_MANIFEST_FILE)),
-    readManifest(join(packagesDir, LAUNCHER_MANIFEST_FILE)),
+    readManifest({
+      path: join(packagesDir, PACKAGE_MANIFEST_FILE),
+      missingMessage: `Package manifest missing: ${join(packagesDir, PACKAGE_MANIFEST_FILE)}. Run \`bun run scripts/pack.ts\` and \`bun run scripts/pack-launcher.ts\` first; the dry-run rehearses the packed candidate, never a rebuild.`,
+    }),
+    readManifest({
+      path: join(packagesDir, LAUNCHER_MANIFEST_FILE),
+      missingMessage: `Package manifest missing: ${join(packagesDir, LAUNCHER_MANIFEST_FILE)}. Run \`bun run scripts/pack.ts\` and \`bun run scripts/pack-launcher.ts\` first; the dry-run rehearses the packed candidate, never a rebuild.`,
+    }),
   );
   // Authenticate the read-only identity before any dry-run; a bad or missing
   // credential fails safely here rather than midway through the plan.

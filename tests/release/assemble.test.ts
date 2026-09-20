@@ -10,10 +10,10 @@ import {
   type CandidateManifest,
   assertAgrees,
   computeCandidate,
-  sha256,
 } from "../../scripts/assemble.js";
 import { verifyReleaseArchive } from "../../scripts/release-consumer.js";
 import { TARGETS } from "../../scripts/targets.js";
+import { sha256 } from "../helpers/sha256.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // These tests exercise the pure assembly and pre-extraction verification logic
@@ -47,8 +47,8 @@ function makeProject(version = VERSION): string {
   return root;
 }
 
-test("computeCandidate carries every owned target fact and a digest", () => {
-  const manifest = computeCandidate({ projectRoot: makeProject() });
+test("computeCandidate carries every owned target fact and a digest", async () => {
+  const manifest = await computeCandidate({ projectRoot: makeProject() });
 
   assert.equal(manifest.version, VERSION);
   assert.equal(manifest.targets.length, Object.keys(TARGETS).length);
@@ -70,17 +70,17 @@ test("computeCandidate carries every owned target fact and a digest", () => {
   }
 });
 
-test("computeCandidate fails closed when a candidate binary is missing", () => {
+test("computeCandidate fails closed when a candidate binary is missing", async () => {
   const root = makeProject();
   rmSync(join(root, "dist", TARGETS["linux-x64"].outfile));
-  assert.throws(
+  await assert.rejects(
     () => computeCandidate({ projectRoot: root }),
     /Candidate binary missing/,
   );
 });
 
-test("assertAgrees rejects version, identity, and binary-digest disagreement", () => {
-  const base = computeCandidate({ projectRoot: makeProject() });
+test("assertAgrees rejects version, identity, and binary-digest disagreement", async () => {
+  const base = await computeCandidate({ projectRoot: makeProject() });
   const clone = (): CandidateManifest =>
     JSON.parse(JSON.stringify(base)) as CandidateManifest;
 
@@ -115,12 +115,12 @@ test("assertAgrees rejects version, identity, and binary-digest disagreement", (
 
 /** A release directory holding one target's manifest, a stand-in archive whose
  *  digest matches the manifest, and a SHA256SUMS. No real archive is created. */
-function makeReleaseDir(): {
+async function makeReleaseDir(): Promise<{
   dir: string;
   archivePath: string;
   archive: string;
-} {
-  const manifest = computeCandidate({ projectRoot: makeProject() });
+}> {
+  const manifest = await computeCandidate({ projectRoot: makeProject() });
   const dir = makeTempDir("secant-release-dir-");
   const target = manifest.targets.find((t) => t.key === "linux-x64");
   assert.ok(target);
@@ -135,38 +135,38 @@ function makeReleaseDir(): {
   return { dir, archivePath, archive: target.archive };
 }
 
-test("the consumer refuses an archive that is not in the manifest", () => {
-  const { dir } = makeReleaseDir();
+test("the consumer refuses an archive that is not in the manifest", async () => {
+  const { dir } = await makeReleaseDir();
   const stray = join(dir, "secant-unknown.zip");
   writeFileSync(stray, "not a candidate");
-  assert.throws(
+  await assert.rejects(
     () => verifyReleaseArchive({ archive: stray, native: false }),
     /not a candidate archive/,
   );
 });
 
-test("the consumer refuses a tampered archive digest", () => {
-  const { archivePath } = makeReleaseDir();
+test("the consumer refuses a tampered archive digest", async () => {
+  const { archivePath } = await makeReleaseDir();
   appendFileSync(archivePath, "tamper");
-  assert.throws(
+  await assert.rejects(
     () => verifyReleaseArchive({ archive: archivePath, native: false }),
     /does not match the candidate manifest/,
   );
 });
 
-test("the consumer requires SHA256SUMS beside the manifest", () => {
-  const { dir, archivePath } = makeReleaseDir();
+test("the consumer requires SHA256SUMS beside the manifest", async () => {
+  const { dir, archivePath } = await makeReleaseDir();
   rmSync(join(dir, CHECKSUMS_FILE));
-  assert.throws(
+  await assert.rejects(
     () => verifyReleaseArchive({ archive: archivePath, native: false }),
     new RegExp(`${CHECKSUMS_FILE} is missing`),
   );
 });
 
-test("the consumer refuses a malformed manifest", () => {
-  const { dir, archivePath } = makeReleaseDir();
+test("the consumer refuses a malformed manifest", async () => {
+  const { dir, archivePath } = await makeReleaseDir();
   writeFileSync(join(dir, MANIFEST_FILE), "{}");
-  assert.throws(
+  await assert.rejects(
     () => verifyReleaseArchive({ archive: archivePath, native: false }),
     /Malformed candidate manifest/,
   );

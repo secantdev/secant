@@ -15,10 +15,10 @@ import {
   MANIFEST_FILE,
   NOTICES_FILE,
   type CandidateManifest,
-  sha256,
 } from "./assemble.js";
 import { NPM_OS, packTarball } from "./pack.js";
 import { TARGETS } from "./targets.js";
+import { sha256File } from "./release-helpers.js";
 
 // Packs the thin, script-free npm launcher package `@secantdev/secant` (spec #137,
 // ADR 0030) that turns npm/pnpm into a launcher channel rather than a second
@@ -98,12 +98,12 @@ export interface LauncherManifest {
   tarballSha256: string;
 }
 
-export function packLauncher(options: {
+export async function packLauncher(options: {
   projectRoot: string;
   distDir?: string;
   releaseDir?: string;
   outDir?: string;
-}): LauncherManifest {
+}): Promise<LauncherManifest> {
   const { projectRoot } = options;
   const distDir = options.distDir ?? join(projectRoot, "dist");
   const releaseDir = options.releaseDir ?? join(distDir, "release");
@@ -124,8 +124,8 @@ export function packLauncher(options: {
 
   const licensePath = join(projectRoot, LICENSE_FILE);
   const noticesPath = join(projectRoot, NOTICES_FILE);
-  const licenseSha256 = sha256(licensePath);
-  const noticesSha256 = sha256(noticesPath);
+  const licenseSha256 = await sha256File(licensePath);
+  const noticesSha256 = await sha256File(noticesPath);
   if (
     licenseSha256 !== candidate.licenseSha256 ||
     noticesSha256 !== candidate.noticesSha256
@@ -207,7 +207,7 @@ export function packLauncher(options: {
   );
 
   next.tarball = packTarball(stageDir, outDir);
-  next.tarballSha256 = sha256(join(outDir, next.tarball));
+  next.tarballSha256 = await sha256File(join(outDir, next.tarball));
   rmSync(stageDir, { recursive: true, force: true });
 
   writeFileSync(manifestPath, `${JSON.stringify(next, null, 2)}\n`);
@@ -216,7 +216,7 @@ export function packLauncher(options: {
 
 if (import.meta.main) {
   const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const manifest = packLauncher({ projectRoot });
+  const manifest = await packLauncher({ projectRoot });
   const outDir = join(projectRoot, "dist", "packages");
   console.log(
     `Packed launcher ${manifest.package}@${manifest.version} into ${outDir}:`,

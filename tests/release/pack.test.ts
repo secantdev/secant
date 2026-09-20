@@ -15,7 +15,6 @@ import {
   MANIFEST_FILE,
   NOTICES_FILE,
   computeCandidate,
-  sha256,
 } from "../../scripts/assemble.js";
 import {
   PACKAGE_MANIFEST_FILE,
@@ -29,6 +28,7 @@ import {
   verifyPlatformPackage,
 } from "../../scripts/package-consumer.js";
 import { TARGETS } from "../../scripts/targets.js";
+import { sha256 } from "../helpers/sha256.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // These tests exercise the pure packing and pre-install verification logic only,
@@ -52,7 +52,7 @@ const NPM_OS: Record<string, string> = {
 /** A fake project tree: package.json, legal material, and one stand-in binary per
  *  gated target under dist/, plus the archive candidate manifest assembly would
  *  have emitted (packing reads it as the byte-identity anchor). */
-function makeProject(version = VERSION): string {
+async function makeProject(version = VERSION): Promise<string> {
   const root = makeTempDir("secant-pack-project-");
   writeFileSync(
     join(root, "package.json"),
@@ -69,7 +69,7 @@ function makeProject(version = VERSION): string {
   mkdirSync(releaseDir, { recursive: true });
   writeFileSync(
     join(releaseDir, MANIFEST_FILE),
-    JSON.stringify(computeCandidate({ projectRoot: root })),
+    JSON.stringify(await computeCandidate({ projectRoot: root })),
   );
   return root;
 }
@@ -93,10 +93,12 @@ test("platformPackageJson carries the exact version, npm os/cpu, contents, and n
   }
 });
 
-test("computePackages carries every target and matches the archive candidate bytes", () => {
-  const root = makeProject();
-  const { manifest, packageJson } = computePackages({ projectRoot: root });
-  const candidate = computeCandidate({ projectRoot: root });
+test("computePackages carries every target and matches the archive candidate bytes", async () => {
+  const root = await makeProject();
+  const { manifest, packageJson } = await computePackages({
+    projectRoot: root,
+  });
+  const candidate = await computeCandidate({ projectRoot: root });
 
   assert.equal(manifest.version, VERSION);
   assert.equal(manifest.packages.length, Object.keys(TARGETS).length);
@@ -116,37 +118,38 @@ test("computePackages carries every target and matches the archive candidate byt
   }
 });
 
-test("computePackages fails closed without the archive candidate manifest", () => {
-  const root = makeProject();
+test("computePackages fails closed without the archive candidate manifest", async () => {
+  const root = await makeProject();
   rmSync(join(root, "dist", "release", MANIFEST_FILE));
-  assert.throws(
+  await assert.rejects(
     () => computePackages({ projectRoot: root }),
     /Archive candidate manifest missing/,
   );
 });
 
-test("computePackages fails closed when a dist binary differs from the candidate", () => {
-  const root = makeProject();
+test("computePackages fails closed when a dist binary differs from the candidate", async () => {
+  const root = await makeProject();
   // Rebuild-under-an-assembled-candidate: the candidate manifest is fixed, but a
   // dist binary now differs. Packing must never carry a non-candidate byte.
   appendFileSync(join(root, "dist", TARGETS["linux-x64"].outfile), "rebuilt");
-  assert.throws(
+  await assert.rejects(
     () => computePackages({ projectRoot: root }),
     /binary digest disagreement/,
   );
 });
 
-test("computePackages fails closed on legal-material drift", () => {
-  const root = makeProject();
+test("computePackages fails closed on legal-material drift", async () => {
+  const root = await makeProject();
   appendFileSync(join(root, LICENSE_FILE), "tampered");
-  assert.throws(
+  await assert.rejects(
     () => computePackages({ projectRoot: root }),
     /Legal-material digest disagreement/,
   );
 });
 
-test("assertPackagesAgree rejects version, identity, and binary-digest disagreement", () => {
-  const base = computePackages({ projectRoot: makeProject() }).manifest;
+test("assertPackagesAgree rejects version, identity, and binary-digest disagreement", async () => {
+  const base = (await computePackages({ projectRoot: await makeProject() }))
+    .manifest;
   const clone = (): PackageManifest =>
     JSON.parse(JSON.stringify(base)) as PackageManifest;
 
@@ -185,14 +188,15 @@ test("assertPackagesAgree rejects version, identity, and binary-digest disagreem
 
 /** A packages directory holding one target's manifest and a stand-in tarball whose
  *  digest matches it. No real tarball is packed. */
-function makePackagesDir(): {
+async function makePackagesDir(): Promise<{
   dir: string;
   target: string;
   tarballPath: string;
   npmOs: string;
   npmCpu: string;
-} {
-  const manifest = computePackages({ projectRoot: makeProject() }).manifest;
+}> {
+  const manifest = (await computePackages({ projectRoot: await makeProject() }))
+    .manifest;
   const dir = makeTempDir("secant-packages-dir-");
   const pkg = manifest.packages.find((p) => p.key === "linux-x64");
   assert.ok(pkg);
@@ -210,9 +214,9 @@ function makePackagesDir(): {
   };
 }
 
-test("the consumer accepts a matching-host package before install", () => {
-  const { dir, target, npmOs, npmCpu } = makePackagesDir();
-  assert.doesNotThrow(() =>
+test("the consumer accepts a matching-host package before install", async () => {
+  const { dir, target, npmOs, npmCpu } = await makePackagesDir();
+  await assert.doesNotReject(() =>
     verifyPlatformPackage({
       packagesDir: dir,
       target,
@@ -222,10 +226,10 @@ test("the consumer accepts a matching-host package before install", () => {
   );
 });
 
-test("the consumer refuses a package built for another target", () => {
-  const { dir, target } = makePackagesDir();
+test("the consumer refuses a package built for another target", async () => {
+  const { dir, target } = await makePackagesDir();
   // AC4: reject the wrong target — the linux-x64 package on a darwin/arm64 host.
-  assert.throws(
+  await assert.rejects(
     () =>
       verifyPlatformPackage({
         packagesDir: dir,
@@ -237,9 +241,9 @@ test("the consumer refuses a package built for another target", () => {
   );
 });
 
-test("the consumer refuses an unknown target", () => {
-  const { dir, npmOs, npmCpu } = makePackagesDir();
-  assert.throws(
+test("the consumer refuses an unknown target", async () => {
+  const { dir, npmOs, npmCpu } = await makePackagesDir();
+  await assert.rejects(
     () =>
       verifyPlatformPackage({
         packagesDir: dir,
@@ -251,10 +255,10 @@ test("the consumer refuses an unknown target", () => {
   );
 });
 
-test("the consumer refuses a tampered tarball digest", () => {
-  const { dir, target, tarballPath, npmOs, npmCpu } = makePackagesDir();
+test("the consumer refuses a tampered tarball digest", async () => {
+  const { dir, target, tarballPath, npmOs, npmCpu } = await makePackagesDir();
   appendFileSync(tarballPath, "tamper");
-  assert.throws(
+  await assert.rejects(
     () =>
       verifyPlatformPackage({
         packagesDir: dir,
@@ -266,10 +270,10 @@ test("the consumer refuses a tampered tarball digest", () => {
   );
 });
 
-test("the consumer requires the package manifest", () => {
-  const { dir, target, npmOs, npmCpu } = makePackagesDir();
+test("the consumer requires the package manifest", async () => {
+  const { dir, target, npmOs, npmCpu } = await makePackagesDir();
   rmSync(join(dir, PACKAGE_MANIFEST_FILE));
-  assert.throws(
+  await assert.rejects(
     () =>
       verifyPlatformPackage({
         packagesDir: dir,
@@ -281,10 +285,10 @@ test("the consumer requires the package manifest", () => {
   );
 });
 
-test("the consumer refuses a malformed manifest", () => {
-  const { dir, target, npmOs, npmCpu } = makePackagesDir();
+test("the consumer refuses a malformed manifest", async () => {
+  const { dir, target, npmOs, npmCpu } = await makePackagesDir();
   writeFileSync(join(dir, PACKAGE_MANIFEST_FILE), "{}");
-  assert.throws(
+  await assert.rejects(
     () =>
       verifyPlatformPackage({
         packagesDir: dir,
@@ -299,13 +303,13 @@ test("the consumer refuses a malformed manifest", () => {
 /** Stage a correct installed package directory (as npm would leave it) from a fake
  *  project's dist binary and legal material, so the deterministic suite can drive
  *  the post-install refusals that the CI round-trip otherwise never triggers. */
-function stageInstalledDir(): {
+async function stageInstalledDir(): Promise<{
   installedDir: string;
   pkg: PackageManifest["packages"][number];
   manifest: PackageManifest;
-} {
-  const root = makeProject();
-  const manifest = computePackages({ projectRoot: root }).manifest;
+}> {
+  const root = await makeProject();
+  const manifest = (await computePackages({ projectRoot: root })).manifest;
   const pkg = manifest.packages.find((p) => p.key === "linux-x64");
   assert.ok(pkg);
   pkg.tarball = "secantdev-secant-linux-x64-9.9.9-test.tgz";
@@ -325,68 +329,68 @@ function stageInstalledDir(): {
   return { installedDir, pkg, manifest };
 }
 
-test("verifyInstalledPackage accepts a correctly installed package", () => {
-  const { installedDir, pkg, manifest } = stageInstalledDir();
-  assert.doesNotThrow(() =>
+test("verifyInstalledPackage accepts a correctly installed package", async () => {
+  const { installedDir, pkg, manifest } = await stageInstalledDir();
+  await assert.doesNotReject(() =>
     verifyInstalledPackage(installedDir, pkg, manifest),
   );
 });
 
-test("verifyInstalledPackage rejects a stale version", () => {
-  const { installedDir, pkg, manifest } = stageInstalledDir();
+test("verifyInstalledPackage rejects a stale version", async () => {
+  const { installedDir, pkg, manifest } = await stageInstalledDir();
   const json = JSON.parse(
     readFileSync(join(installedDir, "package.json"), "utf8"),
   );
   json.version = "0.0.0-stale";
   writeFileSync(join(installedDir, "package.json"), JSON.stringify(json));
-  assert.throws(
+  await assert.rejects(
     () => verifyInstalledPackage(installedDir, pkg, manifest),
     /reports version/,
   );
 });
 
-test("verifyInstalledPackage rejects a lifecycle script", () => {
-  const { installedDir, pkg, manifest } = stageInstalledDir();
+test("verifyInstalledPackage rejects a lifecycle script", async () => {
+  const { installedDir, pkg, manifest } = await stageInstalledDir();
   const json = platformPackageJson(TARGETS[pkg.key], manifest.version);
   (json as { scripts: unknown }).scripts = { postinstall: "node evil.js" };
   writeFileSync(join(installedDir, "package.json"), JSON.stringify(json));
-  assert.throws(
+  await assert.rejects(
     () => verifyInstalledPackage(installedDir, pkg, manifest),
     /lifecycle script/,
   );
 });
 
-test("verifyInstalledPackage rejects an unexpected file", () => {
-  const { installedDir, pkg, manifest } = stageInstalledDir();
+test("verifyInstalledPackage rejects an unexpected file", async () => {
+  const { installedDir, pkg, manifest } = await stageInstalledDir();
   writeFileSync(join(installedDir, "stowaway.txt"), "unexpected");
-  assert.throws(
+  await assert.rejects(
     () => verifyInstalledPackage(installedDir, pkg, manifest),
     /contents are/,
   );
 });
 
-test("verifyInstalledPackage rejects a missing legal file", () => {
-  const { installedDir, pkg, manifest } = stageInstalledDir();
+test("verifyInstalledPackage rejects a missing legal file", async () => {
+  const { installedDir, pkg, manifest } = await stageInstalledDir();
   rmSync(join(installedDir, NOTICES_FILE));
-  assert.throws(
+  await assert.rejects(
     () => verifyInstalledPackage(installedDir, pkg, manifest),
     /contents are/,
   );
 });
 
-test("verifyInstalledPackage rejects tampered legal bytes", () => {
-  const { installedDir, pkg, manifest } = stageInstalledDir();
+test("verifyInstalledPackage rejects tampered legal bytes", async () => {
+  const { installedDir, pkg, manifest } = await stageInstalledDir();
   appendFileSync(join(installedDir, LICENSE_FILE), "tampered");
-  assert.throws(
+  await assert.rejects(
     () => verifyInstalledPackage(installedDir, pkg, manifest),
     new RegExp(`unexpected ${LICENSE_FILE}`),
   );
 });
 
-test("verifyInstalledPackage rejects an inner-binary digest mismatch", () => {
-  const { installedDir, pkg, manifest } = stageInstalledDir();
+test("verifyInstalledPackage rejects an inner-binary digest mismatch", async () => {
+  const { installedDir, pkg, manifest } = await stageInstalledDir();
   appendFileSync(join(installedDir, pkg.executable), "rebuilt");
-  assert.throws(
+  await assert.rejects(
     () => verifyInstalledPackage(installedDir, pkg, manifest),
     /does not match the package manifest/,
   );
@@ -395,10 +399,10 @@ test("verifyInstalledPackage rejects an inner-binary digest mismatch", () => {
 test(
   "verifyInstalledPackage rejects a non-executable binary",
   { skip: process.platform === "win32" },
-  () => {
-    const { installedDir, pkg, manifest } = stageInstalledDir();
+  async () => {
+    const { installedDir, pkg, manifest } = await stageInstalledDir();
     chmodSync(join(installedDir, pkg.executable), 0o644);
-    assert.throws(
+    await assert.rejects(
       () => verifyInstalledPackage(installedDir, pkg, manifest),
       /not executable/,
     );

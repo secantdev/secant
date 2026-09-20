@@ -1,3 +1,5 @@
+import { fail, record, text } from "../release-helpers.js";
+
 export type EvidenceSubject =
   | {
       readonly kind: "terminal";
@@ -24,65 +26,62 @@ export interface ReleaseEvidenceReport {
   readonly timestamp: string;
 }
 
-function fail(field: string): never {
-  throw new Error(`Invalid release evidence field: ${field}.`);
+const FIELD_ERROR = "Invalid release evidence field";
+
+function evidenceRecord(value: unknown, field: string) {
+  return record({ value, field, errorPrefix: FIELD_ERROR });
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function evidenceText(value: unknown, field: string): string {
+  return text({
+    value,
+    field,
+    errorPrefix: FIELD_ERROR,
+    rejectWhitespace: true,
+  });
 }
 
-function record(value: unknown, field: string): Record<string, unknown> {
-  if (!isRecord(value)) fail(field);
-  return value;
-}
-
-/** Hash the exact candidate bytes named by every release-evidence report. */
-export async function sha256File(path: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
-  return hash.digest("hex");
-}
-
-function text(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) fail(field);
-  return value;
+function invalidField(field: string): never {
+  return fail(`${FIELD_ERROR}: ${field}.`);
 }
 
 /** Validate evidence arriving from a saved report before it can support a claim. */
 export function parseReleaseEvidenceReport(
   value: unknown,
 ): ReleaseEvidenceReport {
-  const input = record(value, "report");
-  const operatingSystem = record(input.operatingSystem, "operatingSystem");
-  const subject = record(input.subject, "subject");
+  const input = evidenceRecord(value, "report");
+  const operatingSystem = evidenceRecord(
+    input.operatingSystem,
+    "operatingSystem",
+  );
+  const subject = evidenceRecord(input.subject, "subject");
   const kind = subject.kind;
-  if (kind !== "terminal" && kind !== "harness") fail("subject.kind");
-  const binarySha256 = text(input.binarySha256, "binarySha256");
-  if (!/^[0-9a-f]{64}$/.test(binarySha256)) fail("binarySha256");
+  if (kind !== "terminal" && kind !== "harness") invalidField("subject.kind");
+  const binarySha256 = evidenceText(input.binarySha256, "binarySha256");
+  if (!/^[0-9a-f]{64}$/.test(binarySha256)) invalidField("binarySha256");
   const outcome = input.outcome;
-  if (outcome !== "pass" && outcome !== "fail") fail("outcome");
-  const timestamp = text(input.timestamp, "timestamp");
+  if (outcome !== "pass" && outcome !== "fail") invalidField("outcome");
+  const timestamp = evidenceText(input.timestamp, "timestamp");
   if (
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(timestamp) ||
     Number.isNaN(Date.parse(timestamp))
   ) {
-    fail("timestamp");
+    invalidField("timestamp");
   }
 
   return {
-    checkName: text(input.checkName, "checkName"),
+    checkName: evidenceText(input.checkName, "checkName"),
     operatingSystem: {
-      name: text(operatingSystem.name, "operatingSystem.name"),
-      version: text(operatingSystem.version, "operatingSystem.version"),
+      name: evidenceText(operatingSystem.name, "operatingSystem.name"),
+      version: evidenceText(operatingSystem.version, "operatingSystem.version"),
     },
     subject: {
       kind,
-      name: text(subject.name, "subject.name"),
-      version: text(subject.version, "subject.version"),
+      name: evidenceText(subject.name, "subject.name"),
+      version: evidenceText(subject.version, "subject.version"),
     },
-    bunVersion: text(input.bunVersion, "bunVersion"),
-    secantVersion: text(input.secantVersion, "secantVersion"),
+    bunVersion: evidenceText(input.bunVersion, "bunVersion"),
+    secantVersion: evidenceText(input.secantVersion, "secantVersion"),
     binarySha256,
     outcome,
     timestamp,
@@ -107,5 +106,3 @@ export function formatReleaseEvidenceReport(
 - Outcome: ${report.outcome}
 - UTC timestamp: ${report.timestamp}`;
 }
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";

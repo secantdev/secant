@@ -10,14 +10,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import which from "which";
-import { LICENSE_FILE, NOTICES_FILE, sha256 } from "./assemble.js";
+import { join, resolve } from "node:path";
+import { LICENSE_FILE, NOTICES_FILE } from "./assemble.js";
 import {
   PACKAGE_MANIFEST_FILE,
   type PackageManifest,
   type PlatformPackage,
 } from "./pack.js";
+import { npmInstall, sha256File } from "./release-helpers.js";
 
 // The `platform-package-consumer` scenario (#151): install one per-platform npm
 // package exactly as a consumer receives it — with lifecycle scripts disabled —
@@ -28,45 +28,6 @@ import {
 // npm is the channel under test, so this consumer drives it directly. Run against
 // the matching-OS package on the Windows x64, macOS arm64, and Linux x64 matrix.
 
-/** Install a tarball through npm, never routing a Windows `.cmd` through cmd.exe —
- *  this repo spawns the real target directly rather than through a shell (#21,
- *  src/process; Bun raises EINVAL for a bare `.cmd` spawn just as Node does). On
- *  Windows that means Node on the `npm-cli.js` that ships beside the resolved `npm`
- *  shim (its own directory, so both the bundled and a global npm layout resolve);
- *  on POSIX the `npm` launcher runs directly. Verified end-to-end only on the
- *  three-OS CI job. */
-function npmInstall(
-  tarballPath: string,
-  cwd: string,
-): ReturnType<typeof spawnSync> {
-  const args = [
-    "install",
-    tarballPath,
-    "--ignore-scripts",
-    "--no-save",
-    "--no-package-lock",
-    "--no-audit",
-    "--no-fund",
-  ];
-  if (process.platform !== "win32") {
-    return spawnSync("npm", args, { cwd, encoding: "utf8" });
-  }
-  const npmShim = which.sync("npm");
-  const npmCli = join(
-    dirname(npmShim),
-    "node_modules",
-    "npm",
-    "bin",
-    "npm-cli.js",
-  );
-  if (!existsSync(npmCli)) {
-    throw new Error(
-      `npm CLI not found beside ${npmShim} (looked for ${npmCli}).`,
-    );
-  }
-  return spawnSync("node", [npmCli, ...args], { cwd, encoding: "utf8" });
-}
-
 /** Verify an installed package directory against the manifest — everything short
  *  of running the binary: exact version and os/cpu (AC1), no lifecycle script and
  *  exactly the executable and legal material (AC2), the inner-binary digest
@@ -74,11 +35,11 @@ function npmInstall(
  *  executable mode. Pure file inspection with no subprocess, so the deterministic
  *  suite drives it against a hand-staged directory to prove each AC4 refusal turns
  *  red; the `native` run and macOS signature stay in `verifyPlatformPackage`. */
-export function verifyInstalledPackage(
+export async function verifyInstalledPackage(
   installedDir: string,
   pkg: PlatformPackage,
   manifest: PackageManifest,
-): void {
+): Promise<void> {
   // Metadata: exact version and os/cpu constraints, and no lifecycle script.
   const installed = JSON.parse(
     readFileSync(join(installedDir, "package.json"), "utf8"),
@@ -125,7 +86,7 @@ export function verifyInstalledPackage(
 
   // The inner binary is byte-identical to the built archive candidate (AC3).
   const executablePath = join(installedDir, pkg.executable);
-  const binarySha256 = sha256(executablePath);
+  const binarySha256 = await sha256File(executablePath);
   if (binarySha256 !== pkg.binarySha256) {
     throw new Error(
       `${pkg.executable} digest ${binarySha256} does not match the package manifest ${pkg.binarySha256}.`,
@@ -133,10 +94,16 @@ export function verifyInstalledPackage(
   }
 
   // The bundled legal material is exactly the shipped LICENSE and notices.
-  if (sha256(join(installedDir, LICENSE_FILE)) !== manifest.licenseSha256) {
+  if (
+    (await sha256File(join(installedDir, LICENSE_FILE))) !==
+    manifest.licenseSha256
+  ) {
     throw new Error(`${pkg.package} carries an unexpected ${LICENSE_FILE}.`);
   }
-  if (sha256(join(installedDir, NOTICES_FILE)) !== manifest.noticesSha256) {
+  if (
+    (await sha256File(join(installedDir, NOTICES_FILE))) !==
+    manifest.noticesSha256
+  ) {
     throw new Error(`${pkg.package} carries an unexpected ${NOTICES_FILE}.`);
   }
 
@@ -152,7 +119,7 @@ export function verifyInstalledPackage(
 /** The pre-install refusals and the installed-contents checks are deterministic;
  *  the `bun test` suite exercises them directly. The npm install → run round-trip
  *  needs npm and a real tarball, so it runs only in the three-OS CI job. */
-export function verifyPlatformPackage(options: {
+export async function verifyPlatformPackage(options: {
   /** Directory holding the packed tarballs and the package manifest. */
   packagesDir: string;
   /** The target key to verify: windows-x64, darwin-arm64, or linux-x64. */
@@ -162,7 +129,7 @@ export function verifyPlatformPackage(options: {
   /** Host to check the package's os/cpu against; defaults to this process. npm's
    *  os/cpu tokens are exactly `process.platform`/`process.arch`. */
   host?: { platform: string; arch: string };
-}): void {
+}): Promise<void> {
   const packagesDir = resolve(options.packagesDir);
   const native = options.native ?? true;
   const host = options.host ?? {
@@ -196,7 +163,7 @@ export function verifyPlatformPackage(options: {
   if (!existsSync(tarballPath)) {
     throw new Error(`Package tarball not found: ${tarballPath}.`);
   }
-  const tarballSha256 = sha256(tarballPath);
+  const tarballSha256 = await sha256File(tarballPath);
   if (tarballSha256 !== pkg.tarballSha256) {
     throw new Error(
       `${pkg.tarball} digest ${tarballSha256} does not match the package manifest ${pkg.tarballSha256}.`,
@@ -221,7 +188,7 @@ export function verifyPlatformPackage(options: {
       join(installDir, "package.json"),
       `${JSON.stringify({ name: "secant-package-consumer", private: true }, null, 2)}\n`,
     );
-    const install = npmInstall(tarballPath, installDir);
+    const install = npmInstall({ tarballs: [tarballPath], cwd: installDir });
     if (install.error) throw install.error;
     if (install.status !== 0) {
       throw new Error(
@@ -236,7 +203,7 @@ export function verifyPlatformPackage(options: {
       );
     }
 
-    verifyInstalledPackage(installedDir, pkg, manifest);
+    await verifyInstalledPackage(installedDir, pkg, manifest);
     const executablePath = join(installedDir, pkg.executable);
 
     // Apple silicon refuses arm64 code without at least Bun's ad-hoc signature,
@@ -282,6 +249,6 @@ if (import.meta.main) {
       "Usage: bun scripts/package-consumer.ts <packages-dir> <target-key>",
     );
   }
-  verifyPlatformPackage({ packagesDir, target });
+  await verifyPlatformPackage({ packagesDir, target });
   console.log(`Platform package verified: ${target}.`);
 }

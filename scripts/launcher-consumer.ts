@@ -14,7 +14,6 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import which from "which";
 import { installReplayerAt } from "../tests/harness/replayer-install.js";
 import { seedTestRepairWorkspace } from "../tests/helpers/testRepairWorkspace.js";
 import { PACKAGE_MANIFEST_FILE, type PackageManifest } from "./pack.js";
@@ -24,6 +23,7 @@ import {
   type LauncherManifest,
 } from "./pack-launcher.js";
 import { hostTargetKey } from "./targets.js";
+import { npmInstall, runGit } from "./release-helpers.js";
 
 // The `npm-launcher-consumer` scenario (#152). It proves the thin, script-free npm
 // launcher (@secantdev/secant, spec #137) as a consumer receives it: installed with
@@ -42,45 +42,6 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Proof Bundle env's PATH so the recorded replayer's shim can spawn it, exactly as
 // the compiled-binary smoke does.
 const runtimeDir = dirname(process.execPath);
-
-/** Install one or more local tarballs with lifecycle scripts disabled, never
- *  routing a Windows `.cmd` through cmd.exe — Node on `npm-cli.js` beside the
- *  resolved `npm` shim on Windows, the `npm` launcher directly on POSIX (#21;
- *  mirrors scripts/package-consumer.ts). `--omit=optional` keeps the install
- *  network-free: the launcher's optional dependencies are the unpublished platform
- *  packages, and the matching one is supplied as an explicit tarball instead. */
-function npmInstall(
-  tarballs: readonly string[],
-  cwd: string,
-): SpawnSyncReturns<string> {
-  const args = [
-    "install",
-    ...tarballs,
-    "--ignore-scripts",
-    "--omit=optional",
-    "--no-save",
-    "--no-package-lock",
-    "--no-audit",
-    "--no-fund",
-  ];
-  if (process.platform !== "win32") {
-    return spawnSync("npm", args, { cwd, encoding: "utf8" });
-  }
-  const npmShim = which.sync("npm");
-  const npmCli = join(
-    dirname(npmShim),
-    "node_modules",
-    "npm",
-    "bin",
-    "npm-cli.js",
-  );
-  if (!existsSync(npmCli)) {
-    throw new Error(
-      `npm CLI not found beside ${npmShim} (looked for ${npmCli}).`,
-    );
-  }
-  return spawnSync("node", [npmCli, ...args], { cwd, encoding: "utf8" });
-}
 
 /** Run the launcher entry under Node with captured output. */
 function launch(
@@ -161,7 +122,7 @@ function buildPnpmLayout(
 }
 
 function git(args: readonly string[], cwd: string): string {
-  const result = spawnSync("git", [...args], { cwd, encoding: "utf8" });
+  const result = runGit({ args, cwd });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(
@@ -214,7 +175,11 @@ export function verifyLauncherConsumer(packagesDir: string): void {
       join(consumer, "package.json"),
       `${JSON.stringify({ name: "secant-launcher-consumer", private: true }, null, 2)}\n`,
     );
-    const install = npmInstall([launcherTarball, platformTarball], consumer);
+    const install = npmInstall({
+      tarballs: [launcherTarball, platformTarball],
+      cwd: consumer,
+      omitOptional: true,
+    });
     if (install.error) throw install.error;
     if (install.status !== 0) {
       throw new Error(

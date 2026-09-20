@@ -17,8 +17,8 @@ import {
   NOTICES_FILE,
   type CandidateManifest,
   type CandidateTarget,
-  sha256,
 } from "./assemble.js";
+import { sha256File } from "./release-helpers.js";
 
 // The `release-archive-consumer` scenario (#150): extract one final release
 // archive exactly as a consumer receives it and prove its layout, executable
@@ -45,13 +45,13 @@ function extract(archivePath: string, type: string, into: string): void {
   }
 }
 
-export function verifyReleaseArchive(options: {
+export async function verifyReleaseArchive(options: {
   archive: string;
   manifestDir?: string;
   /** Run the extracted binary (`--version`) and verify the macOS signature.
    *  Only valid when the archive targets this host; the CI matrix guarantees it. */
   native?: boolean;
-}): void {
+}): Promise<void> {
   const archivePath = resolve(options.archive);
   if (!existsSync(archivePath)) {
     throw new Error(`Release archive not found: ${archivePath}.`);
@@ -78,7 +78,7 @@ export function verifyReleaseArchive(options: {
 
   // The archive is the exact assembled candidate (its own digest, cross-checked
   // against the emitted SHA256SUMS).
-  const archiveSha256 = sha256(archivePath);
+  const archiveSha256 = await sha256File(archivePath);
   if (archiveSha256 !== target.archiveSha256) {
     throw new Error(
       `${target.archive} digest ${archiveSha256} does not match the candidate manifest ${target.archiveSha256}.`,
@@ -113,7 +113,7 @@ export function verifyReleaseArchive(options: {
 
     // The inner binary is byte-identical to the built candidate.
     const executablePath = join(extractDir, target.executable);
-    const binarySha256 = sha256(executablePath);
+    const binarySha256 = await sha256File(executablePath);
     if (binarySha256 !== target.binarySha256) {
       throw new Error(
         `${target.executable} digest ${binarySha256} does not match the candidate manifest ${target.binarySha256}.`,
@@ -121,12 +121,18 @@ export function verifyReleaseArchive(options: {
     }
 
     // The bundled legal material is exactly the shipped LICENSE and notices.
-    if (sha256(join(extractDir, LICENSE_FILE)) !== manifest.licenseSha256) {
+    if (
+      (await sha256File(join(extractDir, LICENSE_FILE))) !==
+      manifest.licenseSha256
+    ) {
       throw new Error(
         `${target.archive} carries an unexpected ${LICENSE_FILE}.`,
       );
     }
-    if (sha256(join(extractDir, NOTICES_FILE)) !== manifest.noticesSha256) {
+    if (
+      (await sha256File(join(extractDir, NOTICES_FILE))) !==
+      manifest.noticesSha256
+    ) {
       throw new Error(
         `${target.archive} carries an unexpected ${NOTICES_FILE}.`,
       );
@@ -187,6 +193,6 @@ if (import.meta.main) {
       "Usage: bun scripts/release-consumer.ts <archive> [manifest-dir]",
     );
   }
-  verifyReleaseArchive({ archive, manifestDir: process.argv[3] });
+  await verifyReleaseArchive({ archive, manifestDir: process.argv[3] });
   console.log(`Release archive verified: ${basename(resolve(archive))}.`);
 }

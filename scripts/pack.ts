@@ -18,8 +18,8 @@ import {
   MANIFEST_FILE,
   NOTICES_FILE,
   type CandidateManifest,
-  sha256,
 } from "./assemble.js";
+import { sha256File } from "./release-helpers.js";
 import { TARGETS, type CompileTarget } from "./targets.js";
 
 // Packs the three per-platform npm packages (spec #137, ADR 0030) from the same
@@ -96,14 +96,14 @@ export function platformPackageJson(
  *  (AC3). Pure I/O (hashing) with no subprocess — only `packPlatformPackages`'s
  *  `bun pm pack` spawns a tool — which is why this half is what the deterministic
  *  suite tests. */
-export function computePackages(options: {
+export async function computePackages(options: {
   projectRoot: string;
   distDir?: string;
   releaseDir?: string;
-}): {
+}): Promise<{
   manifest: PackageManifest;
   packageJson: Record<string, Record<string, unknown>>;
-} {
+}> {
   const { projectRoot } = options;
   const distDir = options.distDir ?? join(projectRoot, "dist");
   const releaseDir = options.releaseDir ?? join(distDir, "release");
@@ -118,8 +118,8 @@ export function computePackages(options: {
     readFileSync(candidatePath, "utf8"),
   );
 
-  const licenseSha256 = sha256(join(projectRoot, LICENSE_FILE));
-  const noticesSha256 = sha256(join(projectRoot, NOTICES_FILE));
+  const licenseSha256 = await sha256File(join(projectRoot, LICENSE_FILE));
+  const noticesSha256 = await sha256File(join(projectRoot, NOTICES_FILE));
   if (
     licenseSha256 !== candidate.licenseSha256 ||
     noticesSha256 !== candidate.noticesSha256
@@ -143,7 +143,7 @@ export function computePackages(options: {
         `Candidate binary missing for ${key}: ${binaryPath}. Packing never builds an input.`,
       );
     }
-    const binarySha256 = sha256(binaryPath);
+    const binarySha256 = await sha256File(binaryPath);
     if (binarySha256 !== archiveTarget.binarySha256) {
       throw new Error(
         `Candidate binary digest disagreement for ${key}: dist bytes differ from the assembled archive candidate.`,
@@ -248,18 +248,18 @@ export function packTarball(stageDir: string, outDir: string): string {
   return produced[0];
 }
 
-export function packPlatformPackages(options: {
+export async function packPlatformPackages(options: {
   projectRoot: string;
   distDir?: string;
   releaseDir?: string;
   outDir?: string;
-}): PackageManifest {
+}): Promise<PackageManifest> {
   const { projectRoot } = options;
   const distDir = options.distDir ?? join(projectRoot, "dist");
   const releaseDir = options.releaseDir ?? join(distDir, "release");
   const outDir = options.outDir ?? join(distDir, "packages");
 
-  const { manifest: next, packageJson } = computePackages({
+  const { manifest: next, packageJson } = await computePackages({
     projectRoot,
     distDir,
     releaseDir,
@@ -307,7 +307,7 @@ export function packPlatformPackages(options: {
     );
 
     pkg.tarball = packTarball(stageDir, outDir);
-    pkg.tarballSha256 = sha256(join(outDir, pkg.tarball));
+    pkg.tarballSha256 = await sha256File(join(outDir, pkg.tarball));
     rmSync(stageDir, { recursive: true, force: true });
   }
 
@@ -317,7 +317,7 @@ export function packPlatformPackages(options: {
 
 if (import.meta.main) {
   const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const manifest = packPlatformPackages({ projectRoot });
+  const manifest = await packPlatformPackages({ projectRoot });
   const outDir = join(projectRoot, "dist", "packages");
   console.log(
     `Packed ${manifest.packages.length} platform packages (@secantdev/secant@${manifest.version}) into ${outDir}:`,

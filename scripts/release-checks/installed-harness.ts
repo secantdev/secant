@@ -14,9 +14,9 @@ import {
 } from "./installed-harness-report.js";
 import {
   formatReleaseEvidenceReport,
-  sha256File,
   type ReleaseEvidenceReport,
 } from "./release-evidence.js";
+import { fail, sha256File } from "../release-helpers.js";
 
 type HarnessId = "claude-code" | "codex";
 
@@ -33,10 +33,6 @@ The workspace must be a disposable Git worktree prepared for the external Test
 Repair Proof Bundle. This check runs the external candidate, approves the
 workspace, installs the external Bundle, and approves its authored commit gate.
 The check intentionally leaves the resulting repair commit in the workspace.`;
-
-function fail(message: string, cause?: unknown): never {
-  throw new Error(message, cause === undefined ? undefined : { cause });
-}
 
 function object(value: unknown): ObjectValue | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {

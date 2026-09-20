@@ -15,9 +15,9 @@ import {
   LICENSE_FILE,
   MANIFEST_FILE,
   NOTICES_FILE,
-  sha256,
 } from "../../scripts/assemble.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { sha256 } from "../helpers/sha256.js";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "../..");
 const INSTALLER = join(PROJECT_ROOT, "install.sh");

@@ -12,7 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { formatWindowsTerminalReport } from "./windows-terminal-report.js";
-import { sha256File } from "./release-evidence.js";
+import { fail, sha256File } from "../release-helpers.js";
 
 const HELP = `Windows Terminal human real-terminal check
 
@@ -33,10 +33,6 @@ interface CheckContext {
   readonly binary: string;
   readonly workspace: string;
   readonly env: NodeJS.ProcessEnv;
-}
-
-function fail(message: string, cause?: unknown): never {
-  throw new Error(message, cause === undefined ? undefined : { cause });
 }
 
 function validateManifest(value: unknown): PackageManifest {

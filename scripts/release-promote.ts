@@ -7,7 +7,6 @@ import {
   CHECKSUMS_FILE,
   MANIFEST_FILE,
   assertAgrees,
-  sha256,
   type CandidateManifest,
 } from "./assemble.js";
 import { LAUNCHER_MANIFEST_FILE, launcherPlatforms } from "./pack-launcher.js";
@@ -18,6 +17,12 @@ import {
   type PackageManifest,
 } from "./pack.js";
 import { TARGETS } from "./targets.js";
+import {
+  readManifest,
+  record as guardRecord,
+  sha256File,
+  text as guardText,
+} from "./release-helpers.js";
 
 export type PublishedPackageState = "missing" | "identical" | "conflicting";
 
@@ -88,19 +93,13 @@ export class PromotionCommandError extends Error {
   }
 }
 
-function record(value: unknown, field: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`Invalid approved candidate field: ${field}.`);
-  }
-  return value as Record<string, unknown>;
-}
+const APPROVED_FIELD_ERROR = "Invalid approved candidate field";
 
-function text(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`Invalid approved candidate field: ${field}.`);
-  }
-  return value;
-}
+const record = (value: unknown, field: string): Record<string, unknown> =>
+  guardRecord({ value, field, errorPrefix: APPROVED_FIELD_ERROR });
+
+const text = (value: unknown, field: string): string =>
+  guardText({ value, field, errorPrefix: APPROVED_FIELD_ERROR });
 
 function entries(value: unknown, field: string): Record<string, unknown>[] {
   if (!Array.isArray(value) || value.length === 0) {
@@ -109,18 +108,18 @@ function entries(value: unknown, field: string): Record<string, unknown>[] {
   return value.map((entry, index) => record(entry, `${field}[${index}]`));
 }
 
-function readManifest(path: string, field: string): Record<string, unknown> {
-  if (!existsSync(path)) throw new Error(`Approved ${field} missing: ${path}.`);
-  try {
-    return record(JSON.parse(readFileSync(path, "utf8")), field);
-  } catch (error) {
-    if (error instanceof SyntaxError) {
-      throw new Error(`Approved ${field} is not valid JSON: ${path}.`, {
-        cause: error,
-      });
-    }
-    throw error;
-  }
+function readApprovedManifest(
+  path: string,
+  field: string,
+): Record<string, unknown> {
+  return record(
+    readManifest({
+      path,
+      missingMessage: `Approved ${field} missing: ${path}.`,
+      invalidJsonMessage: `Approved ${field} is not valid JSON: ${path}.`,
+    }),
+    field,
+  );
 }
 
 function candidateFilename(value: unknown, field: string): string {
@@ -131,10 +130,14 @@ function candidateFilename(value: unknown, field: string): string {
   return name;
 }
 
-function assertDigest(path: string, expected: string, subject: string): void {
+async function assertDigest(
+  path: string,
+  expected: string,
+  subject: string,
+): Promise<void> {
   if (!existsSync(path))
     throw new Error(`Approved ${subject} missing: ${path}.`);
-  const actual = sha256(path);
+  const actual = await sha256File(path);
   if (actual !== expected) {
     throw new Error(
       `Approved candidate digest disagreement for ${subject}: expected ${expected}, got ${actual}.`,
@@ -142,10 +145,10 @@ function assertDigest(path: string, expected: string, subject: string): void {
   }
 }
 
-function validateCandidateManifest(
+async function validateCandidateManifest(
   value: Record<string, unknown>,
   releaseDir: string,
-): CandidateManifest {
+): Promise<CandidateManifest> {
   const version = text(value.version, "candidate-manifest.version");
   const licenseSha256 = text(
     value.licenseSha256,
@@ -162,7 +165,8 @@ function validateCandidateManifest(
       "Approved candidate target-set disagreement with the release target manifest.",
     );
   }
-  const targets = targetValues.map((entry, index) => {
+  const targets: CandidateManifest["targets"] = [];
+  for (const [index, entry] of targetValues.entries()) {
     const key = text(entry.key, `candidate-manifest.targets[${index}].key`);
     const expected = TARGETS[key];
     if (expected === undefined || key !== targetKeys[index]) {
@@ -200,7 +204,7 @@ function validateCandidateManifest(
         `candidate-manifest.targets[${index}].executable`,
       ),
     };
-    assertDigest(join(releaseDir, archive), archiveSha256, key);
+    await assertDigest(join(releaseDir, archive), archiveSha256, key);
     const target: CandidateManifest["targets"][number] = {
       key,
       ...identity,
@@ -211,8 +215,8 @@ function validateCandidateManifest(
       ),
       archiveSha256,
     };
-    return target;
-  });
+    targets.push(target);
+  }
   const manifest: CandidateManifest = {
     version,
     licenseSha256,
@@ -258,11 +262,11 @@ function validateChecksums(
   }
 }
 
-function validatePackageManifest(
+async function validatePackageManifest(
   value: Record<string, unknown>,
   candidate: CandidateManifest,
   packagesDir: string,
-): PackagePublication[] {
+): Promise<PackagePublication[]> {
   const version = text(value.version, "package-manifest.version");
   const licenseSha256 = text(
     value.licenseSha256,
@@ -287,7 +291,8 @@ function validatePackageManifest(
       "Approved platform-package target-set disagreement with the archive candidate.",
     );
   }
-  const packages = packageValues.map((entry, index) => {
+  const packages: PackageManifest["packages"] = [];
+  for (const [index, entry] of packageValues.entries()) {
     const target = candidate.targets[index]!;
     const key = text(entry.key, `package-manifest.packages[${index}].key`);
     if (key !== target.key) {
@@ -303,8 +308,8 @@ function validatePackageManifest(
       entry.tarballSha256,
       `package-manifest.packages[${index}].tarballSha256`,
     );
-    assertDigest(join(packagesDir, tarball), tarballSha256, target.key);
-    return {
+    await assertDigest(join(packagesDir, tarball), tarballSha256, target.key);
+    packages.push({
       key,
       package: text(
         entry.package,
@@ -322,8 +327,8 @@ function validatePackageManifest(
       ),
       tarball,
       tarballSha256,
-    };
-  });
+    });
+  }
   const manifest: PackageManifest = {
     version,
     licenseSha256,
@@ -354,11 +359,11 @@ function validatePackageManifest(
   }));
 }
 
-function validateLauncherManifest(
+async function validateLauncherManifest(
   value: Record<string, unknown>,
   candidate: CandidateManifest,
   packagesDir: string,
-): PackagePublication {
+): Promise<PackagePublication> {
   const version = text(value.version, "launcher-manifest.version");
   const packageName = text(value.package, "launcher-manifest.package");
   const licenseSha256 = text(
@@ -390,7 +395,7 @@ function validateLauncherManifest(
       "Approved launcher platform identity disagrees with the release target manifest.",
     );
   }
-  assertDigest(join(packagesDir, tarball), tarballSha256, "launcher");
+  await assertDigest(join(packagesDir, tarball), tarballSha256, "launcher");
   return {
     kind: "launcher",
     package: packageName,
@@ -400,14 +405,14 @@ function validateLauncherManifest(
   };
 }
 
-export function loadApprovedCandidate(options: {
+export async function loadApprovedCandidate(options: {
   readonly expectedTag: string;
   readonly releaseDir: string;
   readonly packagesDir: string;
-}): ApprovedCandidate {
+}): Promise<ApprovedCandidate> {
   const candidatePath = join(options.releaseDir, MANIFEST_FILE);
-  const candidate = validateCandidateManifest(
-    readManifest(candidatePath, "candidate manifest"),
+  const candidate = await validateCandidateManifest(
+    readApprovedManifest(candidatePath, "candidate manifest"),
     options.releaseDir,
   );
   if (options.expectedTag !== `v${candidate.version}`) {
@@ -416,16 +421,16 @@ export function loadApprovedCandidate(options: {
     );
   }
   validateChecksums(candidate, options.releaseDir);
-  const platformPackages = validatePackageManifest(
-    readManifest(
+  const platformPackages = await validatePackageManifest(
+    readApprovedManifest(
       join(options.packagesDir, PACKAGE_MANIFEST_FILE),
       "package manifest",
     ),
     candidate,
     options.packagesDir,
   );
-  const launcher = validateLauncherManifest(
-    readManifest(
+  const launcher = await validateLauncherManifest(
+    readApprovedManifest(
       join(options.packagesDir, LAUNCHER_MANIFEST_FILE),
       "launcher manifest",
     ),
@@ -437,14 +442,16 @@ export function loadApprovedCandidate(options: {
     CHECKSUMS_FILE,
     MANIFEST_FILE,
   ];
+  const assets: ReleaseAsset[] = [];
+  for (const name of assetNames) {
+    const path = join(options.releaseDir, name);
+    assets.push({ name, path, sha256: await sha256File(path) });
+  }
   return {
     tag: options.expectedTag,
     version: candidate.version,
     packages: [...platformPackages, launcher],
-    assets: assetNames.map((name) => {
-      const path = join(options.releaseDir, name);
-      return { name, path, sha256: sha256(path) };
-    }),
+    assets,
   };
 }
 
@@ -508,10 +515,10 @@ function jsonRecord(value: unknown, subject: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function inspectPublishedPackage(
+async function inspectPublishedPackage(
   run: RunCommand,
   pkg: PackagePublication,
-): PublishedPackageState {
+): Promise<PublishedPackageState> {
   const spec = `${pkg.package}@${pkg.version}`;
   const viewArgs = ["view", spec, "version", "--json"];
   const view = run("npm", viewArgs);
@@ -549,7 +556,9 @@ function inspectPublishedPackage(
     if (!existsSync(downloadedPath)) {
       throw new Error(`npm pack did not write ${downloadedPath}.`);
     }
-    return sha256(downloadedPath) === pkg.sha256 ? "identical" : "conflicting";
+    return (await sha256File(downloadedPath)) === pkg.sha256
+      ? "identical"
+      : "conflicting";
   } finally {
     rmSync(downloadDir, { recursive: true, force: true });
   }
@@ -591,11 +600,11 @@ function publishedRelease(
   return { isDraft: release.isDraft, assets };
 }
 
-function assertExistingAsset(
+async function assertExistingAsset(
   run: RunCommand,
   tag: string,
   asset: ReleaseAsset,
-): void {
+): Promise<void> {
   const downloadDir = mkdtempSync(join(tmpdir(), "secant-release-asset-"));
   try {
     runChecked(run, "gh", [
@@ -607,16 +616,16 @@ function assertExistingAsset(
       "--dir",
       downloadDir,
     ]);
-    assertDigest(join(downloadDir, asset.name), asset.sha256, asset.name);
+    await assertDigest(join(downloadDir, asset.name), asset.sha256, asset.name);
   } finally {
     rmSync(downloadDir, { recursive: true, force: true });
   }
 }
 
-function exposeGitHubRelease(
+async function exposeGitHubRelease(
   run: RunCommand,
   candidate: ApprovedCandidate,
-): void {
+): Promise<void> {
   let release = publishedRelease(run, candidate.tag);
   if (release === undefined) {
     runChecked(run, "gh", [
@@ -643,7 +652,7 @@ function exposeGitHubRelease(
         `GitHub release ${candidate.tag} contains unapproved asset ${name}.`,
       );
     }
-    assertExistingAsset(run, candidate.tag, approved);
+    await assertExistingAsset(run, candidate.tag, approved);
   }
 
   const existing = new Set(release.assets);
@@ -670,7 +679,7 @@ export function createCliPromotionPort(run: RunCommand): PromotionPort {
       runChecked(run, "npm", ["publish", pkg.path, "--access", "public"]);
     },
     exposeGitHubRelease(candidate) {
-      exposeGitHubRelease(run, candidate);
+      return exposeGitHubRelease(run, candidate);
     },
   };
 }
@@ -723,7 +732,7 @@ async function main(): Promise<void> {
     );
   }
   const tag = assertProtectedPromotionInvocation(process.env);
-  const candidate = loadApprovedCandidate({
+  const candidate = await loadApprovedCandidate({
     expectedTag: tag,
     releaseDir,
     packagesDir,

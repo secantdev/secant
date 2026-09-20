@@ -6,8 +6,8 @@ import {
   MANIFEST_FILE,
   NOTICES_FILE,
   type CandidateManifest,
-  sha256,
 } from "./assemble.js";
+import { sha256File } from "./release-helpers.js";
 import {
   LAUNCHER_MANIFEST_FILE,
   type LauncherManifest,
@@ -331,8 +331,8 @@ if (import.meta.main) {
 
   const notices = readFileSync(join(projectRoot, NOTICES_FILE), "utf8");
   const truth: SourceOfTruth = {
-    licenseSha256: sha256(join(projectRoot, LICENSE_FILE)),
-    noticesSha256: sha256(join(projectRoot, NOTICES_FILE)),
+    licenseSha256: await sha256File(join(projectRoot, LICENSE_FILE)),
+    noticesSha256: await sha256File(join(projectRoot, NOTICES_FILE)),
   };
 
   const releaseDir = join(projectRoot, "dist", "release");

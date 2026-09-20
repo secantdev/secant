@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -13,6 +12,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TARGETS, type ArchiveType } from "./targets.js";
+import { sha256File } from "./release-helpers.js";
 
 // Assembles the three release archives (ADR 0030, spec #137) once from the
 // already-built candidate binaries under dist/, through the one authoritative
@@ -48,10 +48,6 @@ export interface CandidateManifest {
   readonly licenseSha256: string;
   readonly noticesSha256: string;
   readonly targets: CandidateTarget[];
-}
-
-export function sha256(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 /** Create the archive once from the staged contents, using the platform archive
@@ -134,10 +130,10 @@ export function assertAgrees(
  *  target the owned identity facts plus the input binary's SHA-256. Pure I/O
  *  (hashing) with no subprocess: only `assembleRelease`'s archive creation
  *  spawns tools, which is why this half is what the deterministic suite tests. */
-export function computeCandidate(options: {
+export async function computeCandidate(options: {
   projectRoot: string;
   distDir?: string;
-}): CandidateManifest {
+}): Promise<CandidateManifest> {
   const { projectRoot } = options;
   const distDir = options.distDir ?? join(projectRoot, "dist");
 
@@ -164,9 +160,10 @@ export function computeCandidate(options: {
     }
   }
 
-  const targets: CandidateTarget[] = keys.map((key) => {
+  const targets: CandidateTarget[] = [];
+  for (const key of keys) {
     const target = TARGETS[key];
-    return {
+    targets.push({
       key,
       os: target.os,
       cpu: target.cpu,
@@ -174,30 +171,30 @@ export function computeCandidate(options: {
       archive: target.archive,
       archiveType: target.archiveType,
       executable: target.executable,
-      binarySha256: sha256(join(distDir, target.outfile)),
+      binarySha256: await sha256File(join(distDir, target.outfile)),
       archiveSha256: "",
-    };
-  });
+    });
+  }
   return {
     version,
-    licenseSha256: sha256(licensePath),
-    noticesSha256: sha256(noticesPath),
+    licenseSha256: await sha256File(licensePath),
+    noticesSha256: await sha256File(noticesPath),
     targets,
   };
 }
 
-export function assembleRelease(options: {
+export async function assembleRelease(options: {
   projectRoot: string;
   distDir?: string;
   outDir?: string;
-}): CandidateManifest {
+}): Promise<CandidateManifest> {
   const { projectRoot } = options;
   const distDir = options.distDir ?? join(projectRoot, "dist");
   const outDir = options.outDir ?? join(distDir, "release");
   const licensePath = join(projectRoot, LICENSE_FILE);
   const noticesPath = join(projectRoot, NOTICES_FILE);
 
-  const next = computeCandidate({ projectRoot, distDir });
+  const next = await computeCandidate({ projectRoot, distDir });
 
   // Immutability: a prior candidate manifest must agree on version, legal
   // material, and every input-binary digest. A disagreement means the inputs
@@ -239,7 +236,7 @@ export function assembleRelease(options: {
     rmSync(archivePath, { force: true });
     createArchive(stageDir, contents, target.archiveType, archivePath);
     rmSync(stageDir, { recursive: true, force: true });
-    target.archiveSha256 = sha256(archivePath);
+    target.archiveSha256 = await sha256File(archivePath);
   }
 
   writeFileSync(manifestPath, `${JSON.stringify(next, null, 2)}\n`);
@@ -252,7 +249,7 @@ export function assembleRelease(options: {
 
 if (import.meta.main) {
   const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const manifest = assembleRelease({ projectRoot });
+  const manifest = await assembleRelease({ projectRoot });
   const outDir = join(projectRoot, "dist", "release");
   console.log(
     `Assembled ${manifest.targets.length} release archives (@secantdev/secant@${manifest.version}) into ${outDir}:`,

@@ -12,8 +12,8 @@ import {
   type PackagePublication,
   type PromotionPort,
 } from "../../scripts/release-promote.js";
-import { sha256 } from "../../scripts/assemble.js";
 import { launcherPlatforms } from "../../scripts/pack-launcher.js";
+import { sha256 } from "../helpers/sha256.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 const packages: PackagePublication[] = [
@@ -304,10 +304,10 @@ function mutateJson(
   writeJson(path, value);
 }
 
-test("approved candidate loading re-verifies archive and package digests without rebuilding", () => {
+test("approved candidate loading re-verifies archive and package digests without rebuilding", async () => {
   const fixture = approvedCandidateFixture();
 
-  const loaded = loadApprovedCandidate({
+  const loaded = await loadApprovedCandidate({
     expectedTag: "v1.2.3",
     releaseDir: fixture.releaseDir,
     packagesDir: fixture.packagesDir,
@@ -330,11 +330,11 @@ test("approved candidate loading re-verifies archive and package digests without
   );
 });
 
-test("approved candidate loading fails closed when packed bytes changed after approval", () => {
+test("approved candidate loading fails closed when packed bytes changed after approval", async () => {
   const platformFixture = approvedCandidateFixture();
   writeFileSync(platformFixture.linuxTarball, "tampered-package");
 
-  assert.throws(
+  await assert.rejects(
     () =>
       loadApprovedCandidate({
         expectedTag: "v1.2.3",
@@ -346,7 +346,7 @@ test("approved candidate loading fails closed when packed bytes changed after ap
 
   const archiveFixture = approvedCandidateFixture();
   writeFileSync(archiveFixture.windowsArchive, "tampered-archive");
-  assert.throws(
+  await assert.rejects(
     () =>
       loadApprovedCandidate({
         expectedTag: "v1.2.3",
@@ -358,7 +358,7 @@ test("approved candidate loading fails closed when packed bytes changed after ap
 
   const launcherFixture = approvedCandidateFixture();
   writeFileSync(launcherFixture.launcherTarball, "tampered-launcher");
-  assert.throws(
+  await assert.rejects(
     () =>
       loadApprovedCandidate({
         expectedTag: "v1.2.3",
@@ -369,9 +369,9 @@ test("approved candidate loading fails closed when packed bytes changed after ap
   );
 });
 
-test("approved candidate loading fails closed on tag, checksum, and manifest identity drift", () => {
+test("approved candidate loading fails closed on tag, checksum, and manifest identity drift", async () => {
   const tagFixture = approvedCandidateFixture();
-  assert.throws(
+  await assert.rejects(
     () =>
       loadApprovedCandidate({
         expectedTag: "v9.9.9",
@@ -383,7 +383,7 @@ test("approved candidate loading fails closed on tag, checksum, and manifest ide
 
   const checksumFixture = approvedCandidateFixture();
   writeFileSync(checksumFixture.checksums, "wrong checksums\n");
-  assert.throws(
+  await assert.rejects(
     () =>
       loadApprovedCandidate({
         expectedTag: "v1.2.3",
@@ -398,7 +398,7 @@ test("approved candidate loading fails closed on tag, checksum, and manifest ide
     const targets = manifest.targets as Record<string, unknown>[];
     targets[0]!.package = "@secantdev/not-approved";
   });
-  assert.throws(
+  await assert.rejects(
     () =>
       loadApprovedCandidate({
         expectedTag: "v1.2.3",
@@ -413,7 +413,7 @@ test("approved candidate loading fails closed on tag, checksum, and manifest ide
     const packageEntries = manifest.packages as Record<string, unknown>[];
     packageEntries[1]!.binarySha256 = "not-approved";
   });
-  assert.throws(
+  await assert.rejects(
     () =>
       loadApprovedCandidate({
         expectedTag: "v1.2.3",
@@ -427,7 +427,7 @@ test("approved candidate loading fails closed on tag, checksum, and manifest ide
   mutateJson(launcherFixture.launcherManifest, (manifest) => {
     manifest.package = "@secantdev/not-approved";
   });
-  assert.throws(
+  await assert.rejects(
     () =>
       loadApprovedCandidate({
         expectedTag: "v1.2.3",
@@ -518,7 +518,7 @@ test("an identical visible GitHub release is an idempotent success", async () =>
   );
 });
 
-test("GitHub exposure fails closed on an unapproved existing asset", () => {
+test("GitHub exposure fails closed on an unapproved existing asset", async () => {
   const port = createCliPromotionPort((_command, args) => {
     if (args[1] === "view") {
       return {
@@ -533,8 +533,8 @@ test("GitHub exposure fails closed on an unapproved existing asset", () => {
     return { status: 0, stdout: "", stderr: "" };
   });
 
-  assert.throws(
-    () => port.exposeGitHubRelease(candidate),
+  await assert.rejects(
+    async () => port.exposeGitHubRelease(candidate),
     /unapproved asset unapproved\.zip/,
   );
 });
@@ -583,7 +583,7 @@ test("GitHub exposure resumes an exact partial draft before making it visible", 
   assert.equal(commands.at(-1), "gh release edit v1.2.3 --draft=false");
 });
 
-test("GitHub exposure rejects conflicting bytes and a visible partial release", () => {
+test("GitHub exposure rejects conflicting bytes and a visible partial release", async () => {
   const root = makeTempDir("secant-github-conflict-");
   const assetPath = join(root, "candidate.zip");
   writeFileSync(assetPath, "approved");
@@ -614,8 +614,8 @@ test("GitHub exposure rejects conflicting bytes and a visible partial release", 
     }
     return { status: 0, stdout: "", stderr: "" };
   });
-  assert.throws(
-    () => conflictPort.exposeGitHubRelease(value),
+  await assert.rejects(
+    async () => conflictPort.exposeGitHubRelease(value),
     /digest disagreement/,
   );
 
@@ -624,13 +624,13 @@ test("GitHub exposure rejects conflicting bytes and a visible partial release", 
     stdout: JSON.stringify({ isDraft: false, assets: [] }),
     stderr: "",
   }));
-  assert.throws(
-    () => visiblePartialPort.exposeGitHubRelease(value),
+  await assert.rejects(
+    async () => visiblePartialPort.exposeGitHubRelease(value),
     /refusing to mutate a visible partial release/,
   );
 });
 
-test("a failed GitHub asset upload leaves the release in draft", () => {
+test("a failed GitHub asset upload leaves the release in draft", async () => {
   const commands: string[] = [];
   const port = createCliPromotionPort((command, args) => {
     commands.push(`${command} ${args.join(" ")}`);
@@ -643,8 +643,8 @@ test("a failed GitHub asset upload leaves the release in draft", () => {
     return { status: 0, stdout: "", stderr: "" };
   });
 
-  assert.throws(
-    () => port.exposeGitHubRelease(candidate),
+  await assert.rejects(
+    async () => port.exposeGitHubRelease(candidate),
     PromotionCommandError,
   );
   assert.equal(

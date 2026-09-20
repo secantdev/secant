@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
-import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CandidateManifest } from "./assemble.js";
 import { MANIFEST_FILE } from "./assemble.js";
+import { runGit } from "./release-helpers.js";
 
 // The tag-admission and protected-release boundary (#158, spec #137 stories 82/90/94/
 // 96/97 and the "Release artifact set and publication workflow" decisions): a `v*` tag
@@ -167,7 +167,7 @@ ${digestLines}
 }
 
 function git(args: string[]): string | null {
-  const result = spawnSync("git", args, { encoding: "utf8" });
+  const result = runGit({ args });
   if (result.status !== 0) return null;
   return result.stdout.trim();
 }

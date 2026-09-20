@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -20,6 +21,7 @@ import {
 } from "../../../src/run/execution/execution.js";
 import { openRunGroup, type RunOwner } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
+import { classicWorktree } from "../../helpers/gitWorktree.js";
 
 const WORKSPACE = "/work/example-project";
 const AT = new Date("2026-09-13T12:00:00.000Z");
@@ -33,6 +35,7 @@ const dec = (bytes: Uint8Array | undefined) =>
 function ownerForFreshRun(
   t: { after: (fn: () => void) => void },
   launch: Readonly<Record<string, string>> = {},
+  workspacePath = WORKSPACE,
 ): {
   owner: RunOwner;
   home: string;
@@ -40,7 +43,7 @@ function ownerForFreshRun(
   state: () => string;
 } {
   const home = makeTempDir("secant-execution-");
-  const group = openRunGroup(home, WORKSPACE);
+  const group = openRunGroup(home, workspacePath);
   t.after(() => group.close());
   const created = group.createRun({
     operationId: "op-1",
@@ -192,6 +195,145 @@ test("a Command artifact argument resolves from the Run's Launch inputs", async 
     { outcome: "succeeded" },
   );
   assert.deepEqual(observedArgs, ["tests/failing.test.mjs"]);
+});
+
+test("a Command spawn appends non-interactive Git overrides after authored config", async (t) => {
+  const { owner } = ownerForFreshRun(t);
+  let observedEnv: NodeJS.ProcessEnv | undefined;
+  const spawnCommand: SpawnCommand = (options) => {
+    observedEnv = options.env;
+    return Promise.resolve({
+      kind: "exited",
+      status: 0,
+      text: new Uint8Array(),
+    });
+  };
+
+  await run(
+    [
+      commandStep("inspect-environment", {
+        executable: NODE,
+        arguments: [],
+        env: {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "user.name",
+          GIT_CONFIG_VALUE_0: "Authored Command",
+          GIT_CONFIG_PARAMETERS: "'commit.gpgSign=true'",
+          GIT_EDITOR: "interactive-editor",
+          GIT_TERMINAL_PROMPT: "1",
+        },
+      }),
+    ],
+    owner,
+    { spawnCommand },
+  );
+
+  assert.ok(observedEnv !== undefined);
+  const commandEnv = observedEnv;
+  assert.equal(commandEnv.GIT_CONFIG_COUNT, "9");
+  assert.deepEqual(
+    Array.from({ length: 9 }, (_, index) => [
+      commandEnv[`GIT_CONFIG_KEY_${index}`],
+      commandEnv[`GIT_CONFIG_VALUE_${index}`],
+    ]),
+    [
+      ["user.name", "Authored Command"],
+      ["commit.gpgSign", "false"],
+      ["tag.gpgSign", "false"],
+      ["tag.forceSignAnnotated", "false"],
+      ["credential.interactive", "false"],
+      ["core.askPass", ""],
+      ["core.editor", "true"],
+      ["sequence.editor", "true"],
+      ["core.hooksPath", "/dev/null"],
+    ],
+  );
+  assert.equal(commandEnv.GIT_CONFIG_PARAMETERS, undefined);
+  assert.equal(commandEnv.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(commandEnv.GIT_ASKPASS, "");
+  assert.equal(commandEnv.SSH_ASKPASS, "");
+  assert.equal(commandEnv.GIT_EDITOR, "true");
+  assert.equal(commandEnv.GIT_SEQUENCE_EDITOR, "true");
+  assert.equal(commandEnv.GIT_MERGE_AUTOEDIT, "no");
+});
+
+test("a Command commit ignores ambient signing while preserving authored Git config", async (t) => {
+  const workspace = classicWorktree();
+  const signingConfigDirectory = makeTempDir("secant-signing-config-");
+  const globalConfig = join(signingConfigDirectory, "gitconfig");
+  const signer = join(signingConfigDirectory, "passphrase-signer");
+  const signerMarker = join(signingConfigDirectory, "signer-ran");
+  writeFileSync(
+    signer,
+    `#!/bin/sh\nprintf prompted > '${signerMarker.replaceAll("'", "'\\''")}'\nprintf 'Enter passphrase for signing key\\n' >&2\nexit 1\n`,
+  );
+  chmodSync(signer, 0o755);
+  writeFileSync(
+    globalConfig,
+    `[commit]\n\tgpgSign = true\n[gpg]\n\tformat = ssh\n[gpg "ssh"]\n\tprogram = "${signer.replaceAll("\\", "/")}"\n[user]\n\tname = Global Signer\n\temail = signer@secant.invalid\n\tsigningKey = passphrase-protected-key\n`,
+  );
+  writeFileSync(join(workspace, "seed.txt"), "ready to commit\n");
+  const blockedCommit = spawnSync(
+    "git",
+    ["commit", "--all", "--message", "Blocked signed commit"],
+    {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: globalConfig,
+      },
+      encoding: "utf8",
+    },
+  );
+  assert.notEqual(blockedCommit.status, 0);
+  assert.match(blockedCommit.stderr, /Enter passphrase for signing key/);
+  assert.ok(existsSync(signerMarker));
+  rmSync(signerMarker);
+  const preCommitHook = join(workspace, ".git", "hooks", "pre-commit");
+  writeFileSync(preCommitHook, "#!/bin/sh\nexit 1\n");
+  chmodSync(preCommitHook, 0o755);
+  const { owner } = ownerForFreshRun(t, {}, workspace);
+
+  assert.deepEqual(
+    await run(
+      [
+        commandStep(
+          "commit",
+          {
+            executable: "git",
+            arguments: ["commit", "--all", "--message", "Unattended commit"],
+            workingDirectory: ".",
+            env: {
+              GIT_CONFIG_GLOBAL: globalConfig,
+              GIT_CONFIG_PARAMETERS: "'commit.gpgSign=true'",
+            },
+          },
+          {
+            produces: produces(
+              { name: "commit-verdict", type: "verdict" },
+              { name: "commit-output", type: "text" },
+            ),
+          },
+        ),
+      ],
+      owner,
+    ),
+    { outcome: "succeeded" },
+  );
+  assert.equal(
+    dec(readBound(owner, "commit-verdict")),
+    "pass",
+    dec(readBound(owner, "commit-output")),
+  );
+  assert.equal(
+    execFileSync("git", ["log", "-1", "--format=%s%n%an"], {
+      cwd: workspace,
+      encoding: "utf8",
+    }).trim(),
+    "Unattended commit\nGlobal Signer",
+  );
+  assert.equal(existsSync(signerMarker), false);
 });
 
 // A command killed by a signal (Ctrl+C / termination) has no exit; its Attempt is

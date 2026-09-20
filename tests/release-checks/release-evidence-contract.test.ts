@@ -291,10 +291,23 @@ test("[release-evidence-contract] failed installed-Harness reports retain launch
       outcome: evidence.outcome,
     });
     const details = formatInstalledHarnessDetails(evidence, {
-      launchStatus: 1,
-      launchStdout:
-        '{"code":"command-executable-not-found","detail":"left|right"}\n',
-      launchStderr: "",
+      launch: {
+        status: 1,
+        stdout:
+          '{"code":"command-executable-not-found","detail":"left|right"}\n',
+        stderr: "",
+      },
+      postApprovalRun: {
+        status: 2,
+        stdout: '{"result":{"run":{"state":"failed"}}}\n',
+        stderr: "run answer failed\n",
+      },
+      commitVerdict: { status: 0, stdout: "fail\n", stderr: "" },
+      commitOutput: {
+        status: 0,
+        stdout: "commit command failed\n",
+        stderr: "",
+      },
       problem,
       transcript,
     });
@@ -322,6 +335,19 @@ test("[release-evidence-contract] failed installed-Harness reports retain launch
     );
     assert.match(details, /You have no weighted tokens left<br>until Monday\./);
     assert.match(details, /Launch stderr \| \(empty\)/);
+    assert.match(details, /Post-approval run exit status \| 2/);
+    assert.match(
+      details,
+      /Post-approval run stdout \| \{"result":\{"run":\{"state":"failed"\}\}\}<br>/,
+    );
+    assert.match(details, /Post-approval run stderr \| run answer failed<br>/);
+    assert.match(details, /Commit verdict read exit status \| 0/);
+    assert.match(details, /Captured commit verdict \| fail<br>/);
+    assert.match(details, /Commit output read exit status \| 0/);
+    assert.match(
+      details,
+      /Captured commit stdout\/stderr \| commit command failed<br>/,
+    );
   }
 });
 

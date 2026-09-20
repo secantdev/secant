@@ -21,10 +21,17 @@ export interface InstalledHarnessProblem {
   readonly remediation: string;
 }
 
+export interface CommandDiagnostics {
+  readonly status: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 export interface InstalledHarnessFailureDiagnostics {
-  readonly launchStatus: number | null;
-  readonly launchStdout: string;
-  readonly launchStderr: string;
+  readonly launch: CommandDiagnostics;
+  readonly postApprovalRun?: CommandDiagnostics;
+  readonly commitVerdict?: CommandDiagnostics;
+  readonly commitOutput?: CommandDiagnostics;
   readonly problem?: InstalledHarnessProblem;
   readonly transcript?: string;
 }
@@ -39,6 +46,19 @@ function passFail(value: boolean): "pass" | "fail" {
 
 function tableCell(value: string): string {
   return value.replaceAll("|", "\\|").replaceAll(/\r?\n/g, "<br>");
+}
+
+function commandStatus(value: CommandDiagnostics | undefined): string {
+  return value === undefined ? "not run" : String(value.status);
+}
+
+function commandStream(
+  value: CommandDiagnostics | undefined,
+  stream: "stdout" | "stderr",
+): string {
+  return tableCell(
+    value?.[stream] || (value === undefined ? "not run" : "(empty)"),
+  );
 }
 
 function object(value: unknown): ObjectValue | undefined {
@@ -169,11 +189,18 @@ export function formatInstalledHarnessDetails(
 
 | Diagnostic | Observation |
 | --- | --- |
-| Launch exit status | ${String(diagnostics.launchStatus)} |
+| Launch exit status | ${commandStatus(diagnostics.launch)} |
 | Problem code | ${tableCell(diagnostics.problem?.code ?? "not reported")} |
 | Problem explanation | ${tableCell(diagnostics.problem?.explanation ?? "not reported")} |
 | Problem remediation | ${tableCell(diagnostics.problem?.remediation ?? "not reported")} |
-| Launch stdout | ${tableCell(diagnostics.launchStdout || "(empty)")} |
-| Launch stderr | ${tableCell(diagnostics.launchStderr || "(empty)")} |
+| Launch stdout | ${commandStream(diagnostics.launch, "stdout")} |
+| Launch stderr | ${commandStream(diagnostics.launch, "stderr")} |
+| Post-approval run exit status | ${commandStatus(diagnostics.postApprovalRun)} |
+| Post-approval run stdout | ${commandStream(diagnostics.postApprovalRun, "stdout")} |
+| Post-approval run stderr | ${commandStream(diagnostics.postApprovalRun, "stderr")} |
+| Commit verdict read exit status | ${commandStatus(diagnostics.commitVerdict)} |
+| Captured commit verdict | ${commandStream(diagnostics.commitVerdict, "stdout")} |
+| Commit output read exit status | ${commandStatus(diagnostics.commitOutput)} |
+| Captured commit stdout/stderr | ${commandStream(diagnostics.commitOutput, "stdout")} |
 | Retained terminal Turn or Harness diagnostic | ${tableCell(diagnostics.transcript ?? "not reported")} |`;
 }

@@ -11,3 +11,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   other durable Run fact surfaces on the Attempt's later `publishAttempt`, never from executing a Turn.
 - Every autonomous Agent Attempt publishes one co-sourced evidence value: qualified Harness identity plus its optional observed model. `attemptEvidence`
   fails fast if an Agent result lacks identity; Command/Gate and synthetic interactive Attempts publish neither (#147).
+- Every Command-step spawn passes its resolved authored environment through the Run Store entry's `isolatedGitEnvironment`; the helper appends
+  non-interactive signing, hook, credential, and editor overrides after authored Git config entries, without changing user files or hiding ordinary
+  system/global config (#166). `GIT_CONFIG_PARAMETERS` is removed because Git applies it after the counted entries and could undo the hardening.

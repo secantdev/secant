@@ -9,6 +9,7 @@ import {
   observedHarnessForReport,
   parseInstalledHarnessProblem,
   parseTerminalHarnessDiagnostic,
+  type CommandDiagnostics,
   type InstalledHarnessFailureDiagnostics,
 } from "./installed-harness-report.js";
 import {
@@ -18,12 +19,6 @@ import {
 } from "./release-evidence.js";
 
 type HarnessId = "claude-code" | "codex";
-
-interface CommandResult {
-  readonly status: number | null;
-  readonly stdout: string;
-  readonly stderr: string;
-}
 
 interface ObjectValue {
   readonly [key: string]: unknown;
@@ -68,7 +63,7 @@ function run(
   command: string,
   args: readonly string[],
   options: { readonly cwd: string; readonly env: NodeJS.ProcessEnv },
-): CommandResult {
+): CommandDiagnostics {
   const result = spawnSync(command, [...args], {
     cwd: options.cwd,
     env: options.env,
@@ -86,7 +81,7 @@ function run(
 }
 
 function requireStatus(
-  result: CommandResult,
+  result: CommandDiagnostics,
   expected: number,
   action: string,
 ): string {
@@ -169,15 +164,19 @@ function readTerminalHarnessDiagnostic(
 }
 
 function failureDiagnostics(
-  launchedResult: CommandResult,
+  launchedResult: CommandDiagnostics,
+  postApprovalRunResult: CommandDiagnostics | undefined,
+  commitVerdict: CommandDiagnostics | undefined,
+  commitOutput: CommandDiagnostics | undefined,
   launched: ObjectValue | undefined,
   currentRun: ObjectValue | undefined,
   transcript: string | undefined,
 ): InstalledHarnessFailureDiagnostics {
   return {
-    launchStatus: launchedResult.status,
-    launchStdout: launchedResult.stdout,
-    launchStderr: launchedResult.stderr,
+    launch: launchedResult,
+    postApprovalRun: postApprovalRunResult,
+    commitVerdict,
+    commitOutput,
     problem:
       parseInstalledHarnessProblem(launched) ??
       parseInstalledHarnessProblem(currentRun?.problem),
@@ -319,8 +318,15 @@ async function main(): Promise<void> {
       "Post-approval commit read",
     ).trim();
     const commitVerdict =
-      typeof runId === "string" && answeredResult?.status === 0
+      typeof runId === "string" && answeredResult !== undefined
         ? run(candidate, ["run", "read", `${runId}/commit-verdict`], {
+            cwd: workspace,
+            env,
+          })
+        : undefined;
+    const commitOutput =
+      typeof runId === "string" && answeredResult !== undefined
+        ? run(candidate, ["run", "read", `${runId}/commit-output`], {
             cwd: workspace,
             env,
           })
@@ -349,6 +355,9 @@ async function main(): Promise<void> {
       evidence.outcome === "fail"
         ? failureDiagnostics(
             launchedResult,
+            answeredResult,
+            commitVerdict,
+            commitOutput,
             launched,
             currentRun,
             runId === undefined

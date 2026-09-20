@@ -24,10 +24,39 @@ import type {
 // is runtime-neutral, so no new dependency, notice, or Bun-API allowlist entry.
 // A missing `git` binary is surfaced as a precise `git-unavailable` Problem.
 
+const UNATTENDED_GIT_CONFIG = [
+  ["commit.gpgSign", "false"],
+  ["tag.gpgSign", "false"],
+  ["tag.forceSignAnnotated", "false"],
+  ["credential.interactive", "false"],
+  ["core.askPass", ""],
+  ["core.editor", "true"],
+  ["sequence.editor", "true"],
+  ["core.hooksPath", "/dev/null"],
+] as const;
+
+function inheritedGitConfigCount(environment: NodeJS.ProcessEnv): number {
+  const count = Number(environment.GIT_CONFIG_COUNT ?? "0");
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+}
+
+function appendUnattendedGitConfig(environment: NodeJS.ProcessEnv): void {
+  const offset = inheritedGitConfigCount(environment);
+  for (const [index, [key, value]] of UNATTENDED_GIT_CONFIG.entries()) {
+    environment[`GIT_CONFIG_KEY_${offset + index}`] = key;
+    environment[`GIT_CONFIG_VALUE_${offset + index}`] = value;
+  }
+  environment.GIT_CONFIG_COUNT = String(offset + UNATTENDED_GIT_CONFIG.length);
+}
+
 /** The one isolated-Git-environment hardening, shared by every `git` invocation
- *  Secant makes. Severing the host's system and global Git config makes behaviour
- *  a function of the arguments alone, no ambient config leaking in. Callers layer
- *  their own vars on top through `overrides` — the Artifact
+ *  Secant makes. Its default severs the host's system and global Git config, making
+ *  private Store and Preflight behaviour a function of the arguments alone. Command
+ *  execution selects `inherited` so ordinary identity and other authored config stay
+ *  available. In both modes, config entries that suppress signing, hooks, credential
+ *  prompts, and editors append after counted entries, and the later-applied legacy
+ *  `GIT_CONFIG_PARAMETERS` source is removed so the hardening cannot be undone.
+ *  Callers layer their own vars on top through `overrides` — the Artifact
  *  repo adds `GIT_DIR` and a fixed identity (keeping commit ids a function of
  *  content and time only); Preflight's worktree probe needs nothing more. It lives
  *  here (the only home the private Artifact Module and the Run Store entry both
@@ -35,13 +64,25 @@ import type {
  *  across the Module boundary. */
 export function isolatedGitEnvironment(
   overrides?: NodeJS.ProcessEnv,
+  configFiles: "isolated" | "inherited" = "isolated",
 ): NodeJS.ProcessEnv {
-  return {
+  const environment: NodeJS.ProcessEnv = {
     ...process.env,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "",
     ...overrides,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "",
+    SSH_ASKPASS: "",
+    GIT_EDITOR: "true",
+    GIT_SEQUENCE_EDITOR: "true",
+    GIT_MERGE_AUTOEDIT: "no",
   };
+  if (configFiles === "isolated") {
+    environment.GIT_CONFIG_NOSYSTEM = "1";
+    environment.GIT_CONFIG_GLOBAL = "";
+  }
+  delete environment.GIT_CONFIG_PARAMETERS;
+  appendUnattendedGitConfig(environment);
+  return environment;
 }
 
 /** A candidate output a producer wrote once, ready to publish. */

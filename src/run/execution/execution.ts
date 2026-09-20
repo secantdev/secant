@@ -15,10 +15,11 @@ import {
   type Step,
   type StepKindName,
 } from "../../workflow/workflow.js";
-import type {
-  AttemptLogEntry,
-  CandidateOutput,
-  RunOwner,
+import {
+  isolatedGitEnvironment,
+  type AttemptLogEntry,
+  type CandidateOutput,
+  type RunOwner,
 } from "../store/store.js";
 import {
   resolveExecutable,
@@ -950,18 +951,19 @@ function resolveToken(token: string | Reference, context: StepContext): string {
   return new TextDecoder().decode(bytes);
 }
 
-/** The declared env, resolved over the inherited environment. A Command with no
- *  authored env inherits the parent environment unchanged. */
+/** The declared env, resolved over the inherited environment, then hardened for
+ *  unattended Git use through the Store-owned shared helper. */
 function resolveEnv(
   invocation: CommandInvocation,
   context: StepContext,
 ): NodeJS.ProcessEnv {
-  if (invocation.env === undefined) return process.env;
   const resolved: NodeJS.ProcessEnv = { ...process.env };
-  for (const [name, value] of Object.entries(invocation.env)) {
-    resolved[name] = resolveToken(value, context);
+  if (invocation.env !== undefined) {
+    for (const [name, value] of Object.entries(invocation.env)) {
+      resolved[name] = resolveToken(value, context);
+    }
   }
-  return resolved;
+  return isolatedGitEnvironment(resolved, "inherited");
 }
 
 function encode(text: string): Uint8Array {

@@ -96,7 +96,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   value (`{ name?, ctrl? }`, A16) so the Workbench needs no cast.
 - Two private helpers back those seams: `follow.ts` (`followProjection`) is the one follow-snapshot loop the read seams share (A22); `submit-and-settle.ts`
   (`submitAndSettle`) is the one submit-then-follow-the-operation-stream loop the write seams share (A23). `run-inspection.tsx` holds the Workbench's
-  reference-inspection overlay — its state, key loop, and view — split out of `run-workbench.tsx` (A26).
+  reference-inspection overlay — its state, key loop, and view — split out of `run-workbench.tsx` (A26). `run-workbench-views.tsx` holds the Workbench's
+  four pure presentational leaves; state, focus, modal precedence, and the key dispatcher stay in `run-workbench.tsx` (A12).
 - `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; reuses the single-active-index selection model of `bundle-list.tsx`).
 - `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-screen status wording — keep it matching `headless/render.ts` so
   the TUI and headless surfaces say the same thing about the same fact.

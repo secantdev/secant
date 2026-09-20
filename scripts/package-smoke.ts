@@ -25,6 +25,7 @@ import { TARGETS, hostTargetKey } from "./targets.js";
 import { installReplayerAt } from "../tests/harness/replayer-install.js";
 import { installCodexReplayerAt } from "../tests/harness/codex-replayer-install.js";
 import { seedTestRepairWorkspace } from "../tests/helpers/testRepairWorkspace.js";
+import { runNamedScenario } from "./package-smoke/scenario.js";
 
 // Smokes the Bun compiled single-file executable (ADR 0030). It replaces the
 // npm-tarball smoke and keeps its install-then-run shape: copy the standalone
@@ -236,48 +237,57 @@ async function waitForFile(path: string, deadlineMs: number): Promise<boolean> {
 const smokeRoot = await mkdtemp(join(tmpdir(), "secant-binary-smoke-"));
 
 try {
-  // "Install" the binary into the isolated location and run it from there, so a
-  // stray sibling in dist/ or the working directory cannot mask a non-self-
-  // contained binary.
-  const binary = join(smokeRoot, basename(source));
-  await copyFile(source, binary);
-  if (process.platform !== "win32") await chmod(binary, 0o755);
+  async function compiledBinaryInterfaceScenario(): Promise<string> {
+    // "Install" the binary into the isolated location and run it from there, so a
+    // stray sibling in dist/ or the working directory cannot mask a non-self-
+    // contained binary.
+    const binary = join(smokeRoot, basename(source));
+    await copyFile(source, binary);
+    if (process.platform !== "win32") await chmod(binary, 0o755);
 
-  // Apple silicon refuses arm64 code without at least Bun's ad-hoc signature,
-  // which has regressed twice (ADR 0030); verify it before running the binary.
-  if (process.platform === "darwin") {
-    run("codesign", ["--verify", "--deep", "--strict", binary]);
+    // Apple silicon refuses arm64 code without at least Bun's ad-hoc signature,
+    // which has regressed twice (ADR 0030); verify it before running the binary.
+    if (process.platform === "darwin") {
+      run("codesign", ["--verify", "--deep", "--strict", binary]);
+    }
+
+    const helpOutput = run(binary, ["--help"], { cwd: smokeRoot });
+    if (!helpOutput.includes("Usage: secant")) {
+      throw new Error("Compiled binary help output did not identify secant.");
+    }
+
+    const versionOutput = run(binary, ["--version"], { cwd: smokeRoot });
+    // The embedded version must print exactly, and nothing else.
+    if (versionOutput !== `${pkg.version}\n`) {
+      throw new Error(
+        `Compiled binary reported version ${JSON.stringify(versionOutput)} instead of ${JSON.stringify(`${pkg.version}\n`)}.`,
+      );
+    }
+
+    // An unknown command and an unknown flag exit non-zero with a usage message,
+    // before any composition wiring (issue #72).
+    assertRefuses(binary, [
+      {
+        args: ["frobnicate"],
+        match: /unknown-(command|option)/,
+        cwd: smokeRoot,
+        detail: "did not print a usage message",
+      },
+      {
+        args: ["bundle", "list", "--bogus"],
+        match: /unknown-(command|option)/,
+        cwd: smokeRoot,
+        detail: "did not print a usage message",
+      },
+    ]);
+
+    return binary;
   }
 
-  const helpOutput = run(binary, ["--help"], { cwd: smokeRoot });
-  if (!helpOutput.includes("Usage: secant")) {
-    throw new Error("Compiled binary help output did not identify secant.");
-  }
-
-  const versionOutput = run(binary, ["--version"], { cwd: smokeRoot });
-  // The embedded version must print exactly, and nothing else.
-  if (versionOutput !== `${pkg.version}\n`) {
-    throw new Error(
-      `Compiled binary reported version ${JSON.stringify(versionOutput)} instead of ${JSON.stringify(`${pkg.version}\n`)}.`,
-    );
-  }
-
-  // An unknown command and an unknown flag exit non-zero with a usage message,
-  // before any composition wiring (issue #72).
-  assertRefuses(binary, [
-    {
-      args: ["frobnicate"],
-      match: /unknown-(command|option)/,
-      cwd: smokeRoot,
-      detail: "did not print a usage message",
-    },
-    {
-      args: ["bundle", "list", "--bogus"],
-      match: /unknown-(command|option)/,
-      cwd: smokeRoot,
-      detail: "did not print a usage message",
-    },
-  ]);
+  const binary = await runNamedScenario(
+    "compiled-binary-interface",
+    compiledBinaryInterfaceScenario,
+  );
 
   // Approve a temporary Workspace under a temporary SECANT_HOME, then read it
   // back with --json — the SQLite write→read round-trip (issue #50, AC7).
@@ -291,7 +301,7 @@ try {
   // to a different working directory, then open it from there. This exercises the
   // catalog, coordination, and run.db migrations without relying on the source tree
   // or the process's original cwd, on every gated operating system (#101).
-  {
+  async function relocatedPreDrizzleHomeScenario(): Promise<void> {
     const legacyHome = join(smokeRoot, "pre-drizzle-home");
     await cp(
       join(projectRoot, "tests", "fixtures", "pre-drizzle-home"),
@@ -358,508 +368,571 @@ try {
     assertLegacyRunRemainsUnselected(runDatabasePath);
   }
 
-  run(binary, ["workspace", "approve"], {
-    cwd: workspaceDirectory,
-    env: workspaceEnv,
-  });
-
-  const workspaceJson = run(binary, ["workspace", "--json"], {
-    cwd: workspaceDirectory,
-    env: workspaceEnv,
-  });
-  const snapshot = JSON.parse(workspaceJson);
-  // Match the CLI's own canonicalization (realpathSync.native), so a Windows
-  // 8.3 short name in the temp path does not read as a different directory.
-  const canonicalWorkspace = realpathSync.native(workspaceDirectory);
-  if (snapshot.approval?.state !== "approved") {
-    throw new Error(
-      `Compiled binary did not report the approved Workspace: ${workspaceJson}`,
-    );
-  }
-  if (snapshot.path !== canonicalWorkspace) {
-    throw new Error(
-      `Compiled binary reported Workspace path ${snapshot.path} instead of ${canonicalWorkspace}.`,
-    );
-  }
-
-  // Build the Proof Bundle with --no-install --output on this OS (issue #51,
-  // AC8; issue #52, AC5). `run` throws on a non-zero exit, and `bundle build`
-  // now gates on the Composition check — refusing with a non-zero exit and no
-  // output file on any error-severity finding — so a printed digest and a
-  // written file from the installed binary is the standing assertion, on each of
-  // the three operating systems, that the Proof Bundle reports zero error findings.
-  const proofBundleFolder = join(
-    projectRoot,
-    "bundles",
-    "test-repair-workflow",
+  await runNamedScenario(
+    "relocated-pre-drizzle-home",
+    relocatedPreDrizzleHomeScenario,
   );
-  const outputWfb = join(smokeRoot, "proof.wfb");
-  const buildOutput = run(
-    binary,
-    [
-      "bundle",
-      "build",
-      proofBundleFolder,
-      "--no-install",
-      "--output",
-      outputWfb,
-    ],
-    { cwd: smokeRoot, env: workspaceEnv },
-  );
-  if (!/Digest: sha256:[0-9a-f]{64}/.test(buildOutput)) {
-    throw new Error(
-      `Compiled binary did not print the Proof Bundle digest: ${buildOutput}`,
-    );
-  }
-  if (!existsSync(outputWfb)) {
-    throw new Error(
-      "Compiled binary did not write the Proof Bundle output file.",
-    );
-  }
 
-  // Install the built Proof Bundle into the temporary SECANT_HOME, re-install it
-  // (equal digest → already installed), then install a byte-different archive of
-  // the same identity (→ identity collision) — the full first-install-wins path
-  // from the installed binary on each OS (issue #53, AC7).
-  const firstInstall = run(binary, ["bundle", "install", outputWfb], {
-    cwd: smokeRoot,
-    env: workspaceEnv,
-  });
-  if (!/^Installed\.$/m.test(firstInstall)) {
-    throw new Error(
-      `Compiled binary did not install the Proof Bundle: ${firstInstall}`,
-    );
-  }
-
-  const secondInstall = run(binary, ["bundle", "install", outputWfb], {
-    cwd: smokeRoot,
-    env: workspaceEnv,
-  });
-  if (!/Already installed/.test(secondInstall)) {
-    throw new Error(
-      `Re-installing the equal digest was not reported as already installed: ${secondInstall}`,
-    );
-  }
-
-  const afterInstall = JSON.parse(
-    run(binary, ["workspace", "--json"], {
+  async function workspaceCatalogScenario(): Promise<string> {
+    run(binary, ["workspace", "approve"], {
       cwd: workspaceDirectory,
       env: workspaceEnv,
-    }),
-  );
-  if (afterInstall.installedBundleCount !== 1) {
-    throw new Error(
-      `Home reported ${afterInstall.installedBundleCount} Installed Bundles instead of 1.`,
-    );
-  }
-
-  // List and inspect the installed Proof Bundle over the `bundle-catalog`
-  // Projection with --json (issue #54, AC6): the same read-back on all three
-  // operating systems, asserting identity, digest, all three platforms, and
-  // zero error findings.
-  const platforms = ["windows", "macos", "linux"];
-  const listSnapshot = JSON.parse(
-    run(binary, ["bundle", "list", "--json"], {
-      cwd: smokeRoot,
-      env: workspaceEnv,
-    }),
-  );
-  const listed = (listSnapshot.result?.bundles ?? []).find(
-    (bundle: { id: string }) => bundle.id === "dev.secant.test-repair",
-  );
-  if (
-    !listed ||
-    !/^[0-9a-f]{64}$/.test(listed.digest ?? "") ||
-    platforms.some((platform) => !(listed.platforms ?? []).includes(platform))
-  ) {
-    throw new Error(
-      `bundle list --json did not carry the installed Proof Bundle with its digest and all three platforms: ${JSON.stringify(listSnapshot)}`,
-    );
-  }
-
-  const focus = JSON.parse(
-    run(binary, ["bundle", "inspect", "dev.secant.test-repair", "--json"], {
-      cwd: smokeRoot,
-      env: workspaceEnv,
-    }),
-  );
-  const errorFindings = (focus.compositionFindings ?? []).filter(
-    (finding: { severity: string }) => finding.severity === "error",
-  );
-  if (
-    focus.id !== "dev.secant.test-repair" ||
-    !/^[0-9a-f]{64}$/.test(focus.digest ?? "") ||
-    platforms.some((platform) => !(focus.platforms ?? []).includes(platform)) ||
-    errorFindings.length !== 0
-  ) {
-    throw new Error(
-      `bundle inspect --json did not read back identity, digest, all three platforms, and zero error findings: ${JSON.stringify(focus)}`,
-    );
-  }
-
-  // The `two-harness-proof-bundle` scenario (#149, replacing the M3 single-Harness
-  // #119 smoke). Run the one installed Test Repair Proof Bundle headlessly through
-  // both recorded replayers — Claude Code and Codex — in two fresh Workspaces with
-  // identical routing and launch-input shape, varying only the externally supplied
-  // `--harness` selection. For each: the failing baseline enters one repair
-  // iteration; the recording applies its Workspace patch; the next Verdict passes;
-  // and the authored approve-commit gate keeps Git unchanged until a separate
-  // `run answer --continue` invocation succeeds and makes the commit. Both
-  // Run-driving commands use the frozen --json envelope from the compiled binary,
-  // and only the temporary PATH selects each fake Harness. The two scenarios report
-  // different effective models, proving the compiled binary drives both Adapters.
-  // `evidence` asserts the Harness-specific observable identity that proves the
-  // compiled binary really drove that Adapter's own seam — not just that a Run
-  // reached the gate. This keeps the M3 permission-bridge invariant checked in the
-  // compiled binary specifically, generalized across the two Adapters.
-  type TimelineEvent = { event: string; detail?: string };
-  const twoHarnessScenarios: readonly {
-    harness: "claude-code" | "codex";
-    effectiveModel: string;
-    replayerDirectory: string;
-    install: () => void;
-    evidence: (timeline: readonly TimelineEvent[]) => boolean;
-  }[] = [
-    {
-      harness: "claude-code",
-      effectiveModel: "claude-opus-5[1m]",
-      replayerDirectory: join(smokeRoot, "claude-replayer"),
-      install() {
-        installReplayerAt(
-          this.replayerDirectory,
-          "2.1.273 (Claude Code)",
-          join(
-            projectRoot,
-            "tests",
-            "harness",
-            "fixtures",
-            "claude-code",
-            "test-repair",
-          ),
-        );
-      },
-      // Claude Code surfaces the Edit as an approval request the client answers by
-      // policy — the permission-bridge seam the M3 #119 smoke asserted.
-      evidence: (timeline) =>
-        timeline.some(
-          (event) =>
-            event.event === "request-raised" &&
-            /^Edit .*sum\.mjs/.test(event.detail ?? ""),
-        ) &&
-        timeline.some(
-          (event) =>
-            event.event === "request-answered" &&
-            event.detail === "answered by client policy (allow)",
-        ),
-    },
-    {
-      harness: "codex",
-      effectiveModel: "gpt-5.6-sol",
-      replayerDirectory: join(smokeRoot, "codex-replayer"),
-      install() {
-        installCodexReplayerAt(this.replayerDirectory, "test-repair");
-      },
-      // Codex auto-approves the edit internally: no approval request crosses to the
-      // client; the edit is observable only as a generic tool-activity event.
-      evidence: (timeline) =>
-        timeline.some(
-          (event) =>
-            event.event === "tool-activity" &&
-            event.detail === "file-change completed",
-        ) && !timeline.some((event) => event.event === "request-raised"),
-    },
-  ];
-  for (const scenario of twoHarnessScenarios) {
-    scenario.install();
-    // Canonicalize the Workspace so the `file` launch input (an absolute
-    // passthrough) names the same directory the Adapter is prepared against; the
-    // Codex replayer strict-redacts the Workspace path in the rendered prompt.
-    const proofWorkspaceRaw = join(
-      smokeRoot,
-      `two-harness-${scenario.harness}-workspace`,
-    );
-    await mkdir(proofWorkspaceRaw, { recursive: true });
-    const proofWorkspace = realpathSync.native(proofWorkspaceRaw);
-    const { failingTest, baselineCommit } =
-      seedTestRepairWorkspace(proofWorkspace);
-    const proofEnv: NodeJS.ProcessEnv = {
-      ...workspaceEnv,
-      PATH: `${scenario.replayerDirectory}${delimiter}${workspaceEnv.PATH}`,
-    };
-    delete proofEnv.SECANT_CLAUDE_CODE;
-    delete proofEnv.SECANT_CODEX;
-    run(binary, ["workspace", "approve"], {
-      cwd: proofWorkspace,
-      env: proofEnv,
     });
 
-    const launchedJson = run(
+    const workspaceJson = run(binary, ["workspace", "--json"], {
+      cwd: workspaceDirectory,
+      env: workspaceEnv,
+    });
+    const snapshot = JSON.parse(workspaceJson);
+    // Match the CLI's own canonicalization (realpathSync.native), so a Windows
+    // 8.3 short name in the temp path does not read as a different directory.
+    const canonicalWorkspace = realpathSync.native(workspaceDirectory);
+    if (snapshot.approval?.state !== "approved") {
+      throw new Error(
+        `Compiled binary did not report the approved Workspace: ${workspaceJson}`,
+      );
+    }
+    if (snapshot.path !== canonicalWorkspace) {
+      throw new Error(
+        `Compiled binary reported Workspace path ${snapshot.path} instead of ${canonicalWorkspace}.`,
+      );
+    }
+
+    return canonicalWorkspace;
+  }
+
+  const canonicalWorkspace = await runNamedScenario(
+    "workspace-catalog",
+    workspaceCatalogScenario,
+  );
+
+  async function installAndCatalogScenario() {
+    // Build the Proof Bundle with --no-install --output on this OS (issue #51,
+    // AC8; issue #52, AC5). `run` throws on a non-zero exit, and `bundle build`
+    // now gates on the Composition check — refusing with a non-zero exit and no
+    // output file on any error-severity finding — so a printed digest and a
+    // written file from the installed binary is the standing assertion, on each of
+    // the three operating systems, that the Proof Bundle reports zero error findings.
+    const proofBundleFolder = join(
+      projectRoot,
+      "bundles",
+      "test-repair-workflow",
+    );
+    const outputWfb = join(smokeRoot, "proof.wfb");
+    const buildOutput = run(
       binary,
       [
-        "run",
-        "launch",
-        "dev.secant.test-repair",
-        "--input",
-        `failing-test=${failingTest}`,
-        "--trust",
-        listed.digest,
-        "--harness",
-        scenario.harness,
-        "--harness-requests",
-        "allow",
-        "--json",
+        "bundle",
+        "build",
+        proofBundleFolder,
+        "--no-install",
+        "--output",
+        outputWfb,
       ],
-      { cwd: proofWorkspace, env: proofEnv, expect: 2 },
+      { cwd: smokeRoot, env: workspaceEnv },
     );
-    const launched = JSON.parse(launchedJson);
-    const proofRun = launched.result?.run;
-    if (
-      launched.family !== "run" ||
-      typeof launched.runId !== "string" ||
-      launched.result?.found !== true ||
-      proofRun?.runId !== launched.runId ||
-      proofRun.bundle?.id !== "dev.secant.test-repair" ||
-      proofRun.state !== "blocked" ||
-      !Array.isArray(proofRun.progress) ||
-      !Array.isArray(proofRun.timeline) ||
-      !Array.isArray(proofRun.outputs) ||
-      !Array.isArray(proofRun.actionOffers) ||
-      proofRun.pendingGate?.gate?.shape !== "approve-reject" ||
-      proofRun.pendingGate?.gate?.stepId !== "approve-commit" ||
-      proofRun.effectiveModel !== scenario.effectiveModel ||
-      proofRun.progress.find(
-        (step: { id: string; status: string }) => step.id === "fix",
-      )?.status !== "succeeded" ||
-      proofRun.timeline.filter(
-        (event: { event: string }) => event.event === "iteration",
-      ).length !== 1 ||
-      !scenario.evidence(proofRun.timeline as TimelineEvent[])
-    ) {
+    if (!/Digest: sha256:[0-9a-f]{64}/.test(buildOutput)) {
       throw new Error(
-        `Installed Proof Bundle did not reach its authored gate through ${scenario.harness} with the frozen Run JSON fields: ${launchedJson}`,
+        `Compiled binary did not print the Proof Bundle digest: ${buildOutput}`,
       );
     }
-    if (
-      run("git", ["rev-parse", "HEAD"], { cwd: proofWorkspace }).trim() !==
-      baselineCommit
-    ) {
+    if (!existsSync(outputWfb)) {
       throw new Error(
-        `The Proof Bundle committed before its authored gate was approved through ${scenario.harness}.`,
+        "Compiled binary did not write the Proof Bundle output file.",
       );
     }
 
-    const answeredJson = run(
-      binary,
-      ["run", "answer", launched.runId, "--continue", "--json"],
-      { cwd: proofWorkspace, env: proofEnv },
+    // Install the built Proof Bundle into the temporary SECANT_HOME, re-install it
+    // (equal digest → already installed), then install a byte-different archive of
+    // the same identity (→ identity collision) — the full first-install-wins path
+    // from the installed binary on each OS (issue #53, AC7).
+    const firstInstall = run(binary, ["bundle", "install", outputWfb], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    });
+    if (!/^Installed\.$/m.test(firstInstall)) {
+      throw new Error(
+        `Compiled binary did not install the Proof Bundle: ${firstInstall}`,
+      );
+    }
+
+    const secondInstall = run(binary, ["bundle", "install", outputWfb], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    });
+    if (!/Already installed/.test(secondInstall)) {
+      throw new Error(
+        `Re-installing the equal digest was not reported as already installed: ${secondInstall}`,
+      );
+    }
+
+    const afterInstall = JSON.parse(
+      run(binary, ["workspace", "--json"], {
+        cwd: workspaceDirectory,
+        env: workspaceEnv,
+      }),
     );
-    const answered = JSON.parse(answeredJson);
-    if (
-      answered.family !== "run" ||
-      answered.runId !== launched.runId ||
-      answered.result?.found !== true ||
-      answered.result.run?.state !== "succeeded" ||
-      answered.result.run?.pendingGate !== undefined
-    ) {
+    if (afterInstall.installedBundleCount !== 1) {
       throw new Error(
-        `Installed Proof Bundle did not exit 0 at succeeded through ${scenario.harness} with the frozen Run JSON fields: ${answeredJson}`,
+        `Home reported ${afterInstall.installedBundleCount} Installed Bundles instead of 1.`,
       );
     }
+
+    // List and inspect the installed Proof Bundle over the `bundle-catalog`
+    // Projection with --json (issue #54, AC6): the same read-back on all three
+    // operating systems, asserting identity, digest, all three platforms, and
+    // zero error findings.
+    const platforms = ["windows", "macos", "linux"];
+    const listSnapshot = JSON.parse(
+      run(binary, ["bundle", "list", "--json"], {
+        cwd: smokeRoot,
+        env: workspaceEnv,
+      }),
+    );
+    const listed = (listSnapshot.result?.bundles ?? []).find(
+      (bundle: { id: string }) => bundle.id === "dev.secant.test-repair",
+    );
     if (
-      run("git", ["log", "-1", "--format=%s"], {
-        cwd: proofWorkspace,
-      }).trim() !== "Repair failing test"
+      !listed ||
+      !/^[0-9a-f]{64}$/.test(listed.digest ?? "") ||
+      platforms.some((platform) => !(listed.platforms ?? []).includes(platform))
     ) {
       throw new Error(
-        `The approved Proof Bundle did not make its authored commit through ${scenario.harness}.`,
+        `bundle list --json did not carry the installed Proof Bundle with its digest and all three platforms: ${JSON.stringify(listSnapshot)}`,
       );
     }
+
+    const focus = JSON.parse(
+      run(binary, ["bundle", "inspect", "dev.secant.test-repair", "--json"], {
+        cwd: smokeRoot,
+        env: workspaceEnv,
+      }),
+    );
+    const errorFindings = (focus.compositionFindings ?? []).filter(
+      (finding: { severity: string }) => finding.severity === "error",
+    );
+    if (
+      focus.id !== "dev.secant.test-repair" ||
+      !/^[0-9a-f]{64}$/.test(focus.digest ?? "") ||
+      platforms.some(
+        (platform) => !(focus.platforms ?? []).includes(platform),
+      ) ||
+      errorFindings.length !== 0
+    ) {
+      throw new Error(
+        `bundle inspect --json did not read back identity, digest, all three platforms, and zero error findings: ${JSON.stringify(focus)}`,
+      );
+    }
+
+    return { listed, proofBundleFolder };
   }
 
-  // A byte-different archive of the same identity: rebuild a copy whose declared
-  // script asset differs, so the digest changes while id and version do not.
-  const variantFolder = join(smokeRoot, "variant-bundle");
-  await cp(proofBundleFolder, variantFolder, { recursive: true });
-  appendFileSync(
-    join(variantFolder, "scripts", "run-test.sh"),
-    "\n# package-smoke variant\n",
+  const { listed, proofBundleFolder } = await runNamedScenario(
+    "install-and-catalog",
+    installAndCatalogScenario,
   );
-  const variantWfb = join(smokeRoot, "variant.wfb");
-  run(
-    binary,
-    ["bundle", "build", variantFolder, "--no-install", "--output", variantWfb],
-    { cwd: smokeRoot, env: workspaceEnv },
-  );
-  const collision = spawnSync(binary, ["bundle", "install", variantWfb], {
-    cwd: smokeRoot,
-    encoding: "utf8",
-    env: workspaceEnv,
-  });
-  if (collision.error) throw collision.error;
-  if (
-    collision.status === 0 ||
-    !collision.stderr.includes("bundle-identity-collision")
-  ) {
-    throw new Error(
-      `A byte-different same-identity archive was not rejected as an identity collision: ${collision.stdout}\n${collision.stderr}`,
-    );
-  }
 
-  // Run error paths from the compiled binary (issue #82, AC7): `run show` on an
-  // unknown Run id and `run launch` on an uninstalled Bundle each exit non-zero
-  // with the precise Problem, before any Run directory exists.
-  assertRefuses(binary, [
-    {
-      args: ["run", "show", "no-such-run"],
-      match: "run-not-found",
-      cwd: workspaceDirectory,
-      env: workspaceEnv,
-      detail: "did not print run-not-found",
-    },
-    {
-      args: ["run", "launch", "io.example.absent"],
-      match: "bundle-not-installed",
-      cwd: workspaceDirectory,
-      env: workspaceEnv,
-      detail: "did not print bundle-not-installed",
-    },
-  ]);
-
-  // Preflight refusals from the compiled binary (issue #83, AC7; #116), each before
-  // any Run exists. An interactive-agent Bundle is refused headlessly with
-  // interactive-step-needs-tui (the headless client cannot relay human turn-taking,
-  // checked before Harness discovery so it is deterministic without Claude Code); a
-  // Command-only Bundle that requires a Git worktree root is refused with the
-  // git-worktree-root Problem when launched from the non-repository workspace.
-  // Neither needs a trust acknowledgement: Preflight runs ahead of the Trust gate.
-  const interactiveFolder = join(smokeRoot, "interactive-bundle");
-  await mkdir(interactiveFolder, { recursive: true });
-  await writeFile(join(interactiveFolder, "grill.md"), "Grill me.\n");
-  await writeFile(
-    join(interactiveFolder, "manifest.json"),
-    JSON.stringify({
-      formatVersion: 1,
-      bundle: {
-        id: "dev.secant.smoke-interactive",
-        version: "1.0.0",
-        name: "Smoke Interactive",
-        description: "An interactive-agent Bundle refused headlessly (#116).",
-      },
-      platforms: ["windows", "macos", "linux"],
-      inputs: {},
-      assets: [{ path: "grill.md", kind: "prompt" }],
-      routing: [
-        {
-          id: "grill",
-          kind: "interactive-agent",
-          session: "s",
-          prompt: { asset: "grill.md" },
+  async function twoHarnessProofBundleScenario(): Promise<void> {
+    // The `two-harness-proof-bundle` scenario (#149, replacing the M3 single-Harness
+    // #119 smoke). Run the one installed Test Repair Proof Bundle headlessly through
+    // both recorded replayers — Claude Code and Codex — in two fresh Workspaces with
+    // identical routing and launch-input shape, varying only the externally supplied
+    // `--harness` selection. For each: the failing baseline enters one repair
+    // iteration; the recording applies its Workspace patch; the next Verdict passes;
+    // and the authored approve-commit gate keeps Git unchanged until a separate
+    // `run answer --continue` invocation succeeds and makes the commit. Both
+    // Run-driving commands use the frozen --json envelope from the compiled binary,
+    // and only the temporary PATH selects each fake Harness. The two scenarios report
+    // different effective models, proving the compiled binary drives both Adapters.
+    // `evidence` asserts the Harness-specific observable identity that proves the
+    // compiled binary really drove that Adapter's own seam — not just that a Run
+    // reached the gate. This keeps the M3 permission-bridge invariant checked in the
+    // compiled binary specifically, generalized across the two Adapters.
+    type TimelineEvent = { event: string; detail?: string };
+    const twoHarnessScenarios: readonly {
+      harness: "claude-code" | "codex";
+      effectiveModel: string;
+      replayerDirectory: string;
+      install: () => void;
+      evidence: (timeline: readonly TimelineEvent[]) => boolean;
+    }[] = [
+      {
+        harness: "claude-code",
+        effectiveModel: "claude-opus-5[1m]",
+        replayerDirectory: join(smokeRoot, "claude-replayer"),
+        install() {
+          installReplayerAt(
+            this.replayerDirectory,
+            "2.1.273 (Claude Code)",
+            join(
+              projectRoot,
+              "tests",
+              "harness",
+              "fixtures",
+              "claude-code",
+              "test-repair",
+            ),
+          );
         },
-      ],
-    }),
-  );
-  const interactiveWfb = join(smokeRoot, "interactive.wfb");
-  run(
-    binary,
-    [
-      "bundle",
-      "build",
-      interactiveFolder,
-      "--no-install",
-      "--output",
-      interactiveWfb,
-    ],
-    { cwd: smokeRoot, env: workspaceEnv },
-  );
-  run(binary, ["bundle", "install", interactiveWfb], {
-    cwd: smokeRoot,
-    env: workspaceEnv,
-  });
+        // Claude Code surfaces the Edit as an approval request the client answers by
+        // policy — the permission-bridge seam the M3 #119 smoke asserted.
+        evidence: (timeline) =>
+          timeline.some(
+            (event) =>
+              event.event === "request-raised" &&
+              /^Edit .*sum\.mjs/.test(event.detail ?? ""),
+          ) &&
+          timeline.some(
+            (event) =>
+              event.event === "request-answered" &&
+              event.detail === "answered by client policy (allow)",
+          ),
+      },
+      {
+        harness: "codex",
+        effectiveModel: "gpt-5.6-sol",
+        replayerDirectory: join(smokeRoot, "codex-replayer"),
+        install() {
+          installCodexReplayerAt(this.replayerDirectory, "test-repair");
+        },
+        // Codex auto-approves the edit internally: no approval request crosses to the
+        // client; the edit is observable only as a generic tool-activity event.
+        evidence: (timeline) =>
+          timeline.some(
+            (event) =>
+              event.event === "tool-activity" &&
+              event.detail === "file-change completed",
+          ) && !timeline.some((event) => event.event === "request-raised"),
+      },
+    ];
+    for (const scenario of twoHarnessScenarios) {
+      scenario.install();
+      // Canonicalize the Workspace so the `file` launch input (an absolute
+      // passthrough) names the same directory the Adapter is prepared against; the
+      // Codex replayer strict-redacts the Workspace path in the rendered prompt.
+      const proofWorkspaceRaw = join(
+        smokeRoot,
+        `two-harness-${scenario.harness}-workspace`,
+      );
+      await mkdir(proofWorkspaceRaw, { recursive: true });
+      const proofWorkspace = realpathSync.native(proofWorkspaceRaw);
+      const { failingTest, baselineCommit } =
+        seedTestRepairWorkspace(proofWorkspace);
+      const proofEnv: NodeJS.ProcessEnv = {
+        ...workspaceEnv,
+        PATH: `${scenario.replayerDirectory}${delimiter}${workspaceEnv.PATH}`,
+      };
+      delete proofEnv.SECANT_CLAUDE_CODE;
+      delete proofEnv.SECANT_CODEX;
+      run(binary, ["workspace", "approve"], {
+        cwd: proofWorkspace,
+        env: proofEnv,
+      });
 
-  const gitGuardFolder = join(projectRoot, "bundles", "git-guard-command");
-  const gitGuardWfb = join(smokeRoot, "git-guard.wfb");
-  run(
-    binary,
-    [
-      "bundle",
-      "build",
-      gitGuardFolder,
-      "--no-install",
-      "--output",
-      gitGuardWfb,
-    ],
-    { cwd: smokeRoot, env: workspaceEnv },
-  );
-  run(binary, ["bundle", "install", gitGuardWfb], {
-    cwd: smokeRoot,
-    env: workspaceEnv,
-  });
+      const launchedJson = run(
+        binary,
+        [
+          "run",
+          "launch",
+          "dev.secant.test-repair",
+          "--input",
+          `failing-test=${failingTest}`,
+          "--trust",
+          listed.digest,
+          "--harness",
+          scenario.harness,
+          "--harness-requests",
+          "allow",
+          "--json",
+        ],
+        { cwd: proofWorkspace, env: proofEnv, expect: 2 },
+      );
+      const launched = JSON.parse(launchedJson);
+      const proofRun = launched.result?.run;
+      if (
+        launched.family !== "run" ||
+        typeof launched.runId !== "string" ||
+        launched.result?.found !== true ||
+        proofRun?.runId !== launched.runId ||
+        proofRun.bundle?.id !== "dev.secant.test-repair" ||
+        proofRun.state !== "blocked" ||
+        !Array.isArray(proofRun.progress) ||
+        !Array.isArray(proofRun.timeline) ||
+        !Array.isArray(proofRun.outputs) ||
+        !Array.isArray(proofRun.actionOffers) ||
+        proofRun.pendingGate?.gate?.shape !== "approve-reject" ||
+        proofRun.pendingGate?.gate?.stepId !== "approve-commit" ||
+        proofRun.effectiveModel !== scenario.effectiveModel ||
+        proofRun.progress.find(
+          (step: { id: string; status: string }) => step.id === "fix",
+        )?.status !== "succeeded" ||
+        proofRun.timeline.filter(
+          (event: { event: string }) => event.event === "iteration",
+        ).length !== 1 ||
+        !scenario.evidence(proofRun.timeline as TimelineEvent[])
+      ) {
+        throw new Error(
+          `Installed Proof Bundle did not reach its authored gate through ${scenario.harness} with the frozen Run JSON fields: ${launchedJson}`,
+        );
+      }
+      if (
+        run("git", ["rev-parse", "HEAD"], { cwd: proofWorkspace }).trim() !==
+        baselineCommit
+      ) {
+        throw new Error(
+          `The Proof Bundle committed before its authored gate was approved through ${scenario.harness}.`,
+        );
+      }
 
-  // The maintained Matt front Bundle (#123): built and installed the way a user's
-  // Bundle is (nothing in target source names its id), then refused headlessly with
-  // the exact interactive-step-needs-tui code AND its remediation — the assertion
-  // the M2 not-executable check was replaced by, now pointed at the Matt front. It
-  // runs to succeeded only in the TUI (tests/tui/matt-front-workbench.test.tsx).
-  const mattFrontFolder = join(projectRoot, "bundles", "matt-front-spec");
-  const mattFrontWfb = join(smokeRoot, "matt-front.wfb");
-  run(
-    binary,
-    [
-      "bundle",
-      "build",
-      mattFrontFolder,
-      "--no-install",
-      "--output",
-      mattFrontWfb,
-    ],
-    { cwd: smokeRoot, env: workspaceEnv },
+      const answeredJson = run(
+        binary,
+        ["run", "answer", launched.runId, "--continue", "--json"],
+        { cwd: proofWorkspace, env: proofEnv },
+      );
+      const answered = JSON.parse(answeredJson);
+      if (
+        answered.family !== "run" ||
+        answered.runId !== launched.runId ||
+        answered.result?.found !== true ||
+        answered.result.run?.state !== "succeeded" ||
+        answered.result.run?.pendingGate !== undefined
+      ) {
+        throw new Error(
+          `Installed Proof Bundle did not exit 0 at succeeded through ${scenario.harness} with the frozen Run JSON fields: ${answeredJson}`,
+        );
+      }
+      if (
+        run("git", ["log", "-1", "--format=%s"], {
+          cwd: proofWorkspace,
+        }).trim() !== "Repair failing test"
+      ) {
+        throw new Error(
+          `The approved Proof Bundle did not make its authored commit through ${scenario.harness}.`,
+        );
+      }
+    }
+  }
+
+  await runNamedScenario(
+    "two-harness-proof-bundle",
+    twoHarnessProofBundleScenario,
   );
-  run(binary, ["bundle", "install", mattFrontWfb], {
-    cwd: smokeRoot,
-    env: workspaceEnv,
-  });
-  {
-    const refused = spawnSync(
-      binary,
-      ["run", "launch", "dev.secant.matt-front"],
-      { cwd: workspaceDirectory, encoding: "utf8", env: workspaceEnv },
+
+  async function installCollisionScenario(): Promise<void> {
+    // A byte-different archive of the same identity: rebuild a copy whose declared
+    // script asset differs, so the digest changes while id and version do not.
+    const variantFolder = join(smokeRoot, "variant-bundle");
+    await cp(proofBundleFolder, variantFolder, { recursive: true });
+    appendFileSync(
+      join(variantFolder, "scripts", "run-test.sh"),
+      "\n# package-smoke variant\n",
     );
-    if (refused.error) throw refused.error;
-    const output = `${refused.stdout}${refused.stderr}`;
+    const variantWfb = join(smokeRoot, "variant.wfb");
+    run(
+      binary,
+      [
+        "bundle",
+        "build",
+        variantFolder,
+        "--no-install",
+        "--output",
+        variantWfb,
+      ],
+      { cwd: smokeRoot, env: workspaceEnv },
+    );
+    const collision = spawnSync(binary, ["bundle", "install", variantWfb], {
+      cwd: smokeRoot,
+      encoding: "utf8",
+      env: workspaceEnv,
+    });
+    if (collision.error) throw collision.error;
     if (
-      refused.status === 0 ||
-      !output.includes("interactive-step-needs-tui") ||
-      !output.includes("Run this Bundle in the TUI.")
+      collision.status === 0 ||
+      !collision.stderr.includes("bundle-identity-collision")
     ) {
       throw new Error(
-        `The Matt front was not refused headlessly with the interactive-step-needs-tui code and its remediation: ${output}`,
+        `A byte-different same-identity archive was not rejected as an identity collision: ${collision.stdout}\n${collision.stderr}`,
       );
     }
   }
 
-  assertRefuses(binary, [
-    {
-      args: ["run", "launch", "dev.secant.smoke-interactive"],
-      match: "interactive-step-needs-tui",
-      cwd: workspaceDirectory,
+  await runNamedScenario("install-collision", installCollisionScenario);
+
+  async function runRefusalsScenario(): Promise<void> {
+    // Run error paths from the compiled binary (issue #82, AC7): `run show` on an
+    // unknown Run id and `run launch` on an uninstalled Bundle each exit non-zero
+    // with the precise Problem, before any Run directory exists.
+    assertRefuses(binary, [
+      {
+        args: ["run", "show", "no-such-run"],
+        match: "run-not-found",
+        cwd: workspaceDirectory,
+        env: workspaceEnv,
+        detail: "did not print run-not-found",
+      },
+      {
+        args: ["run", "launch", "io.example.absent"],
+        match: "bundle-not-installed",
+        cwd: workspaceDirectory,
+        env: workspaceEnv,
+        detail: "did not print bundle-not-installed",
+      },
+    ]);
+  }
+
+  await runNamedScenario("run-refusals", runRefusalsScenario);
+
+  async function headlessRefusalFixturesScenario(): Promise<void> {
+    // Preflight refusals from the compiled binary (issue #83, AC7; #116), each before
+    // any Run exists. An interactive-agent Bundle is refused headlessly with
+    // interactive-step-needs-tui (the headless client cannot relay human turn-taking,
+    // checked before Harness discovery so it is deterministic without Claude Code); a
+    // Command-only Bundle that requires a Git worktree root is refused with the
+    // git-worktree-root Problem when launched from the non-repository workspace.
+    // Neither needs a trust acknowledgement: Preflight runs ahead of the Trust gate.
+    const interactiveFolder = join(smokeRoot, "interactive-bundle");
+    await mkdir(interactiveFolder, { recursive: true });
+    await writeFile(join(interactiveFolder, "grill.md"), "Grill me.\n");
+    await writeFile(
+      join(interactiveFolder, "manifest.json"),
+      JSON.stringify({
+        formatVersion: 1,
+        bundle: {
+          id: "dev.secant.smoke-interactive",
+          version: "1.0.0",
+          name: "Smoke Interactive",
+          description: "An interactive-agent Bundle refused headlessly (#116).",
+        },
+        platforms: ["windows", "macos", "linux"],
+        inputs: {},
+        assets: [{ path: "grill.md", kind: "prompt" }],
+        routing: [
+          {
+            id: "grill",
+            kind: "interactive-agent",
+            session: "s",
+            prompt: { asset: "grill.md" },
+          },
+        ],
+      }),
+    );
+    const interactiveWfb = join(smokeRoot, "interactive.wfb");
+    run(
+      binary,
+      [
+        "bundle",
+        "build",
+        interactiveFolder,
+        "--no-install",
+        "--output",
+        interactiveWfb,
+      ],
+      { cwd: smokeRoot, env: workspaceEnv },
+    );
+    run(binary, ["bundle", "install", interactiveWfb], {
+      cwd: smokeRoot,
       env: workspaceEnv,
-      detail: "did not report a Preflight refusal (interactive-step-needs-tui)",
-    },
-    {
-      args: ["run", "launch", "dev.secant.git-guard"],
-      match: "git-worktree-root",
-      cwd: workspaceDirectory,
+    });
+
+    const gitGuardFolder = join(projectRoot, "bundles", "git-guard-command");
+    const gitGuardWfb = join(smokeRoot, "git-guard.wfb");
+    run(
+      binary,
+      [
+        "bundle",
+        "build",
+        gitGuardFolder,
+        "--no-install",
+        "--output",
+        gitGuardWfb,
+      ],
+      { cwd: smokeRoot, env: workspaceEnv },
+    );
+    run(binary, ["bundle", "install", gitGuardWfb], {
+      cwd: smokeRoot,
       env: workspaceEnv,
-      detail: "did not report a Preflight refusal (git-worktree-root)",
-    },
-  ]);
+    });
+  }
+
+  await runNamedScenario(
+    "headless-refusal-fixtures",
+    headlessRefusalFixturesScenario,
+  );
+
+  async function mattFrontRefusalScenario(): Promise<void> {
+    // The maintained Matt front Bundle (#123): built and installed the way a user's
+    // Bundle is (nothing in target source names its id), then refused headlessly with
+    // the exact interactive-step-needs-tui code AND its remediation — the assertion
+    // the M2 not-executable check was replaced by, now pointed at the Matt front. It
+    // runs to succeeded only in the TUI (tests/tui/matt-front-workbench.test.tsx).
+    const mattFrontFolder = join(projectRoot, "bundles", "matt-front-spec");
+    const mattFrontWfb = join(smokeRoot, "matt-front.wfb");
+    run(
+      binary,
+      [
+        "bundle",
+        "build",
+        mattFrontFolder,
+        "--no-install",
+        "--output",
+        mattFrontWfb,
+      ],
+      { cwd: smokeRoot, env: workspaceEnv },
+    );
+    run(binary, ["bundle", "install", mattFrontWfb], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    });
+    {
+      const refused = spawnSync(
+        binary,
+        ["run", "launch", "dev.secant.matt-front"],
+        { cwd: workspaceDirectory, encoding: "utf8", env: workspaceEnv },
+      );
+      if (refused.error) throw refused.error;
+      const output = `${refused.stdout}${refused.stderr}`;
+      if (
+        refused.status === 0 ||
+        !output.includes("interactive-step-needs-tui") ||
+        !output.includes("Run this Bundle in the TUI.")
+      ) {
+        throw new Error(
+          `The Matt front was not refused headlessly with the interactive-step-needs-tui code and its remediation: ${output}`,
+        );
+      }
+    }
+  }
+
+  await runNamedScenario("matt-front-refusal", mattFrontRefusalScenario);
+
+  async function preflightRefusalsScenario(): Promise<void> {
+    assertRefuses(binary, [
+      {
+        args: ["run", "launch", "dev.secant.smoke-interactive"],
+        match: "interactive-step-needs-tui",
+        cwd: workspaceDirectory,
+        env: workspaceEnv,
+        detail:
+          "did not report a Preflight refusal (interactive-step-needs-tui)",
+      },
+      {
+        args: ["run", "launch", "dev.secant.git-guard"],
+        match: "git-worktree-root",
+        cwd: workspaceDirectory,
+        env: workspaceEnv,
+        detail: "did not report a Preflight refusal (git-worktree-root)",
+      },
+    ]);
+  }
+
+  await runNamedScenario("preflight-refusals", preflightRefusalsScenario);
 
   // Workspace materialization, verification, conflict, and resume from the
   // compiled binary on each gated OS (issue #88, AC6). A `home: workspace` text
   // Artifact is materialized to its declared path; a middle Step modifies that
   // copy; the next Step's byte-for-byte verify rests the Run `halted` with a
   // conflict `run show` names; restoring the file and `run resume` continues it.
-  {
+  async function workspaceMaterializationScenario(): Promise<void> {
     const runtime = basename(process.execPath);
     const relPath = "out/materialized.txt";
     const absPath = join(canonicalWorkspace, "out", "materialized.txt");
@@ -976,12 +1049,17 @@ try {
     }
   }
 
+  await runNamedScenario(
+    "workspace-materialization",
+    workspaceMaterializationScenario,
+  );
+
   // Answer a durable Human Gate across process invocations from the compiled
   // binary on each gated OS (issue #85, AC6). A Repeat group blocks at its Review
   // checkpoint under one invocation; a second, separate invocation answers the
   // Gate `--continue`, granting one more interval that reaches the pass and rests
   // the Run `succeeded` — the answer survived process death as a durable Artifact.
-  {
+  async function durableHumanGateScenario(): Promise<void> {
     const runtime = basename(process.execPath);
     const id = "dev.secant.answer-smoke";
     const counterPath = join(smokeRoot, "answer-counter");
@@ -1070,11 +1148,13 @@ try {
     }
   }
 
+  await runNamedScenario("durable-human-gate", durableHumanGateScenario);
+
   // List, delete, and refuse-cancel Previous Runs from the compiled binary on each
   // gated OS (issue #87, AC6). The materialize and answer scenarios above left two
   // resting Runs in this Workspace's group; list them, delete one, and confirm a
   // resting Run cannot be cancelled.
-  {
+  async function runListAndDeleteScenario(): Promise<void> {
     const listed = JSON.parse(
       run(binary, ["run", "list", "--json"], {
         cwd: workspaceDirectory,
@@ -1141,6 +1221,8 @@ try {
     }
   }
 
+  await runNamedScenario("run-list-and-delete", runListAndDeleteScenario);
+
   // A headless process interrupted by SIGINT mid-Run rests the Run `halted` and a
   // later `run resume` continues it, on each gated OS (issue #98, AC3). A dedicated
   // home and Workspace isolate the one Run, so the reopen lists exactly it. The
@@ -1150,7 +1232,7 @@ try {
   // the live Run (killing the child's group) and leaves the claim live; on Windows
   // SIGINT is uncatchable and terminates the process, leaving the same live claim —
   // either way the next open reconciles the Run `halted`.
-  {
+  async function signalHaltThenResumeScenario(): Promise<void> {
     const sigintHome = join(smokeRoot, "sigint-home");
     const sigintWorkspace = join(smokeRoot, "sigint-workspace");
     await mkdir(sigintWorkspace, { recursive: true });
@@ -1384,6 +1466,11 @@ try {
     }
   }
 
+  await runNamedScenario(
+    "signal-halt-then-resume",
+    signalHaltThenResumeScenario,
+  );
+
   // The maintained Command-only gate Bundle, built, installed, and run to
   // completion from the compiled binary on each gated OS (issue #89, the M2 gate —
   // ADR 0027, #26). Its Repeat loop's check fails on iterations 1 and 2 and passes
@@ -1393,7 +1480,7 @@ try {
   // prerequisite runs the real Git probe from the binary on every OS. Nothing in
   // target source knows this Bundle exists — it is built, installed, and driven the
   // way a user's Bundle is.
-  {
+  async function commandGateScenario(): Promise<void> {
     const gateId = "dev.secant.command-gate";
     const gateFolder = join(projectRoot, "bundles", "command-gate");
     const gateWfb = join(smokeRoot, "command-gate.wfb");
@@ -1543,142 +1630,155 @@ try {
     }
   }
 
-  // Windows `.cmd` shim resolution (issue #96 A40, #26): a Bundle whose Command
-  // step names an npm-style `.cmd` shim resolves through the shim to its real
-  // target and runs to a Verdict without a shell; a Bundle naming a plain `.bat`
-  // is refused at Preflight with the interpreter remediation. POSIX has no shim
-  // rule (the executable resolves directly), so this case is Windows-only.
-  if (process.platform === "win32") {
-    const runtime = basename(process.execPath); // resolvable via workspaceEnv PATH
-    const shimDir = join(smokeRoot, "shims");
-    await mkdir(shimDir, { recursive: true });
-    // The worker the npm-style shim wraps: exit 0 -> a pass Verdict.
-    await writeFile(join(shimDir, "worker.js"), "process.exit(0)\n");
-    // An npm `cmd-shim` shape: `_prog` is the interpreter (the runtime already on
-    // PATH), invoked on the `%dp0%`-relative worker script.
-    const cmdShim = [
-      "@ECHO off",
-      "GOTO start",
-      ":find_dp0",
-      "SET dp0=%~dp0",
-      "EXIT /b",
-      ":start",
-      "SETLOCAL",
-      "CALL :find_dp0",
-      "",
-      `IF EXIST "%dp0%\\${runtime}" (`,
-      `  SET "_prog=%dp0%\\${runtime}"`,
-      ") ELSE (",
-      `  SET "_prog=${runtime}"`,
-      "  SET PATHEXT=%PATHEXT:;.JS;=;%",
-      ")",
-      "",
-      `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\worker.js" %*`,
-    ].join("\r\n");
-    await writeFile(join(shimDir, "shimtool.cmd"), cmdShim);
-    // A plain `.bat` that is not an npm-style shim: Preflight must refuse it.
-    await writeFile(
-      join(shimDir, "battool.bat"),
-      "@echo off\r\necho not a node shim\r\n",
-    );
-    const shimEnv = {
-      ...workspaceEnv,
-      PATH: `${shimDir}${delimiter}${workspaceEnv.PATH ?? ""}`,
-    };
+  await runNamedScenario("command-gate", commandGateScenario);
 
-    const shimBundle = (id: string, name: string, executable: string) => ({
-      formatVersion: 1,
-      bundle: { id, version: "1.0.0", name, description: `${name} smoke.` },
-      platforms: ["windows", "macos", "linux"],
-      inputs: {},
-      assets: [],
-      routing: [
+  async function windowsCmdShimScenario(): Promise<void> {
+    // Windows `.cmd` shim resolution (issue #96 A40, #26): a Bundle whose Command
+    // step names an npm-style `.cmd` shim resolves through the shim to its real
+    // target and runs to a Verdict without a shell; a Bundle naming a plain `.bat`
+    // is refused at Preflight with the interpreter remediation. POSIX has no shim
+    // rule (the executable resolves directly), so this case is Windows-only.
+    if (process.platform === "win32") {
+      const runtime = basename(process.execPath); // resolvable via workspaceEnv PATH
+      const shimDir = join(smokeRoot, "shims");
+      await mkdir(shimDir, { recursive: true });
+      // The worker the npm-style shim wraps: exit 0 -> a pass Verdict.
+      await writeFile(join(shimDir, "worker.js"), "process.exit(0)\n");
+      // An npm `cmd-shim` shape: `_prog` is the interpreter (the runtime already on
+      // PATH), invoked on the `%dp0%`-relative worker script.
+      const cmdShim = [
+        "@ECHO off",
+        "GOTO start",
+        ":find_dp0",
+        "SET dp0=%~dp0",
+        "EXIT /b",
+        ":start",
+        "SETLOCAL",
+        "CALL :find_dp0",
+        "",
+        `IF EXIST "%dp0%\\${runtime}" (`,
+        `  SET "_prog=%dp0%\\${runtime}"`,
+        ") ELSE (",
+        `  SET "_prog=${runtime}"`,
+        "  SET PATHEXT=%PATHEXT:;.JS;=;%",
+        ")",
+        "",
+        `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\worker.js" %*`,
+      ].join("\r\n");
+      await writeFile(join(shimDir, "shimtool.cmd"), cmdShim);
+      // A plain `.bat` that is not an npm-style shim: Preflight must refuse it.
+      await writeFile(
+        join(shimDir, "battool.bat"),
+        "@echo off\r\necho not a node shim\r\n",
+      );
+      const shimEnv = {
+        ...workspaceEnv,
+        PATH: `${shimDir}${delimiter}${workspaceEnv.PATH ?? ""}`,
+      };
+
+      const shimBundle = (id: string, name: string, executable: string) => ({
+        formatVersion: 1,
+        bundle: { id, version: "1.0.0", name, description: `${name} smoke.` },
+        platforms: ["windows", "macos", "linux"],
+        inputs: {},
+        assets: [],
+        routing: [
+          {
+            id: "shimstep",
+            kind: "command",
+            produces: [{ name: "v", type: "verdict" }],
+            command: { executable, arguments: [] },
+          },
+        ],
+      });
+
+      // The npm-style `.cmd` shim: Preflight passes and the Command runs to a Verdict.
+      // Routed through `run()` so the exit code is asserted (default 0) alongside the
+      // Run state.
+      const okId = "dev.secant.cmd-shim-ok";
+      const okInstalled = await buildAndInstall(
+        binary,
+        join(smokeRoot, "cmd-shim-ok"),
+        shimBundle(okId, "Cmd Shim Ok", "shimtool"),
         {
-          id: "shimstep",
-          kind: "command",
-          produces: [{ name: "v", type: "verdict" }],
-          command: { executable, arguments: [] },
+          build: smokeRoot,
+          list: workspaceDirectory,
+          env: shimEnv,
+          label: "cmd-shim-ok",
         },
-      ],
-    });
-
-    // The npm-style `.cmd` shim: Preflight passes and the Command runs to a Verdict.
-    // Routed through `run()` so the exit code is asserted (default 0) alongside the
-    // Run state.
-    const okId = "dev.secant.cmd-shim-ok";
-    const okInstalled = await buildAndInstall(
-      binary,
-      join(smokeRoot, "cmd-shim-ok"),
-      shimBundle(okId, "Cmd Shim Ok", "shimtool"),
-      {
-        build: smokeRoot,
-        list: workspaceDirectory,
-        env: shimEnv,
-        label: "cmd-shim-ok",
-      },
-    );
-    const okLaunch = run(
-      binary,
-      ["run", "launch", okId, "--trust", okInstalled.digest, "--json"],
-      { cwd: workspaceDirectory, env: shimEnv },
-    );
-    if (JSON.parse(okLaunch).result.run.state !== "succeeded") {
-      throw new Error(
-        `npm-style .cmd shim Command did not run to succeeded: ${okLaunch}`,
       );
-    }
+      const okLaunch = run(
+        binary,
+        ["run", "launch", okId, "--trust", okInstalled.digest, "--json"],
+        { cwd: workspaceDirectory, env: shimEnv },
+      );
+      if (JSON.parse(okLaunch).result.run.state !== "succeeded") {
+        throw new Error(
+          `npm-style .cmd shim Command did not run to succeeded: ${okLaunch}`,
+        );
+      }
 
-    // The plain `.bat`: refused at Preflight (before Trust) with the shim Problem.
-    const batId = "dev.secant.cmd-shim-bat";
-    await buildAndInstall(
-      binary,
-      join(smokeRoot, "cmd-shim-bat"),
-      shimBundle(batId, "Cmd Shim Bat", "battool"),
-      {
-        build: smokeRoot,
-        list: workspaceDirectory,
+      // The plain `.bat`: refused at Preflight (before Trust) with the shim Problem.
+      const batId = "dev.secant.cmd-shim-bat";
+      await buildAndInstall(
+        binary,
+        join(smokeRoot, "cmd-shim-bat"),
+        shimBundle(batId, "Cmd Shim Bat", "battool"),
+        {
+          build: smokeRoot,
+          list: workspaceDirectory,
+          env: shimEnv,
+          label: "cmd-shim-bat",
+        },
+      );
+      const batLaunch = spawnSync(binary, ["run", "launch", batId], {
+        cwd: workspaceDirectory,
+        encoding: "utf8",
         env: shimEnv,
-        label: "cmd-shim-bat",
-      },
-    );
-    const batLaunch = spawnSync(binary, ["run", "launch", batId], {
-      cwd: workspaceDirectory,
+      });
+      if (batLaunch.error) throw batLaunch.error;
+      if (batLaunch.status === 0) {
+        throw new Error(
+          "Launching a Bundle naming a plain .bat should be refused.",
+        );
+      }
+      const batOutput = `${batLaunch.stdout}${batLaunch.stderr}`;
+      if (!batOutput.includes("command-executable-unsupported-shim")) {
+        throw new Error(
+          `The .bat Bundle was not refused with the unsupported-shim Problem: ${batOutput}`,
+        );
+      }
+    }
+  }
+
+  await runNamedScenario("windows-cmd-shim", windowsCmdShimScenario);
+
+  async function noInteractiveTerminalScenario(): Promise<void> {
+    // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
+    // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
+    // startup Problem and a non-zero exit before the renderer is created.
+    const shellResult = spawnSync(binary, [], {
+      cwd: smokeRoot,
       encoding: "utf8",
-      env: shimEnv,
+      env: workspaceEnv,
     });
-    if (batLaunch.error) throw batLaunch.error;
-    if (batLaunch.status === 0) {
+    if (shellResult.error) throw shellResult.error;
+    if (shellResult.status === 0) {
       throw new Error(
-        "Launching a Bundle naming a plain .bat should be refused.",
+        "Compiled shell should reject a non-interactive launch with a non-zero exit.",
       );
     }
-    const batOutput = `${batLaunch.stdout}${batLaunch.stderr}`;
-    if (!batOutput.includes("command-executable-unsupported-shim")) {
+    if (!shellResult.stderr.includes("no-interactive-terminal")) {
       throw new Error(
-        `The .bat Bundle was not refused with the unsupported-shim Problem: ${batOutput}`,
+        `Compiled shell did not print the startup Problem: ${shellResult.stdout}\n${shellResult.stderr}`,
       );
     }
   }
 
-  // Launch the shell with no interactive terminal (issue #55, AC9): stdio is
-  // piped, so stdin/stdout are not TTYs and the launch rejects with the precise
-  // startup Problem and a non-zero exit before the renderer is created.
-  const shellResult = spawnSync(binary, [], {
-    cwd: smokeRoot,
-    encoding: "utf8",
-    env: workspaceEnv,
-  });
-  if (shellResult.error) throw shellResult.error;
-  if (shellResult.status === 0) {
-    throw new Error(
-      "Compiled shell should reject a non-interactive launch with a non-zero exit.",
-    );
-  }
-  if (!shellResult.stderr.includes("no-interactive-terminal")) {
-    throw new Error(
-      `Compiled shell did not print the startup Problem: ${shellResult.stdout}\n${shellResult.stderr}`,
-    );
-  }
+  await runNamedScenario(
+    "no-interactive-terminal",
+    noInteractiveTerminalScenario,
+  );
 
   process.stdout.write(
     `Compiled binary smoke passed for ${source} (@secantdev/secant@${pkg.version}).\n`,

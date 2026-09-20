@@ -27,6 +27,8 @@ refusal, the smoke runs on each of the three operating systems:
   Windows SIGINT terminates and leaves the same claim), and a later `resume` completes it.
 - **Windows `.cmd` shim** acceptance and refusal: a Command step naming an npm-style `.cmd` shim resolves through the shim, while a broken shim is refused
   at Preflight (POSIX has no shim, so it is skipped there).
+- **Windows App Execution Alias** acceptance: when the runner exposes a `pwsh` or `winget` alias that `where.exe` finds after the primary PATH walk misses,
+  a Command naming it passes Preflight and runs; a runner without such an alias records the reasoned gap.
 - The **Matt front** refusal: the maintained interactive-agent Bundle refused headlessly with the `interactive-step-needs-tui` code and its remediation.
 - **Install and collision**: building the Proof Bundle with `--no-install --output`, installing it, and rejecting a byte-different same-identity archive as
   a `bundle-identity-collision` (first-install-wins).

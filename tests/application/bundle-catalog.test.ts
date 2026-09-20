@@ -278,7 +278,7 @@ test("a per-platform override resolves the command for the chosen platform", asy
     (c) => c.stepId === "baseline-test",
   );
   assert.ok(baseline);
-  assert.equal(baseline.executable, "pwsh");
+  assert.equal(baseline.executable, "powershell.exe");
   assert.deepEqual(baseline.scripts, ["scripts/run-test.ps1"]);
 });
 

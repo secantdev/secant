@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
+import which from "which";
 import { TARGETS, hostTargetKey } from "./targets.js";
 import { installReplayerAt } from "../tests/harness/replayer-install.js";
 import { installCodexReplayerAt } from "../tests/harness/codex-replayer-install.js";
@@ -197,6 +198,25 @@ function assertMigrated(
   } finally {
     database.close();
   }
+}
+
+function findWindowsAppExecutionAlias():
+  { readonly name: string; readonly args: readonly string[] } | undefined {
+  if (process.platform !== "win32") return undefined;
+  for (const candidate of [
+    { name: "pwsh", args: ["--version"] },
+    { name: "winget", args: ["--version"] },
+  ] as const) {
+    const pathMatch = which.sync(candidate.name, { nothrow: true });
+    if (typeof pathMatch === "string") continue;
+    const fallback = spawnSync("where.exe", [candidate.name], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    const firstMatch = fallback.stdout?.split(/\r?\n/, 1)[0]?.trim();
+    if (fallback.status === 0 && firstMatch) return candidate;
+  }
+  return undefined;
 }
 
 /** A pre-M4 Run has no semantic Harness selection until the legacy-upgrade slice
@@ -1632,126 +1652,172 @@ try {
 
   await runNamedScenario("command-gate", commandGateScenario);
 
+  const commandBundle = (
+    id: string,
+    name: string,
+    executable: string,
+    args: readonly string[] = [],
+  ) => ({
+    formatVersion: 1,
+    bundle: { id, version: "1.0.0", name, description: `${name} smoke.` },
+    platforms: ["windows", "macos", "linux"],
+    inputs: {},
+    assets: [],
+    routing: [
+      {
+        id: "command-step",
+        kind: "command",
+        produces: [{ name: "v", type: "verdict" }],
+        command: { executable, arguments: args },
+      },
+    ],
+  });
+
   async function windowsCmdShimScenario(): Promise<void> {
     // Windows `.cmd` shim resolution (issue #96 A40, #26): a Bundle whose Command
     // step names an npm-style `.cmd` shim resolves through the shim to its real
     // target and runs to a Verdict without a shell; a Bundle naming a plain `.bat`
     // is refused at Preflight with the interpreter remediation. POSIX has no shim
     // rule (the executable resolves directly), so this case is Windows-only.
-    if (process.platform === "win32") {
-      const runtime = basename(process.execPath); // resolvable via workspaceEnv PATH
-      const shimDir = join(smokeRoot, "shims");
-      await mkdir(shimDir, { recursive: true });
-      // The worker the npm-style shim wraps: exit 0 -> a pass Verdict.
-      await writeFile(join(shimDir, "worker.js"), "process.exit(0)\n");
-      // An npm `cmd-shim` shape: `_prog` is the interpreter (the runtime already on
-      // PATH), invoked on the `%dp0%`-relative worker script.
-      const cmdShim = [
-        "@ECHO off",
-        "GOTO start",
-        ":find_dp0",
-        "SET dp0=%~dp0",
-        "EXIT /b",
-        ":start",
-        "SETLOCAL",
-        "CALL :find_dp0",
-        "",
-        `IF EXIST "%dp0%\\${runtime}" (`,
-        `  SET "_prog=%dp0%\\${runtime}"`,
-        ") ELSE (",
-        `  SET "_prog=${runtime}"`,
-        "  SET PATHEXT=%PATHEXT:;.JS;=;%",
-        ")",
-        "",
-        `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\worker.js" %*`,
-      ].join("\r\n");
-      await writeFile(join(shimDir, "shimtool.cmd"), cmdShim);
-      // A plain `.bat` that is not an npm-style shim: Preflight must refuse it.
-      await writeFile(
-        join(shimDir, "battool.bat"),
-        "@echo off\r\necho not a node shim\r\n",
-      );
-      const shimEnv = {
-        ...workspaceEnv,
-        PATH: `${shimDir}${delimiter}${workspaceEnv.PATH ?? ""}`,
-      };
+    if (process.platform !== "win32") return;
 
-      const shimBundle = (id: string, name: string, executable: string) => ({
-        formatVersion: 1,
-        bundle: { id, version: "1.0.0", name, description: `${name} smoke.` },
-        platforms: ["windows", "macos", "linux"],
-        inputs: {},
-        assets: [],
-        routing: [
-          {
-            id: "shimstep",
-            kind: "command",
-            produces: [{ name: "v", type: "verdict" }],
-            command: { executable, arguments: [] },
-          },
-        ],
-      });
+    const runtime = basename(process.execPath); // resolvable via workspaceEnv PATH
+    const shimDir = join(smokeRoot, "shims");
+    await mkdir(shimDir, { recursive: true });
+    // The worker the npm-style shim wraps: exit 0 -> a pass Verdict.
+    await writeFile(join(shimDir, "worker.js"), "process.exit(0)\n");
+    // An npm `cmd-shim` shape: `_prog` is the interpreter (the runtime already on
+    // PATH), invoked on the `%dp0%`-relative worker script.
+    const cmdShim = [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      "",
+      `IF EXIST "%dp0%\\${runtime}" (`,
+      `  SET "_prog=%dp0%\\${runtime}"`,
+      ") ELSE (",
+      `  SET "_prog=${runtime}"`,
+      "  SET PATHEXT=%PATHEXT:;.JS;=;%",
+      ")",
+      "",
+      `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\worker.js" %*`,
+    ].join("\r\n");
+    await writeFile(join(shimDir, "shimtool.cmd"), cmdShim);
+    // A plain `.bat` that is not an npm-style shim: Preflight must refuse it.
+    await writeFile(
+      join(shimDir, "battool.bat"),
+      "@echo off\r\necho not a node shim\r\n",
+    );
+    const shimEnv = {
+      ...workspaceEnv,
+      PATH: `${shimDir}${delimiter}${workspaceEnv.PATH ?? ""}`,
+    };
 
-      // The npm-style `.cmd` shim: Preflight passes and the Command runs to a Verdict.
-      // Routed through `run()` so the exit code is asserted (default 0) alongside the
-      // Run state.
-      const okId = "dev.secant.cmd-shim-ok";
-      const okInstalled = await buildAndInstall(
-        binary,
-        join(smokeRoot, "cmd-shim-ok"),
-        shimBundle(okId, "Cmd Shim Ok", "shimtool"),
-        {
-          build: smokeRoot,
-          list: workspaceDirectory,
-          env: shimEnv,
-          label: "cmd-shim-ok",
-        },
-      );
-      const okLaunch = run(
-        binary,
-        ["run", "launch", okId, "--trust", okInstalled.digest, "--json"],
-        { cwd: workspaceDirectory, env: shimEnv },
-      );
-      if (JSON.parse(okLaunch).result.run.state !== "succeeded") {
-        throw new Error(
-          `npm-style .cmd shim Command did not run to succeeded: ${okLaunch}`,
-        );
-      }
-
-      // The plain `.bat`: refused at Preflight (before Trust) with the shim Problem.
-      const batId = "dev.secant.cmd-shim-bat";
-      await buildAndInstall(
-        binary,
-        join(smokeRoot, "cmd-shim-bat"),
-        shimBundle(batId, "Cmd Shim Bat", "battool"),
-        {
-          build: smokeRoot,
-          list: workspaceDirectory,
-          env: shimEnv,
-          label: "cmd-shim-bat",
-        },
-      );
-      const batLaunch = spawnSync(binary, ["run", "launch", batId], {
-        cwd: workspaceDirectory,
-        encoding: "utf8",
+    // The npm-style `.cmd` shim: Preflight passes and the Command runs to a Verdict.
+    const okId = "dev.secant.cmd-shim-ok";
+    const okInstalled = await buildAndInstall(
+      binary,
+      join(smokeRoot, "cmd-shim-ok"),
+      commandBundle(okId, "Cmd Shim Ok", "shimtool"),
+      {
+        build: smokeRoot,
+        list: workspaceDirectory,
         env: shimEnv,
-      });
-      if (batLaunch.error) throw batLaunch.error;
-      if (batLaunch.status === 0) {
-        throw new Error(
-          "Launching a Bundle naming a plain .bat should be refused.",
-        );
-      }
-      const batOutput = `${batLaunch.stdout}${batLaunch.stderr}`;
-      if (!batOutput.includes("command-executable-unsupported-shim")) {
-        throw new Error(
-          `The .bat Bundle was not refused with the unsupported-shim Problem: ${batOutput}`,
-        );
-      }
+        label: "cmd-shim-ok",
+      },
+    );
+    const okLaunch = run(
+      binary,
+      ["run", "launch", okId, "--trust", okInstalled.digest, "--json"],
+      { cwd: workspaceDirectory, env: shimEnv },
+    );
+    if (JSON.parse(okLaunch).result.run.state !== "succeeded") {
+      throw new Error(
+        `npm-style .cmd shim Command did not run to succeeded: ${okLaunch}`,
+      );
+    }
+
+    // The plain `.bat`: refused at Preflight (before Trust) with the shim Problem.
+    const batId = "dev.secant.cmd-shim-bat";
+    await buildAndInstall(
+      binary,
+      join(smokeRoot, "cmd-shim-bat"),
+      commandBundle(batId, "Cmd Shim Bat", "battool"),
+      {
+        build: smokeRoot,
+        list: workspaceDirectory,
+        env: shimEnv,
+        label: "cmd-shim-bat",
+      },
+    );
+    const batLaunch = spawnSync(binary, ["run", "launch", batId], {
+      cwd: workspaceDirectory,
+      encoding: "utf8",
+      env: shimEnv,
+    });
+    if (batLaunch.error) throw batLaunch.error;
+    if (batLaunch.status === 0) {
+      throw new Error(
+        "Launching a Bundle naming a plain .bat should be refused.",
+      );
+    }
+    const batOutput = `${batLaunch.stdout}${batLaunch.stderr}`;
+    if (!batOutput.includes("command-executable-unsupported-shim")) {
+      throw new Error(
+        `The .bat Bundle was not refused with the unsupported-shim Problem: ${batOutput}`,
+      );
     }
   }
 
   await runNamedScenario("windows-cmd-shim", windowsCmdShimScenario);
+
+  async function windowsAppExecutionAliasScenario(): Promise<void> {
+    if (process.platform !== "win32") return;
+    // A Windows Store/MSIX App Execution Alias is visible to where.exe and
+    // spawnable by the OS, while the stat-based primary PATH walk cannot read its
+    // AppExecLink. Exercise that exact Preflight fallback when the runner hosts
+    // one; GitHub's Windows Server image does not promise any such alias.
+    const alias = findWindowsAppExecutionAlias();
+    if (alias === undefined) {
+      console.warn(
+        "Skipping App Execution Alias smoke: this Windows runner exposes no pwsh or winget alias that where.exe can see after the primary PATH walk misses.",
+      );
+      return;
+    }
+
+    const aliasId = "dev.secant.app-execution-alias";
+    const aliasInstalled = await buildAndInstall(
+      binary,
+      join(smokeRoot, "app-execution-alias"),
+      commandBundle(aliasId, "App Execution Alias", alias.name, alias.args),
+      {
+        build: smokeRoot,
+        list: workspaceDirectory,
+        env: workspaceEnv,
+        label: "app-execution-alias",
+      },
+    );
+    const aliasLaunch = run(
+      binary,
+      ["run", "launch", aliasId, "--trust", aliasInstalled.digest, "--json"],
+      { cwd: workspaceDirectory, env: workspaceEnv },
+    );
+    if (JSON.parse(aliasLaunch).result.run.state !== "succeeded") {
+      throw new Error(
+        `App Execution Alias Command did not pass Preflight and run: ${aliasLaunch}`,
+      );
+    }
+  }
+
+  await runNamedScenario(
+    "windows-app-execution-alias",
+    windowsAppExecutionAliasScenario,
+  );
 
   async function noInteractiveTerminalScenario(): Promise<void> {
     // Launch the shell with no interactive terminal (issue #55, AC9): stdio is

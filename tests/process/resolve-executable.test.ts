@@ -6,9 +6,10 @@ import { resolveExecutable } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // The one executable resolver the process Module owns and Preflight shares (D1,
-// A40). Its PATH walk is `which`, so the executable bit decides resolution on
-// POSIX; the Windows `.cmd`-shim path is driven cross-OS through the injected
-// resolver and platform seams (the real Windows behaviour is the package smoke).
+// A40). Its primary PATH walk is `which`, so the executable bit decides
+// resolution on POSIX; the Windows fallback and `.cmd`-shim paths are driven
+// cross-OS through the injected resolver/platform seams. The package smoke owns
+// the real Windows App Execution Alias acceptance path.
 
 // The npm `cmd-shim` shape: `_prog` is node (a colocated node.exe, else the node
 // on PATH), invoked on a `%dp0%`-relative script.
@@ -70,6 +71,82 @@ test("a name that resolves to no path is not-found", () => {
     resolveExecutable("whatever", { resolve: () => undefined }),
     { kind: "not-found" },
   );
+});
+
+test("on Windows a missing PATH result falls back to the first where.exe match", () => {
+  const probes: string[] = [];
+  const aliasPath = String.raw`C:\Users\user\AppData\Local\Microsoft\WindowsApps\pwsh.exe`;
+  const laterMatch = String.raw`C:\Program Files\PowerShell\7\pwsh.exe`;
+
+  const resolution = resolveExecutable("pwsh", {
+    platform: "win32",
+    resolve: (name, probe) => {
+      probes.push(`${probe}:${name}`);
+      return probe === "windows-fallback"
+        ? `${aliasPath}\r\n${laterMatch}\r\n`
+        : undefined;
+    },
+  });
+
+  assert.deepEqual(probes, ["path:pwsh", "windows-fallback:pwsh"]);
+  assert.deepEqual(resolution, {
+    kind: "found",
+    executable: aliasPath,
+    prefixArgs: [],
+  });
+});
+
+test("a Windows fallback .cmd result still goes through the shim rule", () => {
+  const shimDir = makeTempDir("secant-resolve-fallback-shim-");
+  const shimPath = join(shimDir, "worker.cmd");
+  writeFileSync(shimPath, npmNodeShim("worker.js"));
+  const fakeNode = join(shimDir, "node.exe");
+  writeFileSync(fakeNode, "");
+
+  const resolution = resolveExecutable("worker", {
+    platform: "win32",
+    resolve: (name, probe) => {
+      if (name === "worker" && probe === "windows-fallback") return shimPath;
+      if (name === "node" && probe === "path") return fakeNode;
+      return undefined;
+    },
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "found",
+    executable: fakeNode,
+    prefixArgs: [join(shimDir, "worker.js")],
+  });
+});
+
+test("an empty Windows fallback remains not-found", () => {
+  const probes: string[] = [];
+
+  const resolution = resolveExecutable("missing", {
+    platform: "win32",
+    resolve: (name, probe) => {
+      probes.push(`${probe}:${name}`);
+      return probe === "windows-fallback" ? " \r\n" : undefined;
+    },
+  });
+
+  assert.deepEqual(probes, ["path:missing", "windows-fallback:missing"]);
+  assert.deepEqual(resolution, { kind: "not-found" });
+});
+
+test("POSIX does not consult the Windows fallback after a PATH miss", () => {
+  const probes: string[] = [];
+
+  const resolution = resolveExecutable("missing", {
+    platform: "linux",
+    resolve: (name, probe) => {
+      probes.push(`${probe}:${name}`);
+      return probe === "windows-fallback" ? "/unexpected" : undefined;
+    },
+  });
+
+  assert.deepEqual(probes, ["path:missing"]);
+  assert.deepEqual(resolution, { kind: "not-found" });
 });
 
 test("an npm-style .cmd shim resolves to node plus the wrapped script", () => {

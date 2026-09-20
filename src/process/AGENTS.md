@@ -10,5 +10,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   gone reports `false`), and the graceful-stop proof in the spawn suite is POSIX-only by design. Off Windows: SIGTERM to the group, then SIGKILL.
 - Interrupt and terminate are a two-stage shutdown that shares one `gracefulMs`: the process gets the whole bound to exit on the graceful signal, then the
   same bound again to die once force-killed. The bound is not split between the stages.
-- The single-PATH-walk comment (D1, `walkPath`) covers only this Module's executable resolution; it must not be read as excluding the three git spawn sites
-  (the Preflight worktree probe and the two Artifact-repo spawns) that pass the bare name `"git"` and let the OS resolve it through PATH.
+- The primary single-PATH-walk comment (D1, `walkPath`) covers only this Module's executable resolution; it must not be read as excluding the three git
+  spawn sites (the Preflight worktree probe and the two Artifact-repo spawns) that pass the bare name `"git"` and let the OS resolve it through PATH.
+- On Windows only, a missing primary PATH result falls back to the first `where.exe` match so App Execution Aliases remain spawnable. The `.cmd`/`.bat`
+  shim rule still applies to that path; Secant passes an alias path to the OS at spawn and never reads or resolves its AppExecLink target itself.

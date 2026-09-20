@@ -25,7 +25,7 @@
         "workingDirectory": ".",
         "platforms": {
           "windows": {
-            "executable": "pwsh",
+            "executable": "powershell.exe",
             "arguments": [{ "asset": "scripts/baseline.ps1" }]
           }
         }
@@ -57,7 +57,7 @@
               "workingDirectory": ".",
               "platforms": {
                 "windows": {
-                  "executable": "pwsh",
+                  "executable": "powershell.exe",
                   "arguments": [
                     { "asset": "scripts/check.ps1" },
                     ".secant-gate-counter",

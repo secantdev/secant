@@ -36,7 +36,7 @@
         "workingDirectory": ".",
         "platforms": {
           "windows": {
-            "executable": "pwsh",
+            "executable": "powershell.exe",
             "arguments": [
               { "asset": "scripts/run-test.ps1" },
               { "artifact": "failing-test" }
@@ -77,7 +77,7 @@
               "workingDirectory": ".",
               "platforms": {
                 "windows": {
-                  "executable": "pwsh",
+                  "executable": "powershell.exe",
                   "arguments": [
                     { "asset": "scripts/run-test.ps1" },
                     { "artifact": "failing-test" }

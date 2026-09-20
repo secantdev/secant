@@ -1,5 +1,6 @@
 import {
   spawn,
+  spawnSync,
   type ChildProcess,
   type ChildProcessWithoutNullStreams,
   type StdioOptions,
@@ -15,9 +16,10 @@ import which from "which";
 // on a timeout or cancel — SIGTERM→SIGKILL on POSIX, `taskkill /T /F` on Windows.
 //
 // It imports nothing from other Modules and reaches the OS only through
-// `node:child_process` and the single `which` PATH walk (no new Bun API, ADR 0030).
-// Run execution, Application (Preflight), and the Harness Module are its callers,
-// so their precondition checks and their spawns agree by construction (A40, D1).
+// `node:child_process`, the primary `which` PATH walk, and the Windows-only
+// `where.exe` fallback (no new Bun API, ADR 0030). Run execution, Application
+// (Preflight), and the Harness Module are its callers, so their precondition
+// checks and their spawns agree by construction (A40, D1).
 
 // --- Executable resolution --------------------------------------------------
 
@@ -62,8 +64,14 @@ export interface ResolveExecutableOptions {
   readonly path?: string;
   /** Override the host platform that gates the `.cmd`/`.bat` shim rule. */
   readonly platform?: NodeJS.Platform;
-  /** Replace the PATH walk entirely, so the shim rule is testable without PATHEXT. */
-  readonly resolve?: (name: string) => string | undefined;
+  /** Replace both resolution probes, so Windows fallback and shim behavior are
+   *  testable on every host without depending on PATHEXT or `where.exe`. The
+   *  PATH probe returns one resolved path; the fallback probe returns the raw
+   *  stdout that `where.exe` would emit. */
+  readonly resolve?: (
+    name: string,
+    probe: "path" | "windows-fallback",
+  ) => string | undefined;
 }
 
 /** The single PATH walk in `src/` (D1): `which` resolves the name to an absolute
@@ -73,7 +81,7 @@ function walkPath(
   name: string,
   options: ResolveExecutableOptions,
 ): string | undefined {
-  if (options.resolve !== undefined) return options.resolve(name);
+  if (options.resolve !== undefined) return options.resolve(name, "path");
   const result = which.sync(name, {
     nothrow: true,
     ...(options.path !== undefined ? { path: options.path } : {}),
@@ -81,13 +89,54 @@ function walkPath(
   return typeof result === "string" ? result : undefined;
 }
 
+/** Windows Store/MSIX App Execution Aliases are AppExecLink reparse points.
+ *  libuv stat cannot read them, so `which` skips paths the OS can spawn. The
+ *  built-in `where.exe` observes the same alias lookup CreateProcess uses. */
+function resolveWindowsFallback(
+  name: string,
+  options: ResolveExecutableOptions,
+): string | undefined {
+  const output =
+    options.resolve !== undefined
+      ? options.resolve(name, "windows-fallback")
+      : runWhere(name, options.path);
+  if (output === undefined) return undefined;
+  const firstMatch = output.split(/\r?\n/, 1)[0]?.trim();
+  return firstMatch === undefined || firstMatch.length === 0
+    ? undefined
+    : firstMatch;
+}
+
+function runWhere(name: string, path: string | undefined): string | undefined {
+  const result = spawnSync("where.exe", [name], {
+    encoding: "utf8",
+    windowsHide: true,
+    ...(path !== undefined ? { env: { ...process.env, PATH: path } } : {}),
+  });
+  // This is a best-effort positive probe after the primary resolver already
+  // missed. An unavailable/blocked where.exe and a non-zero no-match result both
+  // supply no spawnable path, matching `which.sync({ nothrow: true })` above.
+  if (result.error !== undefined || result.status !== 0) return undefined;
+  return result.stdout;
+}
+
+function resolveExecutablePath(
+  name: string,
+  options: ResolveExecutableOptions,
+  platform: NodeJS.Platform,
+): string | undefined {
+  const resolved = walkPath(name, options);
+  if (resolved !== undefined || platform !== "win32") return resolved;
+  return resolveWindowsFallback(name, options);
+}
+
 export function resolveExecutable(
   name: string,
   options: ResolveExecutableOptions = {},
 ): ExecutableResolution {
-  const resolved = walkPath(name, options);
-  if (resolved === undefined) return { kind: "not-found" };
   const platform = options.platform ?? process.platform;
+  const resolved = resolveExecutablePath(name, options, platform);
+  if (resolved === undefined) return { kind: "not-found" };
   if (platform === "win32") {
     const ext = extname(resolved).toLowerCase();
     if (ext === ".cmd" || ext === ".bat") {
@@ -114,7 +163,11 @@ function resolveWindowsShim(
   if (target === undefined) return { kind: "unsupported-shim", path: shimPath };
   // The shim's own interpreter must itself resolve on PATH, or the real target
   // cannot run — that is a not-found, not an unsupported shim.
-  const interpreter = walkPath(target.interpreter, options);
+  const interpreter = resolveExecutablePath(
+    target.interpreter,
+    options,
+    "win32",
+  );
   if (interpreter === undefined) return { kind: "not-found" };
   return {
     kind: "found",

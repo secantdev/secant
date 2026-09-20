@@ -99,3 +99,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Resume reads registration only to answer `unknown-run`, then claims ownership in `run.db`. Listing and startup reconciliation open each registered Run
   Store to read ownership and close every handle before returning; a damaged store lists unowned, matching its exact-read Problem. A coordinator rebuild
   reads each readable Run's owner before restoring registration, so a live owner survives corruption and the following reconciliation decides its fate.
+
+## Tests
+
+- Store Interface tests are split by concern into `ownership-and-recovery.test.ts`, `attempt-and-artifact-publication.test.ts`, and
+  `session-and-transcript-evidence.test.ts`; keep every file independently runnable with explicit fixtures.

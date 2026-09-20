@@ -7,11 +7,15 @@ sleep, or other unstable external state. Tests requiring those resources are opt
 test runner (`bun test`), not `bun:test`; `bunfig.toml` records why the per-test timeout is a CLI `--timeout` flag rather than a `[test] timeout` key
 (that key applies only to `bun:test`, so it never reaches these tests).
 
-The canonical test script (`scripts/test.ts`) runs isolated file workers — two on Windows, but one on macOS and Linux (`--parallel=1`). Isolation is
-load-bearing: module-level helpers and environment changes must not leak across files, and every OS keeps it (one worker per file, just not concurrent on
-macOS or Linux). Tests within each file remain sequential; do not replace file parallelism with `--concurrent`, which would race their shared fixtures. The
-serialization works around a Bun 1.4.2 defect, not a preference: on a CPU-constrained CI runner, two workers each spawning a child at
-startup occasionally make Bun drop a child's `exit`/`close`/stdio events entirely (the child exits, but the spawn never settles and the test times out at
+The canonical test script (`scripts/test.ts`) runs isolated file workers — two on Windows, but one on macOS and Linux (`--parallel=1`). Windows is capped
+at two after the issue #172 calibration: its public `windows-latest` runner has a documented 4 vCPUs and 16 GB RAM, and reported 4 logical processors and
+17,174,360,064 physical-memory bytes in [run 35507654564](https://github.com/secantdev/secant/actions/runs/35507654564), but three workers produced
+scattered 30 s child-process timeouts, an indeterminate Command attempt, and a failed Harness schema probe. Per the no-retry protocol, that first failure
+rejected three workers, so four was not tried. Isolation is load-bearing: module-level helpers and environment changes must not leak across files, and
+every OS keeps it (one worker per file, just not concurrent on macOS or Linux). Tests within each file remain sequential; do not replace file parallelism
+with `--concurrent`, which would race their shared fixtures. The serialization works around a Bun 1.4.2 defect, not a preference: on a CPU-constrained CI
+runner, two workers each spawning a child at startup occasionally make Bun drop a child's `exit`/`close`/stdio events entirely (the child exits, but the
+spawn never settles and the test times out at
 30s). It first appeared on the macOS arm64 runner ([#149](https://github.com/secantdev/secant/issues/149)) and later on the ubuntu-latest runner
 ([#150](https://github.com/secantdev/secant/issues/150)), so both are serialized. The launcher documents it in full; restore `--parallel=2` on macOS and
 Linux when Bun fixes child-process lifecycle delivery under load.

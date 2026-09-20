@@ -1,6 +1,9 @@
 // The canonical test launcher. It runs Bun's test runner with two isolated file
 // workers on Windows, but ONE on macOS and Linux (`--parallel=1`), because of a
-// Bun 1.4.2 defect — not a preference.
+// Bun 1.4.2 defect — not a preference. Windows is also capped deliberately: its
+// four-logical-processor runner failed with scattered child-process lifecycle
+// failures at three workers (issue #172, run 35507654564), so two is the highest
+// validated count.
 //
 // The defect (#149): on a CPU-constrained CI runner — first the macOS arm64 runner
 // (3 vCPUs), then the ubuntu-latest runner (#150) — when
@@ -29,7 +32,7 @@
 // Extra arguments pass through, so `bun run test -- tests/foo.test.ts` still works.
 import { spawnSync } from "node:child_process";
 
-const parallel = process.platform === "win32" ? "3" : "1";
+const parallel = process.platform === "win32" ? "2" : "1";
 const result = spawnSync(
   process.execPath,
   [

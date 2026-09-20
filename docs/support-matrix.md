@@ -12,24 +12,23 @@ Each cross-compiled single-file binary is built and then smoked on its own opera
 request. The `build` job cross-compiles all three targets; the `smoke` job runs the compiled-binary smoke against the matching binary on the matching
 runner. The scenarios it covers are enumerated once in [testing guidance](./agents/testing.md) — this row does not restate them.
 
-| OS      | Architecture | Binary                   | Evidence                                                                                                                 |
-| ------- | ------------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| Windows | x64          | `secant-windows-x64.exe` | Canonical CI gate, `smoke` job on `windows-latest` ([check.yml](../.github/workflows/check.yml))                         |
-| macOS   | arm64        | `secant-darwin-arm64`    | Canonical CI gate, `smoke` job on `macos-latest`, plus `codesign --verify` ([check.yml](../.github/workflows/check.yml)) |
-| Linux   | x64          | `secant-linux-x64`       | Canonical CI gate, `smoke` job on `ubuntu-latest` ([check.yml](../.github/workflows/check.yml))                          |
+| OS      | Architecture | Binary                   | Evidence                                                                                                                                                                                             |
+| ------- | ------------ | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows | x64          | `secant-windows-x64.exe` | M4 candidate validation, native `smoke` job on `windows-latest`, pass ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868946))                             |
+| macOS   | arm64        | `secant-darwin-arm64`    | M4 candidate validation, native `smoke` job on `macos-latest`, pass including `codesign --verify` ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868927)) |
+| Linux   | x64          | `secant-linux-x64`       | M4 candidate validation, native `smoke` job on `ubuntu-latest`, pass ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868913))                              |
 
 ## Terminals
 
 CI cannot drive a real terminal, so terminal support rests on a human-recorded real-terminal check per release (ADR 0027). The re-run path is
-`bun run check:windows-terminal` (`scripts/release-checks/windows-terminal.ts`). The check has been **re-armed** since the M1 evidence below: a
-`src/tui/renderer/` change lands after that pass, which by the release-check rule requires the Windows Terminal check to be re-run. The row still cites
-only the M1 pass — no new pass is claimed here until a fresh report is recorded.
+`bun run check:windows-terminal` (`scripts/release-checks/windows-terminal.ts`). The M4 validation recorded a fresh pass against the exact Windows
+candidate binary (`593ee7ae861807c8e0fc79f9fe17e9000246411e8aa0a5ee9df07632e138bc51`).
 
-| Terminal              | Host                               | Evidence                                                                                                                                                                                                    |
-| --------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows Terminal 1.24 | Windows 11 (10.0.26200), Bun 1.4.2 | M1 human real-terminal check, pass — quit binding and Ctrl+C both delivered, shell exited, terminal stayed responsive ([#48 report](https://github.com/secantdev/secant/issues/48#issuecomment-5645636636)) |
+| Terminal                      | Host                               | Evidence                                                                                                                                                                                                      |
+| ----------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows Terminal 1.24.11911.0 | Windows 11 (10.0.26200), Bun 1.4.2 | M4 human real-terminal check, pass — quit binding and Ctrl+C both delivered, shell exited, terminal stayed responsive ([#160 report](https://github.com/secantdev/secant/issues/160#issuecomment-5743869546)) |
 
-Legacy conhost is deliberately **not** a claimed row: ADR 0030 removed it, and the M1 check observed conhost only (it "does not decide outcome").
+Legacy conhost is deliberately **not** a claimed row: ADR 0030 removed it, and the M4 check observed conhost only (it "does not decide outcome").
 
 ## Harnesses
 
@@ -39,10 +38,11 @@ recordings prove Adapter behavior against recorded bytes; they do **not** prove
 compatibility with a currently installed Harness and do not support a
 real-Harness or three-OS parity claim.
 
-No Harness row is currently claimed. Add one only after a passing
-`check:claude-code` or `check:codex` report names the exact installed Harness
-version and the candidate binary SHA-256.
+The M4 validation recorded both Harness passes on Windows x64 against candidate
+binary SHA-256 `593ee7ae861807c8e0fc79f9fe17e9000246411e8aa0a5ee9df07632e138bc51`.
+These rows make no macOS, Linux, or cross-operating-system real-Harness claim.
 
-| Harness | OS/architecture | Installed version | Evidence                                         |
-| ------- | --------------- | ----------------- | ------------------------------------------------ |
-| _None_  | —               | —                 | No digest-bound real-Harness report recorded yet |
+| Harness     | OS/architecture | Installed version | Evidence                                                                                                                              |
+| ----------- | --------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code | Windows x64     | 2.1.229           | M4 installed-Harness Proof Bundle check, pass ([#160 report](https://github.com/secantdev/secant/issues/160#issuecomment-5744389697)) |
+| Codex       | Windows x64     | 0.155.0           | M4 installed-Harness Proof Bundle check, pass ([#160 report](https://github.com/secantdev/secant/issues/160#issuecomment-5744297855)) |

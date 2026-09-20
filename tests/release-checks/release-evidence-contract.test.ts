@@ -9,7 +9,10 @@ import {
 import {
   evaluateProofBundleEvidence,
   formatInstalledHarnessDetails,
+  observedHarnessForReport,
+  parseInstalledHarnessProblem,
   parseObservedHarnessIdentity,
+  parseTerminalHarnessDiagnostic,
 } from "../../scripts/release-checks/installed-harness-report.js";
 import { formatWindowsTerminalReport } from "../../scripts/release-checks/windows-terminal-report.js";
 
@@ -186,14 +189,17 @@ test("[release-evidence-contract] installed Harness outcome requires repair, aut
   };
   const passed = evaluateProofBundleEvidence(passingObservations);
   assert.equal(passed.outcome, "pass");
-  assert.match(formatInstalledHarnessDetails(passed), /Test repair \| pass/);
-  assert.match(
+  assert.equal(
     formatInstalledHarnessDetails(passed),
-    /Authored approve-commit gate \| pass/,
-  );
-  assert.match(
-    formatInstalledHarnessDetails(passed),
-    /Post-approval commit \| pass/,
+    `### External Proof Bundle observations
+
+| Observation | Result |
+| --- | --- |
+| Test repair | pass |
+| Authored approve-commit gate | pass |
+| Commit absent before approval | pass |
+| Run succeeded after approval | pass |
+| Post-approval commit | pass |`,
   );
 
   const failingObservations = [
@@ -205,6 +211,117 @@ test("[release-evidence-contract] installed Harness outcome requires repair, aut
   ];
   for (const observations of failingObservations) {
     assert.equal(evaluateProofBundleEvidence(observations).outcome, "fail");
+  }
+});
+
+test("[release-evidence-contract] failed installed-Harness reports retain launch diagnostics on every OS", () => {
+  const operatingSystems = [
+    { name: "Windows", version: "11 (10.0.26200)" },
+    { name: "macOS", version: "15.6 (24G84)" },
+    { name: "Linux", version: "6.8.0-31-generic" },
+  ];
+  const evidence = evaluateProofBundleEvidence({
+    repairPassed: false,
+    authoredGateReached: false,
+    committedBeforeApproval: false,
+    runSucceededAfterApproval: false,
+    postApprovalCommitObserved: false,
+  });
+  const problem = parseInstalledHarnessProblem({
+    code: "command-executable-not-found",
+    explanation: "baseline-test needs missing-command.",
+    remediation: "Install missing-command and launch again.",
+  });
+  const transcript = parseTerminalHarnessDiagnostic({
+    page: {
+      entries: [
+        { role: "assistant", content: "an earlier response" },
+        { role: "user", content: "repair the test" },
+      ],
+    },
+    export: {
+      entries: [
+        { role: "assistant", content: "an earlier response" },
+        {
+          role: "assistant",
+          content: "You have no weighted tokens left\nuntil Monday.",
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(problem, {
+    code: "command-executable-not-found",
+    explanation: "baseline-test needs missing-command.",
+    remediation: "Install missing-command and launch again.",
+  });
+  assert.equal(transcript, "You have no weighted tokens left\nuntil Monday.");
+  assert.equal(
+    parseInstalledHarnessProblem({
+      code: "command-executable-not-found",
+      explanation: "missing remediation",
+    }),
+    undefined,
+  );
+  assert.equal(
+    parseTerminalHarnessDiagnostic({
+      page: { entries: [{ role: "assistant", content: "page fallback" }] },
+    }),
+    "page fallback",
+  );
+  assert.equal(
+    parseTerminalHarnessDiagnostic({
+      export: { entries: [{ role: "user", content: "no assistant" }] },
+    }),
+    undefined,
+  );
+  assert.deepEqual(observedHarnessForReport("Claude Code", undefined, "fail"), {
+    name: "Claude Code",
+    version: "not observed",
+  });
+
+  for (const operatingSystem of operatingSystems) {
+    const formatted = formatReleaseEvidenceReport({
+      ...report({
+        kind: "harness",
+        name: "Claude Code",
+        version: "not observed",
+      }),
+      operatingSystem,
+      outcome: evidence.outcome,
+    });
+    const details = formatInstalledHarnessDetails(evidence, {
+      launchStatus: 1,
+      launchStdout:
+        '{"code":"command-executable-not-found","detail":"left|right"}\n',
+      launchStderr: "",
+      problem,
+      transcript,
+    });
+
+    assert.match(
+      formatted,
+      new RegExp(`OS and version: ${operatingSystem.name}`),
+    );
+    assert.match(formatted, /Harness: Claude Code not observed/);
+    assert.match(formatted, /Outcome: fail/);
+    assert.match(details, /### Failed installed-Harness diagnostics/);
+    assert.match(details, /Launch exit status \| 1/);
+    assert.match(details, /Problem code \| command-executable-not-found/);
+    assert.match(
+      details,
+      /Problem explanation \| baseline-test needs missing-command\./,
+    );
+    assert.match(
+      details,
+      /Problem remediation \| Install missing-command and launch again\./,
+    );
+    assert.match(
+      details,
+      /Launch stdout \| \{"code":"command-executable-not-found","detail":"left\\\|right"\}<br>/,
+    );
+    assert.match(details, /You have no weighted tokens left<br>until Monday\./);
+    assert.match(details, /Launch stderr \| \(empty\)/);
   }
 });
 
@@ -224,4 +341,8 @@ test("[release-evidence-contract] an installed-Harness report requires observed 
   ]) {
     assert.throws(() => parseObservedHarnessIdentity(invalid), /observed/);
   }
+  assert.throws(
+    () => observedHarnessForReport("Codex", undefined, "pass"),
+    /observed/,
+  );
 });

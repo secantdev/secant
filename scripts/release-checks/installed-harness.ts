@@ -6,7 +6,10 @@ import { basename, resolve } from "node:path";
 import {
   evaluateProofBundleEvidence,
   formatInstalledHarnessDetails,
-  parseObservedHarnessIdentity,
+  observedHarnessForReport,
+  parseInstalledHarnessProblem,
+  parseTerminalHarnessDiagnostic,
+  type InstalledHarnessFailureDiagnostics,
 } from "./installed-harness-report.js";
 import {
   formatReleaseEvidenceReport,
@@ -118,6 +121,71 @@ function harnessName(harness: HarnessId): string {
   return harness === "claude-code" ? "Claude Code" : "Codex";
 }
 
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
+}
+
+function runIdFromLaunch(value: ObjectValue | undefined): string | undefined {
+  return (
+    nonEmptyString(value?.runId) ??
+    nonEmptyString(nested(value, "details", "runId"))
+  );
+}
+
+function runFromSnapshot(
+  value: ObjectValue | undefined,
+): ObjectValue | undefined {
+  return object(nested(value, "result", "run"));
+}
+
+function readRun(
+  candidate: string,
+  workspace: string,
+  env: NodeJS.ProcessEnv,
+  runId: string,
+): ObjectValue | undefined {
+  const shown = run(candidate, ["run", "show", runId, "--json"], {
+    cwd: workspace,
+    env,
+  });
+  return shown.status === 0 ? runFromSnapshot(json(shown.stdout)) : undefined;
+}
+
+function readTerminalHarnessDiagnostic(
+  candidate: string,
+  workspace: string,
+  env: NodeJS.ProcessEnv,
+  runId: string,
+): string | undefined {
+  const read = run(
+    candidate,
+    ["run", "read", runId, "--transcript", "--json"],
+    { cwd: workspace, env },
+  );
+  if (read.status !== 0) return undefined;
+  return parseTerminalHarnessDiagnostic(json(read.stdout));
+}
+
+function failureDiagnostics(
+  launchedResult: CommandResult,
+  launched: ObjectValue | undefined,
+  currentRun: ObjectValue | undefined,
+  transcript: string | undefined,
+): InstalledHarnessFailureDiagnostics {
+  return {
+    launchStatus: launchedResult.status,
+    launchStdout: launchedResult.stdout,
+    launchStderr: launchedResult.stderr,
+    problem:
+      parseInstalledHarnessProblem(launched) ??
+      parseInstalledHarnessProblem(currentRun?.problem),
+    transcript:
+      transcript ?? nonEmptyString(object(currentRun?.problem)?.explanation),
+  };
+}
+
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     console.log(HELP);
@@ -207,8 +275,8 @@ async function main(): Promise<void> {
       { cwd: workspace, env },
     );
     const launched = json(launchedResult.stdout);
-    const runId = launched?.runId;
-    const launchedRun = object(nested(launched, "result", "run"));
+    const runId = runIdFromLaunch(launched);
+    const launchedRun = runFromSnapshot(launched);
     const progress = Array.isArray(launchedRun?.progress)
       ? launchedRun.progress
       : [];
@@ -268,7 +336,26 @@ async function main(): Promise<void> {
         commitVerdict?.status === 0 &&
         commitVerdict.stdout.trim() === "pass",
     });
-    const observedHarness = parseObservedHarnessIdentity(launchedRun?.harness);
+    const currentRun =
+      evidence.outcome === "fail" && runId !== undefined
+        ? readRun(candidate, workspace, env, runId)
+        : launchedRun;
+    const observedHarness = observedHarnessForReport(
+      harnessName(harness),
+      launchedRun?.harness ?? currentRun?.harness,
+      evidence.outcome,
+    );
+    const diagnostics =
+      evidence.outcome === "fail"
+        ? failureDiagnostics(
+            launchedResult,
+            launched,
+            currentRun,
+            runId === undefined
+              ? undefined
+              : readTerminalHarnessDiagnostic(candidate, workspace, env, runId),
+          )
+        : undefined;
     const report: ReleaseEvidenceReport = {
       checkName: `${harnessName(harness)} installed-Harness Proof Bundle check`,
       operatingSystem: {
@@ -287,7 +374,7 @@ async function main(): Promise<void> {
       timestamp: new Date().toISOString(),
     };
     console.log(
-      `${formatReleaseEvidenceReport(report)}\n\n${formatInstalledHarnessDetails(evidence)}`,
+      `${formatReleaseEvidenceReport(report)}\n\n${formatInstalledHarnessDetails(evidence, diagnostics)}`,
     );
     if (evidence.outcome === "fail") process.exitCode = 1;
   } finally {

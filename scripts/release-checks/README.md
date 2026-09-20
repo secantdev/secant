@@ -40,11 +40,20 @@ bun run check:windows-terminal -- C:\path\to\secant-windows-x64.exe
 
 ## Installed Claude Code and Codex
 
-These opt-in checks require an installed, authenticated real Harness. They never
-run in CI. Prepare a disposable Git worktree containing the failing baseline
-expected by the external Test Repair Proof Bundle; the check intentionally
-approves the authored gate and leaves the resulting repair commit in that
-worktree.
+These are headless checks: the script drives `secant run launch --json` with
+`--harness-requests allow`, and no Secant TUI or separate window opens. They
+never run in CI.
+
+Before running either check, prepare:
+
+- the final external candidate and the external Test Repair Proof Bundle;
+- the selected real Harness, installed and authenticated; and
+- a disposable Git worktree containing the failing baseline expected by the
+  Proof Bundle.
+
+PowerShell 7 is not a prerequisite. On Windows the maintained Proof Bundle uses
+the built-in `powershell.exe`. The check intentionally approves the authored
+gate and leaves the resulting repair commit in the disposable worktree.
 
 Run each check against the final external candidate and the same external Proof
 Bundle bytes:

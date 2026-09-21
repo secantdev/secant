@@ -1,0 +1,38 @@
+name: OpenCode three-OS qualification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Run the pinned release-binary probe
+        continue-on-error: true
+        env:
+          QUALIFICATION_RESULT_PATH: opencode-qualification-result.json
+        run: bun .research/opencode-three-os-qualification/probe.mjs
+      - name: Require a result artifact
+        if: always()
+        shell: bash
+        run: test -f opencode-qualification-result.json
+      - name: Upload the platform result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-qualification-${{ runner.os }}-${{ runner.arch }}
+          path: opencode-qualification-result.json
+          if-no-files-found: error
+      - name: Require every qualification group to pass
+        if: always()
+        shell: bash
+        run: |
+          bun -e 'const result = await Bun.file("opencode-qualification-result.json").json(); process.exit(result.overall === "pass" ? 0 : 1)'

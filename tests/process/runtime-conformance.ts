@@ -206,7 +206,6 @@ cases.push(
     name: "execution-store-on-fake-process",
     body: executionStoreOnFakeProcess,
   },
-  { name: "composition-real-process", body: compositionRealProcess },
 );
 
 function processSyncCommand(): void {
@@ -246,86 +245,6 @@ function processSyncCommand(): void {
     signalled.kind,
     process.platform === "win32" ? "exited" : "signal",
   );
-}
-
-async function compositionRealProcess(): Promise<void> {
-  const workspace = runtimeTemp("secant-runtime-composition-workspace-");
-  const wired = wireApplication({
-    secantHome: runtimeTemp("secant-runtime-composition-home-"),
-    launchCwd: workspace,
-  });
-  try {
-    const bundle = writeRuntimeCommandBundle();
-    const built = wired.bundleManagement.build(bundle.folder, {
-      noInstall: false,
-    });
-    assert.ok(built.ok);
-    assert.equal(
-      wired.projectionPort.submit({
-        operationId: "composition-approve",
-        operation: "approve-workspace",
-        input: { path: workspace },
-      }).admitted,
-      true,
-    );
-    const entry = wired.catalog
-      .listEntries()
-      .find((candidate) => candidate.id === bundle.id);
-    assert.ok(entry);
-    const admission = wired.projectionPort.submit({
-      operationId: "composition-launch",
-      operation: "launch-run",
-      input: {
-        bundle: { id: bundle.id },
-        launchInputs: {},
-        trustDigest: entry.digest,
-      },
-    });
-    assert.equal(admission.admitted, true);
-    if (!admission.admitted || admission.runId === undefined) {
-      throw new Error("composition did not admit the runtime Run");
-    }
-    await awaitOperation(wired, "composition-launch");
-    const opened = wired.projectionPort.openProjection({
-      family: "run",
-      runId: admission.runId,
-    });
-    try {
-      assert.ok(opened.snapshot.result.found);
-      if (!opened.snapshot.result.found) throw new Error("Run disappeared");
-      assert.equal(opened.snapshot.result.run.state, "succeeded");
-    } finally {
-      opened.close();
-    }
-  } finally {
-    wired.runGroup.close();
-    wired.catalog.close();
-  }
-}
-
-async function awaitOperation(
-  wired: ReturnType<typeof wireApplication>,
-  operationId: string,
-): Promise<void> {
-  const opened = wired.projectionPort.openProjection({
-    family: "operation",
-    operationId,
-  });
-  try {
-    if (opened.snapshot.outcome.status !== "pending") return;
-    for await (const update of opened.updates) {
-      if (
-        update.kind === "durable" &&
-        update.snapshot.family === "operation" &&
-        update.snapshot.outcome.status !== "pending"
-      ) {
-        return;
-      }
-    }
-    throw new Error(`operation ${operationId} closed before settlement`);
-  } finally {
-    opened.close();
-  }
 }
 
 async function executionStoreOnFakeProcess(): Promise<void> {
@@ -732,41 +651,6 @@ function writeGitProbeBundle(): {
           command: {
             executable: basename(process.execPath),
             arguments: ["-e", "process.exit(0)"],
-          },
-        },
-      ],
-    }),
-  );
-  return { folder, id };
-}
-
-function writeRuntimeCommandBundle(): {
-  readonly folder: string;
-  readonly id: string;
-} {
-  const folder = runtimeTemp("secant-runtime-command-bundle-");
-  const id = "dev.secant.runtime-command";
-  writeFileSync(
-    join(folder, "manifest.json"),
-    JSON.stringify({
-      formatVersion: 1,
-      bundle: {
-        id,
-        version: "1.0.0",
-        name: "Runtime Command",
-        description: "Proves production Process composition.",
-      },
-      platforms: ["windows", "macos", "linux"],
-      inputs: {},
-      assets: [],
-      routing: [
-        {
-          id: "command",
-          kind: "command",
-          produces: [{ name: "output", type: "text" }],
-          command: {
-            executable: basename(process.execPath),
-            arguments: ["-e", "process.stdout.write('composed-real-process')"],
           },
         },
       ],

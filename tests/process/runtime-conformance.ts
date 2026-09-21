@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { Database } from "bun:sqlite";
 import {
   createProcessAdapter,
   type OwnedProcessOptions,
@@ -34,6 +35,9 @@ const missing = join(tmpdir(), `secant-process-parity-missing-${process.pid}`);
 const SCENARIO_TIMEOUT_MS = 20_000;
 const CONCURRENT_CREATE_WORKER = fileURLToPath(
   new URL("../run/store/concurrent-create-worker.ts", import.meta.url),
+);
+const LOCKED_COORDINATION_WORKER = fileURLToPath(
+  new URL("../run/store/locked-coordination-worker.ts", import.meta.url),
 );
 
 function commandOptions(
@@ -202,11 +206,48 @@ cases.push(
   { name: "artifact-git-repository", body: artifactGitRepository },
   { name: "store-owner-death-recovery", body: storeOwnerDeathRecovery },
   { name: "store-concurrent-writer", body: storeConcurrentWriter },
+  { name: "store-locked-coordination", body: storeLockedCoordination },
+  { name: "process-worker-environment", body: processWorkerEnvironment },
   {
     name: "execution-store-on-fake-process",
     body: executionStoreOnFakeProcess,
   },
 );
+
+async function processWorkerEnvironment(): Promise<void> {
+  const processAdapter = createProcessAdapter();
+  const probe =
+    "console.log(JSON.stringify({bun:process.env.BUN_TEST_WORKER_ID," +
+    "jest:process.env.JEST_WORKER_ID,visible:process.env.SECANT_VISIBLE}))";
+  const environment = {
+    ...process.env,
+    BUN_TEST_WORKER_ID: "1",
+    JEST_WORKER_ID: "1",
+    SECANT_VISIBLE: "yes",
+  };
+  const command = await processAdapter.spawnCommand({
+    ...commandOptions(probe),
+    env: environment,
+  });
+  assert.equal(command.kind, "exited");
+  if (command.kind !== "exited") throw new Error("worker probe did not exit");
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(command.text)), {
+    visible: "yes",
+  });
+
+  const launched = await processAdapter.spawnOwnedProcess({
+    ...ownedOptions(probe),
+    env: environment,
+  });
+  assert.equal(launched.ok, true);
+  if (!launched.ok) throw new Error("owned worker probe did not launch");
+  const [output, close] = await Promise.all([
+    collectText(launched.process.stdout),
+    launched.process.closed(),
+  ]);
+  assert.deepEqual(JSON.parse(output), { visible: "yes" });
+  assert.deepEqual(close, { kind: "exited", status: 0 });
+}
 
 function processSyncCommand(): void {
   const processAdapter = createProcessAdapter();
@@ -829,6 +870,57 @@ async function storeConcurrentWriter(): Promise<void> {
   }
 }
 
+async function storeLockedCoordination(): Promise<void> {
+  const processAdapter = createProcessAdapter();
+  const home = runtimeTemp("secant-runtime-locked-home-");
+  const workspace = runtimeTemp("secant-runtime-locked-workspace-");
+  const group = openRunGroup(home, workspace, { process: processAdapter });
+  group.createRun({
+    operationId: "locked-create",
+    bundleSnapshotDigest: "sha256:locked",
+    launch: {},
+    at: new Date("2026-09-21T00:00:00.000Z"),
+  });
+  group.close();
+
+  const runsDirectory = join(home, "runs");
+  const groupName = readdirSync(runsDirectory)[0];
+  assert.ok(groupName);
+  const coordinationPath = join(runsDirectory, groupName, "coordination.db");
+  const lock = new Database(coordinationPath);
+  lock.exec("BEGIN EXCLUSIVE");
+  try {
+    const result = await processAdapter.spawnCommand({
+      executable,
+      args: [LOCKED_COORDINATION_WORKER, home, workspace],
+      cwd: process.cwd(),
+      env: process.env,
+      timeoutMs: 15_000,
+      maxCaptureBytes: 1024 * 1024,
+      truncationMarker: "\n[truncated]\n",
+    });
+    assert.equal(result.kind, "exited");
+    if (result.kind !== "exited") {
+      throw new Error("locked coordination worker did not exit");
+    }
+    assert.equal(result.status, 0, new TextDecoder().decode(result.text));
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(result.text)), {
+      kind: "aggregate",
+      errorCount: 2,
+      causeIsLastError: true,
+    });
+  } finally {
+    lock.exec("COMMIT");
+    lock.close();
+  }
+  const reopened = openRunGroup(home, workspace, { process: processAdapter });
+  try {
+    assert.equal(reopened.listRuns().length, 1);
+  } finally {
+    reopened.close();
+  }
+}
+
 async function startStoreWriter(
   processAdapter: ProcessAdapter,
   home: string,
@@ -909,6 +1001,15 @@ function observeOutput(stream: AsyncIterable<Uint8Array>): {
       });
     },
   };
+}
+
+async function collectText(stream: AsyncIterable<Uint8Array>): Promise<string> {
+  const decoder = new TextDecoder();
+  let text = "";
+  for await (const chunk of stream) {
+    text += decoder.decode(chunk, { stream: true });
+  }
+  return text + decoder.decode();
 }
 
 async function main(): Promise<void> {

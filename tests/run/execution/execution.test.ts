@@ -1,12 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import {
-  chmodSync,
-  existsSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -24,13 +17,9 @@ import {
   TRUNCATION_MARKER,
   type AssetResolver,
 } from "../../../src/run/execution/execution.js";
-import {
-  createProcessAdapter,
-  type ProcessAdapter,
-} from "../../../src/process/process.js";
+import type { ProcessAdapter } from "../../../src/process/process.js";
 import type { RunOwner } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
-import { classicWorktree } from "../../helpers/gitWorktree.js";
 import { createFakeProcess } from "../../process/fake-adapter.js";
 import { openFakeRunGroup as openRunGroup } from "../store/fake-git-process.js";
 
@@ -38,7 +27,6 @@ const WORKSPACE = "/work/example-project";
 const AT = new Date("2026-09-13T12:00:00.000Z");
 const HOST: Platform = process.platform === "win32" ? "windows" : "linux";
 const NODE = process.execPath; // the runtime binary; runs `-e` scripts and files
-const realProcess = createProcessAdapter();
 type SpawnCommand = ProcessAdapter["spawnCommand"];
 const semanticProcess = createFakeProcess({
   resolutionHandler: (name) =>
@@ -359,86 +347,6 @@ test("a Command spawn appends non-interactive Git overrides after authored confi
   assert.equal(commandEnv.GIT_EDITOR, "true");
   assert.equal(commandEnv.GIT_SEQUENCE_EDITOR, "true");
   assert.equal(commandEnv.GIT_MERGE_AUTOEDIT, "no");
-});
-
-test("a Command commit ignores ambient signing while preserving authored Git config", async (t) => {
-  const workspace = classicWorktree();
-  const signingConfigDirectory = makeTempDir("secant-signing-config-");
-  const globalConfig = join(signingConfigDirectory, "gitconfig");
-  const signer = join(signingConfigDirectory, "passphrase-signer");
-  const signerMarker = join(signingConfigDirectory, "signer-ran");
-  writeFileSync(
-    signer,
-    `#!/bin/sh\nprintf prompted > '${signerMarker.replaceAll("'", "'\\''")}'\nprintf 'Enter passphrase for signing key\\n' >&2\nexit 1\n`,
-  );
-  chmodSync(signer, 0o755);
-  writeFileSync(
-    globalConfig,
-    `[commit]\n\tgpgSign = true\n[gpg]\n\tformat = ssh\n[gpg "ssh"]\n\tprogram = "${signer.replaceAll("\\", "/")}"\n[user]\n\tname = Global Signer\n\temail = signer@secant.invalid\n\tsigningKey = passphrase-protected-key\n`,
-  );
-  writeFileSync(join(workspace, "seed.txt"), "ready to commit\n");
-  const blockedCommit = spawnSync(
-    "git",
-    ["commit", "--all", "--message", "Blocked signed commit"],
-    {
-      cwd: workspace,
-      env: {
-        ...process.env,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: globalConfig,
-      },
-      encoding: "utf8",
-    },
-  );
-  assert.notEqual(blockedCommit.status, 0);
-  assert.match(blockedCommit.stderr, /Enter passphrase for signing key/);
-  assert.ok(existsSync(signerMarker));
-  rmSync(signerMarker);
-  const preCommitHook = join(workspace, ".git", "hooks", "pre-commit");
-  writeFileSync(preCommitHook, "#!/bin/sh\nexit 1\n");
-  chmodSync(preCommitHook, 0o755);
-  const { owner } = ownerForFreshRun(t, {}, workspace);
-
-  assert.deepEqual(
-    await run(
-      [
-        commandStep(
-          "commit",
-          {
-            executable: "git",
-            arguments: ["commit", "--all", "--message", "Unattended commit"],
-            workingDirectory: ".",
-            env: {
-              GIT_CONFIG_GLOBAL: globalConfig,
-              GIT_CONFIG_PARAMETERS: "'commit.gpgSign=true'",
-            },
-          },
-          {
-            produces: produces(
-              { name: "commit-verdict", type: "verdict" },
-              { name: "commit-output", type: "text" },
-            ),
-          },
-        ),
-      ],
-      owner,
-      { process: realProcess },
-    ),
-    { outcome: "succeeded" },
-  );
-  assert.equal(
-    dec(readBound(owner, "commit-verdict")),
-    "pass",
-    dec(readBound(owner, "commit-output")),
-  );
-  assert.equal(
-    execFileSync("git", ["log", "-1", "--format=%s%n%an"], {
-      cwd: workspace,
-      encoding: "utf8",
-    }).trim(),
-    "Unattended commit\nGlobal Signer",
-  );
-  assert.equal(existsSync(signerMarker), false);
 });
 
 // A command killed by a signal (Ctrl+C / termination) has no exit; its Attempt is

@@ -21,6 +21,7 @@ export const modules = [
       "tui",
       "renderer",
       "headless",
+      "process",
     ],
   },
   {
@@ -78,13 +79,13 @@ export const modules = [
     name: "store",
     root: "src/run/store/",
     entry: "store.ts",
-    imports: ["workflow", "harness", "artifacts", "drizzle"],
+    imports: ["workflow", "harness", "artifacts", "drizzle", "process"],
   },
   {
     name: "artifacts",
     root: "src/run/store/artifacts/",
     entry: "artifacts.ts",
-    imports: ["workflow"],
+    imports: ["workflow", "process"],
   },
   {
     name: "harness",

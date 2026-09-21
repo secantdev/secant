@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -530,10 +530,6 @@ async function executionRealCommand(): Promise<void> {
   const processAdapter = createProcessAdapter();
   const home = runtimeTemp("secant-runtime-execution-home-");
   const workspace = classicWorktree(processAdapter);
-  runGit(processAdapter, workspace, ["config", "commit.gpgSign", "true"]);
-  const hook = join(workspace, ".git", "hooks", "pre-commit");
-  writeFileSync(hook, "#!/bin/sh\nexit 1\n");
-  chmodSync(hook, 0o755);
   writeFileSync(join(workspace, "seed.txt"), "changed\n");
   const group = openRunGroup(home, workspace, { process: processAdapter });
   try {
@@ -570,6 +566,10 @@ async function executionRealCommand(): Promise<void> {
               ],
               workingDirectory: ".",
             },
+            produces: [
+              { name: "commit-verdict", type: "verdict" },
+              { name: "commit-output", type: "text" },
+            ],
           },
         ],
         {
@@ -590,6 +590,11 @@ async function executionRealCommand(): Promise<void> {
       assert.equal(
         new TextDecoder().decode(owner.readArtifact(version, "output")),
         "runtime-ok",
+      );
+      assert.equal(
+        readBound(owner, "commit-verdict"),
+        "pass",
+        readBound(owner, "commit-output"),
       );
       assert.equal(
         readGit(processAdapter, workspace, ["log", "-1", "--format=%s"]),

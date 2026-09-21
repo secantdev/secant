@@ -68,6 +68,7 @@ test("test temp directories are allocated through the shared helper", async () =
     "harness/record-codex.ts",
     "harness/codex-replayer-install.ts",
     "architecture/check-vendor-provenance.ts",
+    "process/runtime-conformance.ts",
   ]);
 
   for (const sourceFile of sourceFiles) {

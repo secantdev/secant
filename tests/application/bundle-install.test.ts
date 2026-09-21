@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { createApplication } from "../helpers/application.js";
+import type { BundleManagement } from "../../src/application/bundle-management.js";
 import {
   buildBundle,
   DEFAULT_BUDGETS,
@@ -25,7 +26,13 @@ const proofBundle = join(
   "test-repair-workflow",
 );
 
-async function harness(t: TestContext, budgets: Budgets = DEFAULT_BUDGETS) {
+async function harness(
+  t: TestContext,
+  budgets: Budgets = DEFAULT_BUDGETS,
+): Promise<{
+  readonly catalog: ReturnType<typeof openCatalog>;
+  readonly bundle: BundleManagement;
+}> {
   const home = makeTempDir("secant-install-home-");
   const catalog = await openCatalog(home);
   t.after(() => catalog.close());

@@ -890,21 +890,22 @@ async function storeLockedCoordination(): Promise<void> {
   const lock = new Database(coordinationPath);
   lock.exec("BEGIN EXCLUSIVE");
   try {
-    const result = await processAdapter.spawnCommand({
+    const launched = await processAdapter.spawnOwnedProcess({
       executable,
       args: [LOCKED_COORDINATION_WORKER, home, workspace],
       cwd: process.cwd(),
       env: process.env,
-      timeoutMs: 15_000,
-      maxCaptureBytes: 1024 * 1024,
-      truncationMarker: "\n[truncated]\n",
+      launchTimeoutMs: 5_000,
     });
-    assert.equal(result.kind, "exited");
-    if (result.kind !== "exited") {
-      throw new Error("locked coordination worker did not exit");
-    }
-    assert.equal(result.status, 0, new TextDecoder().decode(result.text));
-    assert.deepEqual(JSON.parse(new TextDecoder().decode(result.text)), {
+    assert.equal(launched.ok, true);
+    if (!launched.ok)
+      throw new Error("locked coordination worker did not launch");
+    const [output, close] = await Promise.all([
+      collectText(launched.process.stdout),
+      launched.process.closed(),
+    ]);
+    assert.deepEqual(close, { kind: "exited", status: 0 });
+    assert.deepEqual(JSON.parse(output), {
       kind: "aggregate",
       errorCount: 2,
       causeIsLastError: true,

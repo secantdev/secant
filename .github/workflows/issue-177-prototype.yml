@@ -1,0 +1,33 @@
+name: Issue 177 Bun child-lifecycle prototype
+
+on:
+  push:
+    branches:
+      - prototype/issue-177-bun-child-lifecycle
+
+# THROWAWAY PROTOTYPE (#177): branch-only Linux evidence. This workflow is not
+# part of the canonical gate and must never merge.
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Record hosted-runner region when Azure metadata exposes it
+        shell: bash
+        run: |
+          region="$(curl --silent --show-error --max-time 2 --noproxy '*' \
+            --header 'Metadata: true' \
+            'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' \
+            || printf unavailable)"
+          printf 'RUNNER_REGION=%s\n' "$region" >> "$GITHUB_ENV"
+      - run: bun prototypes/issue-177-bun-child-lifecycle/run.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-177-bun-child-lifecycle
+          path: prototype-results/issue-177
+          if-no-files-found: error

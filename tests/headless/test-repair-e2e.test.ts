@@ -54,16 +54,20 @@ function syncExited(stdout = "", status = 0): SpawnSyncResult {
   };
 }
 
+// The run-test Step names `bash` on POSIX and `powershell.exe` on Windows (the
+// manifest's `platforms.windows` override); the fake must flip either one.
+const RUN_TEST_EXECUTABLES = new Set(["bash", "powershell.exe"]);
+
 /** The bespoke Process double for the Test Repair Proof Bundle, process-free: it
- *  resolves the workflow's `bash`/`git` commands, answers the `git-worktree-root`
- *  Preflight probe (the Workspace is a worktree root), flips the run-test verdict
- *  fail→pass across the fix Turn (a small counter reproduces what the real Edit
- *  causes: the baseline run fails, the run after the fix passes), and lets
- *  `git commit` succeed. The Run Store's artifact Git delegates to the in-memory
- *  fake Git. */
+ *  resolves the workflow's run-test (`bash`/`powershell.exe`) and `git` commands,
+ *  answers the `git-worktree-root` Preflight probe (the Workspace is a worktree
+ *  root), flips the run-test verdict fail→pass across the fix Turn (a small counter
+ *  reproduces what the real Edit causes: the baseline run fails, the run after the
+ *  fix passes), and lets `git commit` succeed. The Run Store's artifact Git
+ *  delegates to the in-memory fake Git. */
 function fakeTestRepairProcess(): ProcessAdapter {
   const git = createFakeGitProcess();
-  let bashRuns = 0;
+  let testRuns = 0;
   return createFakeProcess({
     resolutionHandler: (name) => ({
       kind: "found",
@@ -71,10 +75,10 @@ function fakeTestRepairProcess(): ProcessAdapter {
       prefixArgs: [],
     }),
     commandHandler: (options): SpawnResult => {
-      if (options.executable === "bash") {
-        bashRuns += 1;
+      if (RUN_TEST_EXECUTABLES.has(options.executable)) {
+        testRuns += 1;
         // Baseline run fails; the fix Turn "repairs" the code, so the next run passes.
-        return commandExited(bashRuns === 1 ? 1 : 0, `run ${bashRuns}\n`);
+        return commandExited(testRuns === 1 ? 1 : 0, `run ${testRuns}\n`);
       }
       if (options.executable === "git") return commandExited(0);
       throw new Error(

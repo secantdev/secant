@@ -21,6 +21,7 @@
     "pack:launcher": "bun run scripts/pack-launcher.ts",
     "test": "bun run scripts/test.ts",
     "test:package": "bun scripts/package-smoke.ts",
+    "test:runtime-conformance": "bun tests/process/runtime-conformance.ts",
     "test:terminal": "bun tests/terminal/lifecycle.ts",
     "typecheck": "tsc --noEmit"
   },

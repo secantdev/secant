@@ -129,7 +129,7 @@ function resolveExecutablePath(
   return resolveWindowsFallback(name, options);
 }
 
-export function resolveExecutable(
+function resolveExecutableWithNode(
   name: string,
   options: ResolveExecutableOptions = {},
 ): ExecutableResolution {
@@ -310,10 +310,63 @@ export type SpawnOwnedProcessResult =
         | { readonly kind: "launch-timeout"; readonly cause: Error };
     };
 
+/** The Process Module's owned Interface. Callers receive normalized resolution,
+ * command, and long-lived process outcomes without observing a platform child. */
+export interface ProcessAdapter {
+  resolveExecutable(
+    name: string,
+    options?: ResolveExecutableOptions,
+  ): ExecutableResolution;
+  spawnCommand(options: SpawnOptions): Promise<SpawnResult>;
+  spawnOwnedProcess(
+    options: OwnedProcessOptions,
+  ): Promise<SpawnOwnedProcessResult>;
+}
+
+/** Construct the real Node-compatible implementation behind the Process Seam. */
+export function createProcessAdapter(): ProcessAdapter {
+  return new NodeProcessAdapter();
+}
+
+class NodeProcessAdapter implements ProcessAdapter {
+  resolveExecutable(
+    name: string,
+    options: ResolveExecutableOptions = {},
+  ): ExecutableResolution {
+    return resolveExecutableWithNode(name, options);
+  }
+
+  spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
+    return spawnCommandWithNode(options);
+  }
+
+  spawnOwnedProcess(
+    options: OwnedProcessOptions,
+  ): Promise<SpawnOwnedProcessResult> {
+    return spawnOwnedProcessWithNode(options);
+  }
+}
+
+const productionProcess = createProcessAdapter();
+
+/** Compatibility delegate retained while consumers move to the owned Interface. */
+export function resolveExecutable(
+  name: string,
+  options: ResolveExecutableOptions = {},
+): ExecutableResolution {
+  return productionProcess.resolveExecutable(name, options);
+}
+
 /** Spawn a long-lived child with pipe backpressure and tree-owned cleanup. On
  * Windows, `overlapped` pipes avoid synchronous handle semantics; elsewhere
  * ordinary pipes are used. */
 export function spawnOwnedProcess(
+  options: OwnedProcessOptions,
+): Promise<SpawnOwnedProcessResult> {
+  return productionProcess.spawnOwnedProcess(options);
+}
+
+function spawnOwnedProcessWithNode(
   options: OwnedProcessOptions,
 ): Promise<SpawnOwnedProcessResult> {
   const pipe: "pipe" | "overlapped" =
@@ -563,6 +616,10 @@ async function settleWithin<T>(
  * command that reads it gets EOF rather than hanging.
  */
 export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
+  return productionProcess.spawnCommand(options);
+}
+
+function spawnCommandWithNode(options: SpawnOptions): Promise<SpawnResult> {
   return new Promise<SpawnResult>((resolve) => {
     // Unlike boundedCodexExchange (typed rejection) and settleWithin (undefined observation), AbortSignal.timeout actively aborts the command process tree.
     const timeoutSignal = AbortSignal.timeout(options.timeoutMs);

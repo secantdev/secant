@@ -2,6 +2,7 @@
 // same suite runs against the Claude Code Adapter over the replayer from #112
 // on; running both keeps the fake honest to the Interface.
 
+import test from "node:test";
 import type {
   ApprovalDecision,
   HarnessProfile,
@@ -282,4 +283,4 @@ const scenarios: ConformanceScenarios = {
   },
 };
 
-runConformanceSuite(scenarios);
+runConformanceSuite(scenarios, test);

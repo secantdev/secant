@@ -21,7 +21,6 @@ import { fileURLToPath } from "node:url";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
   createClaudeCodeAdapter,
-  type HarnessAdapterFactory,
   type HarnessRequest,
   type HarnessTurn,
   type TurnAdmission,
@@ -35,16 +34,6 @@ import type {
   spawnOwnedProcess,
 } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
-import {
-  runApprovalRequestCases,
-  runInterruptRecoveryCases,
-  runPrepareProfileCases,
-  runTurnLifecycleCases,
-  type ApprovalRequestScenarios,
-  type InterruptRecoveryScenarios,
-  type PrepareProfileScenarios,
-  type TurnLifecycleScenarios,
-} from "./conformance.js";
 import { installReplayer } from "./replayer.js";
 
 const VERSION = "2.1.234 (Claude Code)";
@@ -116,76 +105,17 @@ function assertGoldenLaunch(
   );
 }
 
-// --- Shared conformance cases over the real replayer -------------------------
-
-const conformanceReplayer = installReplayer(VERSION);
-const scenarios: PrepareProfileScenarios = {
-  label: "claude-code",
-  baseline: () => () =>
-    createClaudeCodeAdapter({ path: conformanceReplayer.path, env: {} }),
-  prepareFailure: () => () =>
-    createClaudeCodeAdapter({
-      path: makeTempDir("secant-claude-empty-"),
-      env: {},
-    }),
-};
-runPrepareProfileCases(scenarios);
-
-const turnScenarios: TurnLifecycleScenarios = {
-  ...scenarios,
-  baseline: () => {
-    const replayer = installReplayer(VERSION, COMPLETED_CASE);
-    return () =>
-      createClaudeCodeAdapter({
-        path: replayer.path,
-        env: {},
-        sessionId: () => "11111111-1111-4111-8111-111111111111",
-      });
-  },
-  failedTurn: () => {
-    const replayer = installReplayer(VERSION, protocolCase("failed"));
-    return () =>
-      createClaudeCodeAdapter({
-        path: replayer.path,
-        env: {},
-        sessionId: () => "22222222-2222-4222-8222-222222222222",
-      });
-  },
-};
-runTurnLifecycleCases(turnScenarios);
+// The shared prepare/profile, Turn-lifecycle, approval, and interrupt/recovery
+// conformance cases over the real replayer moved out of the Bun test runner into
+// the standalone runtime-conformance runner (#184): see
+// tests/harness/replayer-conformance.ts (`claude-code-replayer-conformance`). The
+// Claude-Code-specific cases below stay here. The fixed session ids match the ids
+// their fixtures' init frames acknowledge.
 
 // --- Approval requests over the real MCP permission bridge -------------------
 
 const APPROVAL_SESSION = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const CONCURRENT_SESSION = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const OUTSTANDING_SESSION = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-
-const claudeApprovalAdapter = (session: string, caseName: string) => {
-  const replayer = installReplayer(VERSION, protocolCase(caseName));
-  return () =>
-    createClaudeCodeAdapter({
-      path: replayer.path,
-      env: {},
-      sessionId: () => session,
-    });
-};
-
-// The shared concurrent-request, race, and interrupt-expiry cases, driven
-// against the Claude Code Adapter over a real loopback MCP round-trip.
-const approvalScenarios: ApprovalRequestScenarios = {
-  label: "claude-code",
-  concurrentCount: 2,
-  concurrentRequests: () =>
-    claudeApprovalAdapter(CONCURRENT_SESSION, "approval-concurrent"),
-  awaitedApproval: () => claudeApprovalAdapter(APPROVAL_SESSION, "approval"),
-  interruptible: () =>
-    claudeApprovalAdapter(OUTSTANDING_SESSION, "approval-outstanding"),
-};
-// The two interrupt-bearing approval cases settle per OS like the interrupt cases
-// below: on Windows a live Turn's interrupt is a forced kill and truthfully `lost`.
-runApprovalRequestCases(approvalScenarios, {
-  interruptOutcome: process.platform === "win32" ? "lost" : "interrupted",
-});
 
 /** A managed Turn with a trivial always-admitting recorder. */
 function bridgeTurn(session: string): TurnRequest {
@@ -419,55 +349,12 @@ test(
   },
 );
 
-// --- Interrupt, lost, recovery, and cleanup over the real replayer -----------
-
-// The shared interrupt, lost, recovery, and cleanup cases over the real replayer.
-// A fresh replayer per scenario keeps invocations isolated; each fixed session id
-// matches the id its fixture's init acknowledges. Every case runs on every OS.
-// On Windows the process Module has no graceful stage (a hidden console child
-// cannot observe one), so a live replayer is force-killed and reported escalated,
-// and the Adapter truthfully settles the interrupted Turn `lost` with interruption
-// unknown (ADR 0022) — the same escalation the `unresponsive` case models.
+// The shared interrupt, lost, recovery, and cleanup cases over the real replayer
+// moved to the standalone runtime-conformance runner (#184); see
+// tests/harness/replayer-conformance.ts. The Claude-Code-specific interrupt,
+// recovery, and failure cases below stay here.
 const AUTHENTICATION_REQUIRED =
   "Authentication required for Claude Code. Log in separately through Claude Code, then retry.";
-
-const caseScenario =
-  (name: string, id: string) => (): HarnessAdapterFactory => {
-    const replayer = installReplayer(VERSION, protocolCase(name));
-    return () =>
-      createClaudeCodeAdapter({
-        path: replayer.path,
-        env: {},
-        sessionId: () => id,
-      });
-  };
-
-const interruptScenarios: InterruptRecoveryScenarios = {
-  ...turnScenarios,
-  blockingTurn: caseScenario(
-    "interrupt",
-    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  ),
-  unresponsiveInterrupt: caseScenario(
-    "unresponsive",
-    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-  ),
-  lostCompletion: caseScenario(
-    "lost-completion",
-    "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-  ),
-  resumeAcknowledged: caseScenario(
-    "resume",
-    "55555555-5555-4555-8555-555555555555",
-  ),
-  resumeUnacknowledged: caseScenario(
-    "resume-unacknowledged",
-    "66666666-6666-4666-8666-666666666666",
-  ),
-};
-runInterruptRecoveryCases(interruptScenarios, {
-  interruptOutcome: process.platform === "win32" ? "lost" : "interrupted",
-});
 
 /** Drive one Turn against a protocol case over the real replayer, returning the
  *  events, the result, the prepared Harness (to close), and the replayer. */

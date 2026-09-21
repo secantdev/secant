@@ -44,6 +44,14 @@ export async function cleanupTempDirsForTest(): Promise<void> {
   await Promise.all(directories.map(removeTempDir));
 }
 
-after(async () => {
-  await cleanupTempDirsForTest();
-});
+// Registered only under the test runner. The standalone runtime-conformance
+// runner (an ordinary Bun process) imports this helper transitively through the
+// replayer installers; there `after` throws, and its temp dirs are reclaimed by
+// the OS exactly as that runner's own `mkdtempSync` dirs already are.
+try {
+  after(async () => {
+    await cleanupTempDirsForTest();
+  });
+} catch {
+  // Not under the test runner: skip the file-owned cleanup hook.
+}

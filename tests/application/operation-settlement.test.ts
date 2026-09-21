@@ -2,15 +2,47 @@ import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
 import {
+  createApplication,
   type Application,
   type RunExecution,
 } from "../../src/application/application.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
+import type { ProcessAdapter, SpawnResult } from "../../src/process/process.js";
 import type { RunGroup, RunOwner } from "../../src/run/store/store.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
 import { hostPlatform, writeCommandBundle } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import {
+  createFakeGitProcess,
+  openFakeRunGroup as openRunGroup,
+} from "../run/store/fake-git-process.js";
+
+// The Command steps' execution runs through an injected fake Process, so no child
+// is spawned. These tests inject their own `runExecution`, so the fake command is
+// never reached — but the Application requires a Process (it reaches Preflight),
+// so this fake stands in for the real one and never spawns.
+function fakeCommand(): SpawnResult {
+  return { kind: "exited", status: 0, text: new Uint8Array() };
+}
+
+const executionProcess: ProcessAdapter = (() => {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) =>
+      name === "secant-no-such-binary-xyz"
+        ? { kind: "not-found" }
+        : { kind: "found", executable: name, prefixArgs: [] },
+    commandHandler: fakeCommand,
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => git.spawnCommandSync(options),
+  };
+})();
 
 interface Fixture {
   readonly app: Application;
@@ -58,6 +90,7 @@ function fixture(
   const held: (() => void | Promise<void>)[] = [];
   const app = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,
@@ -104,6 +137,7 @@ test("a synchronously throwing settler records a normalized execution fault with
   } satisfies Catalog;
   const app = createApplication({
     catalog: throwingCatalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
   });
 

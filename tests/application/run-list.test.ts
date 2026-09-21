@@ -2,20 +2,52 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { realpathSync as realpath } from "node:fs";
 import test, { type TestContext } from "node:test";
-import { type Application } from "../../src/application/application.js";
+import {
+  createApplication,
+  type Application,
+} from "../../src/application/application.js";
 import type { RunListSnapshot } from "../../src/application/projection-port.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { createProcessAdapter } from "../../src/process/process.js";
+import type { ProcessAdapter, SpawnResult } from "../../src/process/process.js";
 import type { RunGroup } from "../../src/run/store/store.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
 import { hostPlatform, writeCommandBundle } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import {
+  createFakeGitProcess,
+  openFakeRunGroup as openRunGroup,
+} from "../run/store/fake-git-process.js";
 
 // A fixed clock so Today / Yesterday / Older grouping is deterministic on any CI
 // timezone: rows are seeded relative to this same instant.
 const NOW = new Date(2026, 5, 15, 12, 0, 0);
-const executionProcess = createProcessAdapter();
+
+// The Command steps' execution runs through an injected fake Process, so no child
+// is spawned. run-list seeds Runs directly through the Store and never launches, so
+// this fake command is never reached — but the Application requires a Process, and
+// the execution Seam threads it, exactly as production composition does.
+function fakeCommand(): SpawnResult {
+  return { kind: "exited", status: 0, text: new Uint8Array() };
+}
+
+const executionProcess: ProcessAdapter = (() => {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) =>
+      name === "secant-no-such-binary-xyz"
+        ? { kind: "not-found" }
+        : { kind: "found", executable: name, prefixArgs: [] },
+    commandHandler: fakeCommand,
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => git.spawnCommandSync(options),
+  };
+})();
 
 interface Fixture {
   readonly app: Application;
@@ -36,6 +68,7 @@ function fixture(t: TestContext): Fixture {
   t.after(() => runGroup.close());
   const app = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,

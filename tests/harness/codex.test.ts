@@ -18,15 +18,6 @@ import type { OwnedProcess } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { seedTestRepairWorkspace } from "../helpers/testRepairWorkspace.js";
 import {
-  runExactThreadRecoveryCases,
-  runApprovalRequestCases,
-  runInterruptRecoveryCases,
-  runNativeSteerCases,
-  runPrepareProfileCases,
-  runTurnLifecycleCases,
-  type ApprovalRequestScenarios,
-} from "./conformance.js";
-import {
   installCodexReplayer,
   installSyntheticCodexReplayer,
   type InstalledCodexReplayer,
@@ -37,141 +28,11 @@ import {
 } from "./codex-recording-cases.js";
 import { createCodexRecordingCapture } from "./codex-recording.js";
 
-const replayer = installSyntheticCodexReplayer();
-
-runPrepareProfileCases({
-  label: "codex",
-  baseline: () => () => createCodexAdapter({ path: replayer.path, env: {} }),
-  prepareFailure: () => () =>
-    createCodexAdapter({
-      path: makeTempDir("secant-codex-empty-"),
-      env: {},
-    }),
-});
-
-runTurnLifecycleCases({
-  label: "codex-turn-lifecycle",
-  inputText: CODEX_RECORDING_INPUT.completion,
-  baseline: () => () =>
-    createCodexAdapter({
-      path: installCodexReplayer("completion").path,
-      env: {},
-    }),
-  prepareFailure: () => () =>
-    createCodexAdapter({
-      path: makeTempDir("secant-codex-empty-"),
-      env: {},
-    }),
-  failedTurn: () => () =>
-    createCodexAdapter({ path: failedTurnReplayer().path, env: {} }),
-});
-
-runNativeSteerCases({
-  label: "codex-recorded-conformance",
-  inputText: CODEX_RECORDING_INPUT.steer,
-  guidanceText: CODEX_RECORDING_INPUT.steerGuidance,
-  steerableTurn: () => () =>
-    createCodexAdapter({
-      path: installCodexReplayer("steer").path,
-      env: {},
-    }),
-});
-
-runInterruptRecoveryCases({
-  label: "codex-recorded-conformance",
-  inputText: CODEX_RECORDING_INPUT.completion,
-  interruptInputText: CODEX_RECORDING_INPUT.sleep,
-  resumeInputText: CODEX_RECORDING_INPUT.resume,
-  baseline: () => () =>
-    createCodexAdapter({
-      path: installCodexReplayer("completion").path,
-      env: {},
-    }),
-  prepareFailure: () => () =>
-    createCodexAdapter({
-      path: makeTempDir("secant-codex-empty-"),
-      env: {},
-    }),
-  failedTurn: () => () =>
-    createCodexAdapter({ path: failedTurnReplayer().path, env: {} }),
-  blockingTurn: () => () =>
-    createCodexAdapter({
-      path: installCodexReplayer("interrupt").path,
-      env: {},
-    }),
-  unresponsiveInterrupt: () => {
-    const installed = installSyntheticCodexReplayer();
-    installed.configureTurn({
-      withholdTerminal: true,
-      stallInterruptResponse: true,
-    });
-    return () =>
-      createCodexAdapter({
-        path: installed.path,
-        env: {},
-        controlTimeoutMs: 500,
-        cleanupTimeoutMs: 20,
-      });
-  },
-  lostCompletion: () => {
-    const installed = installSyntheticCodexReplayer();
-    installed.configureTurn({ stopAfter: "accepted" });
-    return () => createCodexAdapter({ path: installed.path, env: {} });
-  },
-  resumeAcknowledged: () => () =>
-    createCodexAdapter({
-      path: installCodexReplayer("resume").path,
-      env: {},
-    }),
-  resumeUnacknowledged: () => {
-    const installed = installSyntheticCodexReplayer();
-    installed.configureTurn({
-      withholdTerminal: true,
-      interruptTerminal: "interrupted",
-    });
-    installed.configureRecovery({ threadId: "different-thread" });
-    return () => createCodexAdapter({ path: installed.path, env: {} });
-  },
-});
-
-runExactThreadRecoveryCases({
-  label: "codex-exact-thread-recovery",
-  resumeAcknowledged: () => exactRecoveryReplayer("thread-1"),
-  resumeUnacknowledged: () => exactRecoveryReplayer("different-thread"),
-});
-
-const codexApprovalScenarios: ApprovalRequestScenarios = {
-  label: "codex-approval-contract",
-  concurrentCount: 2,
-  awaitedInputText: CODEX_RECORDING_INPUT.approval,
-  concurrentRequests: () => () =>
-    createCodexAdapter({
-      path: installCodexReplayer("codex-approval-contract").path,
-      env: {},
-    }),
-  awaitedApproval: () => () =>
-    createCodexAdapter({
-      path: installCodexReplayer("approval").path,
-      env: {},
-    }),
-  interruptible: () => {
-    const installed = installSyntheticCodexReplayer();
-    installed.configureTurn({
-      approvals: [
-        {
-          id: "interrupt-command",
-          kind: "command",
-          itemId: "interrupt-command-1",
-          command: "bun test",
-        },
-      ],
-      interruptTerminal: "interrupted",
-    });
-    return () => createCodexAdapter({ path: installed.path, env: {} });
-  },
-};
-
-runApprovalRequestCases(codexApprovalScenarios);
+// The shared prepare/profile, Turn-lifecycle, native-steer, interrupt/recovery,
+// exact-thread-recovery, and approval conformance cases over the real Codex
+// replayer moved out of the Bun test runner into the standalone
+// runtime-conformance runner (#184): see tests/harness/replayer-conformance.ts
+// (`codex-replayer-conformance`). The Codex-specific cases below stay here.
 
 test("Codex approval allow and deny map only to native accept and decline", async () => {
   const installed = installCodexReplayer("codex-approval-contract");
@@ -578,24 +439,6 @@ test("experimental request-user-input remains disabled and fails closed", async 
   assert.equal(prepared.profile.clarifications.available, false);
   await prepared.close();
 });
-
-function failedTurnReplayer() {
-  const installed = installSyntheticCodexReplayer();
-  installed.failTurn("scripted terminal failure");
-  return installed;
-}
-
-function exactRecoveryReplayer(threadId: string) {
-  const installed = installSyntheticCodexReplayer();
-  installed.configureTurn({ stallFirstTurn: true });
-  installed.configureRecovery({ threadId });
-  return () =>
-    createCodexAdapter({
-      path: installed.path,
-      env: {},
-      controlTimeoutMs: 500,
-    });
-}
 
 test("refused durable admission sends no prompt content", async () => {
   const installed = installSyntheticCodexReplayer();

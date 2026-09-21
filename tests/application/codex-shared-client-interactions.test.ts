@@ -3,14 +3,20 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
-import { createCodexAdapter } from "../../src/harness/harness.js";
+import type {
+  HarnessProfile,
+  TurnEvent,
+  TurnResult,
+} from "../../src/harness/harness.js";
+import type { ProcessAdapter } from "../../src/process/process.js";
 import type {
   ProjectionPort,
   RunView,
   SteerTurnOffer,
 } from "../../src/application/projection-port.js";
-import { installCodexReplayer } from "../harness/codex-replayer.js";
-import { ensureRuntimeOnPath } from "../helpers/commandBundle.js";
+import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import { createFakeGitProcess } from "../run/store/fake-git-process.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
@@ -18,11 +24,100 @@ import { makeTempDir } from "../helpers/tempDir.js";
 // Code — the timeline shapes, the durable snapshot, and the Turn-scoped controls —
 // with only the Adapter changed (#148, spec stories 15–23). The one client-visible
 // difference is a capability the profile declares: Codex offers native same-Turn
-// Steer where Claude Code cannot. Each test wires the Application against a recorded
-// Codex app-server replayer (no real Harness, ADR 0027) and drives the Port with
-// `harness: "codex"`.
+// Steer where Claude Code cannot. Each test wires the Application against the
+// deterministic fake Codex Harness (native steer available) and an injected fake
+// Process — no child spawns (#184) — and drives the Port with `harness: "codex"`.
 
-ensureRuntimeOnPath();
+// The fake Codex Harness's profile: identical to Claude Code except native steer is
+// available, which is the one client-visible difference these cases exercise.
+function codexProfile(): HarnessProfile {
+  return {
+    harness: "codex",
+    executable: "codex",
+    executableVersion: "0.0.0-fake-codex",
+    platform: "linux",
+    adapterRevision: "fake-codex-1",
+    configurationPosture: "user-compatible",
+    recovery: {
+      mode: "native-reattach",
+      evidence: "fake codex reattaches a thread",
+    },
+    interruption: {
+      mode: "process-only",
+      evidence: "fake codex stops the process",
+    },
+    approvals: { available: true, evidence: "fake codex hosts approvals" },
+    clarifications: {
+      available: false,
+      evidence: "fake codex offers no clarifications",
+    },
+    steer: {
+      available: true,
+      evidence: "fake codex offers native same-Turn steer",
+    },
+    modelSelection: {
+      at: "unavailable",
+      evidence: "fake codex selects no model",
+    },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "fake codex mints a thread id",
+    },
+    skillDelivery: { mode: "plain-path", evidence: "fake codex reads a path" },
+    fileDelivery: { mode: "plain-path", evidence: "fake codex reads a path" },
+  };
+}
+
+const COMPLETED: TurnResult = {
+  kind: "completed",
+  detail: {
+    finalContent: "recorded",
+    effectiveModel: { known: true, model: "fake-codex-model" },
+    session: { state: "open" },
+  },
+};
+
+/** The fake Codex script for a fixture. The `steer` case blocks the live Turn so a
+ *  native Steer can reach it, then completes once steered; `completion` completes
+ *  straight away. Both emit a Session event and authoritative assistant content. */
+function codexScript(fixture: string): FakeScript {
+  const events: TurnEvent[] = [
+    { kind: "session", availability: { state: "open" } },
+    { kind: "assistant-content", content: `recorded ${fixture}` },
+  ];
+  if (fixture === "steer") {
+    return {
+      profile: codexProfile(),
+      turns: [{ events, block: true, settleOnSteer: true, result: COMPLETED }],
+    };
+  }
+  return { profile: codexProfile(), turns: [{ events, result: COMPLETED }] };
+}
+
+/** A fake Process that resolves any executable and reaches no real child; Git store
+ *  operations run through the deterministic fake Git process. */
+function fakeProcess(): ProcessAdapter {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) => ({
+      kind: "found",
+      executable: name,
+      prefixArgs: [],
+    }),
+    commandHandler: () => ({
+      kind: "exited",
+      status: 0,
+      text: new Uint8Array(),
+    }),
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => git.spawnCommandSync(options),
+  };
+}
 
 /** Author a single-Agent-step Bundle whose prompt renders to exactly `prompt` — the
  *  recorded fixture replays strictly, so the rendered Turn input must match byte for
@@ -68,12 +163,12 @@ function wire(
   fixture: string,
   prompt: string,
 ): { wired: Wiring; bundleId: string; digest: string } {
-  const replayer = installCodexReplayer(fixture);
   const workspace = makeTempDir("secant-codex-cli-ws-");
   const wired = wireApplication({
     secantHome: makeTempDir("secant-codex-cli-home-"),
     launchCwd: workspace,
-    codexHarnessAdapter: createCodexAdapter({ path: replayer.path, env: {} }),
+    process: fakeProcess(),
+    codexHarnessAdapter: createFake(codexScript(fixture))(),
     discoverCodex: () => ({
       kind: "found",
       attempt: {

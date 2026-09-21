@@ -1,22 +1,39 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
-import { TRANSCRIPT_PAGE_SIZE } from "../../src/application/application.js";
+import {
+  createApplication,
+  TRANSCRIPT_PAGE_SIZE,
+} from "../../src/application/application.js";
 import type {
   TranscriptExportReference,
   TranscriptPageReference,
 } from "../../src/application/projection-port.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
 import type { RunGroup } from "../../src/run/store/store.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
 import { hostPlatform } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import { openFakeRunGroup as openRunGroup } from "../run/store/fake-git-process.js";
 
 const AT = new Date("2026-09-16T12:00:00.000Z");
 
 // The transcript `page`/`export` Resource References (#124) resolved through the
 // Projection Port: bounded ordered paging, the complete export, and normalized
 // Problems for an unknown Run, Session, or cursor — never a native id or path.
+
+// These tests seed Runs and Turns straight through the Run Store and never launch
+// or execute a Step, so the injected Process is never exercised — but the source
+// `createApplication` requires one. A fake Process satisfies it without any child
+// spawn, and the faked Run Store Git keeps `admitTurn`/paging off real `git`.
+const executionProcess = createFakeProcess({
+  resolutionHandler: (name) => ({
+    kind: "found",
+    executable: name,
+    prefixArgs: [],
+  }),
+  commandHandler: () => ({ kind: "exited", status: 0, text: new Uint8Array() }),
+});
 
 function fixture(t: TestContext) {
   const catalog = openCatalog(makeTempDir("secant-tx-home-"));
@@ -26,6 +43,7 @@ function fixture(t: TestContext) {
   t.after(() => runGroup.close());
   const app = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,

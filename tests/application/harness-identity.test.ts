@@ -8,12 +8,47 @@ import {
   type HarnessProfile,
 } from "../../src/harness/harness.js";
 import type { RunView } from "../../src/application/projection-port.js";
+import type { ProcessAdapter } from "../../src/process/process.js";
 import { createFake, type FakeScript } from "../harness/fake-adapter.js";
-import { ensureRuntimeOnPath, RUNTIME_NAME } from "../helpers/commandBundle.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import { createFakeGitProcess } from "../run/store/fake-git-process.js";
+import { RUNTIME_NAME } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 
-ensureRuntimeOnPath();
+// One shared fake Git repository backs every wiring in this file, so a Run's
+// Store commits made under one wiring read back after the same home is reopened
+// in a fresh wiring (the reopen/resume cases) — mirroring how `openFakeRunGroup`
+// shares a single fake Git process across Run Stores. Objects are content-hashed
+// in memory; refs land on disk under each home's Git dir.
+const sharedGit = createFakeGitProcess();
+
+// A deterministic Process double for `wireApplication`, so no real child spawns:
+// git Store operations delegate to the shared fake Git; command Steps map their
+// `-e process.exit(N)` script to the exit status; executables always resolve
+// (none of these Bundles declare a deliberately-missing command or a
+// git-worktree-root prerequisite, so `rev-parse` is never probed).
+function fakeProcess(): ProcessAdapter {
+  const commands = createFakeProcess({
+    resolutionHandler: (name) => ({
+      kind: "found",
+      executable: name,
+      prefixArgs: [],
+    }),
+    commandHandler: (options) => {
+      const script = options.args[1] ?? "";
+      const status = Number(/process\.exit\((\d+)\)/.exec(script)?.[1] ?? "0");
+      return { kind: "exited", status, text: new Uint8Array() };
+    },
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => sharedGit.spawnCommandSync(options),
+  };
+}
 
 // The normalized Harness identity a Run projects for its latest Agent-step Attempt
 // (#125), driven end to end through the composition wiring against the deterministic
@@ -359,6 +394,7 @@ async function launch(
       ? wireApplication({
           secantHome: home,
           launchCwd: workspace,
+          process: fakeProcess(),
           codexHarnessAdapter: countedAdapter,
           discoverCodex: () => ({
             kind: "found",
@@ -373,6 +409,7 @@ async function launch(
       : wireApplication({
           secantHome: home,
           launchCwd: workspace,
+          process: fakeProcess(),
           harnessAdapter: countedAdapter,
           supportsInteractiveTurns: bundle.supportsInteractiveTurns,
         });
@@ -504,6 +541,7 @@ test("[both-client-harness-selection] selected Harness authentication and protoc
   const wired = wireApplication({
     secantHome: home,
     launchCwd: workspace,
+    process: fakeProcess(),
     codexHarnessAdapter: {
       async prepare() {
         prepareCount++;
@@ -689,6 +727,7 @@ test("the Harness identity is identical after the Run is reopened (#125)", async
   const reopened = wireApplication({
     secantHome: home,
     launchCwd: workspace,
+    process: fakeProcess(),
     harnessAdapter: createFake(completedScript("fake-sonnet"))(),
   });
   t.after(() => {
@@ -729,6 +768,7 @@ test("[selected-versus-observed-evidence] resume preserves selection while a lat
   const reopened = wireApplication({
     secantHome: home,
     launchCwd: workspace,
+    process: fakeProcess(),
     harnessAdapter: createFake({
       profile: resumedProfile,
       turns: [
@@ -809,6 +849,7 @@ test("a reopened Run's steer Offer uses the recorded profile evidence (#134 A12)
   const reopened = wireApplication({
     secantHome: home,
     launchCwd: workspace,
+    process: fakeProcess(),
     harnessAdapter: createFake(resumedScript)(),
   });
   t.after(() => {

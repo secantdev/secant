@@ -8,7 +8,6 @@
 // interrupt and every `lost` path, recovery by resume, and idempotent close.
 
 import assert from "node:assert/strict";
-import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import {
   LOST_UNKNOWNS,
@@ -24,6 +23,18 @@ import {
   type TurnRequest,
   type TurnResult,
 } from "../../src/harness/harness.js";
+
+/**
+ * How a conformance behaviour is registered. Under the test runner the caller
+ * passes `test` from `node:test`; the standalone runtime-conformance runner
+ * passes a callback that pushes each behaviour as its own runtime case (the same
+ * split the Process conformance suite uses), so the shared suite drives the fake
+ * under the test runner and the real replayers outside it.
+ */
+export type RegisterConformanceCase = (
+  name: string,
+  body: () => void | Promise<void>,
+) => void;
 
 /**
  * The prepare/profile subset of the suite: qualification and the evidence-
@@ -157,10 +168,13 @@ export interface ReplayScenario {
  *  graceful signal) truthfully settles `lost` with interruption unknown (ADR 0022). */
 export type InterruptOutcome = "interrupted" | "lost";
 
-export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
+export function runTurnLifecycleCases(
+  scenarios: TurnLifecycleScenarios,
+  register: RegisterConformanceCase,
+): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
 
-  test(
+  register(
     name("a completed Turn settles once, after the producer closes"),
     async () => {
       const prepared = await prepare(scenarios.baseline());
@@ -179,7 +193,7 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
     },
   );
 
-  test(
+  register(
     name("durable admission failure proves the Turn not-started"),
     async () => {
       const prepared = await prepare(scenarios.baseline());
@@ -200,7 +214,7 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
     },
   );
 
-  test(
+  register(
     name("a thrown recorder still proves not-started, never a throw out"),
     async () => {
       const prepared = await prepare(scenarios.baseline());
@@ -218,21 +232,24 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
     },
   );
 
-  test(name("a terminal error subtype settles the Turn failed"), async () => {
-    const prepared = await prepare(scenarios.failedTurn());
-    const turn = prepared.startTurn(
-      request(recorder().recorder, { text: scenarios.inputText }),
-    );
-    const result = await turn.result();
-    assert.equal(result.kind, "failed");
-    if (result.kind !== "failed") throw new Error("unreachable");
-    assert.ok(result.detail.failure.category.length > 0);
-    assert.equal(result.detail.failure.phase, "turn");
-    assert.ok("state" in result.detail.session);
-    await prepared.close();
-  });
+  register(
+    name("a terminal error subtype settles the Turn failed"),
+    async () => {
+      const prepared = await prepare(scenarios.failedTurn());
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.inputText }),
+      );
+      const result = await turn.result();
+      assert.equal(result.kind, "failed");
+      if (result.kind !== "failed") throw new Error("unreachable");
+      assert.ok(result.detail.failure.category.length > 0);
+      assert.equal(result.detail.failure.phase, "turn");
+      assert.ok("state" in result.detail.session);
+      await prepared.close();
+    },
+  );
 
-  test(name("close after an idle Turn is idempotent"), async () => {
+  register(name("close after an idle Turn is idempotent"), async () => {
     const prepared = await prepare(scenarios.baseline());
     const turn = prepared.startTurn(
       request(recorder().recorder, { text: scenarios.inputText }),
@@ -247,8 +264,9 @@ export function runTurnLifecycleCases(scenarios: TurnLifecycleScenarios): void {
 
 export function runExactThreadRecoveryCases(
   scenarios: ExactThreadRecoveryScenarios,
+  register: RegisterConformanceCase,
 ): void {
-  runRecoveryCases({
+  runRecoveryCases(register, {
     ...scenarios,
     assertStickyUnusable: true,
     expectedAdmissionsBeforeFailure: 0,
@@ -269,10 +287,13 @@ interface RecoveryCaseDriver extends ExactThreadRecoveryScenarios {
   detach(prepared: PreparedHarness): Promise<RecoveryCoordinate>;
 }
 
-function runRecoveryCases(driver: RecoveryCaseDriver): void {
+function runRecoveryCases(
+  register: RegisterConformanceCase,
+  driver: RecoveryCaseDriver,
+): void {
   const name = (behaviour: string) => `[${driver.label}] ${behaviour}`;
 
-  test(
+  register(
     name("a detached Session resumes from its coordinate and completes"),
     async () => {
       const prepared = await prepare(driver.resumeAcknowledged());
@@ -298,7 +319,7 @@ function runRecoveryCases(driver: RecoveryCaseDriver): void {
     },
   );
 
-  test(
+  register(
     name("unacknowledged recovery makes the Session permanently unusable"),
     async () => {
       const prepared = await prepare(driver.resumeUnacknowledged());
@@ -331,10 +352,13 @@ function runRecoveryCases(driver: RecoveryCaseDriver): void {
   );
 }
 
-export function runNativeSteerCases(scenarios: NativeSteerScenarios): void {
+export function runNativeSteerCases(
+  scenarios: NativeSteerScenarios,
+  register: RegisterConformanceCase,
+): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
 
-  test(
+  register(
     name("native same-Turn guidance is accepted while the Turn is live"),
     async () => {
       const prepared = await prepare(scenarios.steerableTurn());
@@ -370,12 +394,13 @@ export function runNativeSteerCases(scenarios: NativeSteerScenarios): void {
  */
 export function runInterruptRecoveryCases(
   scenarios: InterruptRecoveryScenarios,
+  register: RegisterConformanceCase,
   options: { readonly interruptOutcome?: InterruptOutcome } = {},
 ): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
   const outcome = options.interruptOutcome ?? "interrupted";
 
-  runRecoveryCases({
+  runRecoveryCases(register, {
     ...scenarios,
     detach: async (prepared) => {
       const turn = prepared.startTurn(
@@ -388,7 +413,7 @@ export function runInterruptRecoveryCases(
     },
   });
 
-  test(
+  register(
     name(
       `an interrupt stops a blocking Turn, settles ${outcome}, and detaches the Session`,
     ),
@@ -410,7 +435,7 @@ export function runInterruptRecoveryCases(
     },
   );
 
-  test(
+  register(
     name("a process that ignores the graceful signal is force-killed and lost"),
     async () => {
       const prepared = await prepare(scenarios.unresponsiveInterrupt());
@@ -428,7 +453,7 @@ export function runInterruptRecoveryCases(
     },
   );
 
-  test(
+  register(
     name("a producer that closes without a result loses the Turn"),
     async () => {
       const prepared = await prepare(scenarios.lostCompletion());
@@ -444,7 +469,7 @@ export function runInterruptRecoveryCases(
     },
   );
 
-  test(
+  register(
     name("close during a live Turn bounds cleanup and is idempotent"),
     async () => {
       const prepared = await prepare(scenarios.blockingTurn());
@@ -506,10 +531,11 @@ function lostDetachedCoordinate(result: TurnResult): RecoveryCoordinate {
  *  a prepare-only provider (the Claude Code Adapter over the replayer) call it. */
 export function runPrepareProfileCases(
   scenarios: PrepareProfileScenarios,
+  register: RegisterConformanceCase,
 ): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
 
-  test(name("prepare returns an evidence-bearing profile"), async () => {
+  register(name("prepare returns an evidence-bearing profile"), async () => {
     const prepared = await prepare(scenarios.baseline());
     const { profile } = prepared;
     assert.ok(profile.harness.length > 0);
@@ -527,7 +553,7 @@ export function runPrepareProfileCases(
     await prepared.close();
   });
 
-  test(name("prepare fails with a typed value, not a throw"), async () => {
+  register(name("prepare fails with a typed value, not a throw"), async () => {
     const adapter = scenarios.prepareFailure()();
     const result = await adapter.prepare({ workspace: process.cwd() });
     assert.equal(result.ok, false);
@@ -543,12 +569,13 @@ export function runPrepareProfileCases(
  *  (default `interrupted`), exactly as in `runInterruptRecoveryCases`. */
 export function runApprovalRequestCases(
   scenarios: ApprovalRequestScenarios,
+  register: RegisterConformanceCase,
   options: { readonly interruptOutcome?: InterruptOutcome } = {},
 ): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
   const outcome = options.interruptOutcome ?? "interrupted";
 
-  test(
+  register(
     name("several requests are outstanding at once and each is answered"),
     async () => {
       const prepared = await prepare(scenarios.concurrentRequests());
@@ -566,7 +593,7 @@ export function runApprovalRequestCases(
     },
   );
 
-  test(
+  register(
     name("answering an already-answered request is rejected already-settled"),
     async () => {
       const prepared = await prepare(scenarios.awaitedApproval());
@@ -588,7 +615,7 @@ export function runApprovalRequestCases(
     },
   );
 
-  test(
+  register(
     name("answering with the wrong shape is rejected shape-mismatch"),
     async () => {
       const prepared = await prepare(scenarios.awaitedApproval());
@@ -616,7 +643,7 @@ export function runApprovalRequestCases(
 
   const interruptible = scenarios.interruptible;
   if (interruptible !== undefined) {
-    test(
+    register(
       name(`interrupt is confirmed and the result is ${outcome}`),
       async () => {
         const prepared = await prepare(interruptible());
@@ -633,7 +660,7 @@ export function runApprovalRequestCases(
       },
     );
 
-    test(
+    register(
       name("an outstanding request expires when the Turn is interrupted"),
       async () => {
         const prepared = await prepare(interruptible());
@@ -653,31 +680,37 @@ export function runApprovalRequestCases(
 }
 
 /** Run the whole suite against one provider. */
-export function runConformanceSuite(scenarios: ConformanceScenarios): void {
+export function runConformanceSuite(
+  scenarios: ConformanceScenarios,
+  register: RegisterConformanceCase,
+): void {
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
 
-  runPrepareProfileCases(scenarios);
-  runTurnLifecycleCases(scenarios);
-  runInterruptRecoveryCases(scenarios);
-  runApprovalRequestCases(scenarios);
+  runPrepareProfileCases(scenarios, register);
+  runTurnLifecycleCases(scenarios, register);
+  runInterruptRecoveryCases(scenarios, register);
+  runApprovalRequestCases(scenarios, register);
 
-  test(name("answering after the Turn ends is rejected expired"), async () => {
-    const prepared = await prepare(scenarios.expiringRequest());
-    const turn = prepared.startTurn(request(recorder().recorder));
-    const events = observe(turn);
-    const result = await turn.result();
-    assert.equal(result.kind, "completed");
-    const [raised] = events.requests();
-    const expiredEvents = events.all.filter(
-      (e) => e.kind === "request-expired",
-    );
-    assert.equal(expiredEvents.length, 1, "the outstanding request expired");
-    const late = await answer(turn, raised);
-    assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
-    await prepared.close();
-  });
+  register(
+    name("answering after the Turn ends is rejected expired"),
+    async () => {
+      const prepared = await prepare(scenarios.expiringRequest());
+      const turn = prepared.startTurn(request(recorder().recorder));
+      const events = observe(turn);
+      const result = await turn.result();
+      assert.equal(result.kind, "completed");
+      const [raised] = events.requests();
+      const expiredEvents = events.all.filter(
+        (e) => e.kind === "request-expired",
+      );
+      assert.equal(expiredEvents.length, 1, "the outstanding request expired");
+      const late = await answer(turn, raised);
+      assert.deepEqual(late, { outcome: "rejected", reason: "expired" });
+      await prepared.close();
+    },
+  );
 
-  test(
+  register(
     name("steer is rejected unsupported when the profile lacks it"),
     async () => {
       const prepared = await prepare(scenarios.baseline());
@@ -690,7 +723,7 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
   );
 
   for (const unknown of LOST_UNKNOWNS) {
-    test(name(`a Turn settles lost with unknown ${unknown}`), async () => {
+    register(name(`a Turn settles lost with unknown ${unknown}`), async () => {
       const prepared = await prepare(scenarios.lost(unknown));
       const turn = prepared.startTurn(request(recorder().recorder));
       const result = await turn.result();
@@ -702,7 +735,7 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
     });
   }
 
-  test(name("a detached Session is recovered by resume"), async () => {
+  register(name("a detached Session is recovered by resume"), async () => {
     const prepared = await prepare(scenarios.resumable());
     const first = recorder();
     const turn1 = prepared.startTurn(request(first.recorder));
@@ -730,7 +763,7 @@ export function runConformanceSuite(scenarios: ConformanceScenarios): void {
     await prepared.close();
   });
 
-  test(
+  register(
     name(
       "a load-with-replay resume replays history before one barrier, reconciles a repeat, then progresses",
     ),

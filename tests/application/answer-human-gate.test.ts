@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import test, { type TestContext } from "node:test";
 import {
+  createApplication,
   type Application,
   type RunExecution,
 } from "../../src/application/application.js";
@@ -12,11 +13,12 @@ import type {
 } from "../../src/application/projection-port.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { createProcessAdapter } from "../../src/process/process.js";
+import type {
+  ProcessAdapter,
+  SpawnOptions,
+} from "../../src/process/process.js";
 import type { RunGroup } from "../../src/run/store/store.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
 import {
-  ensureRuntimeOnPath,
   hostPlatform,
   writeCommandBundle,
   writeGateBundle,
@@ -26,15 +28,72 @@ import {
 } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import {
+  createFakeGitProcess,
+  openFakeRunGroup as openRunGroup,
+} from "../run/store/fake-git-process.js";
 
 // The `answer-human-gate` Operation on the Projection Port (#85): a `blocked` Run
 // is answered against its exact durable Gate reference. Driven straight through
 // the Port, so the contract — idempotency, staleness, not-blocked — is exercised
 // exactly as a client submits it.
 
-ensureRuntimeOnPath();
+// The Command Steps around the gate (`before`/`after`) and the Repeat loop's
+// `check` run through an injected fake Process, never a real child: `fakeCommand`
+// maps each Bundle script to the exit code and stdout the real runtime produced
+// (`console.log('before')` → exit 0 + "before\n"; the counter script drives the
+// loop's Verdict). The Run Store's Git is faked too, so no `git` child spawns.
+function exited(status: number, text: string) {
+  return {
+    kind: "exited" as const,
+    status,
+    text: new TextEncoder().encode(text),
+  };
+}
 
-const executionProcess = createProcessAdapter();
+function fakeCommand(options: SpawnOptions) {
+  const script = options.args[1] ?? "";
+  // The Repeat loop's counter Command: read/advance its counter file and flip its
+  // Verdict to `pass` on the `passAt`th iteration, exactly as the real script did.
+  const counterPath = /const p=("(?:[^"\\]|\\.)*")/.exec(script)?.[1];
+  if (counterPath !== undefined) {
+    const path = JSON.parse(counterPath) as string;
+    let count = 0;
+    try {
+      count = Number(readFileSync(path, "utf8")) || 0;
+    } catch {
+      // First iteration has no counter file yet.
+    }
+    count++;
+    writeFileSync(path, String(count));
+    const passAt = Number(/n>=(\d+)/.exec(script)?.[1] ?? "1");
+    return exited(count >= passAt ? 0 : 1, `iteration ${count}\n`);
+  }
+  // A plain `console.log('…')` / `process.stdout.write('…')` / `process.exit(n)`
+  // script (baseline, before, after, command-only): exit and stdout as authored.
+  const logged = /console\.log\('([^']*)'\)/.exec(script)?.[1];
+  const written = /process\.stdout\.write\('([^']*)'\)/.exec(script)?.[1];
+  const status = Number(/process\.exit\((\d+)\)/.exec(script)?.[1] ?? "0");
+  return exited(status, logged === undefined ? (written ?? "") : `${logged}\n`);
+}
+
+const executionGit = createFakeGitProcess();
+const executionCommands = createFakeProcess({
+  resolutionHandler: (name) =>
+    name === "secant-no-such-binary-xyz"
+      ? { kind: "not-found" }
+      : { kind: "found", executable: name, prefixArgs: [] },
+  commandHandler: fakeCommand,
+});
+const executionProcess: ProcessAdapter = {
+  resolveExecutable: (name, options) =>
+    executionCommands.resolveExecutable(name, options),
+  spawnCommand: (options) => executionCommands.spawnCommand(options),
+  spawnOwnedProcess: (options) => executionCommands.spawnOwnedProcess(options),
+  spawnCommandSync: (options) => executionGit.spawnCommandSync(options),
+};
+
 const runExecution: RunExecution = ({ routing, owner }) =>
   executeRouting(routing, {
     owner,
@@ -58,6 +117,7 @@ function fixture(t: TestContext): Fixture {
   t.after(() => runGroup.close());
   const app = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,
@@ -231,6 +291,7 @@ test("shutdown releases a blocked Run without changing its rest or answer offer 
   );
   const reopened = createApplication({
     catalog: f.catalog,
+    process: executionProcess,
     launchWorkspacePath: f.workspace,
     hostPlatform: hostPlatform(),
     runGroup: f.runGroup,
@@ -304,6 +365,7 @@ test("taking over a Run blocked in another process re-owns it blocked, and cance
   t.after(() => first.close());
   const owning = createApplication({
     catalog: f.catalog,
+    process: executionProcess,
     launchWorkspacePath: f.workspace,
     hostPlatform: hostPlatform(),
     runGroup: first,
@@ -331,6 +393,7 @@ test("taking over a Run blocked in another process re-owns it blocked, and cance
   t.after(() => second.close());
   const app2 = createApplication({
     catalog: f.catalog,
+    process: executionProcess,
     launchWorkspacePath: f.workspace,
     hostPlatform: hostPlatform(),
     runGroup: second,

@@ -1,43 +1,215 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
-import {
-  CLAUDE_CODE_EXECUTABLE_ENV,
-  createClaudeCodeAdapter,
+import type {
+  HarnessAdapter,
+  HarnessProfile,
+  TurnResult,
 } from "../../src/harness/harness.js";
+import type { ProcessAdapter } from "../../src/process/process.js";
 import type {
   InterruptTurnOffer,
   ProjectionPort,
   RunView,
   SteerTurnOffer,
 } from "../../src/application/projection-port.js";
-import { installReplayer } from "../harness/replayer.js";
-import { ensureRuntimeOnPath } from "../helpers/commandBundle.js";
+import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import { createFakeGitProcess } from "../run/store/fake-git-process.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // Interrupt a live Turn through the Port, resume the same Session, and reject the
-// unavailable steer control (#118). Each test wires the Application against a
-// recorded fixture replayer on a temporary configured `claude`, launches an Agent
-// Bundle, and drives the Port. No real Harness runs (ADR 0027).
+// unavailable steer control (#118). Each test wires the Application against the
+// deterministic fake Claude Code Harness (native steer unavailable) and an injected
+// fake Process — no child spawns (#184). No real Harness runs (ADR 0027).
 
-ensureRuntimeOnPath();
+// Claude Code's stream-json print mode has no same-Turn guidance frame, so the steer
+// Offer is unavailable and its `reason` is exactly this profile evidence.
+const STEER_EVIDENCE =
+  "Claude Code's stream-json print mode has no same-Turn guidance frame: a further user message queues as the next Turn, so steer is rejected unsupported and never emulated.";
 
-function fixtureCase(name: string): string {
-  return join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "harness",
-    "fixtures",
-    "claude-code",
-    name,
-  );
+/** The fake Claude Code profile: native reattach recovery, process-only interruption,
+ *  and — the fact these cases turn on — steer unavailable, carrying the exact evidence
+ *  the steer Offer and the steer-unavailable Problem surface. */
+function claudeProfile(): HarnessProfile {
+  return {
+    harness: "Claude Code",
+    executable: "claude",
+    executableVersion: "2.1.273",
+    platform: "linux",
+    adapterRevision: "fake-claude-1",
+    configurationPosture: "user-compatible",
+    recovery: {
+      mode: "native-reattach",
+      evidence: "fake claude resumes by id",
+    },
+    interruption: {
+      mode: "process-only",
+      evidence: "fake claude stops the process",
+    },
+    approvals: {
+      available: true,
+      evidence: "fake claude hosts a permission bridge",
+    },
+    clarifications: {
+      available: false,
+      evidence: "fake claude offers no clarifications",
+    },
+    steer: { available: false, evidence: STEER_EVIDENCE },
+    modelSelection: {
+      at: "unavailable",
+      evidence: "fake claude selects no model",
+    },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "fake claude mints a session id",
+    },
+    skillDelivery: {
+      mode: "plain-path",
+      evidence: "fake claude reads a SKILL.md path",
+    },
+    fileDelivery: {
+      mode: "plain-path",
+      evidence: "fake claude reads an absolute path",
+    },
+  };
 }
 
-/** Author a single-Agent-step Bundle in Session `s`: the Turn the fixture drives. */
+// A live Turn interrupted cleanly settles `interrupted` on every OS: the fake Harness
+// has no hidden-console child to force-kill, so the Windows force-kill→`lost` variant
+// (ADR 0022) is a real-child artifact covered by the runtime replayer conformance, not
+// this in-process semantic suite. The interrupted Turn detaches Session "s" by its
+// recovery coordinate so a resume can reattach it.
+const INTERRUPTED_DETACHED: TurnResult = {
+  kind: "interrupted",
+  detail: {
+    interruption: {
+      mode: "process-only",
+      evidence: "fake claude stops the process",
+    },
+    session: { state: "detached", coordinate: { opaque: "s" } },
+  },
+};
+
+const COMPLETED_OPEN: TurnResult = {
+  kind: "completed",
+  detail: {
+    finalContent: "done",
+    effectiveModel: { known: false },
+    session: { state: "open" },
+  },
+};
+
+// A resume the Harness does not acknowledge: the recovery phase fails and the Session
+// becomes permanently unusable, so no fresh Session is ever opened in its place.
+const FAILED_UNACKNOWLEDGED: TurnResult = {
+  kind: "failed",
+  detail: {
+    failure: {
+      phase: "recovery",
+      category: "recovery-unacknowledged",
+      possibleEffects: "possible",
+      diagnostics: "the resumed Session was not acknowledged",
+    },
+    effectiveModel: { known: false },
+    session: {
+      state: "unusable",
+      reason: "the resumed Session was not acknowledged",
+    },
+  },
+};
+
+/** A Turn that emits a Session event then blocks until it is interrupted (or the
+ *  Harness is closed); an interrupt settles it `interrupted` with Session "s"
+ *  detached — the request-free "blocks mid-Turn" shape the interrupt cases drive. */
+function blockingTurn(): FakeScript["turns"][number] {
+  return {
+    events: [{ kind: "session", availability: { state: "open" } }],
+    block: true,
+    result: COMPLETED_OPEN, // unused: the Turn is interrupted, never settling naturally
+    interruptResult: INTERRUPTED_DETACHED,
+  };
+}
+
+/** A Turn that completes straight away, reattaching the resumed Session. */
+function completedTurn(): FakeScript["turns"][number] {
+  return {
+    events: [
+      { kind: "session", availability: { state: "open" } },
+      { kind: "assistant-content", content: "resumed and finished" },
+    ],
+    result: COMPLETED_OPEN,
+  };
+}
+
+/** A Turn whose recovery is unacknowledged, failing the resumed Attempt. */
+function unacknowledgedTurn(): FakeScript["turns"][number] {
+  return { result: FAILED_UNACKNOWLEDGED };
+}
+
+/** The scripts one wiring hands out, one per Harness preparation. A launch prepares
+ *  once; a resume prepares a fresh Harness, so the second script drives the resumed
+ *  Turn. Extra preparations reuse the last script. */
+function scriptsFor(scenario: string): readonly FakeScript[] {
+  const blocking: FakeScript = {
+    profile: claudeProfile(),
+    turns: [blockingTurn()],
+  };
+  if (scenario === "resume") {
+    return [blocking, { profile: claudeProfile(), turns: [completedTurn()] }];
+  }
+  if (scenario === "resume-unacknowledged") {
+    return [
+      blocking,
+      { profile: claudeProfile(), turns: [unacknowledgedTurn()] },
+    ];
+  }
+  return [blocking];
+}
+
+/** A Harness Adapter that prepares one scripted fake Harness per `prepare` call. The
+ *  Application re-prepares a fresh Harness for each execution (launch, then resume), so
+ *  a scenario's successive Turn behaviours are keyed to the preparation sequence. */
+function sequencedAdapter(scripts: readonly FakeScript[]): HarnessAdapter {
+  let index = 0;
+  return {
+    prepare(options) {
+      const script = scripts[Math.min(index, scripts.length - 1)]!;
+      index += 1;
+      return createFake(script)().prepare(options);
+    },
+  };
+}
+
+/** A fake Process that resolves any executable and reaches no real child; Git store
+ *  operations run through the deterministic fake Git process. */
+function fakeProcess(): ProcessAdapter {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) => ({
+      kind: "found",
+      executable: name,
+      prefixArgs: [],
+    }),
+    commandHandler: () => ({
+      kind: "exited",
+      status: 0,
+      text: new Uint8Array(),
+    }),
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => git.spawnCommandSync(options),
+  };
+}
+
+/** Author a single-Agent-step Bundle in Session `s`: the Turn the fake drives. */
 function writeAgentBundle(): { folder: string; id: string } {
   const folder = makeTempDir("secant-interrupt-bundle-");
   mkdirSync(join(folder, "prompts"), { recursive: true });
@@ -69,30 +241,27 @@ function writeAgentBundle(): { folder: string; id: string } {
   return { folder, id: manifest.bundle.id };
 }
 
-/** Wire the Application against the named fixture case as the configured Claude
- *  Code, minting the fixture's session id so its init acknowledges. Installs the
- *  single-Agent Bundle and approves the Workspace; returns the wired clients. */
+/** Wire the Application against the fake Claude Code Harness for `scenario` and an
+ *  injected fake Process. Installs the single-Agent Bundle and approves the Workspace;
+ *  returns the wired clients. */
 function wire(
   t: TestContext,
-  fixture: string,
-  sessionId: string,
+  scenario: string,
 ): { wired: Wiring; bundleId: string; digest: string } {
-  const replayer = installReplayer(
-    "2.1.273 (Claude Code)",
-    fixtureCase(fixture),
-  );
-  const savedEnv = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-  process.env[CLAUDE_CODE_EXECUTABLE_ENV] = replayer.executablePath;
-  t.after(() => {
-    if (savedEnv === undefined) delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-    else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedEnv;
-  });
-
   const workspace = makeTempDir("secant-interrupt-ws-");
   const wired = wireApplication({
     secantHome: makeTempDir("secant-interrupt-home-"),
     launchCwd: workspace,
-    harnessAdapter: createClaudeCodeAdapter({ sessionId: () => sessionId }),
+    process: fakeProcess(),
+    harnessAdapter: sequencedAdapter(scriptsFor(scenario)),
+    discoverClaudeCode: () => ({
+      kind: "found",
+      attempt: {
+        source: "path",
+        name: "claude",
+        description: "PATH name 'claude'",
+      },
+    }),
   });
   t.after(() => {
     wired.runGroup.close();
@@ -121,10 +290,9 @@ async function awaitLiveTurn(
   port: ProjectionPort,
   runId: string,
 ): Promise<InterruptTurnOffer> {
-  // The Turn admits out-of-process (prepare, spawn, init handshake), which takes
-  // real wall time; poll on a short real interval up to a generous ceiling. This is
-  // a bounded readiness condition, not a fixed sleep — it returns the instant the
-  // live Turn's offer appears.
+  // The Turn admits asynchronously (prepare, the driver's first microtasks), so poll
+  // on a short real interval up to a generous ceiling. This is a bounded readiness
+  // condition, not a fixed sleep — it returns the instant the live Turn's offer appears.
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     const opened = port.openProjection({ family: "run", runId });
@@ -155,21 +323,8 @@ function runView(port: ProjectionPort, runId: string): RunView {
   }
 }
 
-// How the real Claude Code Adapter settles an interrupted live Turn on this OS. On
-// Windows a hidden console child cannot observe a graceful signal, so the process
-// Module force-kills it and reports escalated, and the Adapter truthfully settles
-// `lost` with interruption unknown (ADR 0022); the Run still rests `halted` with
-// the Session detached, and resume still works.
-const INTERRUPTED_KIND = process.platform === "win32" ? "lost" : "interrupted";
-const STEER_EVIDENCE =
-  "Claude Code's stream-json print mode has no same-Turn guidance frame: a further user message queues as the next Turn, so steer is rejected unsupported and never emulated.";
-
 test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Session, and settles the Turn interrupted (#118)", async (t) => {
-  const { wired, digest } = wire(
-    t,
-    "interrupt",
-    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  );
+  const { wired, digest } = wire(t, "interrupt");
   const port = wired.projectionPort;
   const launch = port.submit({
     operationId: "op-launch",
@@ -214,7 +369,7 @@ test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Sessi
   assert.equal(run.sessions?.[0]?.session, "s");
   assert.equal(run.sessions?.[0]?.availability, "detached");
   const settled = run.timeline.find((event) => event.event === "turn-settled");
-  assert.equal(settled?.detail, INTERRUPTED_KIND);
+  assert.equal(settled?.detail, "interrupted");
 
   // A control issued after acceptance is rejected as a value: the Turn has settled.
   const after = port.submit({
@@ -231,11 +386,7 @@ test("interrupt-turn stops a live Turn, rests the Run halted, detaches the Sessi
 });
 
 test("steer-turn is rejected as a value when submitted (#118)", async (t) => {
-  const { wired, digest } = wire(
-    t,
-    "interrupt",
-    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  );
+  const { wired, digest } = wire(t, "interrupt");
   const port = wired.projectionPort;
   const launch = port.submit({
     operationId: "op-launch",
@@ -274,11 +425,7 @@ test("steer-turn is rejected as a value when submitted (#118)", async (t) => {
 });
 
 test("resume-run continues a detached Session in the same Claude Code Session via --resume (#118)", async (t) => {
-  const { wired, digest } = wire(
-    t,
-    "resume",
-    "55555555-5555-4555-8555-555555555555",
-  );
+  const { wired, digest } = wire(t, "resume");
   const port = wired.projectionPort;
   const launch = port.submit({
     operationId: "op-launch",
@@ -320,11 +467,7 @@ test("a signal (Ctrl+C) mid-Turn interrupts the Turn and rests the Run halted, n
   // aborts every live Run; a live Agent Turn interrupts at the Harness Seam and the
   // Run rests `halted` (resumable) — never `cancelled`. Exit-code (1 vs 130) is a
   // separate concern flagged as a spec conflict; the resting state is the AC value.
-  const { wired, digest } = wire(
-    t,
-    "interrupt",
-    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  );
+  const { wired, digest } = wire(t, "interrupt");
   const port = wired.projectionPort;
   const launch = port.submit({
     operationId: "op-launch",
@@ -344,15 +487,11 @@ test("a signal (Ctrl+C) mid-Turn interrupts the Turn and rests the Run halted, n
   const run = runView(port, runId);
   assert.equal(run.state, "halted");
   const settled = run.timeline.find((event) => event.event === "turn-settled");
-  assert.equal(settled?.detail, INTERRUPTED_KIND);
+  assert.equal(settled?.detail, "interrupted");
 });
 
 test("a resume the Harness does not acknowledge fails the Attempt and never creates a fresh Session (#118)", async (t) => {
-  const { wired, digest } = wire(
-    t,
-    "resume-unacknowledged",
-    "66666666-6666-4666-8666-666666666666",
-  );
+  const { wired, digest } = wire(t, "resume-unacknowledged");
   const port = wired.projectionPort;
   const launch = port.submit({
     operationId: "op-launch",

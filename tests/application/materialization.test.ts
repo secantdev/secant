@@ -3,30 +3,81 @@ import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
+  createApplication,
   type Application,
   type RunExecution,
 } from "../../src/application/application.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { createProcessAdapter } from "../../src/process/process.js";
+import type { ProcessAdapter, SpawnResult } from "../../src/process/process.js";
 import type { RunGroup } from "../../src/run/store/store.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
 import {
-  ensureRuntimeOnPath,
   hostPlatform,
   writeMaterializationBundle,
 } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import {
+  createFakeGitProcess,
+  openFakeRunGroup as openRunGroup,
+} from "../run/store/fake-git-process.js";
 
 // #88 through the Projection Port: a `home: workspace` conflict is visible in the
 // `run` Projection (state `halted`, a blocked Step, a timeline event naming the
 // path, and the diagnostic reachable by reference), and the resume Operation
 // continues the Run once the file is restored.
+//
+// Command-step execution runs against an injected FAKE Process (no child spawns):
+// `produce`'s captured stdout is the workspace-materialized artifact (the Run
+// Store performs the real workspace write), and the `tamper` scripts reproduce
+// their real filesystem side effect on the absolute path in the args, so the
+// downstream conflict/recovery is detected exactly as with a real child. Bundle
+// build/install and the Catalog stay real and in-process.
 
-ensureRuntimeOnPath();
+// The single-quoted `'CHANGED'` tamper literal (the path is JSON, double-quoted).
+function unquote(literal: string): string {
+  return literal.startsWith('"')
+    ? (JSON.parse(literal) as string)
+    : literal.slice(1, -1);
+}
 
-const executionProcess = createProcessAdapter();
+function exited(text: string): SpawnResult {
+  return { kind: "exited", status: 0, text: new TextEncoder().encode(text) };
+}
+
+// Map each `-e` script this suite's Bundles use. The tamper scripts perform the
+// same fs op on the absolute path in the args as the real bundle would, so the
+// materialized copy is genuinely disturbed before `consume` verifies it.
+function fakeCommand(args: readonly string[]): SpawnResult {
+  const script = args[1] ?? "";
+  const write = /writeFileSync\((".*?"),\s*('.*?'|".*?")\)/.exec(script);
+  if (write !== null) {
+    writeFileSync(JSON.parse(write[1]!) as string, unquote(write[2]!));
+    return exited("");
+  }
+  const remove = /rmSync\((".*?")\)/.exec(script);
+  if (remove !== null) {
+    rmSync(JSON.parse(remove[1]!) as string);
+    return exited("");
+  }
+  const stdout = /process\.stdout\.write\((["'])((?:\\.|(?!\1).)*)\1\)/.exec(
+    script,
+  );
+  if (stdout !== null) return exited(stdout[2]!);
+  throw new Error(`unexpected fake Command script: ${script}`);
+}
+
+const gitProcess = createFakeGitProcess();
+const executionProcess: ProcessAdapter = createFakeProcess({
+  resolutionHandler: (name) => ({
+    kind: "found",
+    executable: name,
+    prefixArgs: [],
+  }),
+  commandHandler: (options) => fakeCommand(options.args),
+  syncCommandHandler: (options) => gitProcess.spawnCommandSync(options),
+});
 const runExecution: RunExecution = ({ routing, owner }) =>
   executeRouting(routing, {
     owner,
@@ -52,6 +103,7 @@ function fixture(t: TestContext): Fixture {
   t.after(() => runGroup.close());
   const app = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,
@@ -228,6 +280,7 @@ test("resume of a Run live in another process is refused as live-elsewhere (#86,
   t.after(() => observing.close());
   const app = createApplication({
     catalog: f.catalog,
+    process: executionProcess,
     launchWorkspacePath: f.workspace,
     hostPlatform: hostPlatform(),
     runGroup: observing,

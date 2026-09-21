@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
+import { createApplication } from "../helpers/application.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
-import {
-  CLAUDE_CODE_EXECUTABLE_ENV,
-  createClaudeCodeAdapter,
-} from "../../src/harness/harness.js";
+import type { HarnessProfile, TurnResult } from "../../src/harness/harness.js";
+import type { ProcessAdapter } from "../../src/process/process.js";
 import type {
   ProjectionPort,
   ProjectionUpdate,
@@ -18,7 +14,12 @@ import type {
   RunSnapshot,
 } from "../../src/application/projection-port.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
-import { installReplayer } from "../harness/replayer.js";
+import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import {
+  createFakeGitProcess,
+  openFakeRunGroup as openRunGroup,
+} from "../run/store/fake-git-process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { hostPlatform, writeCommandBundle } from "../helpers/commandBundle.js";
 
@@ -28,20 +29,115 @@ import { hostPlatform, writeCommandBundle } from "../helpers/commandBundle.js";
 // applied); answering with a stale generation or an expired id is rejected with the
 // precise Problem; and the overlay clears the request when the Turn ends. Driven
 // straight against the Projection Port (no headless follower) so the request stays
-// outstanding to observe and answer by hand.
+// outstanding to observe and answer by hand — against the deterministic fake Claude
+// Code Harness and an injected fake Process, so no child spawns (#184).
 
-const TEST_REPAIR_SESSION_ID = "77777777-7777-4777-8777-777777777777";
-const REPLAYER_VERSION = "2.1.273 (Claude Code)";
+/** The fake Claude Code profile: it hosts a permission bridge, so an Agent Turn can
+ *  raise an approval Harness Request. */
+function claudeProfile(): HarnessProfile {
+  return {
+    harness: "Claude Code",
+    executable: "claude",
+    executableVersion: "2.1.273",
+    platform: "linux",
+    adapterRevision: "fake-claude-1",
+    configurationPosture: "user-compatible",
+    recovery: {
+      mode: "native-reattach",
+      evidence: "fake claude resumes by id",
+    },
+    interruption: {
+      mode: "process-only",
+      evidence: "fake claude stops the process",
+    },
+    approvals: {
+      available: true,
+      evidence: "fake claude hosts a permission bridge",
+    },
+    clarifications: {
+      available: false,
+      evidence: "fake claude offers no clarifications",
+    },
+    steer: {
+      available: false,
+      evidence: "fake claude has no same-Turn guidance frame",
+    },
+    modelSelection: {
+      at: "unavailable",
+      evidence: "fake claude selects no model",
+    },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "fake claude mints a session id",
+    },
+    skillDelivery: {
+      mode: "plain-path",
+      evidence: "fake claude reads a SKILL.md path",
+    },
+    fileDelivery: {
+      mode: "plain-path",
+      evidence: "fake claude reads an absolute path",
+    },
+  };
+}
 
-function fixtureCase(name: string): string {
-  return join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "harness",
-    "fixtures",
-    "claude-code",
-    name,
-  );
+const COMPLETED_OPEN: TurnResult = {
+  kind: "completed",
+  detail: {
+    finalContent: "repaired the workspace",
+    effectiveModel: { known: false },
+    session: { state: "open" },
+  },
+};
+
+/** The single-Turn script the live-overlay case drives: one awaited Edit approval
+ *  request holds the Turn open until it is answered, then the Turn completes. */
+function overlayScript(): FakeScript {
+  return {
+    profile: claudeProfile(),
+    turns: [
+      {
+        requests: [
+          {
+            id: "req-edit",
+            shape: {
+              kind: "approval",
+              tool: "Edit",
+              input: "change file",
+              decisions: ["allow", "deny"],
+            },
+            awaited: true,
+          },
+        ],
+        result: COMPLETED_OPEN,
+      },
+    ],
+  };
+}
+
+/** A fake Process that resolves any executable and reaches no real child; Git store
+ *  operations run through the deterministic fake Git process. */
+function fakeProcess(): ProcessAdapter {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) => ({
+      kind: "found",
+      executable: name,
+      prefixArgs: [],
+    }),
+    commandHandler: () => ({
+      kind: "exited",
+      status: 0,
+      text: new Uint8Array(),
+    }),
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => git.spawnCommandSync(options),
+  };
 }
 
 function writeAgentBundle(): { folder: string; id: string } {
@@ -80,29 +176,19 @@ function wire(t: TestContext): {
   bundleId: string;
   digest: string;
 } {
-  const replayer = installReplayer(
-    REPLAYER_VERSION,
-    fixtureCase("test-repair"),
-  );
-  const savedEnv = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-  process.env[CLAUDE_CODE_EXECUTABLE_ENV] = replayer.executablePath;
-  t.after(() => {
-    if (savedEnv === undefined) delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-    else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedEnv;
-  });
-
   const workspace = makeTempDir("secant-ovl-ws-");
-  writeFileSync(
-    join(workspace, "sum.mjs"),
-    "export const sum = (a, b) => a - b;\n",
-  );
-  execFileSync("git", ["init", "-q"], { cwd: workspace });
-
   const wired = wireApplication({
     secantHome: makeTempDir("secant-ovl-home-"),
     launchCwd: workspace,
-    harnessAdapter: createClaudeCodeAdapter({
-      sessionId: () => TEST_REPAIR_SESSION_ID,
+    process: fakeProcess(),
+    harnessAdapter: createFake(overlayScript())(),
+    discoverClaudeCode: () => ({
+      kind: "found",
+      attempt: {
+        source: "path",
+        name: "claude",
+        description: "PATH name 'claude'",
+      },
     }),
   });
   t.after(() => {
@@ -279,6 +365,7 @@ test("an indeterminate request-answer receipt settles not-applied with unknown e
   });
   const app = createApplication({
     catalog,
+    process: fakeProcess(),
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,

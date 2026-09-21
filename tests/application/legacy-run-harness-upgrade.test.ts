@@ -6,12 +6,48 @@ import type { Problem } from "../../src/application/projection-port.js";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import type { HarnessProfile } from "../../src/harness/harness.js";
 import type { RunOwner } from "../../src/run/store/store.js";
+import type { ProcessAdapter } from "../../src/process/process.js";
 import { createFake, type FakeScript } from "../harness/fake-adapter.js";
-import { ensureRuntimeOnPath, RUNTIME_NAME } from "../helpers/commandBundle.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import { createFakeGitProcess } from "../run/store/fake-git-process.js";
+import { RUNTIME_NAME } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
-ensureRuntimeOnPath();
+// One shared fake Git repository backs every wiring in this file, so a legacy
+// fixture's Store commits made under the setup wiring still read back after the
+// home is copied and reopened under a fresh wiring — mirroring how
+// `openFakeRunGroup` shares a single fake Git process across Run Stores. Objects
+// are content-hashed in memory; refs land on disk under each home's Git dir and
+// travel with the `cpSync` relocation.
+const sharedGit = createFakeGitProcess();
+
+// A deterministic Process double for `wireApplication`, so no real child spawns:
+// git Store operations delegate to the shared fake Git; command Steps map their
+// `-e process.exit(N)` script to the exit status; executables always resolve
+// (these fixtures declare no git-worktree-root prerequisite, so `rev-parse` is
+// never probed).
+function fakeProcess(): ProcessAdapter {
+  const commands = createFakeProcess({
+    resolutionHandler: (name) => ({
+      kind: "found",
+      executable: name,
+      prefixArgs: [],
+    }),
+    commandHandler: (options) => {
+      const script = options.args[1] ?? "";
+      const status = Number(/process\.exit\((\d+)\)/.exec(script)?.[1] ?? "0");
+      return { kind: "exited", status, text: new Uint8Array() };
+    },
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => sharedGit.spawnCommandSync(options),
+  };
+}
 
 type LegacyKind = "agent" | "command";
 
@@ -147,6 +183,7 @@ function createLegacyFixture(
   const setup = wireApplication({
     secantHome: fixtureHome,
     launchCwd: workspace,
+    process: fakeProcess(),
   });
   const built = setup.bundleManagement.build(bundle.folder, {
     noInstall: false,
@@ -190,6 +227,7 @@ function openFixture(
   return wireApplication({
     secantHome: fixture.home,
     launchCwd: fixture.workspace,
+    process: fakeProcess(),
     harnessAdapter: createFake(script)(),
     discoverClaudeCode: () => ({
       kind: "found",
@@ -255,6 +293,7 @@ test("[legacy-run-harness-upgrade] a Command-only Run remains unselected and pre
   const wiring = wireApplication({
     secantHome: fixture.home,
     launchCwd: fixture.workspace,
+    process: fakeProcess(),
     harnessAdapter: {
       prepare(options) {
         prepareCount++;
@@ -283,7 +322,11 @@ test("[legacy-run-harness-upgrade] a Command-only Run remains unselected and pre
 test("[legacy-run-harness-upgrade] an unavailable pinned Snapshot returns the existing Problem without guessing", (t) => {
   const home = makeTempDir("secant-legacy-missing-home-");
   const workspace = makeTempDir("secant-legacy-missing-workspace-");
-  const setup = wireApplication({ secantHome: home, launchCwd: workspace });
+  const setup = wireApplication({
+    secantHome: home,
+    launchCwd: workspace,
+    process: fakeProcess(),
+  });
   const created = setup.runGroup.createRun({
     operationId: "legacy-missing",
     bundleSnapshotDigest: "sha256:missing",
@@ -298,7 +341,11 @@ test("[legacy-run-harness-upgrade] an unavailable pinned Snapshot returns the ex
   setup.runGroup.close();
   setup.catalog.close();
 
-  const reopened = wireApplication({ secantHome: home, launchCwd: workspace });
+  const reopened = wireApplication({
+    secantHome: home,
+    launchCwd: workspace,
+    process: fakeProcess(),
+  });
   t.after(() => {
     reopened.runGroup.close();
     reopened.catalog.close();

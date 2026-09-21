@@ -2,22 +2,73 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
-import { type Application } from "../../src/application/application.js";
+import {
+  createApplication,
+  type Application,
+} from "../../src/application/application.js";
 import type { OperationOutcome } from "../../src/application/projection-port.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { createProcessAdapter } from "../../src/process/process.js";
+import type {
+  ProcessAdapter,
+  SpawnOptions,
+  SpawnResult,
+} from "../../src/process/process.js";
 import type { RunGroup } from "../../src/run/store/store.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
-import {
-  ensureRuntimeOnPath,
-  hostPlatform,
-  writeCommandBundle,
-} from "../helpers/commandBundle.js";
+import { hostPlatform, writeCommandBundle } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import {
+  createFakeGitProcess,
+  openFakeRunGroup as openRunGroup,
+} from "../run/store/fake-git-process.js";
 
-const executionProcess = createProcessAdapter();
+// The Command steps' execution runs through an injected fake Process, so a Run
+// spawns no child. A blocking script models a genuinely live child that settles
+// only when the Application's cancel Seam aborts it — reproducing the real
+// abort → RunCancelledError unwind that cancel-run and shutdown depend on.
+function fakeCommand(
+  options: SpawnOptions,
+): SpawnResult | Promise<SpawnResult> {
+  const script = options.args[1] ?? "";
+  if (script.includes("setInterval") || script.includes("setTimeout")) {
+    if (options.cancelSignal === undefined) return { kind: "timeout" };
+    if (options.cancelSignal.aborted) return { kind: "cancelled" };
+    return new Promise<SpawnResult>((resolve) => {
+      options.cancelSignal!.addEventListener(
+        "abort",
+        () => resolve({ kind: "cancelled" }),
+        { once: true },
+      );
+    });
+  }
+  // A `console.log('x')` script exits 0 (a `pass` Verdict) and captures `x\n`.
+  const logged = /console\.log\('([^']*)'\)/.exec(script)?.[1];
+  return {
+    kind: "exited",
+    status: 0,
+    text: new TextEncoder().encode(logged === undefined ? "" : `${logged}\n`),
+  };
+}
+
+const executionProcess: ProcessAdapter = (() => {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) =>
+      name === "secant-no-such-binary-xyz"
+        ? { kind: "not-found" }
+        : { kind: "found", executable: name, prefixArgs: [] },
+    commandHandler: fakeCommand,
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => git.spawnCommandSync(options),
+  };
+})();
 
 interface Fixture {
   readonly app: Application;
@@ -37,6 +88,7 @@ function fixture(t: TestContext): Fixture {
   t.after(() => runGroup.close());
   const app = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,
@@ -127,7 +179,6 @@ test("cancel-run rests a live Run cancelled, keeps its store, and flips the offe
 });
 
 test("cancel-run aborts a Run live in this process, rests it cancelled, and pushes the cancelled snapshot (#98 AC2)", async (t) => {
-  ensureRuntimeOnPath();
   const f = fixture(t);
   f.catalog.approveWorkspace(f.workspace, new Date());
   // A Bundle whose command blocks until killed, so the Run stays genuinely live in
@@ -204,7 +255,6 @@ test("cancel-run aborts a Run live in this process, rests it cancelled, and push
 });
 
 test("shutdown aborts two live Runs and reconciliation rests each halted with one indeterminate marker", async (t) => {
-  ensureRuntimeOnPath();
   const f = fixture(t);
   f.catalog.approveWorkspace(f.workspace, new Date());
   const blocking = writeCommandBundle({
@@ -341,6 +391,7 @@ test("a malformed coordination row settles cancel and delete not-applied, never 
   } as unknown as RunGroup;
   const app = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,

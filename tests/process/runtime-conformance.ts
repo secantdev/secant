@@ -35,6 +35,12 @@ import {
 } from "./conformance.js";
 import { createFakeProcess } from "./fake-adapter.js";
 import { createFakeGitProcess } from "../run/store/fake-git-process.js";
+import {
+  registerClaudeCodeReplayerConformance,
+  registerCodexReplayerConformance,
+} from "../harness/replayer-conformance.js";
+import { writeCommandBundle } from "../helpers/commandBundle.js";
+import { awaitSettled } from "../helpers/settleOperation.js";
 
 const executable = process.execPath;
 const missing = join(tmpdir(), `secant-process-parity-missing-${process.pid}`);
@@ -218,7 +224,86 @@ cases.push(
     name: "execution-store-on-fake-process",
     body: executionStoreOnFakeProcess,
   },
+  { name: "application-on-doubles", body: applicationOnDoubles },
 );
+
+// The shared Harness conformance suite over the REAL replayers. Under the test
+// runner it runs against the fake (tests/harness/conformance.test.ts); here it
+// runs against both recorded-Harness replayers, each behaviour its own bounded
+// runtime case, so the semantic suite never spawns while the replayers stay
+// covered (#184, M5).
+registerClaudeCodeReplayerConformance((name, body) =>
+  cases.push({ name, body }),
+);
+registerCodexReplayerConformance((name, body) => cases.push({ name, body }));
+
+async function applicationOnDoubles(): Promise<void> {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) => ({
+      kind: "found",
+      executable: name,
+      prefixArgs: [],
+    }),
+    commandHandler: () => ({
+      kind: "exited",
+      status: 0,
+      text: new TextEncoder().encode("ran\n"),
+    }),
+  });
+  const processAdapter: ProcessAdapter = {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => git.spawnCommandSync(options),
+  };
+  const workspace = runtimeTemp("secant-runtime-app-ws-");
+  const wired = wireApplication({
+    secantHome: runtimeTemp("secant-runtime-app-home-"),
+    launchCwd: workspace,
+    process: processAdapter,
+  });
+  try {
+    const bundle = writeCommandBundle();
+    const built = wired.bundleManagement.build(bundle.folder, {
+      noInstall: false,
+    });
+    assert.ok(built.ok);
+    const entry = wired.catalog
+      .listEntries()
+      .find((candidate) => candidate.id === bundle.id);
+    assert.ok(entry);
+    const approval = wired.projectionPort.submit({
+      operationId: "app-doubles-approve",
+      operation: "approve-workspace",
+      input: { path: workspace },
+    });
+    assert.equal(approval.admitted, true);
+    const admission = wired.projectionPort.submit({
+      operationId: "app-doubles-launch",
+      operation: "launch-run",
+      input: {
+        bundle: { id: bundle.id },
+        launchInputs: {},
+        trustDigest: entry.digest,
+      },
+    });
+    assert.equal(admission.admitted, true);
+    if (!admission.admitted) throw new Error("launch was not admitted");
+    const outcome = await awaitSettled(
+      wired.projectionPort,
+      "app-doubles-launch",
+    );
+    assert.equal(outcome.status, "applied");
+    const read = wired.runGroup.readRun(admission.runId!);
+    assert.ok(read.ok);
+    if (read.ok) assert.equal(read.run.state, "succeeded");
+  } finally {
+    wired.runGroup.close();
+    wired.catalog.close();
+  }
+}
 
 async function processWorkerEnvironment(): Promise<void> {
   const processAdapter = createProcessAdapter();

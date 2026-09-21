@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import test, { type TestContext } from "node:test";
 import {
+  createApplication,
   type Application,
   type RunExecution,
 } from "../../src/application/application.js";
@@ -11,11 +12,9 @@ import type {
 } from "../../src/application/projection-port.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { createProcessAdapter } from "../../src/process/process.js";
+import type { ProcessAdapter, SpawnResult } from "../../src/process/process.js";
 import type { RunGroup } from "../../src/run/store/store.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
 import {
-  ensureRuntimeOnPath,
   hostPlatform,
   writeCommandBundle,
   writeRepeatBundle,
@@ -23,12 +22,59 @@ import {
 } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import {
+  createFakeGitProcess,
+  openFakeRunGroup as openRunGroup,
+} from "../run/store/fake-git-process.js";
 
-ensureRuntimeOnPath();
+// Run execution runs against an injected FAKE Process (no child spawns). The
+// command handler maps each `-e` script these Bundles use to a SpawnResult:
+// `console.log('X')` → exit 0 with "X\n"; `process.exit(N)` → exit N (the
+// baseline/always-fail Repeat checks); and the Repeat counter script reproduces
+// its real filesystem side effect (read/increment/write the per-Bundle counter
+// file) so its Verdict flips to pass on the passAt-th iteration exactly as a real
+// child would. Bundle build/install and the Catalog stay real and in-process.
 
-// The real Run execution, driven synchronously (spawnSync). The test Bundle
-// declares no assets, so nothing resolves.
-const executionProcess = createProcessAdapter();
+function exited(text: string, status = 0): SpawnResult {
+  return { kind: "exited", status, text: new TextEncoder().encode(text) };
+}
+
+function fakeCommand(args: readonly string[]): SpawnResult {
+  const script = args[1] ?? "";
+  // The Repeat counter check: read the per-Bundle counter file (default 0),
+  // increment, write it back, print `iteration N`, and pass on the passAt-th run.
+  const counter = /const p=("(?:[^"\\]|\\.)*");/.exec(script);
+  if (counter !== null && script.includes("readFileSync")) {
+    const path = JSON.parse(counter[1]!) as string;
+    let n: number;
+    try {
+      n = Number(readFileSync(path, "utf8")) || 0;
+    } catch {
+      n = 0;
+    }
+    n++;
+    writeFileSync(path, String(n));
+    const passAt = Number(/n>=(\d+)\?0:1/.exec(script)?.[1] ?? "0");
+    return exited(`iteration ${n}\n`, n >= passAt ? 0 : 1);
+  }
+  const log = /console\.log\('((?:[^'\\]|\\.)*)'\)/.exec(script);
+  if (log !== null) return exited(`${log[1]!}\n`);
+  const exit = /^process\.exit\((\d+)\)$/.exec(script);
+  if (exit !== null) return exited("", Number(exit[1]!));
+  throw new Error(`unexpected fake Command script: ${script}`);
+}
+
+const gitProcess = createFakeGitProcess();
+const executionProcess: ProcessAdapter = createFakeProcess({
+  resolutionHandler: (name) => ({
+    kind: "found",
+    executable: name,
+    prefixArgs: [],
+  }),
+  commandHandler: (options) => fakeCommand(options.args),
+  syncCommandHandler: (options) => gitProcess.spawnCommandSync(options),
+});
 const runExecution: RunExecution = ({ routing, owner }) =>
   executeRouting(routing, {
     owner,
@@ -56,6 +102,7 @@ function fixture(
   const runGroup = openRunGroup(makeTempDir("secant-run-store-"), workspace);
   t.after(() => runGroup.close());
   const app = createApplication({
+    process: executionProcess,
     catalog,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
@@ -455,6 +502,7 @@ test("reading a live Run's projection does not fence the owner executing it", as
   });
   t.after(() => second.close());
   const observing = createApplication({
+    process: executionProcess,
     catalog: f.catalog,
     launchWorkspacePath: f.workspace,
     hostPlatform: hostPlatform(),
@@ -508,6 +556,7 @@ test("a foreign live Run offers an owner-named takeover that resumes and fences 
   });
   t.after(() => second.close());
   const app = createApplication({
+    process: executionProcess,
     catalog: f.catalog,
     launchWorkspacePath: f.workspace,
     hostPlatform: hostPlatform(),
@@ -569,6 +618,7 @@ test("a fresh Application (no in-process tracking) reads a Run back from its sto
   // this Run, so it must re-derive the routing from the pinned bytes — the
   // `run show` path a separate process takes.
   const fresh = createApplication({
+    process: executionProcess,
     catalog: f.catalog,
     launchWorkspacePath: f.workspace,
     runGroup: f.runGroup,
@@ -595,6 +645,7 @@ test("a run Projection opened after its tracking entry is done follows a later r
   f.catalog.approveWorkspace(f.workspace, new Date());
   let drive = 0;
   const app = createApplication({
+    process: executionProcess,
     catalog: f.catalog,
     launchWorkspacePath: f.workspace,
     hostPlatform: hostPlatform(),
@@ -668,6 +719,7 @@ test("a run Projection opened without a tracking entry follows a later resume (#
   owner.close();
 
   const app = createApplication({
+    process: executionProcess,
     catalog: f.catalog,
     launchWorkspacePath: f.workspace,
     hostPlatform: hostPlatform(),
@@ -832,6 +884,7 @@ test("reopening the Run Store shows a blocked Run still blocked with the same Ga
   t.after(() => catalog.close());
   const runGroup = openRunGroup(storeDir, workspace);
   const app = createApplication({
+    process: executionProcess,
     catalog,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
@@ -857,6 +910,7 @@ test("reopening the Run Store shows a blocked Run still blocked with the same Ga
   const reopened = openRunGroup(storeDir, workspace);
   t.after(() => reopened.close());
   const freshApp = createApplication({
+    process: executionProcess,
     catalog,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),

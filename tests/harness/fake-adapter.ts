@@ -59,6 +59,13 @@ export interface FakeTurnScript {
    *  is interrupted or the Harness is closed — the request-free "blocks mid-Turn"
    *  shape the interrupt/recovery cases drive. */
   readonly block?: boolean;
+  /** With `block` and no scripted `requests`, an accepted native `steer` (a profile
+   *  that offers steer) also releases the block, so the steered Turn settles its
+   *  normal `result` — the "steer keeps the Turn working, then it completes" shape a
+   *  native-steer Adapter (Codex) exhibits. Without it a blocking Turn releases only
+   *  on interrupt/close. Ignored when the Turn has awaited `requests`, whose wait
+   *  shares the same release signal and must be answered, not steered, to settle. */
+  readonly settleOnSteer?: boolean;
   /** The result settled when the Turn ends naturally (all awaited requests
    *  answered, or no awaited requests). */
   readonly result: TurnResult;
@@ -226,6 +233,13 @@ class FakeTurn {
     // capability accepts it, one without rejects it `unsupported`.
     if (!this.profile.steer.available) return reject("unsupported");
     this.emit({ kind: "activity", description: "steer accepted" });
+    // A steer that keeps the Turn working then lets it complete: release the block
+    // without marking the Turn interrupted, so `drive` settles the normal result.
+    // Only for the block-only shape — a Turn with awaited requests shares this
+    // release signal, so steering it must not resolve an unanswered request.
+    if (this.script.settleOnSteer === true && !this.script.requests?.length) {
+      this.interruptSignal?.();
+    }
     return accept();
   }
 

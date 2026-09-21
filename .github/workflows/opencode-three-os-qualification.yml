@@ -2,6 +2,9 @@ name: OpenCode three-OS qualification
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - research/opencode-three-os-qualification
 
 jobs:
   qualify:

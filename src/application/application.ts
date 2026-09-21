@@ -136,6 +136,7 @@ import type {
   ApplicationHarnessRegistration,
   RunHarnessPreparationFailure,
 } from "./harness-registry.js";
+import { type ProcessAdapter } from "../process/process.js";
 export type {
   ApplicationHarnessRegistration,
   RunHarnessPreparationFailure,
@@ -270,6 +271,8 @@ interface InteractiveContext {
 
 export interface ApplicationDependencies {
   readonly catalog: Catalog;
+  /** Process reaches Preflight through composition. */
+  readonly process: ProcessAdapter;
   /** The launch Workspace path, typically the raw cwd; Application canonicalises
    *  it (A6): the roots pass the path they were given, this Module owns the
    *  `realpathSync.native` invariant. */
@@ -327,6 +330,7 @@ const launchInputMap = z.record(z.string(), z.string());
 
 export function createApplication(deps: ApplicationDependencies): Application {
   const { catalog, runGroup, runExecution, prepareRunInteractiveStep } = deps;
+  const process = deps.process;
   const launchWorkspacePath = canonicalizeWorkspacePath(
     deps.launchWorkspacePath,
   );
@@ -1217,17 +1221,20 @@ export function createApplication(deps: ApplicationDependencies): Application {
     // grant or Run is created, so a Problem here leaves nothing behind (#14). It
     // runs ahead of the Trust gate: a Bundle that cannot run in this environment
     // is refused without asking the user to acknowledge bytes that would not run.
-    const pre = preflight({
-      manifest,
-      composition: inspected.inspection.composition,
-      workspacePath: launchWorkspacePath,
-      launchInputs: input.launchInputs,
-      hostPlatform: deps.hostPlatform,
-      digest: entry.digest,
-      supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
-      harnessSelection: input.harness,
-      harnessRegistry: deps.harnessRegistry ?? [],
-    });
+    const pre = preflight(
+      {
+        manifest,
+        composition: inspected.inspection.composition,
+        workspacePath: launchWorkspacePath,
+        launchInputs: input.launchInputs,
+        hostPlatform: deps.hostPlatform,
+        digest: entry.digest,
+        supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
+        harnessSelection: input.harness,
+        harnessRegistry: deps.harnessRegistry ?? [],
+      },
+      process,
+    );
     if ("problem" in pre) {
       return { admitted: false, problem: pre.problem };
     }
@@ -1337,17 +1344,20 @@ export function createApplication(deps: ApplicationDependencies): Application {
     const harnessSelection = routingNeedsHarness(manifest.routing)
       ? (storedHarness ?? "claude-code")
       : undefined;
-    const pre = preflight({
-      manifest,
-      composition: inspected.inspection.composition,
-      workspacePath: launchWorkspacePath,
-      launchInputs,
-      hostPlatform: deps.hostPlatform,
-      digest,
-      supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
-      harnessSelection,
-      harnessRegistry: deps.harnessRegistry ?? [],
-    });
+    const pre = preflight(
+      {
+        manifest,
+        composition: inspected.inspection.composition,
+        workspacePath: launchWorkspacePath,
+        launchInputs,
+        hostPlatform: deps.hostPlatform,
+        digest,
+        supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
+        harnessSelection,
+        harnessRegistry: deps.harnessRegistry ?? [],
+      },
+      process,
+    );
     if ("problem" in pre) return { problem: pre.problem };
     const grant = catalog.getTrustGrant(digest, entry.installationGeneration);
     if (grant === undefined) {

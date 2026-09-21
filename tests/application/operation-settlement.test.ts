@@ -2,16 +2,12 @@ import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
 import {
-  createApplication,
   type Application,
   type RunExecution,
 } from "../../src/application/application.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
-import {
-  openRunGroup,
-  type RunGroup,
-  type RunOwner,
-} from "../../src/run/store/store.js";
+import type { RunGroup, RunOwner } from "../../src/run/store/store.js";
+import { createApplication, openRunGroup } from "../helpers/application.js";
 import { hostPlatform, writeCommandBundle } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";

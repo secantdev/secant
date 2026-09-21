@@ -1,11 +1,14 @@
 import { openRunGroup } from "../../../src/run/store/store.js";
+import { createProcessAdapter } from "../../../src/process/process.js";
 
-const [home, workspacePath, operationId] = process.argv.slice(2);
+const [home, workspacePath, operationId, mode] = process.argv.slice(2);
 if (!home || !workspacePath || !operationId) {
   throw new Error("expected home, Workspace path, and operation id");
 }
 
-const group = openRunGroup(home, workspacePath);
+const group = openRunGroup(home, workspacePath, {
+  process: createProcessAdapter(),
+});
 try {
   process.stdout.write("ready\n");
   await new Promise<void>((resolve) => {
@@ -18,6 +21,11 @@ try {
     at: new Date("2026-09-15T12:00:00.000Z"),
   });
   process.stdout.write(`${result.outcome}\n`);
+  if (mode === "hold") {
+    await new Promise<void>((resolve) => {
+      process.stdin.once("data", () => resolve());
+    });
+  }
 } finally {
   group.close();
 }

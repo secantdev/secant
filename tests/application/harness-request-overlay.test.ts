@@ -5,9 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
-import { createApplication } from "../../src/application/application.js";
+import { createApplication, openRunGroup } from "../helpers/application.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
-import { openRunGroup } from "../../src/run/store/store.js";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
   createClaudeCodeAdapter,

@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { ProcessAdapter } from "../../../process/process.js";
 import type {
   ArtifactType,
   ProducedArtifact,
@@ -21,7 +21,8 @@ import type {
 // state into a private git object store) by shelling out in two independent
 // implementations rather than reaching for isomorphic-git/nodegit, on fidelity
 // and no-dependency grounds; this follows that judgement. `node:child_process`
-// is runtime-neutral, so no new dependency, notice, or Bun-API allowlist entry.
+// stays owned by the injected Process implementation, so this private Module has
+// no direct child-process dependency and adds no notice or Bun-API allowlist entry.
 // A missing `git` binary is surfaced as a precise `git-unavailable` Problem.
 
 const UNATTENDED_GIT_CONFIG = [
@@ -96,7 +97,11 @@ export interface StageOutput {
 /** Why a publication could not be staged, before anything is committed. */
 export type StageProblem =
   | { readonly kind: "missing-output"; readonly name: string }
-  | { readonly kind: "git-unavailable"; readonly detail: string };
+  | {
+      readonly kind: "git-unavailable";
+      readonly detail: string;
+      readonly cause?: unknown;
+    };
 
 export type StageResult =
   | { readonly ok: true; readonly versionId: string }
@@ -127,10 +132,14 @@ export interface ArtifactRepo {
 
 /** A single path segment: no slash, no traversal, so it is a safe flat tree name. */
 const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
+const GIT_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
 
 class GitUnavailable extends Error {}
 
-export function openArtifactRepo(runDir: string): ArtifactRepo {
+export function openArtifactRepo(
+  runDir: string,
+  process: ProcessAdapter,
+): ArtifactRepo {
   const gitDir = join(runDir, "artifacts.git");
   // The shared isolation (no system/global config) plus this repo's own vars: a
   // fixed `GIT_DIR` and a fixed identity, keeping commit ids a function of content
@@ -146,24 +155,28 @@ export function openArtifactRepo(runDir: string): ArtifactRepo {
   /** Run `git`, returning stdout bytes. Throws GitUnavailable if the binary is
    *  absent; throws a plain Error on any nonzero exit (a broken invariant). */
   function git(args: string[], input?: Uint8Array, env = baseEnv): Buffer {
-    const result = spawnSync("git", args, {
-      input: input === undefined ? undefined : Buffer.from(input),
+    const result = process.spawnCommandSync({
+      executable: "git",
+      args,
       env,
-      maxBuffer: 256 * 1024 * 1024,
+      ...(input !== undefined ? { input } : {}),
+      maxBufferBytes: GIT_MAX_BUFFER_BYTES,
     });
-    if (result.error) {
-      const code = (result.error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
-        throw new GitUnavailable("the `git` executable was not found on PATH");
-      }
-      throw result.error;
+    if (result.kind === "spawn-error") {
+      const message = isErrorCode(result.cause, "ENOENT")
+        ? "the `git` executable was not found on PATH"
+        : "the `git` executable could not be started";
+      throw new GitUnavailable(message, { cause: result.cause });
+    }
+    if (result.kind === "signal") {
+      throw new GitUnavailable(`git ${args[0]} terminated by a signal.`);
     }
     if (result.status !== 0) {
       throw new Error(
-        `git ${args[0]} failed (${result.status}): ${result.stderr.toString().trim()}`,
+        `git ${args[0]} failed (${result.status}): ${new TextDecoder().decode(result.stderr).trim()}`,
       );
     }
-    return result.stdout;
+    return Buffer.from(result.stdout);
   }
 
   function ensureRepo(): void {
@@ -238,7 +251,11 @@ export function openArtifactRepo(runDir: string): ArtifactRepo {
         if (error instanceof GitUnavailable) {
           return {
             ok: false,
-            problem: { kind: "git-unavailable", detail: error.message },
+            problem: {
+              kind: "git-unavailable",
+              detail: error.message,
+              ...(error.cause !== undefined ? { cause: error.cause } : {}),
+            },
           };
         }
         throw error;
@@ -246,27 +263,35 @@ export function openArtifactRepo(runDir: string): ArtifactRepo {
     },
     read(versionId, name) {
       if (!SAFE_NAME.test(name)) return undefined;
-      const result = spawnSync(
-        "git",
-        ["cat-file", "blob", `${versionId}:${name}`],
-        {
-          env: baseEnv,
-          maxBuffer: 256 * 1024 * 1024,
-        },
-      );
-      if (result.error) {
+      const result = process.spawnCommandSync({
+        executable: "git",
+        args: ["cat-file", "blob", `${versionId}:${name}`],
+        env: baseEnv,
+        maxBufferBytes: GIT_MAX_BUFFER_BYTES,
+      });
+      if (result.kind === "spawn-error") {
         // git absent (or otherwise unspawnable) is an environment fault — distinct
         // from a nonzero exit, which is git saying the path/version is absent.
-        if ((result.error as NodeJS.ErrnoException).code === "ENOENT") {
-          throw new GitUnavailable(
-            "the `git` executable was not found on PATH",
-          );
-        }
-        throw result.error;
+        const message = isErrorCode(result.cause, "ENOENT")
+          ? "the `git` executable was not found on PATH"
+          : "the `git` executable could not be started";
+        throw new GitUnavailable(message, { cause: result.cause });
+      }
+      if (result.kind === "signal") {
+        throw new GitUnavailable("git cat-file terminated by a signal.");
       }
       // A nonzero exit means git ran and the tree-ish or path is absent.
       if (result.status !== 0) return undefined;
       return result.stdout;
     },
   };
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    error.code === code
+  );
 }

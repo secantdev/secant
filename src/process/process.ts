@@ -245,6 +245,28 @@ export interface SpawnOptions {
   readonly cancelSignal?: AbortSignal;
 }
 
+/** One bounded synchronous child used by storage mechanics that must complete
+ * before their enclosing SQLite transaction can be decided. Unlike Command-step
+ * capture, stdout and stderr stay separate because callers interpret each stream. */
+export interface SpawnSyncOptions {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly cwd?: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly input?: Uint8Array;
+  readonly maxBufferBytes: number;
+}
+
+export type SpawnSyncResult =
+  | {
+      readonly kind: "exited";
+      readonly status: number;
+      readonly stdout: Uint8Array;
+      readonly stderr: Uint8Array;
+    }
+  | { readonly kind: "signal" }
+  | { readonly kind: "spawn-error"; readonly cause: unknown };
+
 // After an abort (timeout or cancel) the group gets SIGTERM, then SIGKILL if a
 // child is still alive this long later — long enough for a well-behaved child to
 // flush and exit, short enough to bound a hang (D2, #21).
@@ -318,6 +340,7 @@ export interface ProcessAdapter {
     options?: ResolveExecutableOptions,
   ): ExecutableResolution;
   spawnCommand(options: SpawnOptions): Promise<SpawnResult>;
+  spawnCommandSync(options: SpawnSyncOptions): SpawnSyncResult;
   spawnOwnedProcess(
     options: OwnedProcessOptions,
   ): Promise<SpawnOwnedProcessResult>;
@@ -340,6 +363,10 @@ class NodeProcessAdapter implements ProcessAdapter {
     return spawnCommandWithNode(options);
   }
 
+  spawnCommandSync(options: SpawnSyncOptions): SpawnSyncResult {
+    return spawnCommandSyncWithNode(options);
+  }
+
   spawnOwnedProcess(
     options: OwnedProcessOptions,
   ): Promise<SpawnOwnedProcessResult> {
@@ -347,14 +374,12 @@ class NodeProcessAdapter implements ProcessAdapter {
   }
 }
 
-const productionProcess = createProcessAdapter();
-
 /** Compatibility delegate retained while consumers move to the owned Interface. */
 export function resolveExecutable(
   name: string,
   options: ResolveExecutableOptions = {},
 ): ExecutableResolution {
-  return productionProcess.resolveExecutable(name, options);
+  return resolveExecutableWithNode(name, options);
 }
 
 /** Spawn a long-lived child with pipe backpressure and tree-owned cleanup. On
@@ -363,7 +388,27 @@ export function resolveExecutable(
 export function spawnOwnedProcess(
   options: OwnedProcessOptions,
 ): Promise<SpawnOwnedProcessResult> {
-  return productionProcess.spawnOwnedProcess(options);
+  return spawnOwnedProcessWithNode(options);
+}
+
+function spawnCommandSyncWithNode(options: SpawnSyncOptions): SpawnSyncResult {
+  const result = spawnSync(options.executable, [...options.args], {
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    env: options.env,
+    input: options.input === undefined ? undefined : Buffer.from(options.input),
+    maxBuffer: options.maxBufferBytes,
+    windowsHide: true,
+  });
+  if (result.error !== undefined) {
+    return { kind: "spawn-error", cause: result.error };
+  }
+  if (result.status === null) return { kind: "signal" };
+  return {
+    kind: "exited",
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
 }
 
 function spawnOwnedProcessWithNode(
@@ -616,7 +661,7 @@ async function settleWithin<T>(
  * command that reads it gets EOF rather than hanging.
  */
 export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
-  return productionProcess.spawnCommand(options);
+  return spawnCommandWithNode(options);
 }
 
 function spawnCommandWithNode(options: SpawnOptions): Promise<SpawnResult> {

@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
-import {
-  createApplication,
-  TRANSCRIPT_PAGE_SIZE,
-} from "../../src/application/application.js";
+import { TRANSCRIPT_PAGE_SIZE } from "../../src/application/application.js";
 import type {
   TranscriptExportReference,
   TranscriptPageReference,
 } from "../../src/application/projection-port.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
-import { openRunGroup, type RunGroup } from "../../src/run/store/store.js";
+import type { RunGroup } from "../../src/run/store/store.js";
+import { createApplication, openRunGroup } from "../helpers/application.js";
 import { hostPlatform } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 

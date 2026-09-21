@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
 import {
   flattenSteps,
@@ -9,7 +8,7 @@ import {
   type LaunchInput,
   type Platform,
 } from "../workflow/workflow.js";
-import { resolveExecutable } from "../process/process.js";
+import type { ProcessAdapter } from "../process/process.js";
 import { isolatedGitEnvironment } from "../run/store/store.js";
 import type { ApplicationHarnessRegistration } from "./harness-registry.js";
 import type {
@@ -68,7 +67,10 @@ export type PreflightResult =
 
 /** Run Preflight against a pinned Snapshot. Returns the first failing check as a
  *  Problem, or `ok` when every prerequisite holds. */
-export function preflight(request: PreflightRequest): PreflightResult {
+export function preflight(
+  request: PreflightRequest,
+  process: ProcessAdapter,
+): PreflightResult {
   const { manifest, composition } = request;
   const steps = flattenSteps(manifest.routing);
 
@@ -145,21 +147,23 @@ export function preflight(request: PreflightRequest): PreflightResult {
     return finishPreflight({
       request,
       steps,
+      process,
       selectedHarness: selected.registration.choice.id,
     });
   }
 
-  return finishPreflight({ request, steps });
+  return finishPreflight({ request, steps, process });
 }
 
 interface TFinishPreflightParams {
   readonly request: PreflightRequest;
   readonly steps: ReturnType<typeof flattenSteps>;
+  readonly process: ProcessAdapter;
   readonly selectedHarness?: HarnessChoice["id"];
 }
 
 function finishPreflight(params: TFinishPreflightParams): PreflightResult {
-  const { request, steps, selectedHarness } = params;
+  const { request, steps, process, selectedHarness } = params;
   const { manifest, launchInputs, workspacePath } = request;
   // 5. Every declared Launch input is required and validated by its Artifact type;
   // one field violation per input, valid inputs pin to the Run unchanged (AC4).
@@ -176,7 +180,7 @@ function finishPreflight(params: TFinishPreflightParams): PreflightResult {
     }
   }
   if (prerequisites.has("git-worktree-root")) {
-    const probe = probeGitWorktreeRoot(workspacePath);
+    const probe = probeGitWorktreeRoot(workspacePath, process);
     if ("problem" in probe) return probe;
   }
 
@@ -190,7 +194,7 @@ function finishPreflight(params: TFinishPreflightParams): PreflightResult {
     // The same resolver execution spawns through, so a pass here means the Command
     // will spawn (A40): a missing binary is refused, and a Windows `.cmd`/`.bat`
     // that is not an npm-style node shim is refused with the interpreter remedy.
-    const resolution = resolveExecutable(executable);
+    const resolution = process.resolveExecutable(executable);
     if (resolution.kind === "not-found") {
       return { problem: commandExecutableNotFound(step.id, executable) };
     }
@@ -318,28 +322,33 @@ function isNonEmptyFile(path: string): boolean {
  *  and a plain directory do not. It runs under the Run Store's
  *  `isolatedGitEnvironment()` so the host's Git config cannot change the result —
  *  the one hardening the Artifact repo also uses. */
-function probeGitWorktreeRoot(workspacePath: string): PreflightResult {
+function probeGitWorktreeRoot(
+  workspacePath: string,
+  process: ProcessAdapter,
+): PreflightResult {
   // Prove Git is runnable through the same resolver the Command check uses, so
   // "Git absent" is a deterministic decision, not a spawn-lookup side effect.
-  if (resolveExecutable("git").kind !== "found") {
+  const resolution = process.resolveExecutable("git");
+  if (resolution.kind !== "found") {
     return { problem: gitNotRunnable() };
   }
-  const result = spawnSync(
-    "git",
-    ["-C", workspacePath, "rev-parse", "--show-toplevel"],
-    {
-      encoding: "utf8",
-      env: isolatedGitEnvironment(),
-    },
-  );
-  if (result.error !== undefined) {
+  const result = process.spawnCommandSync({
+    executable: "git",
+    args: ["-C", workspacePath, "rev-parse", "--show-toplevel"],
+    env: isolatedGitEnvironment(),
+    maxBufferBytes: 1024 * 1024,
+  });
+  if (result.kind === "spawn-error") {
+    return { problem: gitNotRunnable(result.cause) };
+  }
+  if (result.kind === "signal") {
     return { problem: gitNotRunnable() };
   }
   if (result.status !== 0) {
     // Not a repository, or a bare repository (no working tree): prerequisite fails.
     return { problem: worktreeRootFailed(workspacePath) };
   }
-  const toplevel = result.stdout.trim();
+  const toplevel = new TextDecoder().decode(result.stdout).trim();
   let canonicalTop: string;
   try {
     canonicalTop = realpathSync.native(toplevel);
@@ -512,7 +521,7 @@ function launchInputsInvalid(violations: readonly FieldViolation[]): Problem {
   };
 }
 
-function gitNotRunnable(): Problem {
+function gitNotRunnable(cause?: unknown): Problem {
   return {
     code: "workspace-prerequisite-failed",
     explanation:
@@ -520,6 +529,7 @@ function gitNotRunnable(): Problem {
     remediation: "Install Git and make sure it is on PATH, then launch again.",
     possibleEffects: "none",
     details: { prerequisite: "git-worktree-root" },
+    ...(cause !== undefined ? { cause } : {}),
   };
 }
 

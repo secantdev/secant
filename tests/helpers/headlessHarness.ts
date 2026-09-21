@@ -1,13 +1,11 @@
 import { realpathSync } from "node:fs";
 import { type TestContext } from "node:test";
-import {
-  createApplication,
-  type RunExecution,
-} from "../../src/application/application.js";
+import { type RunExecution } from "../../src/application/application.js";
 import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { openRunGroup } from "../../src/run/store/store.js";
+import { createProcessAdapter } from "../../src/process/process.js";
+import { createApplication, openRunGroup } from "./application.js";
 import type { Platform } from "../../src/workflow/workflow.js";
 import { hostPlatform } from "./commandBundle.js";
 import { makeTempDir } from "./tempDir.js";
@@ -65,6 +63,7 @@ export function openHeadlessHarness(
   const slug = opts.slug ?? "secant-headless";
   const runSupport = opts.runSupport ?? true;
   const autoClose = opts.autoClose ?? true;
+  const executionProcess = createProcessAdapter();
 
   const home = opts.home ?? makeTempDir(`${slug}-home-`);
   const catalog = openCatalog(home);
@@ -88,6 +87,7 @@ export function openHeadlessHarness(
       owner,
       platform: hostPlatform(),
       resolveAsset: () => undefined,
+      process: executionProcess,
       ...(opts.commandTimeoutMs !== undefined
         ? { commandTimeoutMs: opts.commandTimeoutMs }
         : {}),
@@ -95,6 +95,7 @@ export function openHeadlessHarness(
 
   const clients = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     ...(opts.hostPlatform !== undefined
       ? { hostPlatform: opts.hostPlatform }

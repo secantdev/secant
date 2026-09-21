@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type {
@@ -10,8 +10,10 @@ import type {
   RoutingNode,
 } from "../../../src/workflow/workflow.js";
 import { executeRouting } from "../../../src/run/execution/execution.js";
-import { openRunGroup, type RunGroup } from "../../../src/run/store/store.js";
+import type { RunGroup } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
+import { createFakeProcess } from "../../process/fake-adapter.js";
+import { openFakeRunGroup as openRunGroup } from "../store/fake-git-process.js";
 
 // #88: an Artifact declared `home: workspace` is materialized into the Workspace
 // at its declared relative path, then verified byte-for-byte against the bound
@@ -23,8 +25,48 @@ import { makeTempDir } from "../../helpers/tempDir.js";
 const AT = new Date("2026-09-13T12:00:00.000Z");
 const HOST: Platform = process.platform === "win32" ? "windows" : "linux";
 const NODE = process.execPath;
+const executionProcess = createFakeProcess({
+  resolutionHandler: (name) => ({
+    kind: "found",
+    executable: name,
+    prefixArgs: [],
+  }),
+  commandHandler: (options) => fakeCommand(options.args),
+});
 const dec = (bytes?: Uint8Array): string | undefined =>
   bytes === undefined ? undefined : new TextDecoder().decode(bytes);
+
+function fakeCommand(args: readonly string[]) {
+  const script = args[1] ?? "";
+  const write =
+    /writeFileSync\(("(?:[^"\\]|\\.)*"), ("(?:[^"\\]|\\.)*")\)/.exec(script);
+  if (write !== null) {
+    writeFileSync(JSON.parse(write[1]!), JSON.parse(write[2]!));
+    return exited("");
+  }
+  const remove = /rmSync\(("(?:[^"\\]|\\.)*")\)/.exec(script);
+  if (remove !== null) {
+    rmSync(JSON.parse(remove[1]!));
+    return exited("");
+  }
+  if (script.includes("hello-world")) return exited("hello-world");
+  if (script.includes("used")) return exited("used");
+  const stdout = /process\.stdout\.write\('((?:[^'\\]|\\.)*)'\)/.exec(
+    script,
+  )?.[1];
+  if (stdout !== undefined) {
+    return exited(stdout.replaceAll("\\r", "\r").replaceAll("\\n", "\n"));
+  }
+  throw new Error(`unexpected fake Command script: ${script}`);
+}
+
+function exited(text: string) {
+  return {
+    kind: "exited" as const,
+    status: 0,
+    text: new TextEncoder().encode(text),
+  };
+}
 
 interface Harness {
   readonly group: RunGroup;
@@ -70,6 +112,7 @@ async function drive(
       platform: HOST,
       resolveAsset: () => undefined,
       now: () => AT,
+      process: executionProcess,
     });
   } finally {
     owner.close();

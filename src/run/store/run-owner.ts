@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { asc, desc, eq, isNotNull, notInArray, or } from "drizzle-orm";
 import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite";
 import { z } from "zod";
+import type { ProcessAdapter } from "../../process/process.js";
 import { openArtifactRepo } from "./artifacts/artifacts.js";
 import {
   artifactBindings,
@@ -75,6 +76,7 @@ interface TCreateRunOwnerParams {
   readonly record: RunRecord;
   readonly epoch: number;
   readonly close: () => void;
+  readonly process: ProcessAdapter;
 }
 
 interface TAcquireRunOwnerParams {
@@ -85,6 +87,7 @@ interface TAcquireRunOwnerParams {
   readonly isOwnerAlive: (pid: number) => boolean;
   readonly openDatabase: TOpenRunDatabase;
   readonly trackHandle: (database: TRunDatabaseHandle) => () => void;
+  readonly process: ProcessAdapter;
 }
 
 const selectedHarnessId = z.enum(["claude-code", "codex"]);
@@ -629,7 +632,7 @@ function toWriteResult(result: TGuardedWriteResult): WriteResult {
 
 function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
   const { db } = params.database;
-  const repo = openArtifactRepo(params.runDir);
+  const repo = openArtifactRepo(params.runDir, params.process);
   const diagnosticsDir = join(params.runDir, "diagnostics");
 
   function isFenced(): boolean {
@@ -1064,5 +1067,6 @@ export function acquireRunOwner(
     record: acquired.record,
     epoch: acquired.epoch,
     close,
+    process: params.process,
   });
 }

@@ -249,3 +249,32 @@ test("fake process refuses output after a terminal result", () => {
     /emitted stdout after its terminal result/,
   );
 });
+
+test("fake process scripts synchronous command streams independently", () => {
+  const fake = createFakeProcess({
+    syncCommands: [
+      {
+        result: {
+          kind: "exited",
+          status: 17,
+          stdout: encoder.encode("out"),
+          stderr: encoder.encode("err"),
+        },
+      },
+    ],
+  });
+  assert.deepEqual(
+    fake.spawnCommandSync({
+      executable: "git",
+      args: ["status"],
+      env: {},
+      maxBufferBytes: 1024,
+    }),
+    {
+      kind: "exited",
+      status: 17,
+      stdout: encoder.encode("out"),
+      stderr: encoder.encode("err"),
+    },
+  );
+});

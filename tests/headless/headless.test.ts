@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
-import { createApplication } from "../../src/application/application.js";
+import { createApplication } from "../helpers/application.js";
 import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
 import { openHeadlessHarness } from "../helpers/headlessHarness.js";

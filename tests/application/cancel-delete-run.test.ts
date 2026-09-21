@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
-import {
-  createApplication,
-  type Application,
-} from "../../src/application/application.js";
+import { type Application } from "../../src/application/application.js";
 import type { OperationOutcome } from "../../src/application/projection-port.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { openRunGroup, type RunGroup } from "../../src/run/store/store.js";
+import { createProcessAdapter } from "../../src/process/process.js";
+import type { RunGroup } from "../../src/run/store/store.js";
+import { createApplication, openRunGroup } from "../helpers/application.js";
 import {
   ensureRuntimeOnPath,
   hostPlatform,
@@ -17,6 +16,8 @@ import {
 } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+
+const executionProcess = createProcessAdapter();
 
 interface Fixture {
   readonly app: Application;
@@ -44,6 +45,7 @@ function fixture(t: TestContext): Fixture {
         owner,
         platform: hostPlatform(),
         resolveAsset: () => undefined,
+        process: executionProcess,
         // Thread the Application's cancel Seam, as production wiring does, so a
         // cancel of a Run live in this process actually aborts its execution (#98).
         ...(cancelSignal !== undefined ? { cancelSignal } : {}),

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
 import {
-  createApplication,
   type Application,
   type RunExecution,
 } from "../../src/application/application.js";
@@ -13,7 +12,9 @@ import type {
 } from "../../src/application/projection-port.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { openRunGroup, type RunGroup } from "../../src/run/store/store.js";
+import { createProcessAdapter } from "../../src/process/process.js";
+import type { RunGroup } from "../../src/run/store/store.js";
+import { createApplication, openRunGroup } from "../helpers/application.js";
 import {
   ensureRuntimeOnPath,
   hostPlatform,
@@ -33,11 +34,13 @@ import { makeTempDir } from "../helpers/tempDir.js";
 
 ensureRuntimeOnPath();
 
+const executionProcess = createProcessAdapter();
 const runExecution: RunExecution = ({ routing, owner }) =>
   executeRouting(routing, {
     owner,
     platform: hostPlatform(),
     resolveAsset: () => undefined,
+    process: executionProcess,
   });
 
 interface Fixture {

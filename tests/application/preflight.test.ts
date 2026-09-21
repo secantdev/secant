@@ -8,12 +8,12 @@ import {
   createApplication,
   type Application,
   type ApplicationHarnessRegistration,
-  type RunExecution,
 } from "../../src/application/application.js";
 import { buildBundle, writeZip } from "../../src/bundle/bundle.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { openRunGroup, type RunGroup } from "../../src/run/store/store.js";
+import type { ProcessAdapter } from "../../src/process/process.js";
+import type { RunGroup } from "../../src/run/store/store.js";
 import {
   ensureRuntimeOnPath,
   hostPlatform,
@@ -23,13 +23,11 @@ import {
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { readArchiveEntries } from "../helpers/zip.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
 import {
-  bareRepo,
-  classicWorktree,
-  linkedWorktree,
-  plainDirectory,
-  unbornWorktree,
-} from "../helpers/gitWorktree.js";
+  createFakeGitProcess,
+  openFakeRunGroup as openRunGroup,
+} from "../run/store/fake-git-process.js";
 
 // Preflight is exercised through the Application's Projection Port — the Module's
 // public Interface — never by importing the private submodule (the boundary suite
@@ -39,14 +37,8 @@ import {
 
 ensureRuntimeOnPath();
 
-// The real Run execution, only reached when Preflight passes (the git pass cases
-// stop at the Trust gate rather than running).
-const runExecution: RunExecution = ({ routing, owner }) =>
-  executeRouting(routing, {
-    owner,
-    platform: hostPlatform(),
-    resolveAsset: () => undefined,
-  });
+type GitProbe =
+  "pass" | "fail" | "subdirectory" | "unavailable" | "spawn-error";
 
 interface Fixture {
   readonly app: Application;
@@ -61,21 +53,76 @@ function fixture(
   t: TestContext,
   workspace: string,
   harnessRegistry: readonly ApplicationHarnessRegistration[] = [],
+  gitProbe: GitProbe = "pass",
 ): Fixture {
+  const executionProcess = preflightProcess(workspace, gitProbe);
   const catalog = openCatalog(makeTempDir("secant-pf-home-"));
   t.after(() => catalog.close());
   const runGroup = openRunGroup(makeTempDir("secant-pf-store-"), workspace);
   t.after(() => runGroup.close());
   const app = createApplication({
     catalog,
+    process: executionProcess,
     launchWorkspacePath: workspace,
     hostPlatform: hostPlatform(),
     runGroup,
-    runExecution,
     harnessRegistry,
+    runExecution: ({ routing, owner }) =>
+      executeRouting(routing, {
+        owner,
+        platform: hostPlatform(),
+        resolveAsset: () => undefined,
+        process: executionProcess,
+      }),
   });
   catalog.approveWorkspace(workspace, new Date());
   return { app, catalog, runGroup, workspace };
+}
+
+function preflightProcess(
+  workspace: string,
+  gitProbe: GitProbe,
+): ProcessAdapter {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) =>
+      name === "secant-no-such-binary-xyz" ||
+      (name === "git" && gitProbe === "unavailable")
+        ? { kind: "not-found" }
+        : { kind: "found", executable: name, prefixArgs: [] },
+    commandHandler: () => ({
+      kind: "exited",
+      status: 0,
+      text: new Uint8Array(),
+    }),
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => {
+      if (options.args.includes("rev-parse")) {
+        if (gitProbe === "spawn-error") {
+          return { kind: "spawn-error", cause: new Error("cannot launch Git") };
+        }
+        const status = gitProbe === "fail" ? 1 : 0;
+        const top =
+          gitProbe === "subdirectory" ? dirname(workspace) : workspace;
+        return {
+          kind: "exited",
+          status,
+          stdout: new TextEncoder().encode(`${top}\n`),
+          stderr: new Uint8Array(),
+        };
+      }
+      return git.spawnCommandSync(options);
+    },
+  };
+}
+
+function workspace(): string {
+  return realpathSync.native(makeTempDir("secant-pf-workspace-"));
 }
 
 function install(
@@ -180,13 +227,13 @@ function registeredHarness(params: {
 
 // --- git-worktree-root probe ----------------------------------------------
 
-for (const [label, make] of [
-  ["a subdirectory of a worktree", subdirectoryOfWorktree],
-  ["a bare repository", bareRepo],
-  ["a plain directory", plainDirectory],
+for (const [label, gitProbe] of [
+  ["a subdirectory of a worktree", "subdirectory"],
+  ["a bare repository", "fail"],
+  ["a plain directory", "fail"],
 ] as const) {
   test(`launching from ${label} fails git-worktree-root, no Run and no grant`, (t) => {
-    const f = fixture(t, make());
+    const f = fixture(t, workspace(), [], gitProbe);
     const { id, digest } = install(f, { prerequisites: ["git-worktree-root"] });
 
     const admission = launch(f, id, { trustDigest: digest });
@@ -200,13 +247,13 @@ for (const [label, make] of [
   });
 }
 
-for (const [label, make] of [
-  ["a classic worktree root", classicWorktree],
-  ["a linked worktree root", linkedWorktree],
-  ["an unborn worktree root", unbornWorktree],
+for (const label of [
+  "a classic worktree root",
+  "a linked worktree root",
+  "an unborn worktree root",
 ] as const) {
   test(`launching from ${label} passes git-worktree-root`, (t) => {
-    const f = fixture(t, make());
+    const f = fixture(t, workspace());
     const { id } = install(f, { prerequisites: ["git-worktree-root"] });
 
     // No trust acknowledgement: Preflight passes the git probe (and the PATH
@@ -220,29 +267,34 @@ for (const [label, make] of [
 }
 
 test("Git absent from PATH names Git as not runnable, no Run", (t) => {
-  const f = fixture(t, classicWorktree());
+  const f = fixture(t, workspace(), [], "unavailable");
   const { id, digest } = install(f, { prerequisites: ["git-worktree-root"] });
 
-  const savedPath = process.env.PATH;
-  try {
-    // Strip PATH so the git probe cannot resolve `git`. Restored at once; submit
-    // is synchronous, so no other test observes the change.
-    process.env.PATH = "";
-    const admission = launch(f, id, { trustDigest: digest });
-    assert.equal(admission.admitted, false);
-    if (admission.admitted) throw new Error("unreachable");
-    assert.equal(admission.problem.code, "workspace-prerequisite-failed");
-    assert.match(admission.problem.explanation, /not runnable/);
-    assert.deepEqual(f.runGroup.listRuns(), []);
-  } finally {
-    process.env.PATH = savedPath;
-  }
+  const admission = launch(f, id, { trustDigest: digest });
+  assert.equal(admission.admitted, false);
+  if (admission.admitted) throw new Error("unreachable");
+  assert.equal(admission.problem.code, "workspace-prerequisite-failed");
+  assert.match(admission.problem.explanation, /not runnable/);
+  assert.deepEqual(f.runGroup.listRuns(), []);
+});
+
+test("a Git spawn failure preserves its operational cause", (t) => {
+  const f = fixture(t, workspace(), [], "spawn-error");
+  const { id, digest } = install(f, {
+    prerequisites: ["git-worktree-root"],
+  });
+
+  const admission = launch(f, id, { trustDigest: digest });
+  assert.equal(admission.admitted, false);
+  if (admission.admitted) throw new Error("unreachable");
+  assert.ok(admission.problem.cause instanceof Error);
+  assert.equal(admission.problem.cause.message, "cannot launch Git");
 });
 
 // --- command executable resolution ----------------------------------------
 
 test("a Command whose executable is not on PATH is refused, no Run", (t) => {
-  const f = fixture(t, plainDirectory());
+  const f = fixture(t, workspace());
   const { id, digest } = install(f, {
     executable: "secant-no-such-binary-xyz",
   });
@@ -265,7 +317,7 @@ test("missing or type-invalid Launch inputs yield one field violation per input,
   const dir = makeTempDir("secant-pf-inputs-");
   const empty = join(dir, "empty.txt");
   writeFileSync(empty, "");
-  const f = fixture(t, plainDirectory());
+  const f = fixture(t, workspace());
   const { id, digest } = install(f, {
     inputs: {
       note: { type: "text", description: "a note" },
@@ -304,7 +356,7 @@ test("valid Launch inputs of every type pin to the created Run and are visible i
   writeFileSync(fileA, "a\n");
   const fileB = join(dir, "b.txt");
   writeFileSync(fileB, "b\n");
-  const f = fixture(t, plainDirectory());
+  const f = fixture(t, workspace());
   const { id, digest } = install(f, {
     inputs: {
       note: { type: "text", description: "a note" },
@@ -337,7 +389,7 @@ test("valid Launch inputs of every type pin to the created Run and are visible i
 // --- Composition re-check (corrupted pinned Snapshot) ----------------------
 
 test("a Snapshot failing the Composition re-check is refused as corrupted, no Run", (t) => {
-  const f = fixture(t, plainDirectory());
+  const f = fixture(t, workspace());
 
   // Build a valid command Bundle, then repack it with a manifest that is shape-
   // valid but no longer composes (a Step requires an artifact nothing binds), and
@@ -402,7 +454,7 @@ test("[both-client-harness-selection] Agent launches require one known semantic 
       },
     }),
   ];
-  const f = fixture(t, plainDirectory(), registry);
+  const f = fixture(t, workspace(), registry);
   const { id, digest } = installAgentBundle(f);
 
   const missing = launch(f, id, { trustDigest: digest });
@@ -457,7 +509,7 @@ test("[both-client-harness-selection] Command-only launches reject a Harness wit
       },
     }),
   ];
-  const f = fixture(t, plainDirectory(), registry);
+  const f = fixture(t, workspace(), registry);
   const { id, digest } = install(f);
   const admission = launch(f, id, {
     trustDigest: digest,
@@ -472,7 +524,7 @@ test("[both-client-harness-selection] Command-only launches reject a Harness wit
 
 test("an unavailable registered Harness is refused before discovery", (t) => {
   let discoveries = 0;
-  const f = fixture(t, plainDirectory(), [
+  const f = fixture(t, workspace(), [
     registeredHarness({
       id: "codex",
       name: "Codex",
@@ -495,7 +547,7 @@ test("an unavailable registered Harness is refused before discovery", (t) => {
 
 test("selected capability mismatch is refused before discovery", (t) => {
   let discoveries = 0;
-  const f = fixture(t, plainDirectory(), [
+  const f = fixture(t, workspace(), [
     registeredHarness({
       id: "codex",
       name: "Codex",
@@ -515,7 +567,7 @@ test("selected capability mismatch is refused before discovery", (t) => {
 });
 
 test("selected unsupported shim names the Harness and configured executable", (t) => {
-  const f = fixture(t, plainDirectory(), [
+  const f = fixture(t, workspace(), [
     registeredHarness({
       id: "codex",
       name: "Codex",
@@ -539,7 +591,7 @@ test("selected unsupported shim names the Harness and configured executable", (t
 // --- intrinsic Step-kind precondition (the Proof Bundle) -------------------
 
 test("the Proof Bundle's Agent Step is dispatchable and refused at Preflight when no Harness is found (#116)", (t) => {
-  const f = fixture(t, plainDirectory(), [
+  const f = fixture(t, workspace(), [
     registeredHarness({
       id: "claude-code",
       name: "Claude Code",
@@ -575,7 +627,7 @@ test("the Proof Bundle's Agent Step is dispatchable and refused at Preflight whe
 });
 
 test("a headless launch refuses an interactive-agent Bundle with interactive-step-needs-tui (#116)", (t) => {
-  const f = fixture(t, plainDirectory());
+  const f = fixture(t, workspace());
   // An interactive-agent Bundle authored directly (no command-bundle helper covers
   // it): the headless client cannot relay human turn-taking, so Preflight refuses
   // it with the TUI remedy — the only kind-based refusal now that every kind
@@ -620,12 +672,3 @@ test("a headless launch refuses an interactive-agent Bundle with interactive-ste
   assert.match(admission.problem.remediation, /TUI/i);
   assert.deepEqual(f.runGroup.listRuns(), []);
 });
-
-// --- helpers ---------------------------------------------------------------
-
-function subdirectoryOfWorktree(): string {
-  const root = classicWorktree();
-  const sub = join(root, "nested");
-  mkdirSync(sub);
-  return realpathSync.native(sub);
-}

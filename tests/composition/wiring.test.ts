@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -10,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
+import type { ProcessAdapter } from "../../src/process/process.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import {
   ensureRuntimeOnPath,
@@ -17,6 +19,8 @@ import {
 } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import { createFakeGitProcess } from "../run/store/fake-git-process.js";
 
 /** Await a submitted Run Operation's settled outcome (execution settles async). */
 async function settled(wired: Wiring, operationId: string): Promise<void> {
@@ -40,6 +44,39 @@ const proofBundle = join(
 );
 const proofId = "dev.secant.test-repair";
 
+function wiringProcess(): ProcessAdapter {
+  const git = createFakeGitProcess();
+  const commands = createFakeProcess({
+    resolutionHandler: (name) => ({
+      kind: "found",
+      executable: name,
+      prefixArgs: [],
+    }),
+    commandHandler: (options) => {
+      const assetPath = options.args[0] === "-e" ? undefined : options.args[0];
+      let text = "";
+      if (assetPath !== undefined) {
+        const script = readFileSync(assetPath, "utf8");
+        text = script.includes("__filename")
+          ? `${assetPath}\n`
+          : `${/console\.log\('([^']*)'\)/.exec(script)?.[1] ?? ""}\n`;
+      }
+      return {
+        kind: "exited",
+        status: 0,
+        text: new TextEncoder().encode(text),
+      };
+    },
+  });
+  return {
+    resolveExecutable: (name, options) =>
+      commands.resolveExecutable(name, options),
+    spawnCommand: (options) => commands.spawnCommand(options),
+    spawnOwnedProcess: (options) => commands.spawnOwnedProcess(options),
+    spawnCommandSync: (options) => git.spawnCommandSync(options),
+  };
+}
+
 /** Wire a fresh Application against a temporary home, seed it with the Proof
  *  Bundle (engine floor `>=0.1.0`, above the dev sentinel), and close on teardown. */
 function seeded(
@@ -49,6 +86,7 @@ function seeded(
   const wired = wireApplication({
     secantHome: makeTempDir("secant-wire-home-"),
     launchCwd: makeTempDir("secant-wire-ws-"),
+    process: wiringProcess(),
     ...overrides,
   });
   t.after(() => {
@@ -100,13 +138,19 @@ test("the wiring hands the Application the engine version, host platform, and la
   assert.equal(bundle.executionSummary.platform, "linux");
 });
 
-test("the wiring constructs the Run Store and Run execution through the single root, so a launch runs to succeeded", async (t) => {
+test("[execution-store-on-fake-process] wiring injects one Process into Preflight, the Run Store, and execution", async (t) => {
   ensureRuntimeOnPath();
   const workspace = makeTempDir("secant-wire-run-ws-");
+  let processConstructions = 0;
   const wired = wireApplication({
     secantHome: makeTempDir("secant-wire-run-home-"),
     launchCwd: workspace,
+    processFactory: () => {
+      processConstructions++;
+      return wiringProcess();
+    },
   });
+  assert.equal(processConstructions, 1);
   t.after(() => {
     wired.runGroup.close();
     wired.catalog.close();
@@ -156,6 +200,7 @@ test("the wiring's AssetResolver maps a Bundle's script asset to its file in the
   const wired = wireApplication({
     secantHome: makeTempDir("secant-wire-asset-home-"),
     launchCwd: workspace,
+    process: wiringProcess(),
   });
   t.after(() => {
     wired.runGroup.close();
@@ -257,7 +302,11 @@ function assetFixture(t: TestContext) {
   ensureRuntimeOnPath();
   const home = makeTempDir("secant-wire-zc-home-");
   const workspace = makeTempDir("secant-wire-zc-ws-");
-  const wired = wireApplication({ secantHome: home, launchCwd: workspace });
+  const wired = wireApplication({
+    secantHome: home,
+    launchCwd: workspace,
+    process: wiringProcess(),
+  });
   t.after(() => {
     wired.runGroup.close();
     wired.catalog.close();
@@ -349,6 +398,7 @@ test("a legacy run-assets directory is swept once at open", (t) => {
   const wired = wireApplication({
     secantHome: home,
     launchCwd: makeTempDir("secant-wire-sweep-ws-"),
+    process: wiringProcess(),
   });
   t.after(() => {
     wired.runGroup.close();

@@ -13,8 +13,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Database } from "bun:sqlite";
-import { openRunGroup, type RunGroup } from "../../../src/run/store/store.js";
+import type { RunGroup } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
+import { openFakeRunGroup as openRunGroup } from "./fake-git-process.js";
 
 const WORKSPACE = "/work/example-project";
 const AT = new Date("2026-09-12T12:00:00.000Z");

@@ -35,6 +35,10 @@ import {
   routingNeedsHarness,
 } from "../workflow/workflow.js";
 import { HarnessRegistry } from "./harness-registry.js";
+import {
+  createProcessAdapter,
+  type ProcessAdapter,
+} from "../process/process.js";
 
 // The one wiring path both composition roots take (#74 A1, A2, A6). Before this,
 // the headless root and the TUI root each resolved the Secant home, opened the
@@ -73,6 +77,11 @@ export interface WiringOverrides {
   readonly launchCwd?: string;
   readonly engineVersion?: string;
   readonly hostPlatform?: Platform;
+  /** Process test Seam. Production constructs the real Adapter once here. */
+  readonly process?: ProcessAdapter;
+  /** Constructor test Seam: proves the default construction branch runs once
+   * while keeping child creation out of the semantic test runner. */
+  readonly processFactory?: () => ProcessAdapter;
   /** The Claude Code Adapter registry entry (#116). Production constructs the
    * native Adapter; tests inject one over the replayer. */
   readonly harnessAdapter?: HarnessAdapter;
@@ -104,6 +113,8 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
     (process.env.SECANT_HOME?.trim() || join(homedir(), ".secant"));
   const launchWorkspacePath = overrides.launchCwd ?? process.cwd();
   const host = overrides.hostPlatform ?? hostPlatform(process.platform);
+  const processAdapter =
+    overrides.process ?? overrides.processFactory?.() ?? createProcessAdapter();
 
   // The Catalog derives each installed digest's read-only asset tree through the
   // Bundle Module's reader, injected here so Catalog keeps depending only on the
@@ -123,6 +134,7 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
     const runGroup = openRunGroup(
       secantHome,
       canonicalizeWorkspacePath(launchWorkspacePath),
+      { process: processAdapter },
     );
     try {
       const harnessRegistry = new HarnessRegistry({
@@ -141,10 +153,12 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
         // Bundle is refused at Preflight (#116). The TUI root sets this true.
         supportsInteractiveTurns: overrides.supportsInteractiveTurns ?? false,
         harnessRegistry: harnessRegistry.applicationRegistrations(),
+        process: processAdapter,
         runExecution: makeRunExecution({
           catalog,
           platform: host ?? "linux",
           harnessRegistry,
+          process: processAdapter,
         }),
         prepareRunInteractiveStep:
           makePrepareRunInteractiveStep(harnessRegistry),
@@ -172,10 +186,11 @@ interface TMakeRunExecutionParams {
   readonly catalog: Catalog;
   readonly platform: Platform;
   readonly harnessRegistry: HarnessRegistry;
+  readonly process: ProcessAdapter;
 }
 
 function makeRunExecution(params: TMakeRunExecutionParams): RunExecution {
-  const { catalog, platform, harnessRegistry } = params;
+  const { catalog, platform, harnessRegistry, process } = params;
   return async ({
     routing,
     digest,
@@ -188,6 +203,7 @@ function makeRunExecution(params: TMakeRunExecutionParams): RunExecution {
       owner,
       platform,
       resolveAsset: treeResolver(catalog, digest),
+      process,
       // The Application's per-Run cancel Seam (#98): an abort kills the child's
       // process group and unwinds execution, and the Application decides the rest.
       ...(cancelSignal !== undefined ? { cancelSignal } : {}),

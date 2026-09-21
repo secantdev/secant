@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { openRunGroup } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
+import { openFakeRunGroup as openRunGroup } from "./fake-git-process.js";
 
 const WORKSPACE = "/work/reconcile-turn-project";
 const AT = new Date("2026-09-16T12:00:00.000Z");

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -17,16 +23,30 @@ import {
   RunCancelledError,
   TRUNCATION_MARKER,
   type AssetResolver,
-  type SpawnCommand,
 } from "../../../src/run/execution/execution.js";
-import { openRunGroup, type RunOwner } from "../../../src/run/store/store.js";
+import {
+  createProcessAdapter,
+  type ProcessAdapter,
+} from "../../../src/process/process.js";
+import type { RunOwner } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
 import { classicWorktree } from "../../helpers/gitWorktree.js";
+import { createFakeProcess } from "../../process/fake-adapter.js";
+import { openFakeRunGroup as openRunGroup } from "../store/fake-git-process.js";
 
 const WORKSPACE = "/work/example-project";
 const AT = new Date("2026-09-13T12:00:00.000Z");
 const HOST: Platform = process.platform === "win32" ? "windows" : "linux";
 const NODE = process.execPath; // the runtime binary; runs `-e` scripts and files
+const realProcess = createProcessAdapter();
+type SpawnCommand = ProcessAdapter["spawnCommand"];
+const semanticProcess = createFakeProcess({
+  resolutionHandler: (name) =>
+    name === "secant-no-such-binary-xyz"
+      ? { kind: "not-found" }
+      : { kind: "found", executable: name, prefixArgs: [] },
+  commandHandler: fakeCommand,
+});
 
 const dec = (bytes: Uint8Array | undefined) =>
   bytes === undefined ? undefined : new TextDecoder().decode(bytes);
@@ -87,14 +107,98 @@ function assetsIn(dir: string, files: Record<string, string>): AssetResolver {
 
 const noAssets: AssetResolver = () => undefined;
 
-function run(routing: RoutingNode[], owner: RunOwner, over = {}) {
+function run(
+  routing: RoutingNode[],
+  owner: RunOwner,
+  over: Partial<Parameters<typeof executeRouting>[1]> & {
+    readonly spawnCommand?: SpawnCommand;
+  } = {},
+) {
+  const { spawnCommand, process: injectedProcess, ...deps } = over;
+  const executionProcess: ProcessAdapter =
+    spawnCommand === undefined
+      ? (injectedProcess ?? semanticProcess)
+      : {
+          resolveExecutable: (name, options) =>
+            semanticProcess.resolveExecutable(name, options),
+          spawnCommand,
+          spawnCommandSync: (options) =>
+            semanticProcess.spawnCommandSync(options),
+          spawnOwnedProcess: (options) =>
+            semanticProcess.spawnOwnedProcess(options),
+        };
   return executeRouting(routing, {
     owner,
     platform: HOST,
     resolveAsset: noAssets,
     now: () => AT,
-    ...over,
+    ...deps,
+    process: executionProcess,
   });
+}
+
+function fakeCommand(options: Parameters<SpawnCommand>[0]) {
+  const script = options.args[1] ?? "";
+  if (script.includes("setTimeout(()=>{},1e9)")) {
+    if (options.cancelSignal !== undefined) {
+      return new Promise<{ readonly kind: "cancelled" }>((resolve) => {
+        options.cancelSignal!.addEventListener(
+          "abort",
+          () => resolve({ kind: "cancelled" }),
+          { once: true },
+        );
+      });
+    }
+    return { kind: "timeout" as const };
+  }
+  if (script.includes("Atomics.wait")) return { kind: "timeout" as const };
+  if (script.includes("SIGKILL")) return { kind: "signal" as const };
+  if (script.includes("repeat(")) {
+    return {
+      kind: "exited" as const,
+      status: 0,
+      text: new TextEncoder().encode(
+        "x".repeat(MAX_CAPTURE_BYTES) + TRUNCATION_MARKER,
+      ),
+    };
+  }
+  const counterPath = /const p=("(?:[^"\\]|\\.)*")/.exec(script)?.[1];
+  if (counterPath !== undefined) {
+    const path = JSON.parse(counterPath) as string;
+    let count = 0;
+    try {
+      count = Number(readFileSync(path, "utf8")) || 0;
+    } catch {
+      // First iteration has no counter file yet.
+    }
+    count++;
+    writeFileSync(path, String(count));
+    const passAt = Number(/n>=(\d+)/.exec(script)?.[1] ?? "1");
+    return exited(count >= passAt ? 0 : 1, `iteration ${count}\n`);
+  }
+  if (options.args[0] !== "-e") {
+    return exited(
+      0,
+      readFileSync(options.args[0]!, "utf8")
+        .replace("console.log('", "")
+        .replace("')", "\n"),
+    );
+  }
+  if (script.includes("echo:")) {
+    return exited(0, `echo:${options.args.at(-1) ?? ""}`);
+  }
+  const logged = /console\.log\('([^']*)'\)/.exec(script)?.[1];
+  const written = /process\.stdout\.write\('([^']*)'\)/.exec(script)?.[1];
+  const status = Number(/process\.exit\((\d+)\)/.exec(script)?.[1] ?? "0");
+  return exited(status, logged === undefined ? (written ?? "") : `${logged}\n`);
+}
+
+function exited(status: number, text: string) {
+  return {
+    kind: "exited" as const,
+    status,
+    text: new TextEncoder().encode(text),
+  };
 }
 
 test("a two-Command Routing whose scripts exit 0 runs to succeeded", async (t) => {
@@ -318,6 +422,7 @@ test("a Command commit ignores ambient signing while preserving authored Git con
         ),
       ],
       owner,
+      { process: realProcess },
     ),
     { outcome: "succeeded" },
   );

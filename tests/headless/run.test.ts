@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import test, { type TestContext } from "node:test";
 import {
-  createApplication,
   TRANSCRIPT_PAGE_SIZE,
   type RunExecution,
 } from "../../src/application/application.js";
 import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { openRunGroup } from "../../src/run/store/store.js";
+import { createProcessAdapter } from "../../src/process/process.js";
+import { createApplication, openRunGroup } from "../helpers/application.js";
 import {
   ensureRuntimeOnPath,
   hostPlatform,
@@ -23,6 +23,7 @@ import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 ensureRuntimeOnPath();
+const executionProcess = createProcessAdapter();
 
 function harness(t: TestContext, opts: { commandTimeoutMs?: number } = {}) {
   const h = openHeadlessHarness(t, {
@@ -569,6 +570,7 @@ test("two invocations: block under one instance, continue under a fresh instance
       owner,
       platform: hostPlatform(),
       resolveAsset: () => undefined,
+      process: executionProcess,
     });
   const sink = () => {
     const lines: string[] = [];
@@ -652,6 +654,7 @@ test("run resume reports a live foreign owner and --takeover continues while fen
         owner,
         platform: hostPlatform(),
         resolveAsset: () => undefined,
+        process: executionProcess,
       }),
   });
   const bundle = writeCommandBundle({ id: "dev.secant.takeover" });
@@ -696,6 +699,7 @@ test("run resume reports a live foreign owner and --takeover continues while fen
         owner,
         platform: hostPlatform(),
         resolveAsset: () => undefined,
+        process: executionProcess,
       }),
   });
   const output: string[] = [];

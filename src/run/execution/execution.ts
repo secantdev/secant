@@ -21,12 +21,7 @@ import {
   type CandidateOutput,
   type RunOwner,
 } from "../store/store.js";
-import {
-  resolveExecutable,
-  spawnCommand,
-  type SpawnOptions,
-  type SpawnResult,
-} from "../../process/process.js";
+import { type ProcessAdapter } from "../../process/process.js";
 import {
   attemptEvidence,
   launchInputs,
@@ -103,18 +98,6 @@ export type {
  */
 export type AssetResolver = (assetPath: string) => string | undefined;
 
-/**
- * The command-execution Seam (module-design.md). Execution spawns every Command
- * through this port, which defaults to the process Module's real `spawnCommand`.
- * The only justified second Adapter is a test's fast in-process executor: it lets
- * the scheduler's loop-arithmetic tests (Repeat-group cadence, resume, the review
- * clamp) assert their exact outcomes deterministically without spawning a real
- * runtime per iteration — the real spawn path stays covered by the command-contract
- * tests that keep the default (docs/agents/testing.md fixture ladder). Nothing
- * above this Seam varies command execution in production.
- */
-export type SpawnCommand = (options: SpawnOptions) => Promise<SpawnResult>;
-
 /** Everything the scheduler needs to drive one acquired Run to rest. */
 export interface ExecutionDeps {
   /** The acquired Run Store owner every Attempt publishes through. */
@@ -138,9 +121,9 @@ export interface ExecutionDeps {
   /** The live request-answer channel an Agent Turn's approval requests reach a
    *  client through (#117). Absent when no client is observing. */
   readonly requestChannel?: RequestChannel;
-  /** The command-execution Seam (see SpawnCommand). Defaults to the real
-   *  `spawnCommand`; a test injects a fast in-process executor. */
-  readonly spawnCommand?: SpawnCommand;
+  /** The owned Process Interface used for executable resolution and Command
+   * execution. Composition supplies the real Adapter; tests supply the fake. */
+  readonly process: ProcessAdapter;
   /** Injectable clock so Attempt timestamps are deterministic in tests. */
   readonly now?: () => Date;
 }
@@ -199,9 +182,7 @@ interface StepContext {
   readonly resolveAsset: AssetResolver;
   readonly commandTimeoutMs: number;
   readonly cancelSignal?: AbortSignal;
-  /** The command-execution Seam, resolved to the real `spawnCommand` unless a
-   *  caller injected an executor (see SpawnCommand). */
-  readonly spawnCommand: SpawnCommand;
+  readonly process: ProcessAdapter;
   /** The prepared Harness and manifest facts an Agent Step runs against (#116). */
   readonly harness?: HarnessExecutionDeps;
   /** The live request-answer channel an Agent Turn reaches a client through (#117). */
@@ -300,9 +281,7 @@ export async function executeRouting(
       platform: deps.platform,
       resolveAsset: deps.resolveAsset,
       commandTimeoutMs: deps.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-      // The command-execution Seam resolves to the real `spawnCommand` unless a
-      // caller injected an executor; production and composition never inject one.
-      spawnCommand: deps.spawnCommand ?? spawnCommand,
+      process: deps.process,
       ...(deps.cancelSignal !== undefined
         ? { cancelSignal: deps.cancelSignal }
         : {}),
@@ -804,7 +783,7 @@ async function runCommand(
   // open those to injection. The executable is resolved to a spawnable target here
   // (a native binary, or an npm `.cmd` shim's real `node` + script) so a Windows
   // shim runs directly, never through `cmd.exe` (#21).
-  const resolution = resolveExecutable(invocation.executable);
+  const resolution = context.process.resolveExecutable(invocation.executable);
   if (resolution.kind !== "found") {
     // Preflight already refused an unresolvable executable or an unsupported shim;
     // reaching here means it was removed between Preflight and spawn — the command
@@ -812,7 +791,7 @@ async function runCommand(
     return { outcome: "failed", outputs: [] };
   }
 
-  const result = await context.spawnCommand({
+  const result = await context.process.spawnCommand({
     executable: resolution.executable,
     args: [...resolution.prefixArgs, ...args],
     // Manifest validation makes this a Workspace-relative directory. Resolve it

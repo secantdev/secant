@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { createApplication } from "../../src/application/application.js";
+import { createApplication } from "../helpers/application.js";
 import type {
   OperationSnapshot,
   ProjectionPort,

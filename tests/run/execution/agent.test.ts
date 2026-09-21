@@ -11,7 +11,7 @@ import {
   executeRouting,
   type AssetResolver,
 } from "../../../src/run/execution/execution.js";
-import { openRunGroup, type RunOwner } from "../../../src/run/store/store.js";
+import type { RunOwner } from "../../../src/run/store/store.js";
 import type {
   AgentStep,
   ArtifactType,
@@ -20,10 +20,13 @@ import type {
 } from "../../../src/workflow/workflow.js";
 import { createFake, type FakeTurnScript } from "../../harness/fake-adapter.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
+import { createFakeProcess } from "../../process/fake-adapter.js";
+import { openFakeRunGroup as openRunGroup } from "../store/fake-git-process.js";
 
 const AT = new Date("2026-09-18T08:00:00.000Z");
 const HOST: Platform = process.platform === "win32" ? "windows" : "linux";
 const SESSION = "shared-session";
+const executionProcess = createFakeProcess({});
 
 function profile(overrides: Partial<HarnessProfile> = {}): HarnessProfile {
   return {
@@ -265,6 +268,7 @@ for (const [kind, scenario] of Object.entries(RESULT_CASES)) {
         platform: HOST,
         resolveAsset: assets.resolveAsset,
         now: () => AT,
+        process: executionProcess,
         harness: {
           prepared: counted,
           inputTypes: {},
@@ -344,6 +348,7 @@ for (const delivery of ["skill", "file"] as const) {
         platform: HOST,
         resolveAsset: assets.resolveAsset,
         now: () => AT,
+        process: executionProcess,
         harness: { prepared: counted, inputTypes, assetKinds },
       },
     );
@@ -379,6 +384,7 @@ test("plain-path delivery keeps the rendered prompt byte-identical", async (t) =
       platform: HOST,
       resolveAsset: assets.resolveAsset,
       now: () => AT,
+      process: executionProcess,
       harness: {
         prepared,
         inputTypes: { report: "file" },

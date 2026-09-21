@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { openRunGroup, type RunGroup } from "../../../src/run/store/store.js";
+import type { RunGroup } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
+import { openFakeRunGroup as openRunGroup } from "./fake-git-process.js";
 
 // #88 at the Run Store Interface: recording a Materialization conflict rests the
 // Run `halted`, moves no binding, and never adopts Workspace bytes (the store has

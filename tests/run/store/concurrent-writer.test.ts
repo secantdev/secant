@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { createProcessAdapter } from "../../../src/process/process.js";
 import { openRunGroup } from "../../../src/run/store/store.js";
 import { makeTempDir } from "../../helpers/tempDir.js";
 
@@ -77,7 +78,9 @@ test("two concurrent writers admit creates in one Workspace group", async (t) =>
   assert.match(firstOutput, /ready\ncreated\n/);
   assert.match(secondOutput, /ready\ncreated\n/);
 
-  const group = openRunGroup(home, WORKSPACE);
+  const group = openRunGroup(home, WORKSPACE, {
+    process: createProcessAdapter(),
+  });
   t.after(() => group.close());
   assert.equal(group.listRuns().length, 2);
 });

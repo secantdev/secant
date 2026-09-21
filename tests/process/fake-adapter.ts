@@ -6,6 +6,8 @@ import type {
   ProcessInterruption,
   ResolveExecutableOptions,
   SpawnOptions,
+  SpawnSyncOptions,
+  SpawnSyncResult,
   SpawnOwnedProcessResult,
   SpawnResult,
   OwnedProcessOptions,
@@ -19,6 +21,11 @@ export interface FakeResolutionScript {
 export type FakeCommandScript =
   | { readonly trigger: "immediate"; readonly result: SpawnResult }
   | { readonly trigger: "cancellation"; readonly result: SpawnResult };
+
+export interface FakeSyncCommandScript {
+  readonly result:
+    SpawnSyncResult | ((options: SpawnSyncOptions) => SpawnSyncResult);
+}
 
 export type FakeOwnedProcessEmission =
   | { readonly kind: "stdout"; readonly bytes: Uint8Array }
@@ -50,7 +57,13 @@ export type FakeOwnedProcessScript =
 
 export interface FakeProcessScript {
   readonly resolutions?: readonly FakeResolutionScript[];
+  readonly resolutionHandler?: (name: string) => ExecutableResolution;
   readonly commands?: readonly FakeCommandScript[];
+  readonly commandHandler?: (
+    options: SpawnOptions,
+  ) => SpawnResult | Promise<SpawnResult>;
+  readonly syncCommands?: readonly FakeSyncCommandScript[];
+  readonly syncCommandHandler?: (options: SpawnSyncOptions) => SpawnSyncResult;
   readonly ownedProcesses?: readonly FakeOwnedProcessScript[];
 }
 
@@ -61,6 +74,7 @@ export function createFakeProcess(script: FakeProcessScript): ProcessAdapter {
 class FakeProcessAdapter implements ProcessAdapter {
   private resolutionIndex = 0;
   private commandIndex = 0;
+  private syncCommandIndex = 0;
   private ownedProcessIndex = 0;
 
   constructor(private readonly script: FakeProcessScript) {}
@@ -70,6 +84,9 @@ class FakeProcessAdapter implements ProcessAdapter {
     _options: ResolveExecutableOptions = {},
   ): ExecutableResolution {
     const entry = this.script.resolutions?.[this.resolutionIndex++];
+    if (entry === undefined && this.script.resolutionHandler !== undefined) {
+      return this.script.resolutionHandler(name);
+    }
     if (entry === undefined) {
       throw new Error(
         `resolveExecutable beyond the scripted resolutions: ${name}`,
@@ -85,6 +102,9 @@ class FakeProcessAdapter implements ProcessAdapter {
 
   spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
     const entry = this.script.commands?.[this.commandIndex++];
+    if (entry === undefined && this.script.commandHandler !== undefined) {
+      return Promise.resolve(this.script.commandHandler(options));
+    }
     if (entry === undefined) {
       throw new Error(
         `spawnCommand beyond the scripted commands: ${options.executable}`,
@@ -102,6 +122,21 @@ class FakeProcessAdapter implements ProcessAdapter {
         { once: true },
       );
     });
+  }
+
+  spawnCommandSync(options: SpawnSyncOptions): SpawnSyncResult {
+    const entry = this.script.syncCommands?.[this.syncCommandIndex++];
+    if (entry === undefined && this.script.syncCommandHandler !== undefined) {
+      return this.script.syncCommandHandler(options);
+    }
+    if (entry === undefined) {
+      throw new Error(
+        `spawnCommandSync beyond the scripted commands: ${options.executable}`,
+      );
+    }
+    return typeof entry.result === "function"
+      ? entry.result(options)
+      : entry.result;
   }
 
   spawnOwnedProcess(

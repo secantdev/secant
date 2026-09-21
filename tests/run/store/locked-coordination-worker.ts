@@ -1,4 +1,5 @@
 import { openRunGroup } from "../../../src/run/store/store.js";
+import { createProcessAdapter } from "../../../src/process/process.js";
 
 const [home, workspacePath] = process.argv.slice(2);
 if (!home || !workspacePath) {
@@ -6,7 +7,9 @@ if (!home || !workspacePath) {
 }
 
 try {
-  const group = openRunGroup(home, workspacePath);
+  const group = openRunGroup(home, workspacePath, {
+    process: createProcessAdapter(),
+  });
   group.close();
   throw new Error("locked coordination database unexpectedly opened");
 } catch (error) {

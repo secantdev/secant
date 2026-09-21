@@ -15,6 +15,7 @@ import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import type { MigrationsJournal } from "drizzle-orm/migrator";
 import { z } from "zod";
 import type { SteerCapability } from "../../harness/harness.js";
+import { type ProcessAdapter } from "../../process/process.js";
 import type {
   ArtifactType,
   AttemptOutcome,
@@ -855,6 +856,7 @@ export function openRunGroup(
   secantHome: string,
   workspacePath: string,
   options: {
+    readonly process: ProcessAdapter;
     readonly now?: () => Date;
     /** Whether the process owning a live Run is still alive (#98 S2). Defaults
      *  to a real probe (`process.kill(pid, 0)`); a test injects a fixed answer to
@@ -864,10 +866,11 @@ export function openRunGroup(
      *  to the real pid; a test overrides it so two `openRunGroup`s on one home stand
      *  in for two processes with distinct pids. */
     readonly selfPid?: number;
-  } = {},
+  },
 ): RunGroup {
   const selfPid = options.selfPid ?? process.pid;
   const isOwnerAlive = options.isOwnerAlive ?? processIsAlive;
+  const processAdapter = options.process;
   const groupDir = join(secantHome, "runs", groupDirName(workspacePath));
   mkdirSync(groupDir, { recursive: true });
   const { db, sqlite, rebuilt } = openCoordination(
@@ -1136,6 +1139,7 @@ export function openRunGroup(
         isOwnerAlive,
         openDatabase: openRunDatabase,
         trackHandle: (database) => trackRunHandle(runId, database),
+        process: processAdapter,
       });
     },
     listRuns() {

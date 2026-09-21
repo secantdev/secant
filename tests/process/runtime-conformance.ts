@@ -565,6 +565,12 @@ async function executionRealCommand(): Promise<void> {
                 "Runtime unattended commit",
               ],
               workingDirectory: ".",
+              env: {
+                GIT_AUTHOR_NAME: "Secant",
+                GIT_AUTHOR_EMAIL: "secant@localhost",
+                GIT_COMMITTER_NAME: "Secant",
+                GIT_COMMITTER_EMAIL: "secant@localhost",
+              },
             },
             produces: [
               { name: "commit-verdict", type: "verdict" },

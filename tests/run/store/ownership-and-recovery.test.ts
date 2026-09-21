@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync,
@@ -19,9 +18,6 @@ import { openFakeRunGroup as openRunGroup } from "./fake-git-process.js";
 
 const WORKSPACE = "/work/example-project";
 const AT = new Date("2026-09-12T12:00:00.000Z");
-const LOCKED_COORDINATION_WORKER = fileURLToPath(
-  new URL("./locked-coordination-worker.ts", import.meta.url),
-);
 
 function create(
   group: RunGroup,
@@ -47,31 +43,6 @@ function create(
 function groupDirOf(home: string): string {
   const runs = join(home, "runs");
   return join(runs, readdirSync(runs)[0]!);
-}
-
-function runLockedCoordinationWorker(home: string): Promise<string> {
-  const child = spawn(
-    process.execPath,
-    [LOCKED_COORDINATION_WORKER, home, WORKSPACE],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  return new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(stderr || `coordination worker exited ${code}`));
-    });
-  });
 }
 
 test("creating a Run produces the grouped directory and its store", async (t) => {
@@ -455,33 +426,6 @@ test("a live Run owner survives a coordination database rebuild", (t) => {
     runId: created.runId,
     ownerPid: 1000,
   });
-});
-
-test("a locked coordination database is never mistaken for corruption", async (t) => {
-  const home = makeTempDir("secant-store-");
-  const first = openRunGroup(home, WORKSPACE);
-  const created = create(first, "op-1");
-  assert.ok(created.outcome === "created");
-  first.close();
-
-  const coordinationPath = join(groupDirOf(home), "coordination.db");
-  const lock = new Database(coordinationPath);
-  lock.exec("BEGIN EXCLUSIVE");
-  try {
-    assert.deepEqual(JSON.parse(await runLockedCoordinationWorker(home)), {
-      kind: "aggregate",
-      errorCount: 2,
-      causeIsLastError: true,
-    });
-    assert.ok(existsSync(coordinationPath));
-  } finally {
-    lock.exec("COMMIT");
-    lock.close();
-  }
-
-  const reopened = openRunGroup(home, WORKSPACE);
-  t.after(() => reopened.close());
-  assert.equal(reopened.listRuns()[0]?.runId, created.runId);
 });
 
 test("a corrupt run.db reports a Problem for that Run while siblings stay readable", async (t) => {

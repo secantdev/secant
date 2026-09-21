@@ -1,6 +1,12 @@
 #!/usr/bin/env bun
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -875,7 +881,7 @@ async function storeLockedCoordination(): Promise<void> {
   const home = runtimeTemp("secant-runtime-locked-home-");
   const workspace = runtimeTemp("secant-runtime-locked-workspace-");
   const group = openRunGroup(home, workspace, { process: processAdapter });
-  group.createRun({
+  const created = group.createRun({
     operationId: "locked-create",
     bundleSnapshotDigest: "sha256:locked",
     launch: {},
@@ -910,13 +916,17 @@ async function storeLockedCoordination(): Promise<void> {
       errorCount: 2,
       causeIsLastError: true,
     });
+    assert.equal(existsSync(coordinationPath), true);
   } finally {
     lock.exec("COMMIT");
     lock.close();
   }
   const reopened = openRunGroup(home, workspace, { process: processAdapter });
   try {
-    assert.equal(reopened.listRuns().length, 1);
+    assert.deepEqual(
+      reopened.listRuns().map((run) => run.runId),
+      [created.runId],
+    );
   } finally {
     reopened.close();
   }

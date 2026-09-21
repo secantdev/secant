@@ -18,6 +18,14 @@ It establishes a baseline, then applies CPU saturation, rapid process churn,
 file-descriptor pressure, and all three together. Stressors publish readiness
 files; no sleep is used as a readiness mechanism.
 
+The second phase keeps each parent alive across ten complete pressure cycles,
+matching the long-lived test-runner shape of the two `westus3` failures. Every
+lane mixes a bounded synchronous spawn with asynchronous lifecycle observation.
+The child writes an out-of-band completion receipt before exit; if Bun drops its
+callbacks, the timeout record also captures the child's Linux `/proc` status and
+wait channel. Host PSI and cgroup CPU, memory, and PID counters bracket every
+cell.
+
 Run it from the repository root:
 
 ```sh
@@ -25,9 +33,12 @@ bun prototypes/issue-177-bun-child-lifecycle/run.mjs
 ```
 
 Results are written under `prototype-results/issue-177/`, which is ignored on
-this branch and uploaded by the branch-only GitHub Actions job. The default is
-12 fresh test files with five observations each; override those dimensions with
-`ISSUE_177_LANES` and `ISSUE_177_ITERATIONS`.
+this branch and uploaded by the branch-only GitHub Actions job. The short matrix
+defaults to 12 fresh test files with five asynchronous observations each. The
+sustained phase defaults to ten cycles with two asynchronous observations per
+lane. Override those dimensions with `ISSUE_177_LANES`,
+`ISSUE_177_ITERATIONS`, `ISSUE_177_SUSTAINED_CYCLES`, and
+`ISSUE_177_SUSTAINED_ITERATIONS`.
 
 Cleanup decision: this directory and the branch-only workflow job never merge.
 The ticket resolution links the preserved branch and Actions artifact.

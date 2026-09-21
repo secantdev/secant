@@ -12,7 +12,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as yieldTurn } from "node:timers/promises";
 
-import { runProbe } from "./probe.mjs";
+import { runProbe, runSyncProbe } from "./probe.mjs";
 
 function needs(axis, pressure) {
   return axis === pressure || axis === "combined";
@@ -94,15 +94,19 @@ async function startPressure(axis, lane) {
   };
 }
 
-export async function runLane(lane) {
-  const axis = process.env.ISSUE_177_AXIS ?? "baseline";
+export async function runLane(
+  lane,
+  axis = process.env.ISSUE_177_AXIS ?? "baseline",
+) {
   const iterations = Number.parseInt(
     process.env.ISSUE_177_ITERATIONS ?? "5",
     10,
   );
   const pressure = await startPressure(axis, lane);
   const observations = [];
+  let syncObservation;
   try {
+    syncObservation = runSyncProbe({ axis, lane });
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       observations.push(await runProbe({ axis, lane, iteration }));
     }
@@ -115,6 +119,7 @@ export async function runLane(lane) {
     lane,
     observations: observations.length,
     failures: observations.filter(({ success }) => !success).length,
+    syncFailure: syncObservation?.success === false,
     descriptorCount: pressure.descriptorCount,
     stressorCount: pressure.stressorCount,
   };

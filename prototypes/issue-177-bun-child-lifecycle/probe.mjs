@@ -1,8 +1,93 @@
-import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 
 const expectedStatus = 17;
+
+function receiptPath(resultPath, token) {
+  const root = join(dirname(resultPath), "receipts");
+  mkdirSync(root, { recursive: true });
+  return join(root, `${token.replaceAll(":", "-")}.json`);
+}
+
+function readOptional(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function childOsState(pid) {
+  if (process.platform !== "linux") return undefined;
+  return {
+    status: readOptional(`/proc/${pid}/status`),
+    waitChannel: readOptional(`/proc/${pid}/wchan`),
+  };
+}
+
+export function runSyncProbe({ axis, lane }) {
+  const bunPath = process.env.ISSUE_177_BUN;
+  const childPath = process.env.ISSUE_177_CHILD;
+  const resultPath = process.env.ISSUE_177_RESULT;
+  if (
+    bunPath === undefined ||
+    childPath === undefined ||
+    resultPath === undefined
+  ) {
+    throw new Error(
+      "ISSUE_177_BUN, ISSUE_177_CHILD, and ISSUE_177_RESULT are required",
+    );
+  }
+
+  const token = `${axis}:${lane}:${process.pid}:sync`;
+  const receipt = receiptPath(resultPath, token);
+  appendFileSync(
+    resultPath,
+    `${JSON.stringify({ kind: "sync-start", axis, lane, token, at: new Date().toISOString() })}\n`,
+  );
+  const startedAt = performance.now();
+  const result = spawnSync(bunPath, [childPath], {
+    encoding: "utf8",
+    timeout: 5_000,
+    env: {
+      ...process.env,
+      ISSUE_177_RECEIPT: receipt,
+      ISSUE_177_TOKEN: token,
+    },
+  });
+  const expectedStdout = `stdout-a:${token}\nstdout-b:${token}\n`;
+  const expectedStderr = `stderr:${token}\n`;
+  const failureReasons = [];
+  if (result.error !== undefined) failureReasons.push("spawn-sync-error");
+  if (result.status !== expectedStatus)
+    failureReasons.push("exit-code-mismatch");
+  if (result.stdout !== expectedStdout) failureReasons.push("stdout-mismatch");
+  if (result.stderr !== expectedStderr) failureReasons.push("stderr-mismatch");
+  if (!existsSync(receipt)) failureReasons.push("missing-completion-receipt");
+  const observation = {
+    kind: "sync-observation",
+    axis,
+    lane,
+    token,
+    parentRuntime: process.versions.bun === undefined ? "node" : "bun",
+    parentPid: process.pid,
+    parentStartedAt: process.env.ISSUE_177_PARENT_STARTED_AT,
+    observedAt: new Date().toISOString(),
+    success: failureReasons.length === 0,
+    failureReasons,
+    status: result.status,
+    signal: result.signal,
+    error: result.error?.message,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    receipt: readOptional(receipt),
+    durationMs: Number((performance.now() - startedAt).toFixed(3)),
+  };
+  appendFileSync(resultPath, `${JSON.stringify(observation)}\n`);
+  return observation;
+}
 
 export async function runProbe({ axis, lane, iteration }) {
   const bunPath = process.env.ISSUE_177_BUN;
@@ -19,6 +104,7 @@ export async function runProbe({ axis, lane, iteration }) {
   }
 
   const token = `${axis}:${lane}:${process.pid}:${iteration}`;
+  const receipt = receiptPath(resultPath, token);
   const startedAt = performance.now();
   const events = [];
   let stdout = "";
@@ -26,7 +112,11 @@ export async function runProbe({ axis, lane, iteration }) {
   let settled = false;
 
   const child = spawn(bunPath, [childPath], {
-    env: { ...process.env, ISSUE_177_TOKEN: token },
+    env: {
+      ...process.env,
+      ISSUE_177_RECEIPT: receipt,
+      ISSUE_177_TOKEN: token,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   events.push({ event: "returned", atMs: 0, exitCode: child.exitCode });
@@ -56,7 +146,10 @@ export async function runProbe({ axis, lane, iteration }) {
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      record("timeout");
+      record("timeout", {
+        completionReceipt: readOptional(receipt),
+        osState: childOsState(child.pid),
+      });
       child.stdout.destroy();
       child.stderr.destroy();
       child.kill("SIGKILL");
@@ -87,6 +180,7 @@ export async function runProbe({ axis, lane, iteration }) {
   if (stderr !== expectedStderr) failureReasons.push("stderr-mismatch");
   if (child.exitCode !== expectedStatus)
     failureReasons.push("exit-code-mismatch");
+  if (!existsSync(receipt)) failureReasons.push("missing-completion-receipt");
   if (eventNames.indexOf("exit") > eventNames.indexOf("close")) {
     failureReasons.push("close-before-exit");
   }
@@ -98,11 +192,14 @@ export async function runProbe({ axis, lane, iteration }) {
     iteration,
     parentRuntime: process.versions.bun === undefined ? "node" : "bun",
     parentPid: process.pid,
+    parentStartedAt: process.env.ISSUE_177_PARENT_STARTED_AT,
+    observedAt: new Date().toISOString(),
     success: failureReasons.length === 0,
     failureReasons,
     finalExitCode: child.exitCode,
     stdout,
     stderr,
+    receipt: readOptional(receipt),
     durationMs: Number((performance.now() - startedAt).toFixed(3)),
     events,
   };

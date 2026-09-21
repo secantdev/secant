@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 import {
   DEFAULT_TARGETS,
   checkMigrationJournal,
@@ -53,46 +51,9 @@ test("a journal timestamp that drifts from its directory name fails", () => {
   assert.match(errors[0]!, /does not match its directory name/);
 });
 
-test("an ungenerated schema change fails with the regeneration message", () => {
-  const temp = makeTempDir("secant-migration-check-");
-  const migrations = join(temp, "migrations");
-  cpSync(join(process.cwd(), "src", "drizzle", "catalog"), migrations, {
-    recursive: true,
-  });
-
-  const sqliteCore = pathToFileURL(
-    join(
-      process.cwd(),
-      "node_modules",
-      "drizzle-orm",
-      "sqlite-core",
-      "index.js",
-    ),
-  ).href;
-  const existingSchema = readFileSync(
-    join(process.cwd(), "src", "catalog", "schema.ts"),
-    "utf8",
-  ).replace('"drizzle-orm/sqlite-core"', JSON.stringify(sqliteCore));
-  const schema = join(temp, "schema.ts");
-  writeFileSync(
-    schema,
-    `${existingSchema}\nexport const ungenerated = sqliteTable("ungenerated", { id: text("id").primaryKey() });\n`,
-  );
-  const config = join(temp, "drizzle.config.ts");
-  writeFileSync(
-    config,
-    `export default ${JSON.stringify({ dialect: "sqlite", schema, out: migrations })};\n`,
-  );
-
-  const result = spawnSync(
-    process.execPath,
-    ["scripts/check-migrations.ts", config],
-    { cwd: process.cwd(), encoding: "utf8" },
-  );
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /Schema has changes not captured in migrations!/);
-  assert.match(result.stderr, /Run: bun run migrations:generate/);
-});
+// The ungenerated-schema-drift assertion (a real drizzle-kit subprocess) moved to
+// tests/process/runtime-conformance.ts — `migration-generator-drift` (#185); the
+// in-process registry/journal checks stay here.
 
 test("a generated migration missing from its embedded registry fails", () => {
   const temp = makeTempDir("secant-migration-registry-");

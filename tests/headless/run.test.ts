@@ -8,10 +8,10 @@ import {
 import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
-import { createProcessAdapter } from "../../src/process/process.js";
-import { createApplication, openRunGroup } from "../helpers/application.js";
+import { createApplication } from "../helpers/application.js";
+import { openFakeRunGroup as openRunGroup } from "../run/store/fake-git-process.js";
+import { createFakeBundleProcess } from "../helpers/fakeBundleProcess.js";
 import {
-  ensureRuntimeOnPath,
   hostPlatform,
   writeCommandBundle,
   writeGateBundle,
@@ -22,8 +22,7 @@ import {
 import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
-ensureRuntimeOnPath();
-const executionProcess = createProcessAdapter();
+const executionProcess = createFakeBundleProcess();
 
 function harness(t: TestContext, opts: { commandTimeoutMs?: number } = {}) {
   const h = openHeadlessHarness(t, {
@@ -76,7 +75,7 @@ test("run launch on an untrusted digest prints the summary, warning, and digest,
   assert.equal(h.stdout(), "");
 });
 
-test("run launch --trust runs to succeeded, and a second launch needs no trust", async (t) => {
+test("[headless-on-doubles] run launch --trust runs to succeeded, and a second launch needs no trust", async (t) => {
   const h = await harness(t);
   const { id, digest } = await h.install();
   h.approve();
@@ -561,7 +560,6 @@ test("run answer needs exactly one of --continue or --stop", async (t) => {
 });
 
 test("two invocations: block under one instance, continue under a fresh instance over the same home (#85, AC6)", async (t) => {
-  ensureRuntimeOnPath();
   const catalogHome = makeTempDir("secant-2inv-cat-");
   const storeHome = makeTempDir("secant-2inv-store-");
   const workspace = realpathSync.native(makeTempDir("secant-2inv-ws-"));

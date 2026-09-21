@@ -1,45 +1,187 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, realpathSync } from "node:fs";
+import {
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
-import {
-  createClaudeCodeAdapter,
-  createCodexAdapter,
-  discoverCodex,
-} from "../../src/harness/harness.js";
+import type { HarnessProfile } from "../../src/harness/harness.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
-import {
-  installReplayer,
-  type InstalledReplayer,
-} from "../harness/replayer.js";
-import { installCodexReplayer } from "../harness/codex-replayer.js";
+import type {
+  ProcessAdapter,
+  SpawnResult,
+  SpawnSyncResult,
+} from "../../src/process/process.js";
+import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeProcess } from "../process/fake-adapter.js";
+import { createFakeGitProcess } from "../run/store/fake-git-process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
-import { seedTestRepairWorkspace } from "../helpers/testRepairWorkspace.js";
 
 // #149: run the one maintained Test Repair Proof Bundle exactly as a user's
 // Bundle, headlessly, through both registered Harnesses. One archive is built
 // once; both scenarios install its exact bytes/digest into fresh Workspaces and
 // launch with identical routing and launch inputs — only `--harness` differs.
-// Both recorded replayers repair the test, reach the authored approve-commit
-// gate with no earlier commit, then succeed and commit after approval. The
-// single-Harness #119 assertion this generalizes stays here as one scenario.
+//
+// This layer proves the *routing* over deterministic doubles: no real child, no
+// recorded Harness replayer. Each Harness is a scripted `createFake` Adapter and
+// the Process is a bespoke double (below) — the fix Turn advances, the run-test
+// verdict flips fail→pass across it, both selections reach the authored
+// approve-commit gate, and answering `--continue` rests the Run succeeded and
+// commits. The real git-working-tree evidence (a modified `sum.mjs`, the advanced
+// HEAD, the "Repair failing test" commit) is a real-child concern that lives in
+// the compiled-binary M3 gate smoke (docs/agents/testing.md), not here.
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PROOF_BUNDLE = join(PROJECT_ROOT, "bundles", "test-repair-workflow");
-const CLAUDE_TEST_REPAIR_FIXTURE = join(
-  PROJECT_ROOT,
-  "tests",
-  "harness",
-  "fixtures",
-  "claude-code",
-  "test-repair",
-);
-const TEST_REPAIR_SESSION_ID = "77777777-7777-4777-8777-777777777777";
-const CLAUDE_REPLAYER_VERSION = "2.1.273 (Claude Code)";
 const BUNDLE_ID = "dev.secant.test-repair";
+
+const encoder = new TextEncoder();
+
+function commandExited(status: number, text = ""): SpawnResult {
+  return { kind: "exited", status, text: encoder.encode(text) };
+}
+
+function syncExited(stdout = "", status = 0): SpawnSyncResult {
+  return {
+    kind: "exited",
+    status,
+    stdout: encoder.encode(stdout),
+    stderr: new Uint8Array(),
+  };
+}
+
+/** The bespoke Process double for the Test Repair Proof Bundle, process-free: it
+ *  resolves the workflow's `bash`/`git` commands, answers the `git-worktree-root`
+ *  Preflight probe (the Workspace is a worktree root), flips the run-test verdict
+ *  fail→pass across the fix Turn (a small counter reproduces what the real Edit
+ *  causes: the baseline run fails, the run after the fix passes), and lets
+ *  `git commit` succeed. The Run Store's artifact Git delegates to the in-memory
+ *  fake Git. */
+function fakeTestRepairProcess(): ProcessAdapter {
+  const git = createFakeGitProcess();
+  let bashRuns = 0;
+  return createFakeProcess({
+    resolutionHandler: (name) => ({
+      kind: "found",
+      executable: name,
+      prefixArgs: [],
+    }),
+    commandHandler: (options): SpawnResult => {
+      if (options.executable === "bash") {
+        bashRuns += 1;
+        // Baseline run fails; the fix Turn "repairs" the code, so the next run passes.
+        return commandExited(bashRuns === 1 ? 1 : 0, `run ${bashRuns}\n`);
+      }
+      if (options.executable === "git") return commandExited(0);
+      throw new Error(
+        `unexpected fake Command executable: ${options.executable}`,
+      );
+    },
+    syncCommandHandler: (options): SpawnSyncResult => {
+      // `git -C <workspace> rev-parse --show-toplevel`: the Workspace is the root.
+      if (options.args.includes("rev-parse")) {
+        return syncExited(`${options.args[1] ?? ""}\n`);
+      }
+      return git.spawnCommandSync(options);
+    },
+  });
+}
+
+/** A complete Harness profile for a scripted fake Adapter. */
+function profile(
+  harness: string,
+  overrides: Partial<HarnessProfile> = {},
+): HarnessProfile {
+  return {
+    harness,
+    executable: `fake-${harness}`,
+    executableVersion: "0.0.0-fake",
+    platform: "linux",
+    adapterRevision: "fake-1",
+    configurationPosture: "user-compatible",
+    recovery: { mode: "native-reattach", evidence: "scripted fake" },
+    interruption: { mode: "process-only", evidence: "scripted fake" },
+    approvals: { available: true, evidence: "scripted fake" },
+    clarifications: { available: false, evidence: "scripted fake" },
+    steer: { available: false, evidence: "scripted fake" },
+    modelSelection: { at: "unavailable", evidence: "scripted fake" },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "scripted fake",
+    },
+    skillDelivery: { mode: "plain-path", evidence: "scripted fake" },
+    fileDelivery: { mode: "plain-path", evidence: "scripted fake" },
+    ...overrides,
+  };
+}
+
+/** The Claude Code fix Turn: it surfaces the Edit as an approval Request the
+ *  client answers by policy (the permission-bridge seam), then completes. */
+function claudeScript(sumPath: string): FakeScript {
+  return {
+    profile: profile("Claude Code"),
+    turns: [
+      {
+        requests: [
+          {
+            id: "edit-sum",
+            shape: {
+              kind: "approval",
+              tool: "Edit",
+              input: sumPath,
+              decisions: ["allow", "deny"],
+            },
+            awaited: true,
+          },
+        ],
+        result: {
+          kind: "completed",
+          detail: {
+            finalContent: "repaired the failing test",
+            effectiveModel: { known: true, model: "claude-opus-5[1m]" },
+            session: { state: "open" },
+          },
+        },
+      },
+    ],
+  };
+}
+
+/** The Codex fix Turn: it auto-approves the edit internally, so no approval
+ *  Request crosses to the client — the edit is a generic tool-activity event. */
+function codexScript(): FakeScript {
+  return {
+    profile: profile("Codex", {
+      steer: { available: true, evidence: "fake native steer" },
+    }),
+    turns: [
+      {
+        events: [
+          {
+            kind: "tool-activity",
+            activity: {
+              tool: "file-change",
+              phase: "completed",
+              summary: "applied the repair",
+            },
+          },
+        ],
+        result: {
+          kind: "completed",
+          detail: {
+            finalContent: "repaired the failing test",
+            effectiveModel: { known: true, model: "gpt-5.6-sol" },
+            session: { state: "open" },
+          },
+        },
+      },
+    ],
+  };
+}
 
 /** A generic-seam scenario: the only externally supplied difference between the
  *  two proofs. `evidence` asserts the Harness-specific observable identity that
@@ -47,7 +189,7 @@ const BUNDLE_ID = "dev.secant.test-repair";
 interface Scenario {
   readonly harness: "claude-code" | "codex";
   readonly effectiveModel: string;
-  readonly evidence: (run: RunSnapshot, f: Fixture) => void;
+  readonly evidence: (run: RunSnapshot) => void;
 }
 
 interface RunTimelineEvent {
@@ -72,7 +214,7 @@ const SCENARIOS: readonly Scenario[] = [
   {
     harness: "claude-code",
     effectiveModel: "claude-opus-5[1m]",
-    evidence: (run, f) => {
+    evidence: (run) => {
       // Claude Code surfaces the Edit as an approval request the client answers
       // by policy — the permission-bridge seam.
       assert.ok(
@@ -91,9 +233,6 @@ const SCENARIOS: readonly Scenario[] = [
         ),
         JSON.stringify(run.timeline),
       );
-      const [editApproval] = f.claudeReplayer.bridges();
-      assert.equal(editApproval?.tool_name, "Edit");
-      assert.equal(editApproval?.behavior, "allow");
     },
   },
   {
@@ -123,15 +262,6 @@ interface Fixture {
   readonly digest: string;
   readonly workspace: string;
   readonly failingTest: string;
-  readonly baselineCommit: string;
-  readonly claudeReplayer: InstalledReplayer;
-}
-
-function git(workspace: string, args: readonly string[]): string {
-  return execFileSync("git", [...args], {
-    cwd: workspace,
-    encoding: "utf8",
-  }).trim();
 }
 
 // The one exact `.wfb` archive both scenarios reuse (AC1). Built once with
@@ -145,7 +275,11 @@ function proofArchive(): { readonly path: string; readonly digest: string } {
     makeTempDir("secant-two-harness-archive-"),
     "test-repair.wfb",
   );
-  const wired = wireApplication({ secantHome: home, launchCwd: home });
+  const wired = wireApplication({
+    secantHome: home,
+    launchCwd: home,
+    process: fakeTestRepairProcess(),
+  });
   try {
     const built = wired.bundleManagement.build(PROOF_BUNDLE, {
       noInstall: true,
@@ -161,47 +295,54 @@ function proofArchive(): { readonly path: string; readonly digest: string } {
 }
 
 function fixture(t: TestContext, scenario: Scenario): Fixture {
-  // Both replayers are installed and both Adapters wired in every scenario, so
-  // the only launch-time difference is `--harness`. Claude discovers on PATH;
-  // Codex discovers on the explicit path handed to its Adapter (captured before
-  // the PATH mutation so its shebang runtime stays resolvable).
-  const claudeReplayer = installReplayer(
-    CLAUDE_REPLAYER_VERSION,
-    CLAUDE_TEST_REPAIR_FIXTURE,
-  );
-  const codexReplayer = installCodexReplayer("test-repair");
-  const savedPath = process.env.PATH;
-  const savedConfiguredClaude = process.env.SECANT_CLAUDE_CODE;
-  process.env.PATH = claudeReplayer.path;
-  delete process.env.SECANT_CLAUDE_CODE;
-  t.after(() => {
-    if (savedPath === undefined) delete process.env.PATH;
-    else process.env.PATH = savedPath;
-    if (savedConfiguredClaude === undefined)
-      delete process.env.SECANT_CLAUDE_CODE;
-    else process.env.SECANT_CLAUDE_CODE = savedConfiguredClaude;
-  });
-
-  // Seed at the canonical path the Application resolves the launch cwd to, so the
-  // `file` launch input (an absolute passthrough) names the same directory the
-  // selected Adapter is prepared against. Codex's replayer strict-redacts the
-  // Workspace path in the rendered prompt against that cwd; a `/var` vs
-  // `/private/var` desync would lose the Turn.
+  // A plain temp Workspace — not the real-git seed helper, which is shared with
+  // real-child scenarios. The bespoke Process double answers the git-worktree-root
+  // probe, so no real `git init` is needed here. Seed at the canonical path the
+  // Application resolves the launch cwd to, so the `file` launch input (an absolute
+  // passthrough) names the same directory.
   const workspace = realpathSync.native(makeTempDir("secant-test-repair-ws-"));
-  const { failingTest, baselineCommit } = seedTestRepairWorkspace(workspace);
+  const failingTest = join(workspace, "sum.test.mjs");
+  writeFileSync(
+    join(workspace, "sum.mjs"),
+    "export const sum = (a, b) => a - b;\n",
+  );
+  writeFileSync(
+    failingTest,
+    [
+      'import assert from "node:assert/strict";',
+      'import test from "node:test";',
+      'import { sum } from "./sum.mjs";',
+      'test("adds two numbers", () => assert.equal(sum(2, 3), 5));',
+      "",
+    ].join("\n"),
+  );
 
+  // Both fake Adapters are wired and both discoveries succeed in every scenario,
+  // so the only launch-time difference is `--harness`. Discovery is resolved
+  // without a spawn; the scripted fake is what actually runs.
   const secantHome = makeTempDir("secant-test-repair-home-");
   const wired = wireApplication({
     secantHome,
     launchCwd: workspace,
-    harnessAdapter: createClaudeCodeAdapter({
-      sessionId: () => TEST_REPAIR_SESSION_ID,
+    process: fakeTestRepairProcess(),
+    harnessAdapter: createFake(claudeScript(join(workspace, "sum.mjs")))(),
+    codexHarnessAdapter: createFake(codexScript())(),
+    discoverClaudeCode: () => ({
+      kind: "found",
+      attempt: {
+        source: "path",
+        name: "claude",
+        description: "PATH name 'claude'",
+      },
     }),
-    codexHarnessAdapter: createCodexAdapter({
-      path: codexReplayer.path,
-      env: {},
+    discoverCodex: () => ({
+      kind: "found",
+      attempt: {
+        source: "path",
+        name: "codex",
+        description: "PATH name 'codex'",
+      },
     }),
-    discoverCodex: () => discoverCodex({ path: codexReplayer.path, env: {} }),
   });
   t.after(() => {
     wired.runGroup.close();
@@ -230,8 +371,6 @@ function fixture(t: TestContext, scenario: Scenario): Fixture {
     digest: entry.digest,
     workspace,
     failingTest,
-    baselineCommit,
-    claudeReplayer,
   };
 }
 
@@ -299,7 +438,7 @@ for (const scenario of SCENARIOS) {
     // The generic Harness Seam yields a per-Attempt observed model; the two
     // scenarios report different models, proving different Adapters ran.
     assert.equal(run.effectiveModel, scenario.effectiveModel);
-    scenario.evidence(run, f);
+    scenario.evidence(run);
     // The seeded test forces the baseline Verdict to `fail`; observing the fix
     // Step and one completed Repeat iteration proves the group was entered.
     // Reaching the authored gate, plus the bound Verdict below, proves the next
@@ -319,8 +458,8 @@ for (const scenario of SCENARIOS) {
     ]);
     assert.equal(verdict.code, 0, verdict.stderr);
     assert.equal(verdict.stdout.trim(), "pass");
-    assert.equal(git(f.workspace, ["rev-parse", "HEAD"]), f.baselineCommit);
-    assert.equal(git(f.workspace, ["status", "--short"]), "M sum.mjs");
+    // The git-working-tree evidence (modified sum.mjs before the commit) is a
+    // real-child concern covered by the compiled-binary M3 gate smoke.
 
     const answered = await headless(f.wired, [
       "run",
@@ -339,22 +478,8 @@ for (const scenario of SCENARIOS) {
       "read",
       `${runId}/commit-verdict`,
     ]);
-    const commitOutput = await headless(f.wired, [
-      "run",
-      "read",
-      `${runId}/commit-output`,
-    ]);
-    const commitDiagnostic = `${commitVerdict.stdout}\n${commitOutput.stdout}\n${git(f.workspace, ["status", "--short"])}`;
-    assert.notEqual(
-      git(f.workspace, ["rev-parse", "HEAD"]),
-      f.baselineCommit,
-      commitDiagnostic,
-    );
-    assert.deepEqual(
-      git(f.workspace, ["log", "-2", "--format=%s"]).split("\n"),
-      ["Repair failing test", "Baseline failing test"],
-    );
-    assert.equal(git(f.workspace, ["status", "--short"]), "");
+    // The advanced HEAD, the "Repair failing test" commit, and the clean tree are
+    // real-git evidence covered by the compiled-binary M3 gate smoke, not here.
     assert.equal(commitVerdict.code, 0, commitVerdict.stderr);
     assert.equal(commitVerdict.stdout.trim(), "pass");
   });

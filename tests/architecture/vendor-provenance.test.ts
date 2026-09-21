@@ -5,7 +5,6 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { makeTempDir } from "../helpers/tempDir.js";
 import {
-  checkEntryDeclarations,
   checkNoticesCoverage,
   checkVendorProvenance,
   scanEntryDeclaration,
@@ -29,9 +28,9 @@ test("every declared runtime dependency has a notices section naming its pin", (
   assert.deepEqual(checkNoticesCoverage(repoRoot), []);
 });
 
-test("no Module entry declaration names a fenced package (S2)", () => {
-  assert.deepEqual(checkEntryDeclarations(repoRoot), []);
-});
+// The real-declaration-emission assertion (a real `tsc` subprocess via
+// checkEntryDeclarations) moved to tests/process/runtime-conformance.ts —
+// `entry-declaration-surface` (#185); the in-process scan checks stay here.
 
 test("a fenced package in a non-renderer entry declaration is flagged (S2)", () => {
   // A type inferred across the entry leaves this reference in the emitted .d.ts;

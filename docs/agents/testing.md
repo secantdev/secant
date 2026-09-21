@@ -43,6 +43,9 @@ refusal, the smoke runs on each of the three operating systems:
   against the recorded Claude Code replayer on PATH, reaching its authored Human Gate and, once answered, `succeeded` with the frozen Run `--json` fields.
 - The **signal halt-then-resume** path: a Run interrupted by SIGINT mid-execution rests `halted` (POSIX aborts the live Run and leaves the claim live;
   Windows SIGINT terminates and leaves the same claim), and a later `resume` completes it.
+- The **owner-death recovery** path (#86): a Run whose owner is killed by SIGKILL — uncatchable, so no handler runs and the claim is left live at a now-dead
+  pid, exactly like a crash — is reconciled `halted` by a later invocation running no Step work, and a plain `resume` (no `--takeover`, because nothing is live)
+  recovers it to `succeeded`, re-running no earlier Step. This is the one compiled-binary home for owner death; the process-free suite never spawns.
 - **Windows `.cmd` shim** acceptance and refusal: a Command step naming an npm-style `.cmd` shim resolves through the shim, while a broken shim is refused
   at Preflight (POSIX has no shim, so it is skipped there).
 - **Windows App Execution Alias** acceptance: when the runner exposes a `pwsh` or `winget` alias that `where.exe` finds after the primary PATH walk misses,

@@ -1,38 +1,81 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
-  createClaudeCodeAdapter,
   type HarnessAdapter,
   type HarnessProfile,
 } from "../../src/harness/harness.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import type { RunView } from "../../src/application/projection-port.js";
-import { installReplayer } from "../harness/replayer.js";
-import { createFake } from "../harness/fake-adapter.js";
-import { ensureRuntimeOnPath, RUNTIME_NAME } from "../helpers/commandBundle.js";
+import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeBundleProcess } from "../helpers/fakeBundleProcess.js";
+import { RUNTIME_NAME } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // The first Agent Step executed headlessly (#116): a synthesized Bundle
 // `command -> agent (session "s", prompt with a {{artifact:…}} file slot and a
-// skill in `uses`) -> command`, launched through the composition wiring against
-// the recorded plain-Turn replayer on a temporary configured command. Drives the
-// Projection Port to rest `succeeded` and asserts the durable Turn view — the
-// timeline kinds, the Session availability, the effective model, and the rendered
-// transcript input — the headless `run show` renders.
+// skill in `uses`) -> command`, launched through the composition wiring against a
+// deterministic fake Adapter and a deterministic Process double (no child spawns,
+// #185). Drives the Projection Port to rest `succeeded` and asserts the durable
+// Turn view — the timeline kinds, the Session availability, the effective model,
+// and the rendered transcript input — the headless `run show` renders.
 
-ensureRuntimeOnPath();
+// The effective model, executable version, and assistant content the fake Claude
+// Code Adapter scripts, matching what the recorded plain-Turn fixture observed.
+const PLAIN_EFFECTIVE_MODEL = "claude-opus-5";
+const PLAIN_EXECUTABLE_VERSION = "2.1.273 (Claude Code)";
 
-// The session id, effective model, and assistant content baked into the recorded
-// plain-Turn fixture; the injected Adapter mints this id so the init frame is
-// acknowledged and the recording replays.
-const PLAIN_SESSION_ID = "11111111-1111-4111-8111-111111111111";
-const REPLAYER_VERSION = "2.1.273 (Claude Code)";
+/** The deterministic Claude Code profile the fake Adapter reports for the plain
+ *  Turn: the observed identity (#125) the Agent-step assertions read back — an
+ *  observed `claude-code` name, a resolved executable, and the recorded version. */
+function claudeCodeProfile(): HarnessProfile {
+  return {
+    harness: "claude-code",
+    executable: "/usr/bin/claude",
+    executableVersion: PLAIN_EXECUTABLE_VERSION,
+    platform: "linux",
+    adapterRevision: "fake-claude-1",
+    configurationPosture: "user-compatible",
+    recovery: { mode: "native-reattach", evidence: "scripted fake" },
+    interruption: { mode: "process-only", evidence: "scripted fake" },
+    approvals: { available: true, evidence: "scripted fake" },
+    clarifications: { available: false, evidence: "scripted fake" },
+    steer: { available: false, evidence: "scripted fake" },
+    modelSelection: { at: "unavailable", evidence: "scripted fake" },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "scripted fake",
+    },
+    skillDelivery: { mode: "plain-path", evidence: "scripted fake" },
+    fileDelivery: { mode: "plain-path", evidence: "scripted fake" },
+  };
+}
+
+/** A single-Turn plain script: it emits authoritative assistant content, then
+ *  settles `completed` with the observed effective model and an open Session — the
+ *  timeline kinds, model, and Session availability the plain replayer produced. */
+function plainScript(): FakeScript {
+  return {
+    profile: claudeCodeProfile(),
+    turns: [
+      {
+        events: [{ kind: "assistant-content", content: "hello" }],
+        result: {
+          kind: "completed",
+          detail: {
+            finalContent: "hello",
+            effectiveModel: { known: true, model: PLAIN_EFFECTIVE_MODEL },
+            session: { state: "open" },
+          },
+        },
+      },
+    ],
+  };
+}
 
 function codexProfile(): HarnessProfile {
   return {
@@ -55,17 +98,6 @@ function codexProfile(): HarnessProfile {
     skillDelivery: { mode: "plain-path", evidence: "scripted fake" },
     fileDelivery: { mode: "plain-path", evidence: "scripted fake" },
   };
-}
-
-function fixtureCase(name: string): string {
-  return join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "harness",
-    "fixtures",
-    "claude-code",
-    name,
-  );
 }
 
 /** Author a `command -> agent -> command` Bundle folder: a `file` Launch input
@@ -132,21 +164,18 @@ function writeAgentBundle(): { folder: string; id: string } {
   return { folder, id: manifest.bundle.id };
 }
 
-/** Wire the Application against a temporary home and the plain-Turn replayer as the
- *  configured Claude Code, install the Agent Bundle, and approve the Workspace. */
+/** Wire the Application against a temporary home and the deterministic fake Claude
+ *  Code Adapter, install the Agent Bundle, and approve the Workspace. */
 function wireAgent(t: TestContext): {
   wired: Wiring;
   bundleId: string;
   digest: string;
   docPath: string;
 } {
-  const replayer = installReplayer(REPLAYER_VERSION, fixtureCase("plain"));
-  // `executablePath` is already the replayer's absolute path; the configured
-  // command resolves straight to it, so discovery never falls through to a real
-  // `claude` on PATH (no real Harness runs in CI, ADR 0027).
-  const executable = replayer.executablePath;
+  // A resolvable executable so Agent-bearing Preflight discovery passes without a
+  // spawn (resolution is a stat, not a child); the fake Adapter is what runs.
   const savedEnv = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-  process.env[CLAUDE_CODE_EXECUTABLE_ENV] = executable;
+  process.env[CLAUDE_CODE_EXECUTABLE_ENV] = process.execPath;
   t.after(() => {
     if (savedEnv === undefined) delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
     else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedEnv;
@@ -156,10 +185,11 @@ function wireAgent(t: TestContext): {
   const wired = wireApplication({
     secantHome: makeTempDir("secant-agent-home-"),
     launchCwd: workspace,
-    // The Adapter mints the fixture's session id so the recorded init acknowledges.
-    harnessAdapter: createClaudeCodeAdapter({
-      sessionId: () => PLAIN_SESSION_ID,
-    }),
+    // A deterministic Process double: the Command bookends and the Run Store's Git
+    // go through the fake, so no child spawns.
+    process: createFakeBundleProcess(),
+    // The fake Adapter reproduces the plain Turn's observed identity and events.
+    harnessAdapter: createFake(plainScript())(),
   });
   t.after(() => {
     wired.runGroup.close();
@@ -301,6 +331,7 @@ test("[selected-versus-observed-evidence] headless distinguishes durable selecti
   const wired = wireApplication({
     secantHome: makeTempDir("secant-headless-codex-home-"),
     launchCwd: workspace,
+    process: createFakeBundleProcess(),
     codexHarnessAdapter: adapter,
     discoverCodex: () => ({
       kind: "found",

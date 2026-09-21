@@ -1491,6 +1491,177 @@ try {
     signalHaltThenResumeScenario,
   );
 
+  // #86 through the installed binary on every OS: a Run's owner is KILLED
+  // (SIGKILL — uncatchable, so no signal handler runs and the claim is left live
+  // at a now-dead pid, exactly like a crash), a later invocation reconciles the Run
+  // `halted`, and a plain `resume` (no `--takeover`, because nothing is live) recovers
+  // it from durable state with no earlier Step re-run. This is the one compiled-binary
+  // home for the owner-death recovery path; the process-free suite never spawns.
+  async function ownerDeathRecoveryScenario(): Promise<void> {
+    const home = join(smokeRoot, "owner-death-home");
+    const workspace = join(smokeRoot, "owner-death-workspace");
+    await mkdir(workspace, { recursive: true });
+    const env = homeEnv(home);
+    const runtime = basename(process.execPath);
+    const markerDir = join(smokeRoot, "owner-death-markers");
+    await mkdir(markerDir, { recursive: true });
+    const firstMarker = join(markerDir, "first");
+    const startedMarker = join(markerDir, "started");
+    const proceedMarker = join(markerDir, "proceed");
+    const lastMarker = join(markerDir, "last");
+    const q = (value: unknown) => JSON.stringify(value);
+    const id = "dev.secant.owner-death-smoke";
+    const manifest = {
+      formatVersion: 1,
+      bundle: {
+        id,
+        version: "1.0.0",
+        name: "Owner Death Smoke",
+        description: "An owner-death-recovery smoke Bundle.",
+      },
+      platforms: ["windows", "macos", "linux"],
+      inputs: {},
+      assets: [],
+      routing: [
+        {
+          id: "first",
+          kind: "command",
+          produces: [{ name: "t0", type: "text" }],
+          command: {
+            executable: runtime,
+            // Append one line, so a re-run would leave two — proving the resume
+            // continues from the killed Step, not from the start.
+            arguments: [
+              "-e",
+              `require('node:fs').appendFileSync(${q(firstMarker)}, 'ran\\n')`,
+            ],
+          },
+        },
+        {
+          id: "block",
+          kind: "command",
+          produces: [{ name: "t1", type: "text" }],
+          command: {
+            executable: runtime,
+            arguments: [
+              "-e",
+              `const fs=require('node:fs');` +
+                `fs.writeFileSync(${q(startedMarker)}, String(process.pid));` +
+                `if(fs.existsSync(${q(proceedMarker)}))process.exit(0);` +
+                `setTimeout(()=>process.exit(0), 30000);`,
+            ],
+          },
+        },
+        {
+          id: "last",
+          kind: "command",
+          produces: [{ name: "t2", type: "text" }],
+          command: {
+            executable: runtime,
+            arguments: [
+              "-e",
+              `require('node:fs').writeFileSync(${q(lastMarker)}, 'ran')`,
+            ],
+          },
+        },
+      ],
+    };
+    run(binary, ["workspace", "approve"], { cwd: workspace, env });
+    const installed = await buildAndInstall(
+      binary,
+      join(smokeRoot, "owner-death-bundle"),
+      manifest,
+      { build: workspace, list: workspace, env, label: "owner-death smoke" },
+    );
+
+    // A real child launches the Run and blocks in the `block` Step's sleep.
+    const child = spawn(
+      binary,
+      ["run", "launch", id, "--trust", installed.digest],
+      {
+        cwd: workspace,
+        env,
+      },
+    );
+    const childErr: string[] = [];
+    child.stderr.on("data", (d) => childErr.push(d.toString()));
+    child.stdout.on("data", () => {});
+    const exited = new Promise<void>((resolve) =>
+      child.on("exit", () => resolve()),
+    );
+    if (!(await waitForFile(startedMarker, 20000))) {
+      child.kill("SIGKILL");
+      throw new Error(
+        `Owner-death smoke child never reached the block Step: ${childErr.join("")}`,
+      );
+    }
+
+    // Kill the owner uncatchably (never a cancel): the claim is left live at the
+    // dead pid, exactly like a crash. Then reap the orphaned block grandchild by
+    // the pid it wrote, so nothing lingers.
+    child.kill("SIGKILL");
+    await exited;
+    const blockPid = Number(readFileSync(startedMarker, "utf8").trim());
+    if (Number.isInteger(blockPid) && blockPid > 0) {
+      try {
+        process.kill(blockPid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+
+    // A fresh invocation reconciles the dead owner's Run to `halted` and runs no
+    // Step work while doing so.
+    const listed = JSON.parse(
+      run(binary, ["run", "list", "--json"], { cwd: workspace, env }),
+    );
+    if (!Array.isArray(listed.rows) || listed.rows.length !== 1) {
+      throw new Error(
+        `Owner-death smoke expected exactly one Run after the kill: ${JSON.stringify(listed)}`,
+      );
+    }
+    const runId = listed.rows[0].runId;
+    const shown = run(binary, ["run", "show", runId], { cwd: workspace, env });
+    if (!/State: halted/.test(shown)) {
+      throw new Error(
+        `Owner-death smoke Run did not rest halted after the kill: ${shown}`,
+      );
+    }
+    if (readFileSync(firstMarker, "utf8") !== "ran\n") {
+      throw new Error(
+        `Owner-death smoke re-ran the first Step during recovery: ${readFileSync(firstMarker, "utf8")}`,
+      );
+    }
+    if (existsSync(lastMarker)) {
+      throw new Error(
+        "Owner-death smoke ran the final Step before the resume.",
+      );
+    }
+
+    // Recover with a plain resume (no --takeover — the owner is dead): it continues
+    // from the killed Step to completion, re-running no earlier Step.
+    await writeFile(proceedMarker, "go");
+    const resumed = run(binary, ["run", "resume", runId], {
+      cwd: workspace,
+      env,
+    });
+    if (!resumed.includes("State: succeeded")) {
+      throw new Error(
+        `Recovering a killed Run's owner did not continue it: ${resumed}`,
+      );
+    }
+    if (readFileSync(firstMarker, "utf8") !== "ran\n") {
+      throw new Error(
+        `Owner-death smoke re-ran the first Step on resume: ${readFileSync(firstMarker, "utf8")}`,
+      );
+    }
+    if (!existsSync(lastMarker)) {
+      throw new Error("Owner-death smoke resume did not run the final Step.");
+    }
+  }
+
+  await runNamedScenario("owner-death-recovery", ownerDeathRecoveryScenario);
+
   // The maintained Command-only gate Bundle, built, installed, and run to
   // completion from the compiled binary on each gated OS (issue #89, the M2 gate —
   // ADR 0027, #26). Its Repeat loop's check fails on iterations 1 and 2 and passes

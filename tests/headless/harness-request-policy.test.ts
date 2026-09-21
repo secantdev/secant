@@ -1,22 +1,18 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
 import {
-  CLAUDE_CODE_EXECUTABLE_ENV,
-  createClaudeCodeAdapter,
   type HarnessAdapter,
+  type HarnessProfile,
   type PrepareResult,
+  type TurnResult,
 } from "../../src/harness/harness.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
-import { installReplayer } from "../harness/replayer.js";
-import {
-  ensureRuntimeOnPath,
-  writeCommandBundle,
-} from "../helpers/commandBundle.js";
+import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeBundleProcess } from "../helpers/fakeBundleProcess.js";
+import { writeCommandBundle } from "../helpers/commandBundle.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // #117 AC3/AC5 and the `--harness-requests` flag: the permission bridge is started
@@ -31,21 +27,93 @@ import { makeTempDir } from "../helpers/tempDir.js";
 // one (`needsHarness`, src/composition/wiring.ts). So the count of `prepare` calls
 // is the honest, portable proxy for "did a bridge come into being for this Run"
 // (asserting a loopback listener directly is not portable across the three OSes).
+//
+// Process-free: the Agent Step runs against the deterministic fake Harness Adapter
+// (an awaited approval Turn), and every Bundle is driven through an injected fake
+// Process, so no real child spawns and no Harness is recorded/replayed (#185).
 
-const TEST_REPAIR_SESSION_ID = "77777777-7777-4777-8777-777777777777";
-const REPLAYER_VERSION = "2.1.273 (Claude Code)";
+/** The fake Claude Code profile: it hosts a permission bridge, so an Agent Turn can
+ *  raise an approval Harness Request. */
+function claudeProfile(): HarnessProfile {
+  return {
+    harness: "Claude Code",
+    executable: "claude",
+    executableVersion: "2.1.273",
+    platform: "linux",
+    adapterRevision: "fake-claude-1",
+    configurationPosture: "user-compatible",
+    recovery: {
+      mode: "native-reattach",
+      evidence: "fake claude resumes by id",
+    },
+    interruption: {
+      mode: "process-only",
+      evidence: "fake claude stops the process",
+    },
+    approvals: {
+      available: true,
+      evidence: "fake claude hosts a permission bridge",
+    },
+    clarifications: {
+      available: false,
+      evidence: "fake claude offers no clarifications",
+    },
+    steer: {
+      available: false,
+      evidence: "fake claude has no same-Turn guidance frame",
+    },
+    modelSelection: {
+      at: "unavailable",
+      evidence: "fake claude selects no model",
+    },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "fake claude mints a session id",
+    },
+    skillDelivery: {
+      mode: "plain-path",
+      evidence: "fake claude reads a SKILL.md path",
+    },
+    fileDelivery: {
+      mode: "plain-path",
+      evidence: "fake claude reads an absolute path",
+    },
+  };
+}
 
-ensureRuntimeOnPath();
+const COMPLETED_OPEN: TurnResult = {
+  kind: "completed",
+  detail: {
+    finalContent: "repaired the workspace",
+    effectiveModel: { known: false },
+    session: { state: "open" },
+  },
+};
 
-function fixtureCase(name: string): string {
-  return join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "harness",
-    "fixtures",
-    "claude-code",
-    name,
-  );
+/** The single-Agent-Turn script: one awaited Edit approval holds the Turn open until
+ *  the headless follower answers it per policy, then the Turn completes — the shape
+ *  the policy assertions observe (answered `allow`/`deny`, then the Run rests). */
+function agentScript(): FakeScript {
+  return {
+    profile: claudeProfile(),
+    turns: [
+      {
+        requests: [
+          {
+            id: "req-edit",
+            shape: {
+              kind: "approval",
+              tool: "Edit",
+              input: "change file",
+              decisions: ["allow", "deny"],
+            },
+            awaited: true,
+          },
+        ],
+        result: COMPLETED_OPEN,
+      },
+    ],
+  };
 }
 
 /** A Harness Adapter spy that counts `prepare` calls and, per prepared Harness,
@@ -81,7 +149,7 @@ function spyAdapter(inner: HarnessAdapter): {
   return { adapter, prepareCount: () => prepares, closeCount: () => closes };
 }
 
-/** Author a single-Agent-step Bundle over the recorded Test Repair Turn. */
+/** Author a single-Agent-step Bundle over the fake approval Turn. */
 function writeAgentBundle(): { folder: string; id: string } {
   const folder = makeTempDir("secant-reqp-bundle-");
   mkdirSync(join(folder, "prompts"), { recursive: true });
@@ -117,40 +185,31 @@ function writeAgentBundle(): { folder: string; id: string } {
   return { folder, id: manifest.bundle.id };
 }
 
-/** Wire against the Test Repair replayer with a spy Adapter, install the Agent
- *  Bundle, seed a git Workspace whose `sum.mjs` matches the recording's pre-image,
- *  and approve the Workspace. */
+/** Wire against the fake approval-Turn Adapter with a spy, over an injected fake
+ *  Process, install the Agent Bundle in a fresh Workspace, and approve it. Harness
+ *  discovery is stubbed `found`, so `--harness claude-code` passes Preflight with no
+ *  executable and no spawn. */
 function wireAgent(t: TestContext): {
   wired: Wiring;
   bundleId: string;
   digest: string;
   spy: ReturnType<typeof spyAdapter>;
 } {
-  const replayer = installReplayer(
-    REPLAYER_VERSION,
-    fixtureCase("test-repair"),
-  );
-  const savedEnv = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-  process.env[CLAUDE_CODE_EXECUTABLE_ENV] = replayer.executablePath;
-  t.after(() => {
-    if (savedEnv === undefined) delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-    else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedEnv;
-  });
-
   const workspace = makeTempDir("secant-reqp-ws-");
-  writeFileSync(
-    join(workspace, "sum.mjs"),
-    "export const sum = (a, b) => a - b;\n",
-  );
-  execFileSync("git", ["init", "-q"], { cwd: workspace });
-
-  const spy = spyAdapter(
-    createClaudeCodeAdapter({ sessionId: () => TEST_REPAIR_SESSION_ID }),
-  );
+  const spy = spyAdapter(createFake(agentScript())());
   const wired = wireApplication({
     secantHome: makeTempDir("secant-reqp-home-"),
     launchCwd: workspace,
+    process: createFakeBundleProcess(),
     harnessAdapter: spy.adapter,
+    discoverClaudeCode: () => ({
+      kind: "found",
+      attempt: {
+        source: "path",
+        name: "claude",
+        description: "PATH name 'claude'",
+      },
+    }),
   });
   t.after(() => {
     wired.runGroup.close();
@@ -173,8 +232,8 @@ function wireAgent(t: TestContext): {
   return { wired, bundleId: bundle.id, digest: entry.digest, spy };
 }
 
-/** Wire a Command-only Bundle with a spy Adapter (no Harness executable needed:
- *  Preflight never discovers a Harness for a Command-only routing). */
+/** Wire a Command-only Bundle with a spy Adapter over an injected fake Process (no
+ *  Harness needed: Preflight never discovers a Harness for a Command-only routing). */
 function wireCommand(t: TestContext): {
   wired: Wiring;
   bundleId: string;
@@ -182,10 +241,11 @@ function wireCommand(t: TestContext): {
   spy: ReturnType<typeof spyAdapter>;
 } {
   const workspace = makeTempDir("secant-reqp-cmd-ws-");
-  const spy = spyAdapter(createClaudeCodeAdapter());
+  const spy = spyAdapter(createFake(agentScript())());
   const wired = wireApplication({
     secantHome: makeTempDir("secant-reqp-cmd-home-"),
     launchCwd: workspace,
+    process: createFakeBundleProcess(),
     harnessAdapter: spy.adapter,
   });
   t.after(() => {

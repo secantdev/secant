@@ -15,6 +15,7 @@ import type {
 } from "../../src/application/projection-port.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeBundleProcess } from "../helpers/fakeBundleProcess.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 
@@ -165,6 +166,7 @@ async function launchInteractive(
     launchCwd: workspace,
     supportsInteractiveTurns: true,
     harnessAdapter: adapter,
+    process: createFakeBundleProcess(),
   });
   t.after(() => {
     wired.runGroup.close();

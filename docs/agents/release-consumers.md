@@ -95,8 +95,10 @@ induced: doing so deterministically would require a private installer hook or an
 
 The `POSIX installer consumer` step ([check.yml](../../.github/workflows/check.yml)) gives root `install.sh` the local candidate without a product runtime.
 macOS arm64 and Linux x64 install under fixed `~/.secant/bin` in isolated homes and retain the declined-PATH instruction; macOS pins Terminal guidance.
-Windows x64 and the source suite there prove only refusal before candidate access. On POSIX, `tests/release/posix-installer.test.ts` also covers
-target/identity, checksum/layout/version/legal refusal, failed-update preservation, `SECANT_HOME` independence, latest/exact versions, and PATH changes.
+Windows x64 and the source suite there prove only refusal before candidate access. The deterministic `tests/release/posix-installer.test.ts` suite —
+which drove `install.sh` through a real shell and additionally covered target/identity, checksum/layout/version/legal refusal, failed-update preservation,
+`SECANT_HOME` independence, latest/exact versions, and PATH idempotency — was retired in the #185 subprocess-test migration so the semantic suite spawns no
+child. That refusal/replacement/idempotency coverage is not currently re-exercised; widening this consumer step to restore it is a known follow-up.
 
 The manual-dispatch candidate validation and the tag-triggered protected promotion are workflow-shape policy, not consumer round-trips; they live in
 [release-workflow.md](./release-workflow.md).

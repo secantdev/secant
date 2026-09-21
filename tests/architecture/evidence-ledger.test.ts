@@ -162,5 +162,13 @@ test("[evidence-ledger] every subprocess-backed test file has a migration row", 
       true,
       `${row.path} has unknown status ${row.status}`,
     );
+    // The migration is complete (#185): every row's replacement is landed, so the
+    // ledger is closed. A new `open` row would mean a subprocess test slipped back
+    // into an evidence layer without its replacement — fail until it is migrated.
+    assert.notEqual(
+      row.status,
+      "open",
+      `${row.path} has an open ledger row; the subprocess-test migration is closed (#185)`,
+    );
   }
 });

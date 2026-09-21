@@ -3,22 +3,110 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
-import { createCodexAdapter } from "../../src/harness/harness.js";
+import {
+  APPROVAL_DECISIONS,
+  type HarnessProfile,
+  type TurnEvent,
+  type TurnResult,
+} from "../../src/harness/harness.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
-import { installCodexReplayer } from "../harness/codex-replayer.js";
-import { ensureRuntimeOnPath } from "../helpers/commandBundle.js";
+import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeBundleProcess } from "../helpers/fakeBundleProcess.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 
 // The headless client drives a selected Codex Run through the same contract as Claude
 // Code (#148, spec stories 28–34): the `--harness-requests` policy answers Codex
 // approvals, the exit code follows the rest state, and the frozen `--json` fields are
-// unchanged with only additive Harness-selection evidence. Driven against a recorded
-// Codex app-server replayer (no real Harness, ADR 0027).
-
-ensureRuntimeOnPath();
+// unchanged with only additive Harness-selection evidence. Driven against the
+// deterministic fake Codex Harness and an injected fake Process — no child spawns
+// (#185, ADR 0027).
 
 const APPROVAL_PROMPT =
   "Run `touch /tmp/secant-codex-recording-approval` now. Do not do anything else.";
+
+// The fake Codex Harness's profile: Codex hosts approvals and offers native steer,
+// the one client-visible difference from Claude Code.
+function codexProfile(): HarnessProfile {
+  return {
+    harness: "codex",
+    executable: "codex",
+    executableVersion: "0.0.0-fake-codex",
+    platform: "linux",
+    adapterRevision: "fake-codex-1",
+    configurationPosture: "user-compatible",
+    recovery: {
+      mode: "native-reattach",
+      evidence: "fake codex reattaches a thread",
+    },
+    interruption: {
+      mode: "process-only",
+      evidence: "fake codex stops the process",
+    },
+    approvals: { available: true, evidence: "fake codex hosts approvals" },
+    clarifications: {
+      available: false,
+      evidence: "fake codex offers no clarifications",
+    },
+    steer: {
+      available: true,
+      evidence: "fake codex offers native same-Turn steer",
+    },
+    modelSelection: {
+      at: "unavailable",
+      evidence: "fake codex selects no model",
+    },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "fake codex mints a thread id",
+    },
+    skillDelivery: { mode: "plain-path", evidence: "fake codex reads a path" },
+    fileDelivery: { mode: "plain-path", evidence: "fake codex reads a path" },
+  };
+}
+
+const COMPLETED: TurnResult = {
+  kind: "completed",
+  detail: {
+    finalContent: "recorded",
+    effectiveModel: { known: true, model: "fake-codex-model" },
+    session: { state: "open" },
+  },
+};
+
+/** The fake Codex script for a fixture. The `approval` case raises one awaited tool
+ *  approval that the unattended `allow` policy answers, then the Turn completes; the
+ *  `completion` case completes straight away. Both emit a Session event and
+ *  authoritative assistant content. */
+function codexScript(fixture: string): FakeScript {
+  const events: TurnEvent[] = [
+    { kind: "session", availability: { state: "open" } },
+    { kind: "assistant-content", content: `recorded ${fixture}` },
+  ];
+  if (fixture === "approval") {
+    return {
+      profile: codexProfile(),
+      turns: [
+        {
+          events,
+          requests: [
+            {
+              id: "req-approve",
+              shape: {
+                kind: "approval",
+                tool: "Shell",
+                input: APPROVAL_PROMPT,
+                decisions: APPROVAL_DECISIONS,
+              },
+              awaited: true,
+            },
+          ],
+          result: COMPLETED,
+        },
+      ],
+    };
+  }
+  return { profile: codexProfile(), turns: [{ events, result: COMPLETED }] };
+}
 
 function writeAgentBundle(prompt: string): { folder: string; id: string } {
   const folder = makeTempDir("secant-codex-headless-bundle-");
@@ -57,12 +145,12 @@ function wire(
   fixture: string,
   prompt: string,
 ): { wired: Wiring; bundleId: string; digest: string } {
-  const replayer = installCodexReplayer(fixture);
   const workspace = makeTempDir("secant-codex-headless-ws-");
   const wired = wireApplication({
     secantHome: makeTempDir("secant-codex-headless-home-"),
     launchCwd: workspace,
-    codexHarnessAdapter: createCodexAdapter({ path: replayer.path, env: {} }),
+    process: createFakeBundleProcess(),
+    codexHarnessAdapter: createFake(codexScript(fixture))(),
     discoverCodex: () => ({
       kind: "found",
       attempt: {

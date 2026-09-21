@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
-import {
-  CLAUDE_CODE_EXECUTABLE_ENV,
-  createClaudeCodeAdapter,
-} from "../../src/harness/harness.js";
+import type { HarnessProfile, TurnResult } from "../../src/harness/harness.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
-import { installReplayer } from "../harness/replayer.js";
+import { createFake, type FakeScript } from "../harness/fake-adapter.js";
+import { createFakeBundleProcess } from "../helpers/fakeBundleProcess.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import type {
@@ -31,32 +27,103 @@ async function nextOverlay(
   throw new Error("the update stream closed before a matching overlay arrived");
 }
 
-// #117 AC1 end-to-end: a synthesized Agent Bundle over the recorded Test Repair
-// fix-Turn, launched headlessly with `--harness-requests allow`, pauses on the Edit
-// approval, answers it through `answer-harness-request`, and runs to `succeeded`;
-// `run show` prints `request-raised` with the exact tool and input and
+// #117 AC1 end-to-end: a single-Agent-step Bundle whose Turn raises an Edit
+// approval request, launched headlessly with `--harness-requests allow`, pauses on
+// the Edit approval, answers it through `answer-harness-request`, and runs to
+// `succeeded`; `run show` prints `request-raised` with the exact tool and input and
 // `request-answered` "answered by client policy". With `deny` the request is denied
-// and the Run's outcome still follows the recording (the fixture completes).
+// and the Run's outcome still follows the script (the Turn completes). Driven
+// against the deterministic fake Claude Code Harness and an injected fake Process,
+// so no child spawns (#185).
 
-// The session id baked into the Test Repair recording; the injected Adapter mints
-// it so the recorded init frame is acknowledged and the recording replays.
-const TEST_REPAIR_SESSION_ID = "77777777-7777-4777-8777-777777777777";
-const REPLAYER_VERSION = "2.1.273 (Claude Code)";
+/** The fake Claude Code profile: it hosts a permission bridge, so an Agent Turn can
+ *  raise an approval Harness Request. */
+function claudeProfile(): HarnessProfile {
+  return {
+    harness: "Claude Code",
+    executable: "claude",
+    executableVersion: "2.1.273",
+    platform: "linux",
+    adapterRevision: "fake-claude-1",
+    configurationPosture: "user-compatible",
+    recovery: {
+      mode: "native-reattach",
+      evidence: "fake claude resumes by id",
+    },
+    interruption: {
+      mode: "process-only",
+      evidence: "fake claude stops the process",
+    },
+    approvals: {
+      available: true,
+      evidence: "fake claude hosts a permission bridge",
+    },
+    clarifications: {
+      available: false,
+      evidence: "fake claude offers no clarifications",
+    },
+    steer: {
+      available: false,
+      evidence: "fake claude has no same-Turn guidance frame",
+    },
+    modelSelection: {
+      at: "unavailable",
+      evidence: "fake claude selects no model",
+    },
+    recoveryCoordinate: {
+      timing: "before-submission",
+      evidence: "fake claude mints a session id",
+    },
+    skillDelivery: {
+      mode: "plain-path",
+      evidence: "fake claude reads a SKILL.md path",
+    },
+    fileDelivery: {
+      mode: "plain-path",
+      evidence: "fake claude reads an absolute path",
+    },
+  };
+}
 
-function fixtureCase(name: string): string {
-  return join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "harness",
-    "fixtures",
-    "claude-code",
-    name,
-  );
+const COMPLETED_OPEN: TurnResult = {
+  kind: "completed",
+  detail: {
+    finalContent: "repaired the workspace",
+    effectiveModel: { known: false },
+    session: { state: "open" },
+  },
+};
+
+/** The single-Turn script every case drives: one awaited Edit approval request
+ *  naming `sum.mjs` holds the Turn open until it is answered (by client policy for
+ *  `run launch`, or by hand for the paused-overlay case), then the Turn completes. */
+function requestScript(): FakeScript {
+  return {
+    profile: claudeProfile(),
+    turns: [
+      {
+        requests: [
+          {
+            id: "req-edit",
+            shape: {
+              kind: "approval",
+              tool: "Edit",
+              input: "edit sum.mjs",
+              decisions: ["allow", "deny"],
+            },
+            awaited: true,
+          },
+        ],
+        result: COMPLETED_OPEN,
+      },
+    ],
+  };
 }
 
 /** Author a single-Agent-step Bundle: one `agent` Step in session `s` with a
- *  prompt asset. The prompt text is irrelevant — the replayer replays the recorded
- *  Turn regardless of input — but a prompt asset must exist for Composition. */
+ *  prompt asset. The prompt text is irrelevant — the fake Harness raises its
+ *  scripted request regardless of input — but a prompt asset must exist for
+ *  Composition. */
 function writeAgentBundle(): { folder: string; id: string } {
   const folder = makeTempDir("secant-req-bundle-");
   mkdirSync(join(folder, "prompts"), { recursive: true });
@@ -91,39 +158,26 @@ function writeAgentBundle(): { folder: string; id: string } {
   return { folder, id: manifest.bundle.id };
 }
 
-/** Wire the Application against the Test Repair replayer, install the Bundle, seed
- *  a git Workspace whose `sum.mjs` matches the recording's pre-image (so the Turn's
- *  recorded workspace patch applies), and approve the Workspace. */
+/** Wire the Application against the fake Claude Code Harness and an injected fake
+ *  Process (no child spawns), install the Bundle, seed a Workspace, and approve it. */
 function wire(t: TestContext): {
   wired: Wiring;
   bundleId: string;
   digest: string;
 } {
-  const replayer = installReplayer(
-    REPLAYER_VERSION,
-    fixtureCase("test-repair"),
-  );
-  const savedEnv = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-  process.env[CLAUDE_CODE_EXECUTABLE_ENV] = replayer.executablePath;
-  t.after(() => {
-    if (savedEnv === undefined) delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
-    else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedEnv;
-  });
-
   const workspace = makeTempDir("secant-req-ws-");
-  // The recording's workspace patch edits `sum.mjs`; seed it (and a git work tree
-  // so `git apply` in the replayer succeeds) with the exact pre-image bytes.
-  writeFileSync(
-    join(workspace, "sum.mjs"),
-    "export const sum = (a, b) => a - b;\n",
-  );
-  execFileSync("git", ["init", "-q"], { cwd: workspace });
-
   const wired = wireApplication({
     secantHome: makeTempDir("secant-req-home-"),
     launchCwd: workspace,
-    harnessAdapter: createClaudeCodeAdapter({
-      sessionId: () => TEST_REPAIR_SESSION_ID,
+    process: createFakeBundleProcess(),
+    harnessAdapter: createFake(requestScript())(),
+    discoverClaudeCode: () => ({
+      kind: "found",
+      attempt: {
+        source: "path",
+        name: "claude",
+        description: "PATH name 'claude'",
+      },
     }),
   });
   t.after(() => {

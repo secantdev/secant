@@ -1,15 +1,18 @@
 #!/usr/bin/env bun
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 import {
   createProcessAdapter,
@@ -18,6 +21,11 @@ import {
   type OwnedProcess,
   type ProcessAdapter,
 } from "../../src/process/process.js";
+import type {
+  AnswerHarnessRequestOffer,
+  RunView,
+} from "../../src/application/projection-port.js";
+import { createClaudeCodeAdapter } from "../../src/harness/harness.js";
 import { wireApplication } from "../../src/composition/main.js";
 import {
   executeRouting,
@@ -41,6 +49,10 @@ import {
 } from "../harness/replayer-conformance.js";
 import { writeCommandBundle } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
+import { checkEntryDeclarations } from "../architecture/check-vendor-provenance.js";
+import { installReplayer } from "../harness/replayer.js";
+
+const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 const executable = process.execPath;
 const missing = join(tmpdir(), `secant-process-parity-missing-${process.pid}`);
@@ -51,6 +63,12 @@ const CONCURRENT_CREATE_WORKER = fileURLToPath(
 const LOCKED_COORDINATION_WORKER = fileURLToPath(
   new URL("../run/store/locked-coordination-worker.ts", import.meta.url),
 );
+
+// The maintained Matt-front Bundle recorded-replayer traversal (#185, from
+// tests/tui/matt-front-workbench.test.tsx): the replayer echoes whichever Session
+// id the Adapter mints, so the recording's own id gives a verbatim transcript.
+const MATT_FRONT_SESSION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const MATT_FRONT_REPLAYER_VERSION = "2.1.274 (Claude Code)";
 
 function commandOptions(
   source: string,
@@ -225,6 +243,12 @@ cases.push(
     body: executionStoreOnFakeProcess,
   },
   { name: "application-on-doubles", body: applicationOnDoubles },
+  {
+    name: "matt-front-replayer-workbench",
+    body: mattFrontReplayerWorkbench,
+  },
+  { name: "migration-generator-drift", body: migrationGeneratorDrift },
+  { name: "entry-declaration-surface", body: entryDeclarationSurface },
 );
 
 // The shared Harness conformance suite over the REAL replayers. Under the test
@@ -299,6 +323,235 @@ async function applicationOnDoubles(): Promise<void> {
     const read = wired.runGroup.readRun(admission.runId!);
     assert.ok(read.ok);
     if (read.ok) assert.equal(read.run.state, "succeeded");
+  } finally {
+    wired.runGroup.close();
+    wired.catalog.close();
+  }
+}
+
+// The maintained Matt-front Bundle driven entirely through the real ProjectionPort
+// against the recorded Claude Code replayer (#185; ported from the recorded-replayer
+// substance of tests/tui/matt-front-workbench.test.tsx). This runner is a plain `bun`
+// process with no Solid/OpenTUI JSX transform, so the flow is driven over the Port,
+// not the TUI: the launch seam's `launch-run` replaces the bundle/trust/harness/review
+// keypresses, and an `answer-harness-request` over the live overlay replaces the
+// [Allow] keypress. The TUI-rendering coverage stays in live-run-workbench.test.tsx;
+// this case's job is the recorded-replayer traversal. Nothing is faked in place of a
+// spawn: the real Adapter discovers and spawns the PATH-installed replayer, which
+// replays the recorded grill and spec Turns. Two human grill Turns are sent, the Step
+// is ended, the approve-reject gate is answered, and the spec Turn's file-write
+// approval is allowed; the Run reaches `succeeded` with the spec written.
+async function mattFrontReplayerWorkbench(): Promise<void> {
+  const replayer = installReplayer(
+    MATT_FRONT_REPLAYER_VERSION,
+    join(repoRoot, "tests", "harness", "fixtures", "claude-code", "matt-front"),
+  );
+  const workspace = runtimeTemp("secant-runtime-matt-front-ws-");
+  const wired = wireApplication({
+    secantHome: runtimeTemp("secant-runtime-matt-front-home-"),
+    launchCwd: workspace,
+    supportsInteractiveTurns: true,
+    discoverClaudeCode: () => ({
+      kind: "found",
+      attempt: {
+        source: "configured",
+        name: replayer.executablePath,
+        description: "injected Matt-front replayer",
+      },
+    }),
+    harnessAdapter: createClaudeCodeAdapter({
+      path: replayer.path,
+      env: {},
+      sessionId: () => MATT_FRONT_SESSION_ID,
+    }),
+  });
+  try {
+    const built = wired.bundleManagement.build(
+      join(repoRoot, "bundles", "matt-front-spec"),
+      { noInstall: false },
+    );
+    assert.ok(built.ok, JSON.stringify(built));
+    const entry = wired.catalog
+      .listEntries()
+      .find((item) => item.id === "dev.secant.matt-front");
+    assert.ok(entry);
+    assert.ok(
+      wired.projectionPort.submit({
+        operationId: "matt-front-approve-ws",
+        operation: "approve-workspace",
+        input: { path: workspace },
+      }).admitted,
+    );
+
+    // The launch seam builds this exact LaunchRunInput — the acknowledged installed
+    // digest, the interactive Harness selection, no launch inputs. The launch rests
+    // the Run `blocked` at the interactive grill Step and only then clears its
+    // execution claim, so awaiting this Operation is the correct gate before a human
+    // Turn is sent (a Turn before it settles is refused `interactive-turn-busy`).
+    const LAUNCH_OP = "matt-front-launch";
+    const admission = wired.projectionPort.submit({
+      operationId: LAUNCH_OP,
+      operation: "launch-run",
+      input: {
+        bundle: { id: entry.id },
+        launchInputs: {},
+        trustDigest: entry.digest,
+        harness: "claude-code",
+      },
+    });
+    assert.equal(admission.admitted, true);
+    if (!admission.admitted || admission.runId === undefined)
+      throw new Error("the Matt-front launch was not admitted");
+    const runId = admission.runId;
+    assert.equal(
+      (await awaitSettled(wired.projectionPort, LAUNCH_OP)).status,
+      "applied",
+    );
+
+    // A projection's `snapshot` is fixed at open, so reopen per read to observe the
+    // Turns as they land.
+    const readRun = (): RunView => {
+      const projection = wired.projectionPort.openProjection({
+        family: "run",
+        runId,
+      });
+      try {
+        const result = projection.snapshot.result;
+        assert.ok(result.found, JSON.stringify(result));
+        if (!result.found) throw new Error("unreachable");
+        return result.run;
+      } finally {
+        projection.close();
+      }
+    };
+
+    // Each human grill Turn over the real Port; the launch (and each prior send)
+    // settles the Run back to the Turn boundary first, so each send is admitted there.
+    let grillTurn = 0;
+    const sendGrillTurn = async (text: string): Promise<void> => {
+      const operationId = `matt-front-grill-${++grillTurn}`;
+      assert.ok(
+        wired.projectionPort.submit({
+          operationId,
+          operation: "send-interactive-turn",
+          input: { runId, stepId: "grill", text },
+        }).admitted,
+      );
+      const outcome = await awaitSettled(wired.projectionPort, operationId);
+      assert.equal(outcome.status, "applied", JSON.stringify(outcome));
+    };
+
+    await sendGrillTurn("Interview me about a feature.");
+    await sendGrillTurn("That is enough context.");
+
+    const afterGrill = readRun();
+    assert.equal(afterGrill.state, "blocked");
+    const transcriptReference = afterGrill.sessions?.[0]?.transcriptPage;
+    assert.ok(transcriptReference);
+    const transcript = wired.projectionPort.readTranscript(transcriptReference);
+    assert.ok(transcript.found);
+    if (!transcript.found) throw new Error("unreachable");
+    const humanTurns = transcript.entries
+      .filter((entry) => entry.role === "user")
+      .map((entry) => entry.content);
+    assert.deepEqual(humanTurns, [
+      "Interview me about a feature.",
+      "That is enough context.",
+    ]);
+    const assistantText = transcript.entries
+      .filter((entry) => entry.role === "assistant")
+      .map((entry) => entry.content)
+      .join("\n");
+    // The recorded grill: a question on the first Turn, a confirmation on the second.
+    assert.match(assistantText, /persist per-device|sync across/);
+    assert.match(assistantText, /enough to design|Ready when you are/);
+    // A detached Session that recorded human Turns still advertises its transcript
+    // page/export References alongside its availability (#124).
+    assert.deepEqual(afterGrill.sessions, [
+      {
+        session: "spec",
+        availability: "detached",
+        transcriptPage: { runId, session: "spec", type: "transcript-page" },
+        transcriptExport: {
+          runId,
+          session: "spec",
+          type: "transcript-export",
+        },
+      },
+    ]);
+
+    // End the interactive Step at a Turn boundary; the Run advances to the authored
+    // approve-reject gate and rests `blocked` at it.
+    assert.ok(
+      wired.projectionPort.submit({
+        operationId: "matt-front-end-grill",
+        operation: "end-interactive-step",
+        input: { runId, stepId: "grill" },
+      }).admitted,
+    );
+    assert.equal(
+      (await awaitSettled(wired.projectionPort, "matt-front-end-grill")).status,
+      "applied",
+    );
+    const atGate = readRun();
+    assert.equal(atGate.pendingGate?.gate.shape, "approve-reject");
+    assert.equal(atGate.pendingGate?.gate.stepId, "approve-spec");
+
+    // Approve the gate; the spec Agent Step resumes the Session and raises a
+    // file-write approval on the live overlay, then blocks awaiting it. Watch the
+    // overlay for the outstanding request (the .tsx test watches the same overlay
+    // rather than a rendered frame) and answer it `allow` over the Port — the exact
+    // answer-harness-request the Workbench's [Allow] control submits (#121).
+    const gate = atGate.pendingGate!.gate;
+    const overlayWatch = wired.projectionPort.openProjection({
+      family: "run",
+      runId,
+    });
+    wired.projectionPort.submit({
+      operationId: "matt-front-answer-gate",
+      operation: "answer-human-gate",
+      input: { runId, gate, answer: "continue" },
+    });
+    let offer: AnswerHarnessRequestOffer | undefined;
+    for await (const update of overlayWatch.updates) {
+      if (update.kind === "live" && update.overlay.offers.length > 0) {
+        offer = update.overlay.offers[0];
+        break;
+      }
+    }
+    overlayWatch.close();
+    assert.ok(offer, "the spec Turn raised no approval request");
+    assert.ok(
+      wired.projectionPort.submit({
+        operationId: "matt-front-allow-request",
+        operation: "answer-harness-request",
+        input: {
+          runId,
+          requestId: offer.requestId,
+          generation: offer.generation,
+          decision: "allow",
+          by: "client-policy",
+        },
+      }).admitted,
+    );
+
+    // The spec Turn completes, applies the recorded Workspace patch, and the Run
+    // reaches `succeeded`; the answer-gate drive settles once the Run rests.
+    assert.equal(
+      (await awaitSettled(wired.projectionPort, "matt-front-answer-gate"))
+        .status,
+      "applied",
+    );
+
+    const done = readRun();
+    assert.equal(done.state, "succeeded");
+    assert.deepEqual(
+      done.progress.map((step) => step.status),
+      ["succeeded", "succeeded", "succeeded"],
+    );
+    const specFile = join(workspace, "specs", "spec.md");
+    assert.ok(existsSync(specFile), "the spec Turn wrote specs/spec.md");
+    assert.match(readFileSync(specFile, "utf8"), /Dark Mode Toggle/);
   } finally {
     wired.runGroup.close();
     wired.catalog.close();
@@ -1106,6 +1359,53 @@ async function collectText(stream: AsyncIterable<Uint8Array>): Promise<string> {
     text += decoder.decode(chunk, { stream: true });
   }
   return text + decoder.decode();
+}
+
+// The real migration generator rejects an ungenerated schema change and names the
+// regeneration command (was tests/architecture/migrations.test.ts; #185). It spawns
+// scripts/check-migrations.ts, which itself runs drizzle-kit as real children — so it
+// belongs in the runtime runner, not the process-free semantic suite.
+function migrationGeneratorDrift(): void {
+  const temp = runtimeTemp("secant-migration-check-");
+  const migrations = join(temp, "migrations");
+  cpSync(join(repoRoot, "src", "drizzle", "catalog"), migrations, {
+    recursive: true,
+  });
+
+  const sqliteCore = pathToFileURL(
+    join(repoRoot, "node_modules", "drizzle-orm", "sqlite-core", "index.js"),
+  ).href;
+  const existingSchema = readFileSync(
+    join(repoRoot, "src", "catalog", "schema.ts"),
+    "utf8",
+  ).replace('"drizzle-orm/sqlite-core"', JSON.stringify(sqliteCore));
+  const schema = join(temp, "schema.ts");
+  writeFileSync(
+    schema,
+    `${existingSchema}\nexport const ungenerated = sqliteTable("ungenerated", { id: text("id").primaryKey() });\n`,
+  );
+  const config = join(temp, "drizzle.config.ts");
+  writeFileSync(
+    config,
+    `export default ${JSON.stringify({ dialect: "sqlite", schema, out: migrations })};\n`,
+  );
+
+  const result = spawnSync(
+    process.execPath,
+    ["scripts/check-migrations.ts", config],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Schema has changes not captured in migrations!/);
+  assert.match(result.stderr, /Run: bun run migrations:generate/);
+}
+
+// Real declaration emission keeps fenced packages out of Module entry surfaces (was
+// tests/architecture/vendor-provenance.test.ts; #185). `checkEntryDeclarations`
+// spawns `tsc` to emit every Module's public .d.ts, so it runs here, not in the
+// process-free semantic suite.
+function entryDeclarationSurface(): void {
+  assert.deepEqual(checkEntryDeclarations(repoRoot), []);
 }
 
 async function main(): Promise<void> {

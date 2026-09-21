@@ -172,3 +172,11 @@ writeFileSync(
   join(resultRoot, "summary.json"),
   `${JSON.stringify({ environment, summaries }, null, 2)}\n`,
 );
+
+const emptyCells = summaries.filter(({ observations }) => observations === 0);
+if (emptyCells.length > 0) {
+  console.error(
+    `prototype invalid: ${emptyCells.length} cells produced no observations`,
+  );
+  process.exitCode = 1;
+}

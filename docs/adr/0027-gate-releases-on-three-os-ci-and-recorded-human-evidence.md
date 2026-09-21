@@ -57,3 +57,25 @@ from covering a new build.
 
 The three-OS gate, what CI proves, what only a human proves, the shared report shape, and `docs/support-matrix.md` are otherwise unchanged. Where
 this ADR and ADR 0030 differ, ADR 0030 governs.
+
+## Amendment — Three blocking evidence layers (2026-09-21)
+
+The [#177 resolution](https://github.com/secantdev/secant/issues/177#issuecomment-5755036178) proved that Bun 1.4.2 can lose completed child-process
+evidence inside its isolated test workers while the same stress envelope stays clean in an ordinary Bun process. That test-runner-confined defect
+changes the evidence topology, not production Process behavior:
+
+- **The deterministic suite runs the Proof Bundle end to end through fake Harness programs and real process spawning** → the canonical test runner is
+  the **process-free semantic suite**. Injected Process and Harness doubles prove orchestration transitions, failures, races, retries, ordering, and
+  resting states without a child.
+- Real spawn acknowledgement, ordered stdout and stderr, exit and close status, signals, cancellation, escalation, tree cleanup, Git, and recorded
+  Harness behavior form **standalone runtime conformance** in an ordinary Bun process. Its named `Process runtime conformance` step runs with
+  `if: always()` after the canonical step on each gated operating system and blocks independently.
+- The installed-artifact paths form **compiled-binary acceptance** in the three-OS consumer job. Command, Claude Code, Codex, interruption, recovery,
+  and Git remain covered through the copied compiled binary, and the consumer aggregator makes every scenario independently blocking.
+- **The real-terminal lifecycle suite runs as its own blocking CI job** → `Terminal lifecycle` is one `continue-on-error` consumer-job step whose result
+  is made blocking by `Require every consumer scenario to succeed`; this preserves independent attribution without describing a job that does not
+  exist.
+
+The [subprocess migration ledger](../subprocess-test-migration-ledger.md) maps every old assertion to one of those layers before deletion. No retry,
+sleep, timeout increase, or silent assertion removal may mask a failure. The rejected **in-process fake Adapter as the only end-to-end double** option
+above remains rejected: runtime conformance and compiled-binary acceptance still exercise the boundaries a fake cannot.

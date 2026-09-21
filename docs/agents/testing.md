@@ -7,6 +7,20 @@ sleep, or other unstable external state. Tests requiring those resources are opt
 test runner (`bun test`), not `bun:test`; `bunfig.toml` records why the per-test timeout is a CLI `--timeout` flag rather than a `[test] timeout` key
 (that key applies only to `bun:test`, so it never reaches these tests).
 
+## Evidence Layers
+
+The gate separates three independently attributable, blocking layers (ADR 0027's 2026-09-21 amendment):
+
+- The **process-free semantic suite** runs under the test runner with injected Process and Harness doubles.
+- **Standalone runtime conformance** runs real Process, Git, and recorded-Harness behavior in an ordinary Bun process outside the test runner.
+- **Compiled-binary acceptance** exercises Command, Harness, interruption, recovery, and Git through the copied binary in the consumer job.
+
+The checked-in [subprocess migration ledger](../subprocess-test-migration-ledger.md) maps every legacy spawning test assertion to its replacement layer.
+Its row must exist before an assertion is migrated. Migrate each row independently: after its named replacement has passed on Windows, macOS, and Linux,
+remove the old subprocess assertion and mark that row `done` in the deletion change. Delete a whole old file only when all of its rows are `done`. Do not
+mask a failure with a retry, sleep, timeout increase, or silent assertion removal in any layer. The issue #177 stress prototype is branch-only
+investigation evidence and stays out of this tree.
+
 The canonical test script (`scripts/test.ts`) runs isolated file workers — two on Windows, but one on macOS and Linux (`--parallel=1`). Windows is capped
 at two after the issue #172 calibration: its public `windows-latest` runner has a documented 4 vCPUs and 16 GB RAM, and reported 4 logical processors and
 17,174,360,064 physical-memory bytes in [run 35507654564](https://github.com/secantdev/secant/actions/runs/35507654564), but three workers produced
@@ -46,8 +60,10 @@ Verifying each shipped release channel as a consumer receives it — the archive
 Test observable behavior through the same Interface callers use. Internal refactoring should not require test rewrites. When shallow Modules are
 replaced by a deeper Module, replace their implementation-coupled tests rather than retaining both suites.
 
-Use real deterministic local resources, such as temporary directories and Git repositories. Use an injected Adapter for remote or truly external
-dependencies, and keep internal test Seams private to the Module's Implementation.
+Use real deterministic in-process local resources, such as temporary directories and local databases. Under the test runner, reach child-process
+behavior only through the injected Process double and use an injected Adapter for remote or truly external dependencies. Real children, child-backed
+Git repositories, and recorded Harness programs belong only in standalone runtime conformance or compiled-binary acceptance. Keep internal test Seams
+private to the Module's Implementation.
 
 ## Behavioral Completeness
 
@@ -62,6 +78,7 @@ cannot be asserted deterministically, that is a named gap, not a sleep or a retr
 
 - Test in-process behavior with ordinary real values.
 - Use deterministic real substitutes for local resources.
+- Use the injected Process double for executable resolution, commands, owned processes, cancellation, escalation, and Process-backed Git probes.
 - Use injected Adapters for remote or third-party Seams.
 - Give recorded external-protocol fixtures source and version provenance, redaction, representative data, and update instructions.
 - When replacing a recording, explain meaningful behavioral or protocol changes on the implementing issue.

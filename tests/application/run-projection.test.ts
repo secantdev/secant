@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
   createApplication,
@@ -8,6 +9,7 @@ import {
 } from "../../src/application/application.js";
 import type {
   OperationSnapshot,
+  ResumeRunOffer,
   RunSnapshot,
 } from "../../src/application/projection-port.js";
 import { openCatalog, type Catalog } from "../../src/catalog/catalog.js";
@@ -570,10 +572,11 @@ test("a foreign live Run offers an owner-named takeover that resumes and fences 
     ownerPid: 1000,
   });
   const offer = result.run.actionOffers.find(
-    (candidate) => candidate.action === "resume-run",
+    (candidate): candidate is Extract<ResumeRunOffer, { available: true }> =>
+      candidate.action === "resume-run" && candidate.available === true,
   );
-  assert.deepEqual(offer?.takeover, { ownerPid: 1000 });
-  assert.ok(offer?.takeover);
+  assert.ok(offer);
+  assert.deepEqual(offer.takeover, { ownerPid: 1000 });
 
   const refused = app.projectionPort.submit({
     operationId: "plain-resume",
@@ -589,7 +592,7 @@ test("a foreign live Run offers an owner-named takeover that resumes and fences 
   const takeover = app.projectionPort.submit({
     operationId: "takeover-resume",
     operation: "resume-run",
-    input: { runId: offer.runId, takeover: offer.takeover },
+    input: { runId: offer.runId, takeover: offer.takeover! },
   });
   assert.ok(takeover.admitted);
   assert.deepEqual(await settled(app, takeover.operationId), {
@@ -1063,4 +1066,209 @@ test("timeline detail keeps 160 characters and caps 161 at an explicit 160-chara
   assert.equal(details[0], "x".repeat(160));
   assert.equal(details[1]?.length, 160);
   assert.match(details[1] ?? "", /^y+ … output truncated$/);
+});
+
+// --- resting resume evidence (#194 stories 39/40), through the public port ---
+
+function haltRunWithAttempt(
+  f: Fixture,
+  digest: string,
+  outcome: "indeterminate" | "failed",
+): { runId: string; owner: ReturnType<RunGroup["acquireRun"]> } {
+  const created = f.runGroup.createRun({
+    operationId: `op-${outcome}`,
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date("2026-09-22T10:00:00.000Z"),
+  });
+  assert.ok(created.outcome === "created");
+  if (created.outcome !== "created") throw new Error("unreachable");
+  const owner = f.runGroup.acquireRun(created.runId);
+  assert.ok(owner);
+  return { runId: created.runId, owner };
+}
+
+test("an indeterminate Command Attempt halt offers resume with an acknowledgement (#194 story 39)", (t) => {
+  const f = fixture(t);
+  const { digest } = installCommandBundle(f);
+  const { runId, owner } = haltRunWithAttempt(f, digest, "indeterminate");
+  t.after(() => owner!.close());
+  // A command Attempt that ended indeterminate rests the Run halted at the command
+  // Step — effects may have already run, so resume must arm an acknowledgement.
+  assert.deepEqual(
+    owner!.publishAttempt({
+      attemptId: "0.0:build",
+      outcome: "indeterminate",
+      required: [],
+      outputs: [],
+      at: new Date("2026-09-22T10:00:01.000Z"),
+      advanceState: "halted",
+    }),
+    { ok: true },
+  );
+
+  const result = runResult(f.app, runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  const offer = result.run.actionOffers.find(
+    (candidate): candidate is Extract<ResumeRunOffer, { available: true }> =>
+      candidate.action === "resume-run" && candidate.available === true,
+  );
+  assert.ok(offer);
+  assert.match(offer.acknowledgement ?? "", /effects may repeat/);
+});
+
+test("an unusable Session at a command Step does not hide resume (#194 story 40 guard)", (t) => {
+  const f = fixture(t);
+  const { digest } = installCommandBundle(f);
+  const { runId, owner } = haltRunWithAttempt(f, digest, "failed");
+  t.after(() => owner!.close());
+  // Record an unusable Session, then rest the Run halted at the command Step: the
+  // command needs no Session, so the lost Session must NOT mark resume unavailable.
+  assert.deepEqual(
+    owner!.admitTurn({
+      turnId: "turn-1",
+      attemptId: "0.0:build",
+      session: "main",
+      origin: "managed",
+      kind: "agent",
+      input: "x",
+      recoveryCoordinate: "native-1",
+      harness: "codex",
+      at: new Date("2026-09-22T10:00:01.000Z"),
+    }),
+    { ok: true },
+  );
+  assert.deepEqual(
+    owner!.settleTurn({
+      turnId: "turn-1",
+      session: "main",
+      resultKind: "lost",
+      resultDetail: "{}",
+      availability: "unusable",
+      at: new Date("2026-09-22T10:00:02.000Z"),
+    }),
+    { ok: true },
+  );
+  assert.deepEqual(
+    owner!.publishAttempt({
+      attemptId: "0.0:build",
+      outcome: "failed",
+      required: [],
+      outputs: [],
+      at: new Date("2026-09-22T10:00:03.000Z"),
+      advanceState: "halted",
+    }),
+    { ok: true },
+  );
+
+  const result = runResult(f.app, runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  const offer = result.run.actionOffers.find(
+    (candidate): candidate is ResumeRunOffer =>
+      candidate.action === "resume-run",
+  );
+  assert.ok(offer);
+  // Resume stays available: the resting command Step needs no Session, so an
+  // unusable Session must not hide it. The positive path (an Agent Step's unusable
+  // Session → unavailable) is the next test.
+  assert.equal(offer.available, true);
+  assert.ok(result.run.sessions?.some((s) => s.availability === "unusable"));
+});
+
+/** Author, build, and install a single-agent-Step Bundle; return its digest. The
+ *  Harness is resolved at launch, not build, so no Harness wiring is needed here. */
+function installAgentBundle(f: Fixture): string {
+  const folder = makeTempDir("secant-agent-bundle-");
+  mkdirSync(join(folder, "prompts"), { recursive: true });
+  writeFileSync(join(folder, "prompts", "go.md"), "Do the work.\n");
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify({
+      formatVersion: 1,
+      bundle: {
+        id: "dev.secant.agent-only",
+        version: "1.0.0",
+        name: "Agent Only",
+        description: "A single agent Step for the resume-evidence projection.",
+      },
+      platforms: ["windows", "macos", "linux"],
+      inputs: {},
+      assets: [{ path: "prompts/go.md", kind: "prompt" }],
+      routing: [
+        {
+          id: "work",
+          kind: "agent",
+          retry: 0,
+          session: "s",
+          prompt: { asset: "prompts/go.md" },
+        },
+      ],
+    }),
+  );
+  const built = f.app.bundleManagement.build(folder, { noInstall: false });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = f.catalog
+    .listEntries()
+    .find((e) => e.id === "dev.secant.agent-only");
+  assert.ok(entry);
+  return entry.digest;
+}
+
+test("a lost required Session makes resume unavailable with its reason (#194 story 40)", (t) => {
+  const f = fixture(t);
+  const digest = installAgentBundle(f);
+  const created = f.runGroup.createRun({
+    operationId: "op-lost-session",
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date("2026-09-22T10:00:00.000Z"),
+  });
+  assert.ok(created.outcome === "created");
+  if (created.outcome !== "created") throw new Error("unreachable");
+  const owner = f.runGroup.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+  // A Turn opened the Agent Step's Session, which then went unusable; the Attempt
+  // failed and rested the Run halted at that Agent Step.
+  owner.admitTurn({
+    turnId: "turn-1",
+    attemptId: "0.0:work",
+    session: "s",
+    origin: "managed",
+    kind: "agent",
+    input: "go",
+    recoveryCoordinate: "native-1",
+    harness: "codex",
+    at: new Date("2026-09-22T10:00:01.000Z"),
+  });
+  owner.settleTurn({
+    turnId: "turn-1",
+    session: "s",
+    resultKind: "lost",
+    resultDetail: "{}",
+    availability: "unusable",
+    at: new Date("2026-09-22T10:00:02.000Z"),
+  });
+  owner.publishAttempt({
+    attemptId: "0.0:work",
+    outcome: "failed",
+    required: [],
+    outputs: [],
+    at: new Date("2026-09-22T10:00:03.000Z"),
+    advanceState: "halted",
+  });
+
+  const result = runResult(f.app, created.runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  const offer = result.run.actionOffers.find(
+    (candidate): candidate is ResumeRunOffer =>
+      candidate.action === "resume-run",
+  );
+  assert.ok(offer);
+  assert.equal(offer.available, false);
+  if (offer.available) throw new Error("unreachable");
+  assert.match(offer.reason, /"s" Session, which is no longer usable/);
 });

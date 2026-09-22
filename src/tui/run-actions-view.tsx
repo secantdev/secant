@@ -38,8 +38,13 @@ export type RunActionOutcome =
   | { readonly kind: "refused"; readonly problem: Problem };
 
 export interface RunActionsView {
-  /** Resume a resting Run or perform the takeover named by its current Offer. */
-  resume(offer: ResumeRunOffer): Accessor<RunActionOutcome>;
+  /** Resume a resting Run or perform the takeover named by its current Offer.
+   *  Only an available Offer is dispatchable — an `available:false` Offer names a
+   *  resume the Port cannot perform (#194 story 40), so the caller never reaches
+   *  here with one. */
+  resume(
+    offer: Extract<ResumeRunOffer, { available: true }>,
+  ): Accessor<RunActionOutcome>;
   /** Cancel a live Run: ends it `cancelled`, keeping history (#87). */
   cancel(runId: string): Accessor<RunActionOutcome>;
   /** Delete a resting or terminal Run: removes its store from disk (#87). */

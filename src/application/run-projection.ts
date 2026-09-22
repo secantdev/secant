@@ -202,6 +202,17 @@ function runResult(
     // for those.
     const harnessIdentity = harnessEvidence?.identity;
     const steer = context.steer ?? harnessIdentity?.steer;
+    // #194 stories 39/40: the evidence that shapes a resting resume offer. The
+    // Attempt log carries no Step kind, so the resting Step's kind is read from the
+    // derived progress at `position` (the Step the walk stalled at).
+    const resumeEvidence = (): ResumeEvidence =>
+      resumeEvidenceOf({
+        state: derivedRun.state,
+        currentStepKind: derivedRun.statuses[derivedRun.position]?.kind,
+        lastAttemptOutcome: log[log.length - 1]?.outcome,
+        hasConflict: active !== undefined,
+        sessions,
+      });
     return {
       found: true,
       run: {
@@ -255,9 +266,13 @@ function runResult(
           listing?.ownerPid !== undefined &&
           derivedRun.state !== "succeeded" &&
           derivedRun.state !== "cancelled"
-            ? [resumeRunOffer(runId, derivedRun.state, listing.ownerPid)]
+            ? [
+                resumeRunOffer(runId, derivedRun.state, {
+                  takeoverOwnerPid: listing.ownerPid,
+                }),
+              ]
             : derivedRun.state === "halted" || derivedRun.state === "failed"
-              ? [resumeRunOffer(runId, derivedRun.state)]
+              ? [resumeRunOffer(runId, derivedRun.state, resumeEvidence())]
               : []),
           // Turn-scoped controls (#118, #148): while a Turn is live in this process, a
           // user can interrupt it (rests the Run `halted`, resumable) without
@@ -436,32 +451,96 @@ function collectOutputs(
   return outputs;
 }
 
+/** The evidence that shapes a resting `resume-run` offer (#194 stories 39/40).
+ *  At most one of these is set; an empty value is an ordinary available resume. */
+interface ResumeEvidence {
+  readonly takeoverOwnerPid?: number;
+  readonly acknowledgement?: string;
+  readonly unavailable?: string;
+}
+
+/** Derive the resting-resume evidence from the facts the Run view already exposes
+ *  (#194 stories 39/40), pure so both branches are exercised in isolation:
+ *   - An Agent/interactive Step whose Session is recorded `unusable` cannot resume —
+ *     re-driving only fails the Attempt without ever opening a fresh Session
+ *     (ADR 0022) — so resume is offered unavailable with the reason (story 40).
+ *   - A `halted` Run whose current Step is a command and whose last Attempt settled
+ *     `indeterminate` (an interrupted/lost command, not a Materialization conflict)
+ *     may have already run side effects a re-run repeats, so resume arms an
+ *     acknowledgement (story 39).
+ *  Neither fires for an ordinary resumable rest, which resumes without ceremony. */
+function resumeEvidenceOf(params: {
+  readonly state: RunStateName;
+  readonly currentStepKind: string | undefined;
+  readonly lastAttemptOutcome: string | undefined;
+  readonly hasConflict: boolean;
+  readonly sessions: readonly {
+    readonly availability: string;
+    readonly session: string;
+  }[];
+}): { readonly acknowledgement?: string; readonly unavailable?: string } {
+  const unusable = params.sessions.find((s) => s.availability === "unusable");
+  if (
+    unusable !== undefined &&
+    (params.currentStepKind === "agent" ||
+      params.currentStepKind === "interactive-agent")
+  ) {
+    // ponytail: any unusable Session, not the exact one the Step names — a
+    // single-Harness Run has one Session, so this is precise in practice;
+    // per-Session matching arrives only if a Step ever needs two Sessions.
+    return {
+      unavailable: `resume needs the "${unusable.session}" Session, which is no longer usable — start a new Run instead.`,
+    };
+  }
+  if (
+    params.state === "halted" &&
+    !params.hasConflict &&
+    params.currentStepKind === "command" &&
+    params.lastAttemptOutcome === "indeterminate"
+  ) {
+    return {
+      acknowledgement:
+        "the interrupted command may have already run — resuming re-runs this Step, so its effects may repeat.",
+    };
+  }
+  return {};
+}
+
 /** The `resume-run` offer for a resting Run: names what resume does from the
- *  current state so a client presents it without re-deriving the model (#86). */
+ *  current state so a client presents it without re-deriving the model (#86), or
+ *  is offered unavailable with the reason when the Port knows it cannot proceed
+ *  (#194 story 40). */
 function resumeRunOffer(
   runId: string,
   state: RunStateName,
-  takeoverOwnerPid?: number,
+  evidence: ResumeEvidence = {},
 ): ActionOffer {
-  const offer: {
-    action: "resume-run";
-    runId: string;
-    consequence: string;
-    takeover?: { ownerPid: number };
-  } = {
+  if (evidence.unavailable !== undefined) {
+    return {
+      action: "resume-run",
+      runId,
+      available: false,
+      reason: evidence.unavailable,
+    };
+  }
+  const consequence =
+    evidence.takeoverOwnerPid !== undefined
+      ? `take over from process ${evidence.takeoverOwnerPid} and continue the Run.`
+      : state === "failed"
+        ? "resume: reset this Step's attempt and iteration bounds and grant another try."
+        : "resume: continue from the Step the Run stopped at.";
+  return {
     action: "resume-run",
     runId,
-    consequence:
-      takeoverOwnerPid !== undefined
-        ? `take over from process ${takeoverOwnerPid} and continue the Run.`
-        : state === "failed"
-          ? "resume: reset this Step's attempt and iteration bounds and grant another try."
-          : "resume: continue from the Step the Run stopped at.",
+    available: true,
+    consequence,
+    ...(evidence.takeoverOwnerPid !== undefined
+      ? { takeover: { ownerPid: evidence.takeoverOwnerPid } }
+      : {}),
+    ...(evidence.acknowledgement !== undefined
+      ? { acknowledgement: evidence.acknowledgement }
+      : {}),
   };
-  if (takeoverOwnerPid !== undefined) {
-    offer.takeover = { ownerPid: takeoverOwnerPid };
-  }
-  return offer;
 }
 
 /** The `answer-human-gate` offer for a blocked Run: names the consequence of each

@@ -335,14 +335,25 @@ export function renderRun(run: RunView): string {
   }
 
   // The resume-run offer appears only while resting halted or failed (#86); print
-  // the command and what resume does from the Run's current state.
+  // the command and what resume does, or — when the Port marks it unavailable
+  // (#194 story 40) — the reason instead of a command, so the surface stays
+  // truthful rather than offering a resume that cannot proceed.
   for (const offer of run.actionOffers) {
     if (offer.action !== "resume-run") continue;
-    lines.push(
-      "",
-      "Resume:",
-      `  secant run resume ${run.runId}  # ${offer.consequence}`,
-    );
+    if (!offer.available) {
+      lines.push("", "Resume:", `  unavailable — ${offer.reason}`);
+    } else {
+      lines.push(
+        "",
+        "Resume:",
+        `  secant run resume ${run.runId}  # ${offer.consequence}`,
+        // An indeterminate Command Attempt may repeat its effects on re-run (#194
+        // story 39): state the risk the TUI arms an acknowledgement for.
+        ...(offer.acknowledgement !== undefined
+          ? [`  warning: ${offer.acknowledgement}`]
+          : []),
+      );
+    }
   }
 
   // The cancel/delete offers appear only when legal (#87): cancel while live,

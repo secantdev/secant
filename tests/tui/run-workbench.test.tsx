@@ -314,6 +314,9 @@ function runOf(over: Partial<RunView> = {}): RunView {
     ...(over.effectiveModel !== undefined
       ? { effectiveModel: over.effectiveModel }
       : {}),
+    ...(over.requestedModel !== undefined
+      ? { requestedModel: over.requestedModel }
+      : {}),
     ...(over.selectedHarness !== undefined
       ? { selectedHarness: over.selectedHarness }
       : {}),
@@ -515,6 +518,7 @@ test("workbench-view-freshness: four stream-health tokens replace scroll-live an
   const resumeOffer: ResumeRunOffer = {
     action: "resume-run",
     runId: "run-1",
+    available: true,
     consequence: "continue from the resting Step.",
   };
   const [pendingResume] = createSignal<RunActionOutcome>({ kind: "pending" });
@@ -583,11 +587,13 @@ test("reopened history renders End Step distinctly from a settled Command Attemp
   assert.match(t.captureCharFrame(), /interactive-step-ended succeeded/);
 });
 
-test("the full header shows the Harness name, executable, version, and model (#125)", async () => {
-  const { t } = await mountWorkbench(
+test("the details panel shows the observed Harness, executable, version, and model, and the header no longer does (#194 story 35)", async () => {
+  const { t, renderer } = await mountWorkbench(
     runOf({
       state: "succeeded",
       progress: PROGRESS,
+      selectedHarness: "claude-code",
+      requestedModel: "fake-opus",
       harness: {
         name: "Claude Code",
         executable: "/usr/bin/claude",
@@ -598,15 +604,21 @@ test("the full header shows the Harness name, executable, version, and model (#1
     100,
     30,
   );
+  // The header no longer carries the Harness/model facts (they moved to the panel).
+  assert.doesNotMatch(t.captureCharFrame(), /Observed Harness/);
+  await press(t, renderer, "d");
   const frame = t.captureCharFrame();
+  assert.match(frame, /Selected Harness · claude-code/);
   assert.match(
     frame,
-    /Claude Code · \/usr\/bin\/claude · 1\.2\.3 · model fake-sonnet/,
+    /Observed Harness · Claude Code · \/usr\/bin\/claude · 1\.2\.3 · model fake-sonnet/,
   );
+  // Requested and observed models stay visibly distinct (AC1).
+  assert.match(frame, /Requested model · fake-opus/);
   noOverflow(frame, 100);
 });
 
-test("the compact header keeps the Harness name, version, and model readable without overflow (#125)", async () => {
+test("the panel drops the long executable path to stay readable at small widths (#194 story 35)", async () => {
   const { t, renderer } = await mountWorkbench(
     runOf({
       state: "succeeded",
@@ -624,12 +636,16 @@ test("the compact header keeps the Harness name, version, and model readable wit
   );
   renderer.resize(70, 30);
   await t.renderOnce();
+  await press(t, renderer, "d");
   const compact = t.captureCharFrame();
-  assert.match(compact, /Claude Code · 1\.2\.3 · model fake-sonnet/);
+  assert.match(
+    compact,
+    /Observed Harness · Claude Code · 1\.2\.3 · model fake-sonnet/,
+  );
   noOverflow(compact, 70);
 });
 
-test("the header reports no model rather than inventing one, and omits the line for a Command-only Run (#125)", async () => {
+test("the panel reports no model rather than inventing one, and omits Harness facts for a Command-only Run (#194 story 35)", async () => {
   // Harness present, model unobserved: the fact is stated honestly, not invented.
   const missing = await mountWorkbench(
     runOf({
@@ -644,21 +660,22 @@ test("the header reports no model rather than inventing one, and omits the line 
     100,
     30,
   );
-  const frame = missing.t.captureCharFrame();
+  await press(missing.t, missing.renderer, "d");
   assert.match(
-    frame,
-    /Claude Code · \/usr\/bin\/claude · 1\.2\.3 · model not reported/,
+    missing.t.captureCharFrame(),
+    /Observed Harness · Claude Code · \/usr\/bin\/claude · 1\.2\.3 · model not reported/,
   );
 
-  // Command-only Run: no Harness identity, so no Harness line at all.
+  // Command-only Run: no Harness identity, so no Harness/model lines at all.
   const commandOnly = await mountWorkbench(
     runOf({ state: "succeeded", progress: PROGRESS }),
     100,
     30,
   );
+  await press(commandOnly.t, commandOnly.renderer, "d");
   const commandOnlyFrame = commandOnly.t.captureCharFrame();
-  assert.doesNotMatch(commandOnlyFrame, /Selected ·/);
-  assert.doesNotMatch(commandOnlyFrame, /Observed ·/);
+  assert.doesNotMatch(commandOnlyFrame, /Selected Harness/);
+  assert.doesNotMatch(commandOnlyFrame, /Observed Harness/);
   assert.doesNotMatch(commandOnlyFrame, /model/);
 });
 
@@ -815,23 +832,25 @@ test("[selected-versus-observed-evidence] selected and observed Harness facts st
     preview: "I am checking the failing assertion",
   });
   await t.renderOnce();
+  // Selected and observed facts live in the details panel now (#194 story 35); open
+  // it and confirm the two read as visibly distinct lines (AC1), through the live Turn.
+  await press(t, renderer, "d");
   const streaming = t.captureCharFrame();
-  assert.match(streaming, /Selected · codex/);
+  assert.match(streaming, /Selected Harness · codex/);
   assert.match(
     streaming,
-    /Observed · Claude Code · \/usr\/bin\/claude · 1\.2\.3/,
+    /Observed Harness · Claude Code · \/usr\/bin\/claude · 1\.2\.3/,
   );
   assert.match(streaming, /model claude-sonnet-4-5/);
   assert.match(streaming, /Agent Turn · working/);
   assert.match(streaming, /Assistant preview · I am checking/);
   assert.match(streaming, /Activity · Edit src\/repair\.ts/);
 
+  // Below the panel's width breakpoint the panel hides (its facts with it), but the
+  // screen still relays out without overflow.
   renderer.resize(40, 24);
   await t.renderOnce();
-  const compact = t.captureCharFrame();
-  assert.match(compact, /Selected · codex/);
-  assert.match(compact, /Observed · Claude Code/);
-  noOverflow(compact, 40);
+  noOverflow(t.captureCharFrame(), 40);
   renderer.resize(110, 24);
   await t.renderOnce();
 
@@ -1605,16 +1624,15 @@ test("a selected-Harness preparation Problem is visible without colour and survi
   });
   const { t, renderer } = await mountWorkbench(run, 100, 30);
   let frame = t.captureCharFrame();
-  assert.match(frame, /Selected · codex/);
-  assert.doesNotMatch(frame, /Observed ·/);
-  assert.doesNotMatch(frame, /model /);
+  // The selected-Harness Problem stays a top-level header block, colour-independent.
   assert.match(frame, /selected-harness-unavailable/);
   assert.match(frame, /authentication/);
   assert.match(frame, /Log in separately through Codex/);
+  // A halted Run carries its resting prose beside the state word (#194 story 38).
+  assert.match(frame, /Execution stopped outside the Workflow\./);
   renderer.resize(40, 24);
   await t.renderOnce();
   frame = t.captureCharFrame();
-  assert.match(frame, /Selected · codex/);
   assert.match(frame, /selected-harness-unavailable/);
   noOverflow(frame, 40);
 });
@@ -1997,6 +2015,7 @@ test("a launched Run missing on initial open returns to Previous Runs with its B
 const RESUME_OFFER = {
   action: "resume-run" as const,
   runId: "run-1",
+  available: true as const,
   consequence: "resume: continue from the Step the Run stopped at.",
 };
 const CANCEL_OFFER = {
@@ -2009,6 +2028,23 @@ const DELETE_OFFER = {
   runId: "run-1",
   consequence: "remove the Run and its stored history and Artifacts from disk.",
 };
+// A resume that arms an acknowledgement (#194 story 39) and one the Port marks
+// unavailable (#194 story 40).
+const RESUME_ACK_OFFER = {
+  action: "resume-run" as const,
+  runId: "run-1",
+  available: true as const,
+  consequence: "resume: continue from the Step the Run stopped at.",
+  acknowledgement:
+    "the interrupted command may have already run — resuming re-runs this Step, so its effects may repeat.",
+};
+const RESUME_UNAVAILABLE_OFFER = {
+  action: "resume-run" as const,
+  runId: "run-1",
+  available: false as const,
+  reason:
+    'resume needs the "main" Session, which is no longer usable — start a new Run instead.',
+};
 
 function okActions(over: Partial<RunActionsView> = {}): RunActionsView {
   return {
@@ -2020,17 +2056,23 @@ function okActions(over: Partial<RunActionsView> = {}): RunActionsView {
   };
 }
 
-test("Run Actions render only when offered, with the consequence and shortcut", async () => {
-  const { t } = await mountWorkbench(
+test("resume stays on the main rail; delete moves into the details panel (#194 story 37)", async () => {
+  const { t, renderer } = await mountWorkbench(
     runOf({ state: "halted", actionOffers: [RESUME_OFFER, DELETE_OFFER] }),
     100,
     40,
     okActions(),
   );
-  const frame = t.captureCharFrame();
-  assert.match(frame, /r resume — resume: continue from the Step/);
-  assert.match(frame, /x delete — remove the Run/);
-  assert.doesNotMatch(frame, /c cancel/); // not offered while resting
+  // The main rail keeps the primary action; delete is not on it (AC3).
+  const rail = t.captureCharFrame();
+  assert.match(rail, /r resume — resume: continue from the Step/);
+  assert.doesNotMatch(rail, /x delete/);
+  assert.doesNotMatch(rail, /c cancel/);
+  // Delete lives in the panel with its consequence.
+  await press(t, renderer, "d");
+  const panel = t.captureCharFrame();
+  assert.match(panel, /x delete — remove the Run/);
+  assert.doesNotMatch(panel, /c cancel/); // not offered while resting
 });
 
 test("no Actions section is shown when the Run offers none", async () => {
@@ -2058,8 +2100,11 @@ test("resume dispatches and the Workbench follows into the running Run", async (
   await press(t, renderer, "r");
   const frame = t.captureCharFrame();
   assert.match(frame, /RUNNING/); // transitioned into the running Workbench
-  assert.match(frame, /c cancel/); // now offers cancel (live), not resume
-  assert.doesNotMatch(frame, /r resume/);
+  assert.doesNotMatch(frame, /r resume/); // no longer resumable
+  // Cancel now lives in the panel (#194 story 37); it is offered while live.
+  await press(t, renderer, "d"); // dismiss the "Resume applied" receipt
+  await press(t, renderer, "d"); // open the details panel
+  assert.match(t.captureCharFrame(), /c cancel/);
 });
 
 test("workbench-timeline-inspection: a resume receipt moves from checking to applied and is dismissible", async () => {
@@ -2130,6 +2175,8 @@ test("workbench-interaction-regression: delete stays armed until y confirms and 
     },
   });
   const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("Timeline"));
+  await press(t, renderer, "d"); // open the panel where delete now lives (#194)
   await t.waitForFrame((f) => f.includes("x delete"));
   await press(t, renderer, "x"); // arm the confirmation
   assert.equal(removed, 0); // not dispatched yet
@@ -2154,6 +2201,8 @@ test("Escape backs out of an armed delete without dispatching or leaving", async
     },
   });
   const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("Timeline"));
+  await press(t, renderer, "d"); // open the panel where delete now lives (#194)
   await t.waitForFrame((f) => f.includes("x delete"));
   await press(t, renderer, "x"); // arm
   assert.match(t.captureCharFrame(), /Delete is permanent/);
@@ -2179,6 +2228,8 @@ test("workbench-interaction-regression: cancel stays armed until y confirms", as
     },
   });
   const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("Timeline"));
+  await press(t, renderer, "d"); // open the panel where cancel now lives (#194)
   await t.waitForFrame((f) => f.includes("c cancel"));
   await press(t, renderer, "c"); // arm
   assert.equal(cancelled, 0);
@@ -2213,6 +2264,159 @@ test("a refused action surfaces the reason without leaving", async () => {
   const frame = t.captureCharFrame();
   assert.match(frame, /live in another process/); // the reason is shown
   assert.match(frame, /Timeline/); // still on the Workbench
+});
+
+test("a refused delete surfaces its reason though delete lives only in the panel (#194 story 37)", async () => {
+  const { t, renderer } = await mountWorkbench(
+    runOf({ state: "failed", actionOffers: [DELETE_OFFER] }),
+    100,
+    40,
+    okActions({
+      remove: () => () => ({
+        kind: "refused",
+        problem: {
+          code: "run-store-damaged",
+          explanation: "The Run store is damaged.",
+          remediation: "Re-open the Run.",
+          possibleEffects: "none",
+        },
+      }),
+    }),
+  );
+  // Delete is the only offer, so the main Actions rail is not shown at all — the
+  // refusal must not be gated behind it (the regression this guards).
+  assert.doesNotMatch(t.captureCharFrame(), /Actions:/);
+  await press(t, renderer, "d"); // open the panel where delete lives
+  await press(t, renderer, "x"); // arm
+  await press(t, renderer, "y"); // confirm → refused
+  const after = t.captureCharFrame();
+  assert.match(after, /The Run store is damaged\./); // the reason stays visible
+  assert.match(after, /Timeline/); // still on the Workbench
+});
+
+// --- recovery evidence, resting prose, and the two resume acknowledgements
+//     (#194 stories 36-40) ------------------------------------------------
+
+test("[workbench-details-recovery] the panel renders recovery evidence and hosts the relocated destructive actions", async () => {
+  // Coverage dimensions for this slice (AC7): keymap and focus (`d` opens the panel,
+  // `x` arms delete from it), terminal layout and the details breakpoint (the panel
+  // fits at 100×40 without overflow), colour-independent status (every recovery line
+  // and the resting prose read as words), interaction tuning (delete arms then
+  // confirms on `y`), and renderer/platform evidence (the sessions/latest-activity
+  // facts come only from the Run view). Timeline mechanics and large content are
+  // inapplicable to this slice; the Windows Terminal human check is not applicable —
+  // the named workbench-details-recovery scenario runs in the canonical suite on
+  // Windows, macOS, and Linux.
+  const run = runOf({
+    state: "halted",
+    sessions: [{ session: "main", availability: "unusable" }],
+    timeline: [{ at: "T0", event: "turn-settled", detail: "interrupted" }],
+    actionOffers: [RESUME_UNAVAILABLE_OFFER, DELETE_OFFER],
+  });
+  const { t, renderer } = await mountWorkbench(run, 100, 40, okActions());
+  // Header: resting prose beside the state word (story 38, AC4).
+  const header = t.captureCharFrame();
+  assert.match(header, /Execution stopped outside the Workflow\./);
+  // Rail: resume is truthfully unavailable, not hidden (story 40); delete is off it.
+  assert.match(header, /resume — unavailable · .*no longer usable/);
+  assert.doesNotMatch(header, /x delete/);
+
+  await press(t, renderer, "d");
+  const panel = t.captureCharFrame();
+  assert.match(panel, /Recovery:/);
+  assert.match(
+    panel,
+    /Resting reason · Execution stopped outside the Workflow\./,
+  );
+  assert.match(panel, /Latest activity · turn-settled interrupted · T0/);
+  assert.match(panel, /Session main · unusable/);
+  // Nothing invented when absent (story 36, AC2): no conflict line here.
+  assert.doesNotMatch(panel, /Materialization conflict/);
+  assert.match(panel, /x delete — remove the Run/);
+  noOverflow(panel, 100);
+
+  // The relocated delete keeps its confirm-armed behaviour (story 37, AC3).
+  await press(t, renderer, "x");
+  assert.match(t.captureCharFrame(), /Delete is permanent/);
+  await press(t, renderer, "escape"); // Esc backs out without dispatching
+  assert.doesNotMatch(t.captureCharFrame(), /Delete is permanent/);
+});
+
+test("an unavailable resume is not dispatchable — r does nothing (#194 story 40)", async () => {
+  let dispatched = false;
+  const { t, renderer } = await mountWorkbench(
+    runOf({ state: "halted", actionOffers: [RESUME_UNAVAILABLE_OFFER] }),
+    100,
+    40,
+    okActions({
+      resume: () => {
+        dispatched = true;
+        return () => ({ kind: "ok" });
+      },
+    }),
+  );
+  await press(t, renderer, "r");
+  assert.equal(dispatched, false);
+  assert.match(t.captureCharFrame(), /resume — unavailable/);
+});
+
+test("an indeterminate-Command resume arms an acknowledgement before it dispatches (#194 story 39)", async () => {
+  let received = false;
+  const { t, renderer } = await mountWorkbench(
+    runOf({ state: "halted", actionOffers: [RESUME_ACK_OFFER] }),
+    100,
+    40,
+    okActions({
+      resume: () => {
+        received = true;
+        return () => ({ kind: "ok" });
+      },
+    }),
+  );
+  // `r` arms the acknowledgement of repeatable effects and does not dispatch yet.
+  await press(t, renderer, "r");
+  assert.equal(received, false);
+  const armed = t.captureCharFrame();
+  assert.match(armed, /Resuming may repeat this Step's effects/);
+  assert.match(armed, /y to acknowledge and resume/);
+  // Esc backs out without resuming.
+  await press(t, renderer, "escape");
+  assert.equal(received, false);
+  assert.doesNotMatch(t.captureCharFrame(), /y to acknowledge/);
+  // Arm again and confirm: `y` acknowledges and dispatches the resume.
+  await press(t, renderer, "r");
+  await press(t, renderer, "y");
+  assert.equal(received, true);
+});
+
+test("the indeterminate Attempt shows as recovery evidence in the panel (#194 story 36/39)", async () => {
+  const { t, renderer } = await mountWorkbench(
+    runOf({ state: "halted", actionOffers: [RESUME_ACK_OFFER] }),
+    100,
+    40,
+    okActions(),
+  );
+  await press(t, renderer, "d");
+  assert.match(
+    t.captureCharFrame(),
+    /Indeterminate Attempt · the interrupted command may have already run/,
+  );
+});
+
+test("every terminal resting state carries its prose beside the state word (#194 story 38)", async () => {
+  for (const [state, prose] of [
+    ["succeeded", "Workflow completed."],
+    ["failed", "This Run has ended."],
+    ["cancelled", "You cancelled this Run."],
+    ["halted", "Execution stopped outside the Workflow."],
+  ] as const) {
+    const { t } = await mountWorkbench(runOf({ state }), 100, 30);
+    assert.match(
+      t.captureCharFrame(),
+      new RegExp(prose.replace(/[.]/g, "\\.")),
+      `resting prose for ${state}`,
+    );
+  }
 });
 
 // --- interactive-agent turn-taking (#122) ----------------------------------

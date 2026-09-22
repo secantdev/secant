@@ -727,7 +727,8 @@ async function resumeRun(params: TResumeRunParams): Promise<number> {
           (candidate): candidate is ResumeRunOffer =>
             candidate.action === "resume-run",
         );
-        if (offer?.takeover !== undefined) input.takeover = offer.takeover;
+        if (offer?.available === true && offer.takeover !== undefined)
+          input.takeover = offer.takeover;
       }
     } finally {
       opened.close();

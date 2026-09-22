@@ -273,17 +273,16 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
   // (allow) decision dispatches `answer-harness-request` and the Turn continues to
   // completion — the whole client wiring, not a hand-built Port submit (#121 AC1).
   fakeRenderer.key("return");
-  await rendered.waitForFrame(
-    (next) => next.includes("SUCCEEDED") && next.includes("model fake-sonnet"),
-  );
-  const settled = rendered.captureCharFrame();
-  // The Harness identity header now shows the observed name, executable, and version
-  // alongside the effective model, read from the durable `harness` view — not the old
-  // model-only header that hardcoded "Claude Code" (#125).
+  await rendered.waitForFrame((next) => next.includes("SUCCEEDED"));
+  assert.match(rendered.captureCharFrame(), /Tool activity · Edit started/);
+  assert.doesNotMatch(rendered.captureCharFrame(), /Assistant preview/);
+  // The Harness identity and effective model live in the details panel now (#194
+  // story 35), read from the durable `harness` view — not the old model-only header
+  // that hardcoded "Claude Code" (#125). Open the panel to confirm the observed line.
+  fakeRenderer.key("d");
+  await rendered.waitForFrame((next) => next.includes("Observed Harness"));
   assert.match(
-    settled,
-    /Claude Code · fake-claude · 0\.0\.0-fake · model fake-sonnet/,
+    rendered.captureCharFrame(),
+    /Observed Harness · Claude Code · fake-claude · 0\.0\.0-fake · model fake-sonnet/,
   );
-  assert.match(settled, /Tool activity · Edit started/);
-  assert.doesNotMatch(settled, /Assistant preview/);
 });

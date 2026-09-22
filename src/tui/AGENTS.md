@@ -108,6 +108,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `bundle-list.tsx`, now replaced by `bundle-catalog.tsx`).
 - `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-catalog status wording — keep it matching `headless/render.ts` so
   the TUI and headless surfaces say the same thing about the same fact.
-- The Workbench header renders durable `run.selectedHarness` on a worded `Selected` line and latest-Attempt `run.harness`/`effectiveModel` on a separate
-  `Observed` line (#125, #147). Before an Attempt only selection appears; the compact observed line drops the executable path. Command-only Runs show neither,
-  and `headerRows()` counts each independently so small layouts reserve exactly the rows they render.
+- The Harness/model facts (#125/#147), recovery evidence, the story-38 resting reason, and cancel/delete moved off the header/rail into the details panel (#194).
+  `buildDetailsRows` (`run-workbench-views.tsx`) builds the panel once; the container reserves exactly `detailsRows().length` rows, so render and row accounting
+  never drift. Recovery lines appear only when their Run-view fact is present. `c`/`x` act only while the panel is shown, confirm in the panel; the rail keeps only
+  resume and the live-Turn interrupt/steer. A terminal/`halted` rest also shows one `restingProse` line beside the header state word (colour is never the only
+  signal); `blocked` keeps that prose only in the panel, and `headerRows()` counts it.
+- `ResumeRunOffer` is a `SteerTurnOffer`-style union (#194): `available:false` renders `resume — unavailable · <reason>` and `r` no-ops (story 40); an
+  `available:true` offer with `acknowledgement` arms an extra confirm (`pending() === "acknowledge"`) before dispatch, since an indeterminate Command Attempt may
+  repeat effects (story 39) — the full risk shows in the panel's recovery evidence, the rail prompt leads with the action so it never clips.

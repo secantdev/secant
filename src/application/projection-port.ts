@@ -1025,15 +1025,34 @@ export interface AnswerHumanGateOffer {
   readonly textConsequence?: string;
 }
 
-/** Resume a resting Run or take over a nonterminal Run owned by another process. */
-export interface ResumeRunOffer {
-  readonly action: "resume-run";
-  readonly runId: string;
-  /** What resume does from the Run's current resting state. */
-  readonly consequence: string;
-  /** Present when resume requires an explicit takeover confirmation. */
-  readonly takeover?: { readonly ownerPid: number };
-}
+/** Resume a resting Run or take over a nonterminal Run owned by another process.
+ *  Discriminated on `available` like `SteerTurnOffer`: resume is offered `available`
+ *  with the consequence a client presents, or `available:false` when the Port knows
+ *  it cannot proceed (a lost required Session, #194 story 40) — carrying only the
+ *  reason so the control reads truthfully rather than hiding. */
+export type ResumeRunOffer =
+  | {
+      readonly action: "resume-run";
+      readonly runId: string;
+      readonly available: true;
+      /** What resume does from the Run's current resting state. */
+      readonly consequence: string;
+      /** Present when resume requires an explicit takeover confirmation. */
+      readonly takeover?: { readonly ownerPid: number };
+      /** Present when the latest resting Attempt was an indeterminate Command
+       *  Attempt whose side effects may repeat on re-run (#194 story 39): the
+       *  client arms an explicit acknowledgement of that risk before dispatch. The
+       *  string is the risk stated for the human to acknowledge. */
+      readonly acknowledgement?: string;
+    }
+  | {
+      readonly action: "resume-run";
+      readonly runId: string;
+      readonly available: false;
+      /** Why resume cannot proceed — e.g. the required Harness Session is no
+       *  longer usable, so re-driving would only fail the Attempt (ADR 0022). */
+      readonly reason: string;
+    };
 
 /** Interrupt the live Turn of a running Run (#118). Offered on the `run`
  *  Projection only while a Turn is live; it carries the live Turn's id — the

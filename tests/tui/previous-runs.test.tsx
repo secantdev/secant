@@ -598,6 +598,8 @@ test("delete from the Workbench returns to the list without that Run", async () 
   t.mockInput.pressArrow("down"); // select run-doomed
   await until(() => selectedLine(t.captureCharFrame()).includes("run-doomed"));
   t.mockInput.pressEnter(); // → Workbench
+  await t.waitForFrame((f) => f.includes("Timeline"));
+  renderer.key("d"); // open the details panel where delete now lives (#194)
   await t.waitForFrame((f) => f.includes("x delete")); // the delete control is offered
 
   renderer.key("x"); // arm the delete confirmation

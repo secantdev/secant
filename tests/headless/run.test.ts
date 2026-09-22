@@ -848,6 +848,39 @@ test("run show offers the resume action only while resting failed or halted (#86
   assert.doesNotMatch(h.stdout(), /Resume:/);
 });
 
+test("run show warns that resuming an indeterminate Command Attempt may repeat effects (#194 story 39)", async (t) => {
+  const h = await harness(t);
+  const { digest } = await h.install();
+  assert.ok(h.runGroup);
+  // Seed a halted Run whose command Attempt ended indeterminate directly in the Run
+  // Store — no child spawns; the resume section must carry the additive warning line.
+  const created = h.runGroup.createRun({
+    operationId: "op-indeterminate",
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date(),
+  });
+  assert.ok(created.outcome === "created");
+  if (created.outcome !== "created") throw new Error("unreachable");
+  const owner = h.runGroup.acquireRun(created.runId);
+  assert.ok(owner);
+  owner.publishAttempt({
+    attemptId: "0.0:build",
+    outcome: "indeterminate",
+    required: [],
+    outputs: [],
+    at: new Date(),
+    advanceState: "halted",
+  });
+  owner.close();
+
+  await runHeadless(h.clients, ["run", "show", created.runId], h.io);
+  const out = h.stdout();
+  assert.match(out, /^State: halted$/m);
+  assert.match(out, /Resume:/);
+  assert.match(out, /warning: .*effects may repeat/);
+});
+
 /** Parse a `run show --json` snapshot's run view (blocked-run shape). */
 function parseRun(json: string): {
   state: string;

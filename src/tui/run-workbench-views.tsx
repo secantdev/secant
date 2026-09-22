@@ -2,8 +2,11 @@ import { TextAttributes } from "@opentui/core";
 import { For, Show, type Accessor } from "solid-js";
 import type {
   AnswerHumanGateOffer,
+  CancelRunOffer,
+  DeleteRunOffer,
   Problem,
   RunCheckpointView,
+  RunStateName,
   RunView,
 } from "../application/projection-port.js";
 import { clip } from "./clip.js";
@@ -238,19 +241,195 @@ export function CheckpointInteraction(props: {
   );
 }
 
+/** Short prose stating why a resting Run rests (#194 story 38), derived purely in
+ *  presentation from the Run view's `state` and — for `halted`/`blocked` — the
+ *  conflict/checkpoint/gate facts. Exhaustive over `RunStateName` so a new state
+ *  must be given prose here to compile. `running` is not a resting state. Both the
+ *  header (beside the state word, so colour is never the only signal, AC4) and the
+ *  panel's recovery evidence (AC2) render this one string. */
+export function restingProse(run: RunView): string | undefined {
+  switch (run.state) {
+    case "running":
+      return undefined;
+    case "succeeded":
+      return "Workflow completed.";
+    case "failed":
+      return "This Run has ended.";
+    case "cancelled":
+      return "You cancelled this Run.";
+    case "halted":
+      return run.conflict !== undefined
+        ? "A required file changed, so execution stopped outside the Workflow."
+        : "Execution stopped outside the Workflow.";
+    case "blocked":
+      return run.checkpoint !== undefined
+        ? "You stopped at the Review checkpoint."
+        : run.pendingGate !== undefined
+          ? "Paused at a Human Gate — waiting for your answer."
+          : "It's your Turn — waiting for you to continue.";
+  }
+}
+
+export type DetailsTone = "text" | "muted" | "warning" | "error" | "success";
+
+export interface DetailsRow {
+  readonly text: string;
+  readonly tone: DetailsTone;
+  readonly bold: boolean;
+}
+
+function restingTone(state: RunStateName): DetailsTone {
+  switch (state) {
+    case "succeeded":
+      return "success";
+    case "failed":
+      return "error";
+    case "halted":
+    case "blocked":
+      return "warning";
+    case "cancelled":
+    case "running":
+      return "muted";
+  }
+}
+
+/** The details panel's rows, built once so the render and the container's exact
+ *  row reservation (the panel's height) share one source of truth (tui/AGENTS.md).
+ *  Every recovery-evidence line appears only when the Run view exposes its fact —
+ *  nothing is invented when a fact is absent (#194 story 36, AC2). */
+export function buildDetailsRows(params: {
+  readonly run: RunView;
+  readonly position: string;
+  readonly compact: boolean;
+  readonly focused: boolean;
+  readonly openables: readonly Openable[];
+  readonly selected: number;
+  /** Set when the resting resume offer arms an indeterminate-Command-Attempt
+   *  acknowledgement (#194 story 39); surfaced as recovery evidence too. */
+  readonly resumeAcknowledgement: string | undefined;
+  readonly cancel: CancelRunOffer | undefined;
+  readonly remove: DeleteRunOffer | undefined;
+  readonly armed: "cancel" | "delete" | undefined;
+}): DetailsRow[] {
+  const { run } = params;
+  const rows: DetailsRow[] = [];
+  const push = (text: string, tone: DetailsTone = "muted", bold = false) =>
+    rows.push({ text, tone, bold });
+
+  push(`${params.focused ? "› " : "  "}Details`, "text", params.focused);
+  push(
+    `  ${run.bundle.id}@${run.bundle.version} · sha256:${run.bundle.digest}`,
+    "text",
+  );
+  push(`  Workspace: ${run.workspacePath}`);
+  push(`  Launched: ${run.launchedAt} · ${params.position}`);
+
+  // Harness/model facts, moved out of the header (#194 story 35): durable
+  // selection, then the latest Attempt's observation, then the requested model
+  // kept visibly apart from the observed effective model (AC1). The compact form
+  // drops the long executable path to stay readable at small widths.
+  if (run.selectedHarness !== undefined)
+    push(`  Selected Harness · ${run.selectedHarness}`);
+  if (run.harness !== undefined) {
+    const model = run.effectiveModel ?? "not reported";
+    push(
+      params.compact
+        ? `  Observed Harness · ${run.harness.name} · ${run.harness.executableVersion} · model ${model}`
+        : `  Observed Harness · ${run.harness.name} · ${run.harness.executable} · ${run.harness.executableVersion} · model ${model}`,
+    );
+  }
+  if (run.requestedModel !== undefined)
+    push(`  Requested model · ${run.requestedModel}`);
+
+  // Recovery evidence (#194 story 36): each line only when its fact is present.
+  const recovery: DetailsRow[] = [];
+  const prose = restingProse(run);
+  if (prose !== undefined)
+    recovery.push({
+      text: `  Resting reason · ${prose}`,
+      tone: restingTone(run.state),
+      bold: false,
+    });
+  const last = run.timeline[run.timeline.length - 1];
+  if (last !== undefined)
+    recovery.push({
+      text: `  Latest activity · ${last.event}${last.detail !== undefined ? ` ${last.detail}` : ""} · ${last.at}`,
+      tone: "muted",
+      bold: false,
+    });
+  if (run.conflict !== undefined)
+    recovery.push({
+      text: `  Materialization conflict · restore ${run.conflict.path}`,
+      tone: "warning",
+      bold: false,
+    });
+  if (params.resumeAcknowledgement !== undefined)
+    recovery.push({
+      text: `  Indeterminate Attempt · ${params.resumeAcknowledgement}`,
+      tone: "warning",
+      bold: false,
+    });
+  for (const session of run.sessions ?? [])
+    recovery.push({
+      text: `  Session ${session.session} · ${session.availability}`,
+      tone: session.availability === "unusable" ? "warning" : "muted",
+      bold: false,
+    });
+  if (recovery.length > 0) {
+    push("  Recovery:", "muted");
+    rows.push(...recovery);
+  }
+
+  push("  Resources:", "muted");
+  if (params.openables.length === 0) push("    (none)");
+  else
+    params.openables.forEach((openable, index) => {
+      const active = params.focused && index === params.selected;
+      push(`    ${active ? "› " : "  "}${openable.label}`, "text", active);
+    });
+
+  // Secondary lifecycle actions, moved off the main rail (#194 story 37): cancel
+  // and delete render here with the consequence each Offer names, and their
+  // confirm-armed prompt (AC3) shows in place while armed.
+  if (params.cancel !== undefined || params.remove !== undefined) {
+    push("  Actions:", "muted");
+    if (params.cancel !== undefined)
+      push(`    c cancel — ${params.cancel.consequence}`, "text");
+    if (params.remove !== undefined)
+      push(`    x delete — ${params.remove.consequence}`, "text");
+    if (params.armed === "cancel")
+      push(
+        "    ⚠ Cancel ends the Run (history is kept). Press y to confirm · esc to keep",
+        "warning",
+      );
+    else if (params.armed === "delete")
+      push(
+        "    ⚠ Delete is permanent (Workspace files are kept). Press y to confirm · esc to keep",
+        "warning",
+      );
+  }
+
+  return rows;
+}
+
 export function DetailsPanel(props: {
-  run: Accessor<RunView>;
-  position: Accessor<string>;
+  rows: Accessor<readonly DetailsRow[]>;
   height: number;
   width: Accessor<number>;
-  focused: Accessor<boolean>;
-  openables: Accessor<readonly Openable[]>;
-  selected: Accessor<number>;
   theme: Theme;
 }) {
   const { theme } = props;
-  const run = props.run;
   const w = () => props.width();
+  const colour = (tone: DetailsTone) =>
+    tone === "text"
+      ? theme.text
+      : tone === "warning"
+        ? theme.warning
+        : tone === "error"
+          ? theme.error
+          : tone === "success"
+            ? theme.success
+            : theme.textMuted;
   return (
     <box
       flexDirection="column"
@@ -259,55 +438,17 @@ export function DetailsPanel(props: {
       overflow="hidden"
       backgroundColor={theme.backgroundPanel}
     >
-      <text
-        fg={props.focused() ? theme.text : theme.textMuted}
-        attributes={props.focused() ? TextAttributes.BOLD : 0}
-        flexShrink={0}
-      >
-        {clip(`${props.focused() ? "› " : "  "}Details`, w())}
-      </text>
-      <text fg={theme.text} flexShrink={0}>
-        {clip(
-          `  ${run().bundle.id}@${run().bundle.version} · sha256:${run().bundle.digest}`,
-          w(),
-        )}
-      </text>
-      <text fg={theme.textMuted} flexShrink={0}>
-        {clip(`  Workspace: ${run().workspacePath}`, w())}
-      </text>
-      <text fg={theme.textMuted} flexShrink={0}>
-        {clip(`  Launched: ${run().launchedAt} · ${props.position()}`, w())}
-      </text>
-      <text fg={theme.textMuted} flexShrink={0}>
-        {clip("  Resources:", w())}
-      </text>
-      <Show
-        when={props.openables().length > 0}
-        fallback={
-          <text fg={theme.textMuted} flexShrink={0}>
-            {clip("    (none)", w())}
+      <For each={props.rows()}>
+        {(row) => (
+          <text
+            fg={colour(row.tone)}
+            attributes={row.bold ? TextAttributes.BOLD : 0}
+            flexShrink={0}
+          >
+            {clip(row.text, w())}
           </text>
-        }
-      >
-        <For each={props.openables()}>
-          {(openable, index) => (
-            <text
-              fg={theme.text}
-              attributes={
-                props.focused() && index() === props.selected()
-                  ? TextAttributes.BOLD
-                  : 0
-              }
-              flexShrink={0}
-            >
-              {clip(
-                `    ${props.focused() && index() === props.selected() ? "› " : "  "}${openable.label}`,
-                w(),
-              )}
-            </text>
-          )}
-        </For>
-      </Show>
+        )}
+      </For>
     </box>
   );
 }

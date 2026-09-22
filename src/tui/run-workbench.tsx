@@ -53,10 +53,13 @@ import {
   type FreeTextGate,
 } from "./run-gate-control.js";
 import {
+  buildDetailsRows,
   CheckpointInteraction,
   DetailsPanel,
   InteractiveInput,
+  restingProse,
   SteerInput,
+  type DetailsRow,
 } from "./run-workbench-views.js";
 import {
   AT_LIVE,
@@ -98,7 +101,6 @@ import { useTheme } from "./vendor/theme-context.js";
 
 const HEADER_COMPACT_WIDTH = 80;
 const DETAILS_MIN_WIDTH = 60;
-const DETAILS_HEIGHT = 8;
 /** Rows the Review checkpoint interaction occupies when it replaces the footer
  *  (#92): the heading, the latest-verdict-and-evidence line, two controls each with
  *  their consequence line (four rows), and a status/hint line — seven rows. Fixed so
@@ -287,7 +289,7 @@ export function RunWorkbench(props: {
   });
   const [actionRefusal, setActionRefusal] = createSignal<Problem | undefined>();
   const [pending, setPending] = createSignal<
-    "takeover" | "cancel" | "delete" | "end-step" | undefined
+    "takeover" | "acknowledge" | "cancel" | "delete" | "end-step" | undefined
   >();
   // A dispatched Run Action followed to settlement: resume drives execution and a
   // cancel-as-abort aborts a live Run, both asynchronous now (#98), so the outcome
@@ -309,7 +311,9 @@ export function RunWorkbench(props: {
 
   const dispatchResume = () => {
     const offer = offers().resume;
-    if (offer === undefined || actionInFlight()) return;
+    // An unavailable resume (#194 story 40) is never dispatched — the Port has
+    // said it cannot proceed, so the control is truthful, not actionable.
+    if (offer === undefined || !offer.available || actionInFlight()) return;
     setActionRefusal(undefined);
     setActionReceipt({ kind: "pending", operation: "resume" });
     setActionFlight({ op: "resume", outcome: actions.resume(offer) });
@@ -338,13 +342,20 @@ export function RunWorkbench(props: {
     setActionReceipt({ kind: "pending", operation: "delete" });
     setActionFlight({ op: "delete", outcome: actions.remove(offer.runId) });
   };
+  // The confirm the main rail owns: only resume's takeover/acknowledge (#194).
+  // Cancel and delete confirm inside the details panel now, so their armed prompt
+  // never reserves a rail row.
+  const railPending = () => {
+    const armed = pending();
+    return armed === "takeover" || armed === "acknowledge" ? armed : undefined;
+  };
+  // The main rail keeps only the primary action (resume) and the live-Turn controls
+  // interrupt/steer (#194 story 37, AC3); cancel and delete moved into the panel.
   const anyActionOffer = () => {
     if (modalControl()) return false; // a request/gate modal hides the Actions rail
     const current = offers();
     return (
       current.resume !== undefined ||
-      current.cancel !== undefined ||
-      current.remove !== undefined ||
       current.interrupt !== undefined ||
       current.steer !== undefined
     );
@@ -357,11 +368,7 @@ export function RunWorkbench(props: {
     const liveTurn = interactiveStepActive()
       ? 0
       : (current.interrupt ? 1 : 0) + (current.steer ? 1 : 0);
-    const count =
-      (current.resume ? 1 : 0) +
-      (current.cancel ? 1 : 0) +
-      (current.remove ? 1 : 0) +
-      liveTurn;
+    const count = (current.resume ? 1 : 0) + liveTurn;
     if (count === 0) return 0;
     return (
       1 /*heading*/ +
@@ -369,8 +376,7 @@ export function RunWorkbench(props: {
       (!interactiveStepActive() && interruptArmed()
         ? 1
         : 0) /*the "again to interrupt" hint*/ +
-      (pending() !== undefined ? 1 : 0) +
-      (actionRefusal() !== undefined ? 1 : 0)
+      (railPending() !== undefined ? 1 : 0)
     );
   };
 
@@ -573,13 +579,21 @@ export function RunWorkbench(props: {
   const hasConflict = () => run()?.conflict !== undefined;
   const hasRunProblem = () => run()?.problem !== undefined;
   const compactHeader = () => dims().width < HEADER_COMPACT_WIDTH;
-  const headerRows = () => {
+  // The one-line resting prose shown beside the header state word (#194 story 38,
+  // AC4), so colour and the state word are never the only signal. Absent while the
+  // Run is `running`. The Harness/model evidence rows left the header for the panel
+  // (#194 story 35), so headerRows no longer counts them.
+  const restingProseLine = () => {
     const current = run();
-    const evidenceRows =
-      (current?.selectedHarness === undefined ? 0 : 1) +
-      (current?.harness === undefined ? 0 : 1);
-    return (compactHeader() ? 1 : 2) + evidenceRows;
+    // A `blocked` Run already carries non-colour signals in the header (the blocked
+    // basis and the waiting/gate line), so its prose lives only in the panel's
+    // recovery evidence; the header line is for the terminal and halted rests, whose
+    // state word and colour would otherwise be the only signal (AC4).
+    if (current === undefined || current.state === "blocked") return undefined;
+    return restingProse(current);
   };
+  const headerRows = () =>
+    (compactHeader() ? 1 : 2) + (restingProseLine() !== undefined ? 1 : 0);
   const hasGateLine = () =>
     run()?.checkpoint !== undefined || run()?.pendingGate !== undefined;
   // The bottom region is one of, in precedence: the approval request control, the
@@ -601,7 +615,12 @@ export function RunWorkbench(props: {
   const bottomHeight = () =>
     interactionHeight() +
     (!viewCurrent() && pendingOperation() !== undefined ? 1 : 0) +
-    (actionReceipt() === undefined ? 0 : 1);
+    (actionReceipt() === undefined ? 0 : 1) +
+    // A refused Run Action surfaces here, below the timeline, not on the Actions
+    // rail: cancel/delete moved into the panel and drop off the rail (#194), so a
+    // refusal gated behind the rail would be invisible whenever cancel or delete is
+    // the only offer. This always-visible line shows any action's refusal.
+    (actionRefusal() === undefined ? 0 : 1);
   const chrome = () =>
     headerRows() +
     (hasGateLine() ? 1 : 0) +
@@ -612,24 +631,59 @@ export function RunWorkbench(props: {
     1 /*timeline label*/ +
     bottomHeight();
   // The details panel needs both room across (its width breakpoint) and room
-  // down: DETAILS_HEIGHT rows plus at least one timeline row. On a short terminal
-  // it stays hidden rather than clipping the panel and footer off the bottom.
+  // down: its own rows plus at least one timeline row. On a short terminal it stays
+  // hidden rather than clipping the panel and footer off the bottom.
   const detailsAvailable = () =>
     dims().width >= DETAILS_MIN_WIDTH &&
-    interiorH() - chrome() - DETAILS_HEIGHT >= 1;
+    interiorH() - chrome() - detailsHeight() >= 1;
   const detailsShown = () => detailsOpen() && detailsAvailable();
   const viewportH = () =>
-    Math.max(1, interiorH() - chrome() - (detailsShown() ? DETAILS_HEIGHT : 0));
+    Math.max(
+      1,
+      interiorH() - chrome() - (detailsShown() ? detailsHeight() : 0),
+    );
   // The selection can point past the end after a durable update drops outputs; a
   // clamped read keeps the highlight and any open on a real row.
   const selectedRef = () =>
     Math.min(selected(), Math.max(0, openables().length - 1));
 
+  // The panel's rows, built from the Run view plus the moved-in facts, offers, and
+  // armed confirm. The container reserves exactly these rows (its height) and hands
+  // the same array to the pure DetailsPanel, so render and row accounting never
+  // drift (tui/AGENTS.md). Lazy (not a createMemo) so it never eagerly reads a
+  // const defined later in this body.
+  const detailsRows = (): readonly DetailsRow[] => {
+    const current = run();
+    if (current === undefined) return [];
+    const resume = offers().resume;
+    const armed = pending();
+    return buildDetailsRows({
+      run: current,
+      position: positionText(current),
+      compact: compactHeader(),
+      focused: focus() === "details",
+      openables: openables(),
+      selected: selectedRef(),
+      resumeAcknowledgement:
+        resume?.available === true ? resume.acknowledgement : undefined,
+      cancel: offers().cancel,
+      remove: offers().remove,
+      armed: armed === "cancel" || armed === "delete" ? armed : undefined,
+    });
+  };
+  const detailsHeight = () => detailsRows().length;
+
   // If the panel becomes unavailable (a resize below either breakpoint) while it
   // held focus, hand focus back to the timeline so the footer and marker stay
   // honest about what the keys do.
   createEffect(() => {
-    if (!detailsShown() && focus() === "details") setFocus("timeline");
+    if (!detailsShown()) {
+      if (focus() === "details") setFocus("timeline");
+      // Cancel/delete confirm in the panel (#194 story 37); if it closes mid-arm,
+      // drop the confirm so no invisible destructive action stays armed.
+      const armed = pending();
+      if (armed === "cancel" || armed === "delete") setPending(undefined);
+    }
   });
 
   const answerPending = () => {
@@ -893,7 +947,7 @@ export function RunWorkbench(props: {
       if (name === "y") {
         const action = pending();
         setPending(undefined);
-        if (action === "takeover") dispatchResume();
+        if (action === "takeover" || action === "acknowledge") dispatchResume();
         else if (action === "cancel") confirmCancel();
         else if (action === "delete") confirmDelete();
         else confirmEndStep();
@@ -954,22 +1008,33 @@ export function RunWorkbench(props: {
       openSteer();
       return;
     }
-    // Run Actions from any focus, gated on the Offer being present. A local resume
-    // dispatches at once; takeover, Cancel, and Delete arm a confirmation first.
-    if (name === "r" && offers().resume !== undefined) {
-      if (offers().resume?.takeover === undefined) dispatchResume();
-      else {
+    // Resume from any focus, gated on an available Offer. A local resume dispatches
+    // at once; a takeover or an indeterminate-Command-Attempt acknowledgement (#194
+    // story 39) arms a confirmation first. An unavailable resume (#194 story 40) is
+    // not actionable — `r` does nothing.
+    const resume = offers().resume;
+    if (name === "r" && resume?.available === true) {
+      if (resume.takeover !== undefined) {
         setActionRefusal(undefined);
         setPending("takeover");
-      }
+      } else if (resume.acknowledgement !== undefined) {
+        setActionRefusal(undefined);
+        setPending("acknowledge");
+      } else dispatchResume();
       return;
     }
-    if (name === "c" && offers().cancel !== undefined) {
+    // Cancel and delete now live in the details panel (#194 story 37), so their keys
+    // act only while the panel is shown — where the control and its confirm prompt
+    // render. Both still arm a confirmation first (AC3).
+    // ponytail: reachable only when the panel fits; on a terminal too small for the
+    // panel, open a wider one to cancel/delete — the same breakpoint all panel
+    // content already lives behind.
+    if (name === "c" && offers().cancel !== undefined && detailsShown()) {
       setActionRefusal(undefined);
       setPending("cancel");
       return;
     }
-    if (name === "x" && offers().remove !== undefined) {
+    if (name === "x" && offers().remove !== undefined && detailsShown()) {
       setActionRefusal(undefined);
       setPending("delete");
       return;
@@ -1092,8 +1157,10 @@ export function RunWorkbench(props: {
               pendingOperation={pendingOperation}
               actionReceipt={actionReceipt}
               compactHeader={compactHeader}
+              restingProse={restingProseLine}
               detailsShown={detailsShown}
-              detailsHeight={DETAILS_HEIGHT}
+              detailsRows={detailsRows}
+              detailsHeight={detailsHeight}
               viewportH={viewportH}
               innerW={innerW}
               win={win}
@@ -1101,9 +1168,7 @@ export function RunWorkbench(props: {
               visibleRows={visibleRows}
               blockedBasis={blockedBasis}
               focus={focus}
-              openables={openables}
               transcriptAvailable={() => transcriptTarget() !== undefined}
-              selected={selectedRef}
               checkpointActive={checkpointActive}
               offer={answerOffer}
               evidence={evidenceLabels}
@@ -1113,12 +1178,10 @@ export function RunWorkbench(props: {
               actionOffers={offers}
               anyActionOffer={anyActionOffer}
               actionRefusal={actionRefusal}
-              // End Step's confirm renders in the interactive input, not the Actions
-              // box, so the Actions box never sees the `end-step` pending state.
-              actionPending={() => {
-                const armed = pending();
-                return armed === "end-step" ? undefined : armed;
-              }}
+              // Only resume's takeover/acknowledge confirm on the rail; cancel/delete
+              // confirm in the panel, and End Step in the interactive input, so the
+              // Actions box never sees those pending states.
+              actionPending={railPending}
               interactiveActive={interactiveStepActive}
               interactiveTurnLive={interactiveTurnLive}
               interactiveEndOffered={() =>
@@ -1203,8 +1266,10 @@ function Workbench(props: {
   pendingOperation: Accessor<string | undefined>;
   actionReceipt: Accessor<TActionReceipt | undefined>;
   compactHeader: Accessor<boolean>;
+  restingProse: Accessor<string | undefined>;
   detailsShown: Accessor<boolean>;
-  detailsHeight: number;
+  detailsRows: Accessor<readonly DetailsRow[]>;
+  detailsHeight: Accessor<number>;
   viewportH: Accessor<number>;
   innerW: Accessor<number>;
   win: Accessor<ReturnType<typeof timelineWindow>>;
@@ -1212,9 +1277,7 @@ function Workbench(props: {
   visibleRows: Accessor<readonly TimelineRow[]>;
   blockedBasis: Accessor<string | undefined>;
   focus: Accessor<Focus>;
-  openables: Accessor<readonly Openable[]>;
   transcriptAvailable: Accessor<boolean>;
-  selected: Accessor<number>;
   checkpointActive: Accessor<boolean>;
   offer: Accessor<AnswerHumanGateOffer | undefined>;
   evidence: Accessor<readonly string[]>;
@@ -1230,7 +1293,7 @@ function Workbench(props: {
   }>;
   anyActionOffer: Accessor<boolean>;
   actionRefusal: Accessor<Problem | undefined>;
-  actionPending: Accessor<"takeover" | "cancel" | "delete" | undefined>;
+  actionPending: Accessor<"takeover" | "acknowledge" | undefined>;
   interactiveActive: Accessor<boolean>;
   interactiveTurnLive: Accessor<boolean>;
   interactiveEndOffered: Accessor<boolean>;
@@ -1318,26 +1381,10 @@ function Workbench(props: {
         return "View catching up";
     }
   };
-  const selectedHarnessLine = () => {
-    const selected = run().selectedHarness;
-    return selected === undefined ? undefined : `Selected · ${selected}`;
-  };
-  // Attempt evidence is a separate line from durable selection. A live Turn before
-  // its first Attempt settles therefore shows only selection; executable, version,
-  // and model appear only after an Attempt records them. The compact form drops the
-  // long executable path to remain readable at small widths.
-  const observedHarnessLine = () => {
-    const harness = run().harness;
-    if (harness === undefined) return undefined;
-    const model = run().effectiveModel ?? "not reported";
-    return props.compactHeader()
-      ? `Observed · ${harness.name} · ${harness.executableVersion} · model ${model}`
-      : `Observed · ${harness.name} · ${harness.executable} · ${harness.executableVersion} · model ${model}`;
-  };
-
   return (
     <box flexDirection="column" flexGrow={1} overflow="hidden">
-      {/* Compact header: Bundle name, Run id, state in words as well as colour. */}
+      {/* Compact header: Bundle name, Run id, state in words as well as colour.
+          The Harness/model facts moved to the details panel (#194 story 35). */}
       <box flexDirection="column" flexShrink={0}>
         <Show
           when={!props.compactHeader()}
@@ -1363,11 +1410,14 @@ function Workbench(props: {
             )}
           </text>
         </Show>
-        <Show when={selectedHarnessLine()}>
-          {(line) => <text fg={theme.textMuted}>{clip(line(), w())}</text>}
-        </Show>
-        <Show when={observedHarnessLine()}>
-          {(line) => <text fg={theme.textMuted}>{clip(line(), w())}</text>}
+        {/* One line of resting prose beside the state word (#194 story 38, AC4),
+            so colour and the state word are never the only signal. */}
+        <Show when={props.restingProse()}>
+          {(prose) => (
+            <text fg={theme.textMuted} flexShrink={0}>
+              {clip(prose(), w())}
+            </text>
+          )}
         </Show>
       </box>
 
@@ -1419,34 +1469,30 @@ function Workbench(props: {
         {clip(progressLine(run().progress), w())}
       </text>
 
-      {/* Run Actions: each control shows only while its Offer is present, with the
-          consequence the Offer names verbatim and its shortcut. Takeover,
-          Cancel, and Delete arm a confirming keypress first. */}
+      {/* Run Actions: the main rail keeps the primary action (resume) and the
+          live-Turn controls interrupt/steer (#194 story 37); cancel and delete moved
+          to the details panel. Resume names the consequence its Offer carries, or —
+          when the Port marks it unavailable (#194 story 40) — its reason instead,
+          truthful rather than hidden. A takeover or an indeterminate-Command-Attempt
+          acknowledgement arms a confirming keypress first. */}
       <Show when={props.anyActionOffer()}>
         <box flexDirection="column" flexShrink={0}>
           <text fg={theme.textMuted} flexShrink={0}>
             {clip("Actions:", w())}
           </text>
           <Show when={props.actionOffers().resume}>
-            {(offer) => (
-              <text fg={theme.text} flexShrink={0}>
-                {clip(`  r resume — ${offer().consequence}`, w())}
-              </text>
-            )}
-          </Show>
-          <Show when={props.actionOffers().cancel}>
-            {(offer) => (
-              <text fg={theme.text} flexShrink={0}>
-                {clip(`  c cancel — ${offer().consequence}`, w())}
-              </text>
-            )}
-          </Show>
-          <Show when={props.actionOffers().remove}>
-            {(offer) => (
-              <text fg={theme.text} flexShrink={0}>
-                {clip(`  x delete — ${offer().consequence}`, w())}
-              </text>
-            )}
+            {(offer) => {
+              const o = offer();
+              return o.available ? (
+                <text fg={theme.text} flexShrink={0}>
+                  {clip(`  r resume — ${o.consequence}`, w())}
+                </text>
+              ) : (
+                <text fg={theme.textMuted} flexShrink={0}>
+                  {clip(`  resume — unavailable · ${o.reason}`, w())}
+                </text>
+              );
+            }}
           </Show>
           {/* Interrupt (Esc twice) and Steer, shown only while an agent Turn is live
               and no interactive Step owns the interaction (its Esc leaves, #122).
@@ -1484,25 +1530,25 @@ function Workbench(props: {
             </text>
           </Show>
           <Show when={props.actionPending()}>
-            {(action) => (
-              <text fg={theme.warning} flexShrink={0}>
-                {clip(
-                  action() === "takeover"
-                    ? `  ⚠ Take over from process ${props.actionOffers().resume?.takeover?.ownerPid ?? "unknown"}? Press y to confirm · esc to keep`
-                    : action() === "delete"
-                      ? "  ⚠ Delete is permanent (Workspace files are kept). Press y to confirm · esc to keep"
-                      : "  ⚠ Cancel ends the Run (history is kept). Press y to confirm · esc to keep",
-                  w(),
-                )}
-              </text>
-            )}
-          </Show>
-          <Show when={props.actionRefusal()}>
-            {(problem) => (
-              <text fg={theme.error} flexShrink={0}>
-                {clip(`  ✗ ${problem().explanation}`, w())}
-              </text>
-            )}
+            {(action) => {
+              const resume = props.actionOffers().resume;
+              const takeoverPid =
+                resume?.available === true
+                  ? (resume.takeover?.ownerPid ?? "unknown")
+                  : "unknown";
+              // The acknowledgement's full risk shows in the panel's recovery
+              // evidence; the prompt leads with the action so it is never clipped.
+              return (
+                <text fg={theme.warning} flexShrink={0}>
+                  {clip(
+                    action() === "takeover"
+                      ? `  ⚠ Take over from process ${takeoverPid}? Press y to confirm · esc to keep`
+                      : "  ⚠ Resuming may repeat this Step's effects. Press y to acknowledge and resume · esc to keep",
+                    w(),
+                  )}
+                </text>
+              );
+            }}
           </Show>
         </box>
       </Show>
@@ -1547,13 +1593,9 @@ function Workbench(props: {
 
       <Show when={props.detailsShown()}>
         <DetailsPanel
-          run={run}
-          position={() => positionText(run())}
-          height={props.detailsHeight}
+          rows={props.detailsRows}
+          height={props.detailsHeight()}
           width={props.innerW}
-          focused={() => props.focus() === "details"}
-          openables={props.openables}
-          selected={props.selected}
           theme={theme}
         />
       </Show>
@@ -1579,6 +1621,17 @@ function Workbench(props: {
             flexShrink={0}
           >
             {clip(actionReceiptText(receipt()), w())}
+          </text>
+        )}
+      </Show>
+
+      {/* A refused Run Action (resume, cancel, delete, or interrupt) surfaces here,
+          always visible below the timeline — not on the Actions rail, which cancel
+          and delete left for the panel (#194). */}
+      <Show when={props.actionRefusal()}>
+        {(problem) => (
+          <text fg={theme.error} flexShrink={0}>
+            {clip(`✗ ${problem().explanation}`, w())}
           </text>
         )}
       </Show>

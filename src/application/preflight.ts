@@ -70,38 +70,138 @@ export type PreflightResult =
     }
   | { readonly problem: Problem };
 
+/** The ordered findings of the same checks, collected rather than short-circuited
+ *  (#189). `launch-preparation` reads this so a client sees every problem in one
+ *  assessment; `selectedHarness` is set whenever the Harness block passed, so the
+ *  assessment can qualify only that Harness. */
+export interface PreflightAssessment {
+  readonly findings: readonly Problem[];
+  readonly selectedHarness?: HarnessChoice["id"];
+  readonly requestedModel?: string;
+}
+
 /** Run Preflight against a pinned Snapshot. Returns the first failing check as a
- *  Problem, or `ok` when every prerequisite holds. */
+ *  Problem, or `ok` when every prerequisite holds. Short-circuits at the first
+ *  failure so a launch performs no probe beyond the one that already refused it. */
 export function preflight(
   request: PreflightRequest,
   process: ProcessAdapter,
 ): PreflightResult {
-  const { manifest, composition } = request;
-  const steps = flattenSteps(manifest.routing);
+  const steps = flattenSteps(request.manifest.routing);
 
-  // 1. The pinned Snapshot must still compose. A launch re-checks it because a Run
-  // pins a Snapshot (ADR 0021); a failing re-check means corrupted installed bytes.
-  // The Problem carries no routing vocabulary — the findings inform it, unprinted.
-  if (composition.some((finding) => finding.severity === "error")) {
-    return { problem: bundleSnapshotCorrupt(request.digest) };
-  }
+  const composition = checkComposition(request);
+  if (composition !== undefined) return { problem: composition };
 
-  // 2. An `interactive-agent` Step needs human turn-taking the headless client
-  // cannot relay (#116): refuse it with the TUI remedy. Every Step kind is now
-  // dispatchable (the closed table has all four kinds, #122), so this is the only
-  // kind-based Preflight refusal — the generic not-executable check is retired.
-  if (request.supportsInteractiveTurns !== true) {
-    const interactive = steps.find((step) => step.kind === "interactive-agent");
-    if (interactive !== undefined) {
-      return { problem: interactiveStepNeedsTui(interactive.id) };
-    }
-  }
+  const interactive = checkInteractive(request, steps);
+  if (interactive !== undefined) return { problem: interactive };
 
-  // 3. Harness discovery and the capability-need union (#116). Only when the
-  // routing needs a Harness (a Step kind declaring capability needs). The union
-  // must be a subset of what the Harness serves, and the executable must resolve
-  // (configured command first, then the PATH name), or the launch is refused
-  // before a Run exists — an Agent Step never discovers its Harness mid-Run.
+  const harness = checkHarness(request, steps);
+  if (harness.problems.length > 0) return { problem: harness.problems[0]! };
+
+  const inputs = checkInputs(request);
+  if (inputs !== undefined) return { problem: inputs };
+
+  const workspace = checkWorkspacePrerequisites(request, steps, process);
+  if (workspace !== undefined) return { problem: workspace };
+
+  const command = checkCommands(request, steps, process);
+  if (command !== undefined) return { problem: command };
+
+  return okResult(harness.selectedHarness, request.requestedModel);
+}
+
+/** Run the same ordered checks as `preflight`, collecting every finding instead of
+ *  returning at the first (#189). A corrupt Snapshot is the one hard stop — the
+ *  routing it declares cannot be trusted, so nothing further is assessed. Every
+ *  other check contributes independently, so a draft with several faults yields a
+ *  finding per fault in launch order. The Workspace-prerequisite and Command probes
+ *  are read-only, so collecting them after an earlier finding is safe. */
+export function assessPreflight(
+  request: PreflightRequest,
+  process: ProcessAdapter,
+): PreflightAssessment {
+  const steps = flattenSteps(request.manifest.routing);
+
+  const composition = checkComposition(request);
+  if (composition !== undefined) return { findings: [composition] };
+
+  const findings: Problem[] = [];
+  const interactive = checkInteractive(request, steps);
+  if (interactive !== undefined) findings.push(interactive);
+
+  const harness = checkHarness(request, steps);
+  findings.push(...harness.problems);
+
+  const inputs = checkInputs(request);
+  if (inputs !== undefined) findings.push(inputs);
+
+  const workspace = checkWorkspacePrerequisites(request, steps, process);
+  if (workspace !== undefined) findings.push(workspace);
+
+  const command = checkCommands(request, steps, process);
+  if (command !== undefined) findings.push(command);
+
+  return {
+    findings,
+    ...(harness.selectedHarness !== undefined
+      ? { selectedHarness: harness.selectedHarness }
+      : {}),
+    // The requested model is meaningful only on the Agent-bearing path; a
+    // Command-only routing already yields a `model` finding above (#187).
+    ...(harness.selectedHarness !== undefined &&
+    request.requestedModel !== undefined
+      ? { requestedModel: request.requestedModel }
+      : {}),
+  };
+}
+
+function okResult(
+  selectedHarness: HarnessChoice["id"] | undefined,
+  requestedModel: string | undefined,
+): PreflightResult {
+  return {
+    ok: true,
+    ...(selectedHarness !== undefined ? { selectedHarness } : {}),
+    ...(requestedModel !== undefined ? { requestedModel } : {}),
+  };
+}
+
+type TSteps = ReturnType<typeof flattenSteps>;
+
+// 1. The pinned Snapshot must still compose. A launch re-checks it because a Run
+// pins a Snapshot (ADR 0021); a failing re-check means corrupted installed bytes.
+// The Problem carries no routing vocabulary — the findings inform it, unprinted.
+function checkComposition(request: PreflightRequest): Problem | undefined {
+  return request.composition.some((finding) => finding.severity === "error")
+    ? bundleSnapshotCorrupt(request.digest)
+    : undefined;
+}
+
+// 2. An `interactive-agent` Step needs human turn-taking the headless client
+// cannot relay (#116): refuse it with the TUI remedy. Every Step kind is now
+// dispatchable (the closed table has all four kinds, #122), so this is the only
+// kind-based Preflight refusal — the generic not-executable check is retired.
+function checkInteractive(
+  request: PreflightRequest,
+  steps: TSteps,
+): Problem | undefined {
+  if (request.supportsInteractiveTurns === true) return undefined;
+  const interactive = steps.find((step) => step.kind === "interactive-agent");
+  return interactive === undefined
+    ? undefined
+    : interactiveStepNeedsTui(interactive.id);
+}
+
+// 3. Harness discovery and the capability-need union (#116). Only when the routing
+// needs a Harness (a Step kind declaring capability needs). The union must be a
+// subset of what the Harness serves, and the executable must resolve (configured
+// command first, then the PATH name), or the launch is refused before a Run exists
+// — an Agent Step never discovers its Harness mid-Run. `selectedHarness` is set
+// only when every harness check passed, so assessment can qualify exactly it.
+function checkHarness(
+  request: PreflightRequest,
+  steps: TSteps,
+): { problems: readonly Problem[]; selectedHarness?: HarnessChoice["id"] } {
   const capabilityNeeds = new Set<string>();
   for (const step of steps) {
     for (const need of STEP_KINDS[step.kind].capabilityNeeds) {
@@ -109,94 +209,93 @@ export function preflight(
     }
   }
   if (capabilityNeeds.size === 0) {
+    // A Command-only routing prepares no Harness, so a selected Harness and a
+    // requested model are each independently irrelevant: collect both, so a draft
+    // carrying both is corrected in one pass rather than one refusal at a time (#189).
+    const irrelevant: Problem[] = [];
     if (request.harnessSelection !== undefined) {
-      return { problem: harnessSelectionIrrelevant(request.harnessSelection) };
+      irrelevant.push(harnessSelectionIrrelevant(request.harnessSelection));
     }
-    // A Command-only routing prepares no Harness, so a requested model would never
-    // be applied: refuse it as irrelevant rather than pin a value nothing reads (#187).
     if (request.requestedModel !== undefined) {
-      return { problem: requestedModelIrrelevant(request.requestedModel) };
+      irrelevant.push(requestedModelIrrelevant(request.requestedModel));
     }
-  } else {
-    const selected = selectHarness(request);
-    if ("problem" in selected) return selected;
-    const served = new Set(selected.registration.servedCapabilities);
-    const unmet = Array.from(capabilityNeeds).filter(
-      (need) => !served.has(need),
-    );
-    if (unmet.length > 0) {
-      return {
-        problem: harnessCapabilityUnmet(
-          selected.registration.choice.name,
-          unmet,
-        ),
-      };
-    }
-    const discovery = selected.registration.discover();
-    if (discovery.kind === "unsupported-shim") {
-      return {
-        problem: harnessUnsupportedShim({
+    return { problems: irrelevant };
+  }
+  const selected = selectHarness(request);
+  if ("problem" in selected) return { problems: [selected.problem] };
+  const served = new Set(selected.registration.servedCapabilities);
+  const unmet = Array.from(capabilityNeeds).filter((need) => !served.has(need));
+  if (unmet.length > 0) {
+    return {
+      problems: [
+        harnessCapabilityUnmet(selected.registration.choice.name, unmet),
+      ],
+    };
+  }
+  const discovery = selected.registration.discover();
+  if (discovery.kind === "unsupported-shim") {
+    return {
+      problems: [
+        harnessUnsupportedShim({
           harness: selected.registration.choice,
           name: discovery.name,
           path: discovery.path,
           executableEnvironmentVariable:
             discovery.executableEnvironmentVariable,
         }),
-      };
-    }
-    if (discovery.kind === "not-found") {
-      return {
-        problem: harnessNotFound({
+      ],
+    };
+  }
+  if (discovery.kind === "not-found") {
+    return {
+      problems: [
+        harnessNotFound({
           harness: selected.registration.choice,
           searched: discovery.searched,
           executableEnvironmentVariable:
             discovery.executableEnvironmentVariable,
         }),
-      };
-    }
-    return finishPreflight({
-      request,
-      steps,
-      process,
-      selectedHarness: selected.registration.choice.id,
-    });
+      ],
+    };
   }
-
-  return finishPreflight({ request, steps, process });
+  return { problems: [], selectedHarness: selected.registration.choice.id };
 }
 
-interface TFinishPreflightParams {
-  readonly request: PreflightRequest;
-  readonly steps: ReturnType<typeof flattenSteps>;
-  readonly process: ProcessAdapter;
-  readonly selectedHarness?: HarnessChoice["id"];
+// 5. Every declared Launch input is required and validated by its Artifact type;
+// one field violation per input, valid inputs pin to the Run unchanged (AC4).
+function checkInputs(request: PreflightRequest): Problem | undefined {
+  const violations = inputViolations(
+    request.manifest.inputs,
+    request.launchInputs,
+  );
+  return violations.length > 0 ? launchInputsInvalid(violations) : undefined;
 }
 
-function finishPreflight(params: TFinishPreflightParams): PreflightResult {
-  const { request, steps, process, selectedHarness } = params;
-  const { manifest, launchInputs, workspacePath } = request;
-  // 5. Every declared Launch input is required and validated by its Artifact type;
-  // one field violation per input, valid inputs pin to the Run unchanged (AC4).
-  const violations = inputViolations(manifest.inputs, launchInputs);
-  if (violations.length > 0) {
-    return { problem: launchInputsInvalid(violations) };
-  }
-
-  // 6. The union of authored Workspace prerequisites. V1 has one: git-worktree-root.
+// 6. The union of authored Workspace prerequisites. V1 has one: git-worktree-root.
+function checkWorkspacePrerequisites(
+  request: PreflightRequest,
+  steps: TSteps,
+  process: ProcessAdapter,
+): Problem | undefined {
   const prerequisites = new Set<string>();
   for (const step of steps) {
     for (const prerequisite of step.prerequisites ?? []) {
       prerequisites.add(prerequisite);
     }
   }
-  if (prerequisites.has("git-worktree-root")) {
-    const probe = probeGitWorktreeRoot(workspacePath, process);
-    if ("problem" in probe) return probe;
-  }
+  if (!prerequisites.has("git-worktree-root")) return undefined;
+  const probe = probeGitWorktreeRoot(request.workspacePath, process);
+  return "problem" in probe ? probe.problem : undefined;
+}
 
-  // 7. Each selected Command step's executable resolves on PATH, ahead of the Run
-  // (execution treats a missing binary as a failed Attempt; Preflight refuses it).
-  const platforms = manifest.platforms ?? [];
+// 7. Each selected Command step's executable resolves on PATH, ahead of the Run
+// (execution treats a missing binary as a failed Attempt; Preflight refuses it).
+function checkCommands(
+  request: PreflightRequest,
+  steps: TSteps,
+  process: ProcessAdapter,
+): Problem | undefined {
+  const platforms = request.manifest.platforms ?? [];
   const platform = selectPlatform(platforms, request.hostPlatform);
   for (const step of steps) {
     if (step.kind !== "command") continue;
@@ -206,27 +305,17 @@ function finishPreflight(params: TFinishPreflightParams): PreflightResult {
     // that is not an npm-style node shim is refused with the interpreter remedy.
     const resolution = process.resolveExecutable(executable);
     if (resolution.kind === "not-found") {
-      return { problem: commandExecutableNotFound(step.id, executable) };
+      return commandExecutableNotFound(step.id, executable);
     }
     if (resolution.kind === "unsupported-shim") {
-      return {
-        problem: commandExecutableUnsupportedShim(
-          step.id,
-          executable,
-          resolution.path,
-        ),
-      };
+      return commandExecutableUnsupportedShim(
+        step.id,
+        executable,
+        resolution.path,
+      );
     }
   }
-
-  // The requested model rides through on the Agent-bearing path (a Command-only
-  // routing refused a present model above, so it is undefined here) (#187).
-  const requestedModel = request.requestedModel;
-  return {
-    ok: true,
-    ...(selectedHarness !== undefined ? { selectedHarness } : {}),
-    ...(requestedModel !== undefined ? { requestedModel } : {}),
-  };
+  return undefined;
 }
 
 type TSelectedHarness =
@@ -398,7 +487,7 @@ function harnessSelectionRequired(
       "This Bundle contains an Agent step and needs a Harness selection.",
     remediation: `Choose one registered Harness before launching: ${choices || "none are available"}.`,
     possibleEffects: "none",
-    correction: "harness-selection",
+    correction: "harness",
     details: { choices },
   };
 }
@@ -413,7 +502,7 @@ function harnessSelectionUnknown(
     explanation: `Harness "${selection}" is not registered in this Secant build.`,
     remediation: `Choose one registered Harness: ${choices || "none are available"}.`,
     possibleEffects: "none",
-    correction: "harness-selection",
+    correction: "harness",
     details: { harness: selection, choices },
   };
 }
@@ -424,7 +513,7 @@ function harnessSelectionIrrelevant(selection: string): Problem {
     explanation: `This Bundle is Command-only, so Harness "${selection}" would never be used.`,
     remediation: "Launch the Bundle again without a Harness selection.",
     possibleEffects: "none",
-    correction: "harness-selection",
+    correction: "harness",
     details: { harness: selection },
   };
 }
@@ -435,6 +524,7 @@ function requestedModelIrrelevant(model: string): Problem {
     explanation: `This Bundle is Command-only, so model "${model}" would never be used.`,
     remediation: "Launch the Bundle again without a model.",
     possibleEffects: "none",
+    correction: "model",
     details: { model },
   };
 }
@@ -449,7 +539,7 @@ function harnessSelectionUnavailable(choice: HarnessChoice): Problem {
     explanation: `${choice.name} is registered but unavailable. ${reason}`,
     remediation: "Choose an available registered Harness, then launch again.",
     possibleEffects: "none",
-    correction: "harness-selection",
+    correction: "harness",
     details: { harness: choice.id },
   };
 }
@@ -469,7 +559,7 @@ function harnessNotFound(params: THarnessNotFoundParams): Problem {
     explanation: `This Bundle runs an agent through ${harness.name}, which could not be found. Searched: ${searched.join("; ")}.`,
     remediation: `Install ${harness.name} and make sure it is on PATH, or set ${executableEnvironmentVariable} to its executable, then launch again.`,
     possibleEffects: "none",
-    correction: "harness-selection",
+    correction: "harness",
     details: { harness: harness.id, searched: searched.join("; ") },
   };
 }
@@ -490,7 +580,7 @@ function harnessUnsupportedShim(
     explanation: `${harness.name} "${name}" resolves to the Windows script shim "${path}", which Secant will not run through a shell.`,
     remediation: `Point ${executableEnvironmentVariable} at the real ${harness.name} executable (not a .cmd/.bat shim), then launch again.`,
     possibleEffects: "none",
-    correction: "harness-selection",
+    correction: "harness",
     details: { harness: harness.id, name, path },
   };
 }
@@ -508,7 +598,7 @@ function harnessCapabilityUnmet(
     remediation:
       "Use a Harness that serves these capabilities, or a Bundle whose Steps do not need them.",
     possibleEffects: "none",
-    correction: "harness-selection",
+    correction: "harness",
     details: { unmet: unmet.join(", ") },
   };
 }
@@ -521,17 +611,19 @@ function interactiveStepNeedsTui(stepId: string): Problem {
     explanation: `Step "${stepId}" is an interactive-agent Step, which hands its Session to a human for turn-taking; the headless client cannot relay that.`,
     remediation: "Run this Bundle in the TUI.",
     possibleEffects: "none",
+    correction: "bundle",
     details: { step: stepId },
   };
 }
 
-function bundleSnapshotCorrupt(digest: string): Problem {
+export function bundleSnapshotCorrupt(digest: string): Problem {
   return {
     code: "bundle-snapshot-corrupt",
     explanation: `The installed Bundle (digest ${digest}) is corrupted and can no longer be launched.`,
     remediation:
       "Reinstall the Bundle to restore an intact copy, then launch again.",
     possibleEffects: "none",
+    correction: "bundle",
     details: { digest },
   };
 }
@@ -543,6 +635,7 @@ function launchInputsInvalid(violations: readonly FieldViolation[]): Problem {
     remediation:
       "Provide each listed input with a value of its declared type, then launch again.",
     possibleEffects: "none",
+    correction: "inputs",
     fieldViolations: violations,
   };
 }
@@ -554,6 +647,7 @@ function gitNotRunnable(cause?: unknown): Problem {
       "The Bundle requires the launch Workspace to be a Git worktree root (git-worktree-root), but Git is not runnable on this system.",
     remediation: "Install Git and make sure it is on PATH, then launch again.",
     possibleEffects: "none",
+    correction: "workspace",
     details: { prerequisite: "git-worktree-root" },
     ...(cause !== undefined ? { cause } : {}),
   };
@@ -566,6 +660,7 @@ function worktreeRootFailed(workspacePath: string): Problem {
     remediation:
       "Launch from the root of a Git worktree — run `git init` there, or change to the worktree root — then launch again.",
     possibleEffects: "none",
+    correction: "workspace",
     details: { prerequisite: "git-worktree-root", path: workspacePath },
   };
 }
@@ -579,6 +674,7 @@ function commandExecutableNotFound(
     explanation: `Command step "${stepId}" needs the executable "${executable}", which is not on PATH.`,
     remediation: `Install "${executable}" and make sure it is on PATH, then launch again.`,
     possibleEffects: "none",
+    correction: "command",
     details: { step: stepId, executable },
   };
 }
@@ -597,6 +693,7 @@ function commandExecutableUnsupportedShim(
     remediation:
       "Name the real interpreter and the script as the Command executable and arguments (for example the interpreter plus the script path) instead of the shim, then launch again.",
     possibleEffects: "none",
+    correction: "command",
     details: { step: stepId, executable, path },
   };
 }

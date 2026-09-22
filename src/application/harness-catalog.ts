@@ -35,6 +35,12 @@ export interface HarnessCatalog {
     selection: HarnessFocusSelector,
   ): OpenedProjection<HarnessFocusSnapshot>;
   readDiagnostic(reference: HarnessDiagnosticReference): ResourceRead;
+  /** Qualify one registered Harness through the process cache (#189): the same
+   *  bounded qualify path a focus uses (prepare then immediate close in
+   *  composition), reused by `launch-preparation` to check a requested model
+   *  against the Harness's declared model list. A repeated call reuses the held
+   *  result. Returns undefined for an unregistered id. */
+  qualify(id: string): Promise<ApplicationHarnessQualification | undefined>;
 }
 
 /** The read-only Harness catalog owns the process-scoped qualification cache and
@@ -60,7 +66,7 @@ export function createHarnessCatalog(
   ): ApplicationHarnessRegistration | undefined =>
     registrations.find((registration) => registration.choice.id === id);
 
-  const qualify = (
+  const qualifyRegistration = (
     registration: ApplicationHarnessRegistration,
   ): Promise<HeldQualification> => {
     const existing = qualifications.get(registration.choice.id);
@@ -127,7 +133,7 @@ export function createHarnessCatalog(
         );
       }
 
-      void qualify(registration).then((qualification) => {
+      void qualifyRegistration(registration).then((qualification) => {
         updates.push({
           kind: "durable",
           snapshot: focusSnapshot(selection, registration, qualification),
@@ -137,6 +143,15 @@ export function createHarnessCatalog(
         updates,
         focusSnapshot(selection, registration, undefined),
       );
+    },
+    async qualify(
+      id: string,
+    ): Promise<ApplicationHarnessQualification | undefined> {
+      const registration = registrationFor(id);
+      if (registration === undefined) return undefined;
+      const cached = held.get(id);
+      if (cached !== undefined) return cached.result;
+      return (await qualifyRegistration(registration)).result;
     },
     readDiagnostic(reference: HarnessDiagnosticReference): ResourceRead {
       const qualification = held.get(reference.harnessId);

@@ -596,7 +596,7 @@ test("changing a Harness after a selected-Harness refusal preserves unrelated in
       explanation: "Codex could not be found.",
       remediation: "Install Codex.",
       possibleEffects: "none",
-      correction: "harness-selection",
+      correction: "harness",
       details: { harness: "codex" },
     },
   });

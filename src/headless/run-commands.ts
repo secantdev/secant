@@ -3,6 +3,8 @@ import stripAnsi from "strip-ansi";
 import type { Command } from "commander";
 import type {
   AnswerHumanGateOffer,
+  LaunchPreparationSnapshot,
+  LaunchRunInput,
   OpenedProjection,
   OperationOutcome,
   Problem,
@@ -532,19 +534,68 @@ interface TLaunchRunParams {
   readonly harnessRequests: HarnessRequestPolicy;
 }
 
+/** Read the launch-preparation assessment for one draft (#189): return the settled
+ *  snapshot, awaiting the first durable update when the initial snapshot is still
+ *  `assessing` (a requested model is being qualified), like `harness inspect` waits
+ *  on its first focus update. */
+async function assessDraft(
+  port: ProjectionPort,
+  draft: LaunchRunInput,
+): Promise<LaunchPreparationSnapshot> {
+  const opened = port.openProjection({ family: "launch-preparation", draft });
+  try {
+    if (opened.snapshot.status !== "assessing") return opened.snapshot;
+    for await (const update of opened.updates) {
+      if (update.kind === "durable" && update.snapshot.status !== "assessing") {
+        return update.snapshot;
+      }
+    }
+    return opened.snapshot;
+  } finally {
+    opened.close();
+  }
+}
+
+/** Print every assessment finding and exit one (#189): `--json` prints the
+ *  not-ready status with its findings; plain text prints each finding through the
+ *  shared `fail` renderer, so an operator sees all problems in one invocation and
+ *  the per-Problem format never drifts from a single refusal's. */
+function reportNotReady(
+  io: HeadlessIO,
+  fail: RunCommandDeps["fail"],
+  json: boolean,
+  findings: readonly Problem[],
+): number {
+  if (json) {
+    io.out(`${JSON.stringify({ status: "not-ready", findings }, null, 2)}\n`);
+    return 1;
+  }
+  for (const problem of findings) fail(io, false, problem);
+  return 1;
+}
+
 async function launchRun(params: TLaunchRunParams): Promise<number> {
   const { port, io, fail, json, selector, inputs, harnessRequests } = params;
   const { id, version } = splitSelector(selector);
+  const draft: LaunchRunInput = {
+    bundle: { id, version },
+    launchInputs: inputs,
+    trustDigest: params.trust,
+    harness: params.harness,
+    requestedModel: params.model,
+  };
+  // Read the `launch-preparation` assessment first (#189): when the draft is not
+  // ready, print every finding in text and JSON and exit without submitting, so an
+  // operator sees all problems in one invocation. A ready draft falls through to
+  // the launch, which reruns every authoritative check under identical rules.
+  const assessment = await assessDraft(port, draft);
+  if (assessment.status === "not-ready") {
+    return reportNotReady(io, fail, json, assessment.findings);
+  }
   const admission = port.submit({
     operationId: randomUUID(),
     operation: "launch-run",
-    input: {
-      bundle: { id, version },
-      launchInputs: inputs,
-      trustDigest: params.trust,
-      harness: params.harness,
-      requestedModel: params.model,
-    },
+    input: draft,
   });
   if (!admission.admitted) return fail(io, json, admission.problem);
   const runId = admission.runId;

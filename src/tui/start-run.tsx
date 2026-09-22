@@ -272,7 +272,7 @@ export function StartRun(props: {
     if (problem.fieldViolations !== undefined) {
       setFieldFindings(problem.fieldViolations);
       setStep("inputs");
-    } else if (problem.correction === "harness-selection") {
+    } else if (problem.correction === "harness") {
       setChooserProblem(problem);
       setStep("harness");
     } else {

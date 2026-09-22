@@ -71,6 +71,10 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   and settles the Operation with `selected-harness-unavailable`. `supportsInteractiveTurns` remains the client fact Application forwards to Preflight.
 - `harness-catalog` caches one qualification promise/result per semantic Harness id for the Application lifetime (#188). List calls discovery only; focus initially
   reports `not-checked`, then publishes one durable normalized result. Qualification diagnostics are process-held Resources addressed by semantic id and checked time.
+- `launch-preparation` and `submitLaunch` share one create-time evaluator (`LaunchPreparation.evaluate`, `launch-preparation.ts`) so both admit under identical rules (#189):
+  `submitLaunch` takes its first finding; the Projection collects all in launch order, each with a `correction` target. Composition-corruption is a single hard-stop `bundle`
+  finding like missing/invalid bytes. The model check is assessment-only — the Projection qualifies the selected Harness (`harnessCatalog.qualify`, which spawns) only when the
+  draft is otherwise ready and a model is requested; a direct `submitLaunch` skips it, so a bad model surfaces at `prepare`, not as a pre-create refusal.
 - The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no **durable**
   snapshot; the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`). The live lane is
   separate — Turn activity reaches an open client through the live overlay below (#117), not through this durable write.

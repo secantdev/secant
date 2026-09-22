@@ -33,6 +33,7 @@ import {
   type BundleCatalogDependencies,
 } from "./bundle-catalog.js";
 import { createHarnessCatalog } from "./harness-catalog.js";
+import { createLaunchPreparation } from "./launch-preparation.js";
 import type { BundleManagement } from "./bundle-management.js";
 import { createBundleManagement } from "./build-bundle.js";
 import {
@@ -40,7 +41,6 @@ import {
   deriveRunFacts,
   GATE_ANSWER_ARTIFACT,
   runSnapshot,
-  selectRunEntry,
   type RunFacts,
   type RunProjectionDependencies,
   type RunSteerCapability,
@@ -76,9 +76,7 @@ import {
   selectedHarnessUnavailable,
   steerRejected,
   steerUnavailable,
-  trustDigestMismatch,
   turnControlRejected,
-  workspaceNotApproved,
 } from "./problems.js";
 import { UpdateStream } from "./update-stream.js";
 import { listRunsSnapshot } from "./run-list.js";
@@ -114,6 +112,7 @@ import type {
   HarnessDiagnosticReference,
   HarnessFocusSelector,
   HarnessFocusSnapshot,
+  LaunchPreparationSnapshot,
   LaunchRunInput,
   ResumeRunInput,
   SendInteractiveTurnInput,
@@ -346,6 +345,21 @@ export function createApplication(deps: ApplicationDependencies): Application {
   const now = deps.now ?? (() => new Date());
   const harnessCatalog = createHarnessCatalog(deps.harnessRegistry ?? [], now);
   const budgets = deps.bundleBudgets ?? DEFAULT_BUDGETS;
+  // The launch-draft evaluator both `submitLaunch` (first failing check) and the
+  // `launch-preparation` Projection (every finding) read, so both clients admit a
+  // launch under identical rules and route a refusal to the same step (#189).
+  const launchPreparation = createLaunchPreparation({
+    catalog,
+    budgets,
+    process,
+    ...(deps.hostPlatform !== undefined
+      ? { hostPlatform: deps.hostPlatform }
+      : {}),
+    supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
+    harnessRegistry: deps.harnessRegistry ?? [],
+    launchWorkspacePath,
+    qualify: (id) => harnessCatalog.qualify(id),
+  });
   // Each Operation carries a settler (run inline by default, deferred under a
   // test), its outcome, and the streams watching it. Observers are added only
   // while `pending` and delivered to exactly once on settlement, so a settled
@@ -922,6 +936,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
     readonly focus?: undefined;
   }): OpenedProjection<HarnessCatalogSnapshot>;
   function openProjection(selector: {
+    readonly family: "launch-preparation";
+    readonly draft: LaunchRunInput;
+  }): OpenedProjection<LaunchPreparationSnapshot>;
+  function openProjection(selector: {
     readonly family: "run";
     readonly runId: string;
   }): OpenedProjection<RunSnapshot>;
@@ -999,6 +1017,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
         return harnessCatalog.openFocus(selector.focus);
       }
       return harnessCatalog.openList();
+    }
+    if (selector.family === "launch-preparation") {
+      return launchPreparation.open(selector.draft);
     }
     if (selector.family === "workspace") {
       const updates = new UpdateStream();
@@ -1199,105 +1220,31 @@ export function createApplication(deps: ApplicationDependencies): Application {
     if (runGroup === undefined || runExecution === undefined) {
       return { admitted: false, problem: runSupportUnavailable() };
     }
-    // Resolve the installed Entry, prove the Workspace is approved, and read the
-    // pinned bytes — all before anything is written, so a Problem here leaves no
-    // Trust grant and no Run (AC1, AC4).
-    const selected = selectRunEntry(
-      catalog,
-      input.bundle.id,
-      input.bundle.version,
-    );
-    if ("problem" in selected) {
-      return { admitted: false, problem: selected.problem };
-    }
-    const entry = selected.entry;
-    if (catalog.getWorkspaceApproval(launchWorkspacePath) === undefined) {
+    // The shared evaluator runs the ordered creation-free checks (installed
+    // Bundle, Workspace approval, pinned bytes and Composition, Preflight, and
+    // Trust) and returns the first failing one plus the resolved facts a create
+    // needs. It is the same evaluator the `launch-preparation` Projection reads,
+    // so a refusal here carries the correction target both clients route to, and
+    // the Trust grant is still recorded only *after* the Run is created below —
+    // a Problem here leaves no Run and no grant (#189, AC1/AC4).
+    const evaluation = launchPreparation.evaluate(input);
+    if (evaluation.findings.length > 0 || evaluation.resolution === undefined) {
+      // Findings are non-empty whenever the resolution is absent; the fallback is
+      // a defensive impossibility, not a reachable branch.
       return {
         admitted: false,
-        problem: workspaceNotApproved(launchWorkspacePath),
+        problem: evaluation.findings[0] ?? runSupportUnavailable(),
       };
     }
-    const bytes = catalog.readManagedBytes(entry.digest);
-    if (bytes === undefined) {
-      return {
-        admitted: false,
-        problem: bundleBytesMissing({ digest: entry.digest }),
-      };
-    }
-    // Include the Composition re-check: a Run pins this Snapshot, so Preflight
-    // proves it still composes against the archived prompt/schema text (ADR 0021).
-    const inspected = inspectBundle(bytes, budgets, true);
-    if (!inspected.ok) {
-      return {
-        admitted: false,
-        problem: bundleBytesCorrupt(
-          { digest: entry.digest },
-          inspected.finding.code,
-        ),
-      };
-    }
-    const manifest = inspected.inspection.manifest;
-
-    // Preflight refuses a Run whose prerequisites are not met — before any Trust
-    // grant or Run is created, so a Problem here leaves nothing behind (#14). It
-    // runs ahead of the Trust gate: a Bundle that cannot run in this environment
-    // is refused without asking the user to acknowledge bytes that would not run.
-    const pre = preflight(
-      {
-        manifest,
-        composition: inspected.inspection.composition,
-        workspacePath: launchWorkspacePath,
-        launchInputs: input.launchInputs,
-        hostPlatform: deps.hostPlatform,
-        digest: entry.digest,
-        supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
-        harnessSelection: input.harness,
-        requestedModel: input.requestedModel,
-        harnessRegistry: deps.harnessRegistry ?? [],
-      },
-      process,
-    );
-    if ("problem" in pre) {
-      return { admitted: false, problem: pre.problem };
-    }
-
-    // Trust: an untrusted digest needs a matching acknowledgement. A missing one
-    // is `bundle-trust-required` (carrying the Execution summary, the fixed
-    // warning, and the exact digest); a mismatching one grants nothing. The
-    // acknowledgement is validated here but the grant is only recorded *after* the
-    // Run is created, so a failed create leaves no dangling grant.
-    const grant = catalog.getTrustGrant(
-      entry.digest,
-      entry.installationGeneration,
-    );
-    const needsGrant = grant === undefined;
-    if (needsGrant) {
-      if (input.trustDigest === undefined) {
-        return {
-          admitted: false,
-          problem: bundleTrustRequired(
-            manifest,
-            entry.digest,
-            deps.hostPlatform,
-          ),
-        };
-      }
-      if (input.trustDigest !== entry.digest) {
-        return {
-          admitted: false,
-          problem: trustDigestMismatch(entry.digest, input.trustDigest),
-        };
-      }
-    }
+    const { entry, manifest, selectedHarness, requestedModel, needsGrant } =
+      evaluation.resolution;
 
     const created = runGroup.createRun({
       operationId,
       bundleSnapshotDigest: entry.digest,
       launch: input.launchInputs,
-      selectedHarness: pre.selectedHarness,
-      ...(pre.requestedModel !== undefined
-        ? { requestedModel: pre.requestedModel }
-        : {}),
+      selectedHarness,
+      ...(requestedModel !== undefined ? { requestedModel } : {}),
       at: new Date(),
     });
     if (needsGrant) {

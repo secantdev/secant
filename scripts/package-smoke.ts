@@ -1019,6 +1019,99 @@ try {
 
   await runNamedScenario("preflight-refusals", preflightRefusalsScenario);
 
+  // The pre-launch assessment from the compiled binary (issue #189, AC5/AC8): a
+  // draft with several faults — a required input unprovided AND the digest
+  // untrusted — is read through `launch-preparation` first, so `run launch` prints
+  // every finding (text and JSON) and exits without submitting. No Harness is
+  // needed: the assessment is not-ready before any qualification, so this stays
+  // deterministic without Claude Code and creates no Run.
+  async function launchPreparationHeadlessScenario(): Promise<void> {
+    const runtime = basename(process.execPath);
+    const folder = join(smokeRoot, "lp-smoke-bundle");
+    await mkdir(folder, { recursive: true });
+    await writeFile(
+      join(folder, "manifest.json"),
+      JSON.stringify({
+        formatVersion: 1,
+        bundle: {
+          id: "dev.secant.lp-smoke",
+          version: "1.0.0",
+          name: "LP Smoke",
+          description: "Pre-launch assessment smoke Bundle (#189).",
+        },
+        platforms: ["windows", "macos", "linux"],
+        inputs: { note: { type: "text", description: "a required note" } },
+        assets: [],
+        routing: [
+          {
+            id: "run",
+            kind: "command",
+            command: {
+              executable: runtime,
+              arguments: ["-e", "process.exit(0)"],
+            },
+          },
+        ],
+      }),
+    );
+    const wfb = join(smokeRoot, "lp-smoke.wfb");
+    run(binary, ["bundle", "build", folder, "--no-install", "--output", wfb], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    });
+    run(binary, ["bundle", "install", wfb], {
+      cwd: smokeRoot,
+      env: workspaceEnv,
+    });
+
+    const text = spawnSync(binary, ["run", "launch", "dev.secant.lp-smoke"], {
+      cwd: workspaceDirectory,
+      encoding: "utf8",
+      env: workspaceEnv,
+    });
+    if (text.error) throw text.error;
+    const output = `${text.stdout}${text.stderr}`;
+    if (
+      text.status === 0 ||
+      !output.includes("launch-input-invalid") ||
+      !output.includes("bundle-trust-required")
+    ) {
+      throw new Error(
+        `run launch on a not-ready draft did not print every finding and exit non-zero: ${output}`,
+      );
+    }
+
+    const json = spawnSync(
+      binary,
+      ["run", "launch", "dev.secant.lp-smoke", "--json"],
+      { cwd: workspaceDirectory, encoding: "utf8", env: workspaceEnv },
+    );
+    if (json.error) throw json.error;
+    if (json.status === 0) {
+      throw new Error(
+        `run launch --json on a not-ready draft exited zero: ${json.stdout}${json.stderr}`,
+      );
+    }
+    const parsed = JSON.parse(json.stdout) as {
+      status?: string;
+      findings?: unknown[];
+    };
+    if (
+      parsed.status !== "not-ready" ||
+      !Array.isArray(parsed.findings) ||
+      parsed.findings.length < 2
+    ) {
+      throw new Error(
+        `run launch --json did not report a not-ready assessment with all findings: ${json.stdout}`,
+      );
+    }
+  }
+
+  await runNamedScenario(
+    "launch-preparation-headless",
+    launchPreparationHeadlessScenario,
+  );
+
   // Workspace materialization, verification, conflict, and resume from the
   // compiled binary on each gated OS (issue #88, AC6). A `home: workspace` text
   // Artifact is materialized to its declared path; a middle Step modifies that

@@ -128,6 +128,45 @@ test("[requested-model-durability] run launch rejects --model for a Command-only
   assert.equal(h.runGroup?.listRuns().length, 0);
 });
 
+test("[launch-preparation-headless] run launch prints every finding and exits without submitting when not ready", async (t) => {
+  const h = await harness(t);
+  const { id } = await h.install({
+    inputs: { note: { type: "text", description: "a note" } },
+  });
+  h.approve();
+  // A required input left unprovided AND no trust acknowledgement: the pre-launch
+  // assessment prints both findings in one invocation and submits nothing.
+  const code = await runHeadless(h.clients, ["run", "launch", id], h.io);
+  assert.equal(code, 1);
+  const err = h.stderr();
+  assert.match(err, /launch-input-invalid/);
+  assert.match(err, /bundle-trust-required/);
+  assert.equal(h.stdout(), "");
+  assert.equal(h.runGroup?.listRuns().length, 0);
+});
+
+test("[launch-preparation-headless] run launch --json prints the not-ready status with all findings", async (t) => {
+  const h = await harness(t);
+  const { id } = await h.install({
+    inputs: { note: { type: "text", description: "a note" } },
+  });
+  h.approve();
+  const code = await runHeadless(
+    h.clients,
+    ["run", "launch", id, "--json"],
+    h.io,
+  );
+  assert.equal(code, 1);
+  const parsed = JSON.parse(h.stdout());
+  assert.equal(parsed.status, "not-ready");
+  const codes = parsed.findings.map(
+    (finding: { code: string }) => finding.code,
+  );
+  assert.ok(codes.includes("launch-input-invalid"));
+  assert.ok(codes.includes("bundle-trust-required"));
+  assert.equal(h.runGroup?.listRuns().length, 0);
+});
+
 test("run resume has no --model option", async (t) => {
   const h = await harness(t);
   const code = await runHeadless(

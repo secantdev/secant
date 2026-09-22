@@ -37,6 +37,7 @@ export function workspaceNotApproved(path: string): Problem {
     remediation:
       "Run `secant workspace approve` to approve this Workspace, then launch again.",
     possibleEffects: "none",
+    correction: "workspace",
     details: { path },
   };
 }
@@ -73,6 +74,7 @@ export function bundleTrustRequired(
     explanation,
     remediation: `Re-run with --trust ${digest} to acknowledge and trust this exact Bundle, then launch.`,
     possibleEffects: "none",
+    correction: "trust",
     details: { digest, platform: summary.platform },
   };
 }
@@ -86,7 +88,30 @@ export function trustDigestMismatch(
     explanation: `The acknowledged digest ${acknowledged} does not match the installed digest ${installed}; nothing was trusted.`,
     remediation: `Re-run with --trust ${installed} to acknowledge the exact installed Bundle.`,
     possibleEffects: "none",
+    correction: "trust",
     details: { installed, acknowledged },
+  };
+}
+
+/** The requested model is not one the selected Harness declares (#189): a launch
+ *  assessment qualifies the Harness and, when its model declaration is an exact
+ *  list, checks the requested model against it. Distinct from a prepare-time
+ *  substitution — the assessment surfaces it before a Run is created. */
+export function requestedModelUnavailable(
+  harness: HarnessChoice,
+  model: string,
+  supported: readonly string[],
+): Problem {
+  return {
+    code: "requested-model-unavailable",
+    explanation: `${harness.name} does not offer the model "${model}".`,
+    remediation:
+      supported.length > 0
+        ? `Choose one of ${harness.name}'s models (${supported.join(", ")}) or the Harness default, then launch again.`
+        : `Choose the Harness default, then launch again.`,
+    possibleEffects: "none",
+    correction: "model",
+    details: { harness: harness.id, model, supported: supported.join(", ") },
   };
 }
 
@@ -142,6 +167,7 @@ export function harnessQualificationUnavailable(
         ? `Log in separately through ${harness.name}, then start a new Secant process to inspect it again.`
         : `Check the installed ${harness.name} version and configuration, then start a new Secant process to inspect it again.`,
     possibleEffects: problemEffectScope(failure.possibleEffects),
+    correction: "harness",
     details: {
       harnessId: harness.id,
       phase: failure.phase,
@@ -221,7 +247,7 @@ export function selectedHarnessUnavailable(
         : `${explanation} ${failure.diagnostics}`,
     remediation,
     possibleEffects: problemEffectScope(failure.possibleEffects),
-    correction: "harness-selection",
+    correction: "harness",
     details,
     cause: failure.cause,
   };
@@ -612,6 +638,7 @@ export function bundleNotInstalled(id: string): Problem {
     remediation:
       "Run `secant bundle list` to see installed Bundles, then name one that is installed.",
     possibleEffects: "none",
+    correction: "bundle",
     details: { id },
   };
 }
@@ -623,6 +650,7 @@ export function versionNotInstalled(id: string, version: string): Problem {
     remediation:
       "Run `secant bundle list` to see the installed versions, then name one that is installed.",
     possibleEffects: "none",
+    correction: "bundle",
     details: { id, version },
   };
 }
@@ -633,6 +661,7 @@ export function noStableVersion(id: string): Problem {
     explanation: `Only prerelease versions of ${id} are installed; a prerelease must be named explicitly.`,
     remediation: `Run \`secant bundle list\` to see the installed versions, then name a prerelease explicitly (e.g. \`${id}@<version>\`).`,
     possibleEffects: "none",
+    correction: "bundle",
     details: { id },
   };
 }
@@ -658,6 +687,7 @@ export function bundleBytesMissing(subject: {
     remediation:
       "Reinstall the Bundle to restore its bytes, or remove the stale Catalog Entry.",
     possibleEffects: "none",
+    correction: "bundle",
     details:
       id !== undefined && version !== undefined
         ? { id, version, digest }
@@ -682,6 +712,7 @@ export function bundleBytesCorrupt(
     // whether the caller was launching or inspecting.
     remediation: "Reinstall the Bundle to restore intact bytes.",
     possibleEffects: "none",
+    correction: "bundle",
     details:
       id !== undefined && version !== undefined
         ? { id, version, finding, digest }

@@ -20,6 +20,10 @@ export type ProjectionSelector =
       readonly family: "harness-catalog";
       readonly focus?: HarnessFocusSelector;
     }
+  // A live, read-only assessment of one complete client-owned launch draft (#189).
+  // The selector *is* the draft: changing any field opens a new Projection rather
+  // than preserving identity. It creates no Run, Session, Turn, or durable draft.
+  | { readonly family: "launch-preparation"; readonly draft: LaunchRunInput }
   // One launched Run by its id. Read-only: launching is an Operation, not a Run
   // Action; durable updates land as each publication commits.
   | { readonly family: "run"; readonly runId: string }
@@ -306,6 +310,7 @@ export type ProjectionSnapshot =
   | BundleFocusSnapshot
   | HarnessCatalogSnapshot
   | HarnessFocusSnapshot
+  | LaunchPreparationSnapshot
   | RunSnapshot
   | RunListSnapshot;
 
@@ -911,10 +916,51 @@ export interface RunListSnapshot {
   readonly empty: boolean;
 }
 
+// --- launch-preparation family ---------------------------------------------
+//
+// A live, read-only assessment of one complete client-owned launch draft (#189):
+// it reruns the ordered creation-free checks a launch runs today and additionally
+// qualifies only the selected Harness to check a requested model, creating no Run,
+// Session, Turn, or durable draft. Changing any draft field opens a new Projection.
+
+/** `assessing` while the selected Harness is qualifying to check a requested
+ *  model; then `ready` (no findings) or `not-ready` (one or more findings). */
+export type LaunchPreparationStatus = "assessing" | "ready" | "not-ready";
+
+/** The assessed draft in normalized form. Bundle `version`/`digest`/`name` are
+ *  filled once the exact Installed Bundle resolves; they are absent when the
+ *  Bundle could not be resolved (a `bundle` finding says why). */
+export interface LaunchPreparationDraftView {
+  readonly bundle: {
+    readonly id: string;
+    readonly version?: string;
+    readonly digest?: string;
+    readonly name?: string;
+  };
+  readonly harness?: string;
+  readonly requestedModel?: string;
+  readonly launchInputs: Readonly<Record<string, string>>;
+  readonly trustDigest?: string;
+}
+
+/** The assessment of one launch draft. `findings` is ordered and empty exactly
+ *  when `status` is `ready`; each finding names a `correction` target from the
+ *  existing Problem vocabulary. `executionSummary` is present once the Bundle
+ *  resolves and composes. `actionOffers` carries `launch-run` only when ready. */
+export interface LaunchPreparationSnapshot {
+  readonly family: "launch-preparation";
+  readonly status: LaunchPreparationStatus;
+  readonly draft: LaunchPreparationDraftView;
+  readonly findings: readonly Problem[];
+  readonly executionSummary?: ExecutionSummary;
+  readonly actionOffers: readonly ActionOffer[];
+}
+
 /** A typed opportunity bound to an exact target. The closed set grows one
  *  variant per slice; each offer names the consequence of taking it. */
 export type ActionOffer =
   | ApproveWorkspaceOffer
+  | LaunchRunOffer
   | AnswerHumanGateOffer
   | AnswerHarnessRequestOffer
   | ResumeRunOffer
@@ -945,6 +991,18 @@ export interface AnswerHarnessRequestOffer {
 export interface ApproveWorkspaceOffer {
   readonly action: "approve-workspace";
   readonly input: { readonly path: string };
+}
+
+/** Launch the assessed draft (#189). Offered on a `launch-preparation` Projection
+ *  only while its `status` is `ready`; a client submits `launch-run` with `draft`
+ *  and the Application reruns every authoritative check. `trustRequired` is true
+ *  when launching will record a new Trust grant for the acknowledged digest, so a
+ *  client can present the trust posture without re-deriving it. */
+export interface LaunchRunOffer {
+  readonly action: "launch-run";
+  readonly draft: LaunchRunInput;
+  readonly trustRequired: boolean;
+  readonly consequence: string;
 }
 
 /** Answer the Human Gate a `blocked` Run rests at (#85, #108). Offered on the `run`
@@ -1108,6 +1166,12 @@ export type ObserverEnd =
   | "temporarily-unavailable"
   | "application-shutdown";
 
+/** The seven launch-draft fields a finding or refusal routes correction to
+ *  (#189). A client moves to the step that owns the named field; it never
+ *  classifies Problem codes or reads free-form details to decide. */
+export type CorrectionTarget =
+  "bundle" | "harness" | "model" | "inputs" | "trust" | "workspace" | "command";
+
 /**
  * The one normalized failure family crossing the Port. Operational failures are
  * values carried here; throws are reserved for caller-contract violations.
@@ -1117,9 +1181,11 @@ export interface Problem {
   readonly explanation: string;
   readonly remediation: string;
   readonly possibleEffects: "none" | "partial" | "unknown";
-  /** A typed correction surface presentation may route to without classifying
-   * Problem codes or inspecting free-form details. */
-  readonly correction?: "harness-selection";
+  /** The launch draft field a presentation routes a finding or refusal to without
+   * classifying Problem codes or inspecting free-form details. Every launch
+   * refusal and every `launch-preparation` finding carries one, so both clients
+   * route to the same correcting step (#189). */
+  readonly correction?: CorrectionTarget;
   readonly details?: Readonly<Record<string, string>>;
   readonly fieldViolations?: readonly FieldViolation[];
   /** Preserved operational cause. Clients format the normalized Problem fields;
@@ -1229,6 +1295,10 @@ export interface ProjectionPort {
     readonly family: "harness-catalog";
     readonly focus?: undefined;
   }): OpenedProjection<HarnessCatalogSnapshot>;
+  openProjection(selector: {
+    readonly family: "launch-preparation";
+    readonly draft: LaunchRunInput;
+  }): OpenedProjection<LaunchPreparationSnapshot>;
   openProjection(selector: {
     readonly family: "run";
     readonly runId: string;

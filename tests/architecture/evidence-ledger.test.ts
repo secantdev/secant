@@ -15,6 +15,10 @@ const PROCESS_FREE_MARKER_EXCEPTIONS = new Set([
   // Born process-free (#187): wireApplication runs against the fake Process, fake
   // Git, and fake Harness Adapter, so no real child is ever reached.
   "tests/application/requested-model.test.ts",
+  // Born process-free (#189): launch-preparation assessments create no Run, and the
+  // one launch submitted is refused before creation, so the wired runExecution and
+  // fake Run Group never reach a Command, Git probe, or Harness child.
+  "tests/application/launch-preparation.test.ts",
 ]);
 
 const SUBPROCESS_SOURCE_PATTERNS = [

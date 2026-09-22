@@ -6,6 +6,7 @@ import { App, createLiveRunLaunchView } from "../../src/tui/tui.js";
 import { inertRunActionsView, inertRunListView } from "./inert.js";
 import type {
   BundleCatalogView,
+  HarnessCatalogView,
   LaunchOutcome,
   RunLaunchView,
   RunWorkbenchView,
@@ -16,6 +17,11 @@ import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
   BundleFocusSnapshot,
+  HarnessCatalogSnapshot,
+  HarnessFocus,
+  HarnessFocusSelector,
+  HarnessFocusSnapshot,
+  HarnessSummary,
   InstalledBundleFocus,
   LaunchRunInput,
   OpenedProjection,
@@ -29,15 +35,24 @@ import type {
   WorkspaceSnapshot,
 } from "../../src/application/projection-port.js";
 
-// In-memory renderer tests for the Start-a-Run flow (#90). Most drive the flow
-// through a hand-driven `RunLaunchView` over fake `bundle-catalog` snapshots —
-// the chooser + side panel, the trust-acknowledge control, typed inputs with
-// inline per-input findings, review, pending feedback, each refusal routed to its
-// owning step, and the transition into the Run Workbench on success (#91 replaced
-// #90's receipt), with small-width/resize relayout and status readable without
-// colour. The last group exercises the real launch seam (`createLiveRunLaunchView`)
-// over fake `operation`/`run` snapshots, both directly and end-to-end through the
-// App into the Workbench.
+// In-memory renderer tests for the Start-a-Run flow (#90, #191). Most drive the
+// flow through a hand-driven `RunLaunchView` over fake `bundle-catalog` and
+// `harness-catalog` snapshots — the chooser + side panel, the `View Bundle Details`
+// jump, the trust-acknowledge control, the worded Harness rows with the list/
+// free-text/`Harness default` model field, `N of M` step numbering, typed inputs
+// with inline per-input findings, review, pending feedback, each refusal routed to
+// its owning step, and the transition into the Run Workbench on success (#91
+// replaced #90's receipt). The last group exercises the real launch seam
+// (`createLiveRunLaunchView`) over fake `operation`/`run` snapshots.
+//
+// #191 slice coverage (AC7): keymap and focus (choose/model/inputs bindings and the
+// spawn-free-until-choose Harness step), terminal layout and small sizes (40/30-col
+// relayout without overflow), colour-independent status (worded qualification and
+// model, never a raw enum), interaction tuning (the two-phase Harness step), and
+// renderer evidence (every model-field variant and the `N of M` count). Timeline
+// mechanics and large content do not apply — this slice owns no timeline or
+// scrollable region — and the Windows Terminal check does not apply because it
+// changes neither the renderer nor a pin.
 
 const WORKSPACE = "/tmp/secant-launch-workspace";
 
@@ -133,6 +148,117 @@ function catalog(bundles: readonly InstalledBundleFocus[]): BundleCatalogView {
       return snapshot;
     },
   };
+}
+
+// --- fake harness-catalog --------------------------------------------------
+
+interface HarnessSpec {
+  readonly id: "claude-code" | "codex";
+  readonly name: string;
+  /** A declared model list, `"free-text"`, or `undefined` for none. */
+  readonly models?: readonly string[] | "free-text";
+  /** When present, focus resolves unavailable with this Problem. */
+  readonly unavailable?: Problem;
+  /** When present, the list-view discovery is not-found (colour-independent
+   *  unavailability visible before focusing). */
+  readonly notFound?: boolean;
+}
+
+const OBSERVATION = {
+  executable: "/usr/bin/harness",
+  executableVersion: "1.0.0",
+  platform: "linux" as const,
+  checkedAt: "2026-01-01T00:00:00.000Z",
+};
+
+function summaryOf(spec: HarnessSpec): HarnessSummary {
+  return {
+    id: spec.id,
+    name: spec.name,
+    discovery: spec.notFound
+      ? {
+          state: "not-found",
+          searched: ["/usr/bin"],
+          executableEnvironmentVariable: "SECANT_HARNESS",
+        }
+      : { state: "found", source: "path", description: "/usr/bin/harness" },
+    qualification: { state: "not-checked" },
+  };
+}
+
+function focusOf(spec: HarnessSpec): HarnessFocus {
+  const summary = summaryOf(spec);
+  if (spec.unavailable !== undefined) {
+    return {
+      ...summary,
+      qualification: { state: "not-ready", checkedAt: OBSERVATION.checkedAt },
+      capabilities: [],
+      unavailable: spec.unavailable,
+    };
+  }
+  const supportedModels =
+    spec.models === undefined
+      ? undefined
+      : spec.models === "free-text"
+        ? ({ kind: "free-text" } as const)
+        : ({ kind: "list", models: spec.models } as const);
+  return {
+    ...summary,
+    qualification: { state: "qualified", observation: OBSERVATION },
+    ...(supportedModels === undefined ? {} : { supportedModels }),
+    capabilities: [],
+    configurationPosture: "Harness-owned settings stay with the Harness.",
+  };
+}
+
+/** A fake `harness-catalog` view whose list is spawn-free and whose focus records
+ *  every qualified id, so a test can assert that opening the step spawns nothing
+ *  and choosing a Harness qualifies only that one. */
+function harnessCatalog(specs: readonly HarnessSpec[]): {
+  view: HarnessCatalogView;
+  focusCalls: string[];
+} {
+  const focusCalls: string[] = [];
+  const [list] = createSignal<HarnessCatalogSnapshot>({
+    family: "harness-catalog",
+    view: "list",
+    harnesses: specs.map(summaryOf),
+  });
+  const view: HarnessCatalogView = {
+    openList: () => list,
+    openFocus: (selector: HarnessFocusSelector) => {
+      focusCalls.push(selector.id);
+      const spec = specs.find((candidate) => candidate.id === selector.id);
+      const [snapshot] = createSignal<HarnessFocusSnapshot>({
+        family: "harness-catalog",
+        view: "focus",
+        selection: selector,
+        result:
+          spec !== undefined
+            ? { found: true, harness: focusOf(spec) }
+            : {
+                found: false,
+                problem: {
+                  code: "harness-not-registered",
+                  explanation: "gone",
+                  remediation: "register",
+                  possibleEffects: "none",
+                },
+              },
+      });
+      return snapshot;
+    },
+  };
+  return { view, focusCalls };
+}
+
+const AVAILABLE_HARNESSES: readonly HarnessSpec[] = [
+  { id: "claude-code", name: "Claude Code", models: ["claude-sonnet"] },
+  { id: "codex", name: "Codex", models: ["gpt-5-codex", "gpt-5"] },
+];
+
+function defaultHarnessCatalog(): HarnessCatalogView {
+  return harnessCatalog(AVAILABLE_HARNESSES).view;
 }
 
 // --- hand-driven launch seam -----------------------------------------------
@@ -260,14 +386,15 @@ async function mountFlow(
   width = 100,
   height = 40,
   runView: RunWorkbenchView = noRunView(),
-  harnesses: WorkspaceSnapshot["harnesses"] = DEFAULT_HARNESSES,
+  harnessesView: HarnessCatalogView = defaultHarnessCatalog(),
 ) {
   const exits: unknown[] = [];
   const t = await testRender(
     () => (
       <App
-        view={approvedWorkspace(harnesses)}
+        view={approvedWorkspace()}
         bundles={bundlesView}
+        harnesses={harnessesView}
         launch={launchView}
         run={runView}
         runList={inertRunListView()}
@@ -279,8 +406,7 @@ async function mountFlow(
     { width, height },
   );
   await t.waitForFrame((f) => f.includes("Secant"));
-  // Home menu: Workflow Bundles (0), Start a Run (1).
-  t.mockInput.pressArrow("down");
+  // Start a Run is the first and default Home entry (#191), so Enter opens it.
   t.mockInput.pressEnter();
   // "esc back" is in every chooser footer but not Home's, so it marks arrival.
   await t.waitForFrame((f) => f.includes("esc back"));
@@ -404,28 +530,45 @@ test("a Bundle with no declared inputs skips the inputs screen and reaches revie
   );
 });
 
-test("[both-client-harness-selection] an Agent Bundle chooses a colour-independent Harness status and reviews the semantic selection", async () => {
+test("[both-client-harness-selection] the Harness step shows worded rows, spawns nothing until a Harness is chosen, then qualifies only that one", async () => {
   const launch = fakeLaunch();
-  const { t } = await mountFlow(catalog([AGENT_ALPHA]), launch.view, 40, 20);
+  const harnesses = harnessCatalog(AVAILABLE_HARNESSES);
+  const { t } = await mountFlow(
+    catalog([AGENT_ALPHA]),
+    launch.view,
+    40,
+    20,
+    noRunView(),
+    harnesses.view,
+  );
   t.mockInput.pressEnter();
   await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
-  let frame = t.captureCharFrame();
+  const frame = t.captureCharFrame();
   assert.match(frame, /Claude Code/);
   assert.match(frame, /Codex/);
-  assert.equal(frame.match(/available/g)?.length, 2);
+  // Worded qualification, never a raw enum, and colour-independent.
+  assert.match(frame, /Not checked/);
+  assert.doesNotMatch(frame, /availability/i);
+  // Opening the step spawns nothing: no focus opened until a Harness is chosen.
+  assert.deepEqual(harnesses.focusCalls, []);
   for (const line of frame.split("\n")) {
     assert.ok(line.length <= 40, `overflow at 40: ${JSON.stringify(line)}`);
   }
 
-  t.mockInput.pressArrow("down");
-  t.mockInput.pressEnter();
+  t.mockInput.pressArrow("down"); // highlight Codex (still spawn-free)
+  assert.deepEqual(harnesses.focusCalls, []);
+  t.mockInput.pressEnter(); // choose Codex → qualifies only Codex
+  await t.waitForFrame((candidate) => candidate.includes("Model"));
+  assert.deepEqual(harnesses.focusCalls, ["codex"]);
+
+  t.mockInput.pressEnter(); // model default → review
   await t.waitForFrame((candidate) => candidate.includes("Review"));
-  frame = t.captureCharFrame();
-  assert.match(frame, /Harness: Codex \(codex\)/);
+  assert.match(t.captureCharFrame(), /Harness: Codex \(codex\)/);
 
   t.mockInput.pressEnter();
   await t.waitForFrame((candidate) => candidate.includes("Launching"));
   assert.equal(launch.calls[0]?.harness, "codex");
+  assert.equal(launch.calls[0]?.requestedModel, undefined);
 });
 
 test("changing a Harness after a selected-Harness refusal preserves unrelated input drafts", async () => {
@@ -433,8 +576,11 @@ test("changing a Harness after a selected-Harness refusal preserves unrelated in
   const { t } = await mountFlow(catalog([AGENT_BETA]), launch.view);
   t.mockInput.pressEnter(); // Bundle → Harness
   await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
-  t.mockInput.pressArrow("down"); // Codex
-  t.mockInput.pressEnter(); // Harness → inputs
+  t.mockInput.pressArrow("down"); // highlight Codex
+  t.mockInput.pressEnter(); // choose Codex → model phase
+  await t.waitForFrame((frame) => frame.includes("Model"));
+  await t.renderOnce();
+  t.mockInput.pressEnter(); // model default → inputs
   await t.waitForFrame((frame) => frame.includes("Launch inputs"));
   t.mockInput.pressKey("h");
   t.mockInput.pressKey("i");
@@ -455,8 +601,14 @@ test("changing a Harness after a selected-Harness refusal preserves unrelated in
     },
   });
   await t.waitForFrame((frame) => frame.includes("harness-not-found"));
-  t.mockInput.pressArrow("up"); // Claude Code
-  t.mockInput.pressEnter(); // back to inputs
+  t.mockInput.pressEscape(); // model → list, to choose another Harness
+  // A lone Escape is held briefly by OpenTUI key disambiguation — poll in real time.
+  await until(() => t.captureCharFrame().includes("enter choose"));
+  t.mockInput.pressArrow("up"); // highlight Claude Code
+  t.mockInput.pressEnter(); // choose Claude Code → model phase
+  await t.waitForFrame((frame) => frame.includes("Model"));
+  await t.renderOnce();
+  t.mockInput.pressEnter(); // model default → inputs
   await t.waitForFrame((frame) => frame.includes("Launch inputs"));
   assert.match(t.captureCharFrame(), /hi/);
   t.mockInput.pressEnter();
@@ -464,29 +616,40 @@ test("changing a Harness after a selected-Harness refusal preserves unrelated in
   assert.match(t.captureCharFrame(), /target: hi/);
 });
 
-test("an unavailable Harness names its reason, cannot continue, and relayouts after resize", async () => {
-  const choices: WorkspaceSnapshot["harnesses"] = [
-    { id: "claude-code", name: "Claude Code", availability: "available" },
+test("an unavailable Harness names its reason and remediation, cannot continue, and relayouts after resize", async () => {
+  const harnesses = harnessCatalog([
+    { id: "claude-code", name: "Claude Code", models: ["claude-sonnet"] },
     {
       id: "codex",
       name: "Codex",
-      availability: "unavailable",
-      unavailableReason: "Codex support is disabled in this build.",
+      notFound: true,
+      unavailable: {
+        code: "harness-not-ready",
+        explanation: "Codex support is disabled in this build.",
+        remediation: "Enable Codex, or choose another Harness.",
+        possibleEffects: "none",
+      },
     },
-  ];
+  ]);
   const { t } = await mountFlow(
     catalog([AGENT_ALPHA]),
     fakeLaunch().view,
     50,
     20,
     noRunView(),
-    choices,
+    harnesses.view,
   );
   t.mockInput.pressEnter();
   await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
-  t.mockInput.pressArrow("down");
-  await t.waitForFrame((frame) => frame.includes("disabled in this build"));
-  t.mockInput.pressEnter();
+  // Availability is visible in words before focusing the unavailable Harness.
+  assert.match(t.captureCharFrame(), /Unavailable · not found on/);
+  t.mockInput.pressArrow("down"); // highlight Codex
+  t.mockInput.pressEnter(); // choose Codex → its focus is unavailable
+  await t.waitForFrame((frame) => frame.includes("Codex support is disabled"));
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Codex support is disabled/);
+  assert.match(frame, /Enable Codex/);
+  t.mockInput.pressEnter(); // cannot continue while unavailable
   await t.renderOnce();
   assert.match(t.captureCharFrame(), /Choose a Harness/);
   assert.doesNotMatch(t.captureCharFrame(), /Review/);
@@ -495,6 +658,110 @@ test("an unavailable Harness names its reason, cannot continue, and relayouts af
   for (const line of t.captureCharFrame().split("\n")) {
     assert.ok(line.length <= 30, `overflow at 30: ${JSON.stringify(line)}`);
   }
+});
+
+test("[start-run-model-choice] a list Harness offers Harness default first then its models, and the draft carries the chosen model", async () => {
+  const launch = fakeLaunch();
+  const harnesses = harnessCatalog([
+    {
+      id: "claude-code",
+      name: "Claude Code",
+      models: ["claude-sonnet", "claude-opus"],
+    },
+    { id: "codex", name: "Codex", models: "free-text" },
+  ]);
+  const { t } = await mountFlow(
+    catalog([AGENT_ALPHA]),
+    launch.view,
+    100,
+    40,
+    noRunView(),
+    harnesses.view,
+  );
+  t.mockInput.pressEnter(); // Bundle → Harness
+  await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  assert.deepEqual(harnesses.focusCalls, []); // spawn-free until chosen
+  t.mockInput.pressEnter(); // choose Claude Code (highlighted first)
+  await t.waitForFrame((frame) => frame.includes("Model"));
+  assert.deepEqual(harnesses.focusCalls, ["claude-code"]);
+  const model = t.captureCharFrame();
+  // Harness default is the first option and the models follow it.
+  assert.match(model, /Harness default/);
+  assert.match(model, /claude-sonnet, claude-opus/);
+
+  t.mockInput.pressArrow("right"); // Harness default → claude-sonnet
+  await t.waitForFrame((frame) => /‹ claude-sonnet ›/.test(frame));
+  t.mockInput.pressEnter(); // → review
+  await t.waitForFrame((frame) => frame.includes("Review"));
+  assert.match(t.captureCharFrame(), /model claude-sonnet/);
+  t.mockInput.pressEnter(); // Start
+  await t.waitForFrame((frame) => frame.includes("Launching"));
+  assert.equal(launch.calls[0]?.requestedModel, "claude-sonnet");
+});
+
+test("[start-run-model-choice] a free-text Harness accepts a typed model, and blank means Harness default", async () => {
+  const launch = fakeLaunch();
+  const harnesses = harnessCatalog([
+    { id: "codex", name: "Codex", models: "free-text" },
+  ]);
+  const { t } = await mountFlow(
+    catalog([AGENT_ALPHA]),
+    launch.view,
+    100,
+    40,
+    noRunView(),
+    harnesses.view,
+  );
+  t.mockInput.pressEnter(); // Bundle → Harness
+  await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  t.mockInput.pressEnter(); // choose the only Harness → model phase
+  await t.waitForFrame((frame) =>
+    frame.includes("Leave blank for Harness default"),
+  );
+  // Type a free-text model, then a trailing space: the stored model is trimmed so
+  // Preflight (which matches the model verbatim) never sees stray whitespace.
+  t.mockInput.pressKey("o");
+  t.mockInput.pressKey("4");
+  t.mockInput.pressKey(" ");
+  await t.waitForFrame((frame) => frame.includes("o4"));
+  t.mockInput.pressEnter(); // → review
+  await t.waitForFrame((frame) => frame.includes("Review"));
+  assert.match(t.captureCharFrame(), /model o4/);
+  t.mockInput.pressEnter(); // Start
+  await t.waitForFrame((frame) => frame.includes("Launching"));
+  assert.equal(launch.calls[0]?.requestedModel, "o4");
+});
+
+test("a Command-only Bundle asks for neither Harness nor model and numbers its steps N of M", async () => {
+  const launch = fakeLaunch();
+  const { t } = await mountFlow(catalog([ALPHA]), launch.view);
+  // Command-only ALPHA has no inputs, so the sequence is Bundle → Review: 1 of 2.
+  assert.match(t.captureCharFrame(), /Step 1 of 2/);
+  t.mockInput.pressEnter(); // straight to review (no Harness, no inputs)
+  await t.waitForFrame((f) => f.includes("Review"));
+  const review = t.captureCharFrame();
+  assert.match(review, /Step 2 of 2/);
+  assert.doesNotMatch(review, /Harness:/); // no Harness/model for a Command-only Bundle
+  t.mockInput.pressEnter(); // Start
+  await t.waitForFrame((f) => f.includes("Launching"));
+  assert.equal(launch.calls[0]?.harness, undefined);
+  assert.equal(launch.calls[0]?.requestedModel, undefined);
+});
+
+test("an Agent Bundle with inputs numbers Bundle, Harness, Inputs, Review as N of 4", async () => {
+  const { t } = await mountFlow(catalog([AGENT_BETA]), fakeLaunch().view);
+  assert.match(t.captureCharFrame(), /Step 1 of 4/); // Bundle
+  t.mockInput.pressEnter();
+  await t.waitForFrame((f) => f.includes("Choose a Harness"));
+  assert.match(t.captureCharFrame(), /Step 2 of 4/); // Harness
+  t.mockInput.pressEnter(); // choose Claude Code → model
+  await t.waitForFrame((f) => f.includes("esc choose another"));
+  t.mockInput.pressEnter(); // → inputs
+  await t.waitForFrame((f) => f.includes("Launch inputs"));
+  assert.match(t.captureCharFrame(), /Step 3 of 4/); // Inputs
+  t.mockInput.pressEnter(); // → review
+  await t.waitForFrame((f) => f.includes("Review"));
+  assert.match(t.captureCharFrame(), /Step 4 of 4/); // Review
 });
 
 test("pending feedback then a transition into the Workbench for the Run id; a trusted launch carries no trustDigest", async () => {

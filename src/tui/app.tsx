@@ -15,6 +15,10 @@ import {
   BundleCatalogViewProvider,
   type BundleCatalogView,
 } from "./bundle-view.js";
+import {
+  HarnessCatalogViewProvider,
+  type HarnessCatalogView,
+} from "./harness-view.js";
 import { Home } from "./home.js";
 import { createTuiKeymap, KeymapProvider, useBindings } from "./keymap.js";
 import { PreviousRuns } from "./previous-runs.js";
@@ -312,6 +316,7 @@ function GuardedExitProvider(props: ParentProps<{ exit: Exit }>) {
 export function App(props: {
   view: WorkspaceView;
   bundles: BundleCatalogView;
+  harnesses: HarnessCatalogView;
   launch: RunLaunchView;
   run: RunWorkbenchView;
   /** The Previous Runs read seam and the Run Actions submit seam (#92). Required:
@@ -330,25 +335,27 @@ export function App(props: {
         <KeymapProvider keymap={keymap}>
           <WorkspaceViewProvider view={props.view}>
             <BundleCatalogViewProvider view={props.bundles}>
-              <RunLaunchViewProvider view={props.launch}>
-                <RunWorkbenchViewProvider view={props.run}>
-                  <RunListViewProvider view={props.runList}>
-                    <RunActionsViewProvider view={props.actions}>
-                      <DialogProvider>
-                        <GuardedExitProvider exit={props.exit}>
-                          <ErrorBoundary
-                            fallback={(error) => (
-                              <Fallback error={error} exit={props.exit} />
-                            )}
-                          >
-                            <Route renderer={props.renderer} />
-                          </ErrorBoundary>
-                        </GuardedExitProvider>
-                      </DialogProvider>
-                    </RunActionsViewProvider>
-                  </RunListViewProvider>
-                </RunWorkbenchViewProvider>
-              </RunLaunchViewProvider>
+              <HarnessCatalogViewProvider view={props.harnesses}>
+                <RunLaunchViewProvider view={props.launch}>
+                  <RunWorkbenchViewProvider view={props.run}>
+                    <RunListViewProvider view={props.runList}>
+                      <RunActionsViewProvider view={props.actions}>
+                        <DialogProvider>
+                          <GuardedExitProvider exit={props.exit}>
+                            <ErrorBoundary
+                              fallback={(error) => (
+                                <Fallback error={error} exit={props.exit} />
+                              )}
+                            >
+                              <Route renderer={props.renderer} />
+                            </ErrorBoundary>
+                          </GuardedExitProvider>
+                        </DialogProvider>
+                      </RunActionsViewProvider>
+                    </RunListViewProvider>
+                  </RunWorkbenchViewProvider>
+                </RunLaunchViewProvider>
+              </HarnessCatalogViewProvider>
             </BundleCatalogViewProvider>
           </WorkspaceViewProvider>
         </KeymapProvider>

@@ -26,11 +26,11 @@ export function Home(props: {
   const dimensions = useTerminalDimensions();
   const approved = () => view.snapshot().approval.state === "approved";
 
-  // Workflow Bundles stays the first entry so Enter from a fresh Home opens it;
-  // Start a Run sits beside it (#90).
+  // Start a Run is the first and default entry so the primary task is one keypress
+  // away (#191); Workflow Bundles and Previous Runs sit beside it.
   const entries = () => [
-    { label: "Workflow Bundles", open: () => props.onOpenBundles() },
     { label: "Start a Run", open: () => props.onStartRun() },
+    { label: "Workflow Bundles", open: () => props.onOpenBundles() },
     { label: "Previous Runs", open: () => props.onOpenPreviousRuns() },
   ];
   const [selected, setSelected] = createSignal(0);

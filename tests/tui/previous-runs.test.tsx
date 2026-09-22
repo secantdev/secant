@@ -12,6 +12,7 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
+import { inertHarnessCatalogView } from "./inert.js";
 import { makeFakeRenderer, until } from "./renderer-fixture.js";
 import type {
   BundleCatalogSnapshot,
@@ -319,6 +320,7 @@ async function mountHome(options: MountOptions = {}) {
       <App
         view={approvedWorkspace()}
         bundles={noBundles()}
+        harnesses={inertHarnessCatalogView()}
         launch={noLaunch()}
         run={options.runView ?? runViewOf(options.run ?? runOf())}
         runList={runListView(
@@ -340,8 +342,8 @@ async function mountHome(options: MountOptions = {}) {
 async function openList(options: MountOptions = {}) {
   const mounted = await mountHome(options);
   await mounted.t.waitForFrame((f) => f.includes("Secant"));
-  mounted.t.mockInput.pressArrow("down"); // Start a Run
-  mounted.t.mockInput.pressArrow("down"); // Previous Runs
+  mounted.t.mockInput.pressArrow("down"); // Start a Run (0) → Workflow Bundles (1)
+  mounted.t.mockInput.pressArrow("down"); // → Previous Runs (2)
   mounted.t.mockInput.pressEnter();
   // Wait for a list-only string: "Previous Runs" alone also names the Home menu
   // entry, so it would match Home before navigation lands. The footer can clip at

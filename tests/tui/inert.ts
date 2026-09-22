@@ -1,4 +1,14 @@
-import type { RunActionsView, RunListView } from "../../src/tui/tui.js";
+import { createSignal } from "solid-js";
+import type {
+  HarnessCatalogView,
+  RunActionsView,
+  RunListView,
+} from "../../src/tui/tui.js";
+import type {
+  HarnessCatalogSnapshot,
+  HarnessFocusSelector,
+  HarnessFocusSnapshot,
+} from "../../src/application/projection-port.js";
 
 // Inert seams for the App screens a given render never opens (A28): an empty
 // Previous Runs list and a Run Actions seam that refuses. A test that actually
@@ -17,6 +27,38 @@ export function inertRunListView(): RunListView {
       setResumable() {},
       loadMore() {},
     }),
+  };
+}
+
+// An empty Harness catalog for the App screens a given render never reaches: the
+// list is empty and any focus is a not-found refusal, so a stray Harness step is
+// caught rather than silently served. A test that reaches the Harness step wires a
+// real fake instead.
+export function inertHarnessCatalogView(): HarnessCatalogView {
+  const [list] = createSignal<HarnessCatalogSnapshot>({
+    family: "harness-catalog",
+    view: "list",
+    harnesses: [],
+  });
+  return {
+    openList: () => list,
+    openFocus: (selector: HarnessFocusSelector) => {
+      const [snapshot] = createSignal<HarnessFocusSnapshot>({
+        family: "harness-catalog",
+        view: "focus",
+        selection: selector,
+        result: {
+          found: false,
+          problem: {
+            code: "harness-not-registered",
+            explanation: "No Harness is wired in this context.",
+            remediation: "Open a Bundle that needs a Harness.",
+            possibleEffects: "none",
+          },
+        },
+      });
+      return snapshot;
+    },
   };
 }
 

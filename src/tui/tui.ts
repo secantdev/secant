@@ -10,6 +10,10 @@ export { App } from "./app.js";
 export { mountTui, type MountOptions } from "./mount.js";
 export type { WorkspaceView } from "./workspace-view.js";
 export type { BundleCatalogView } from "./bundle-view.js";
+export {
+  createLiveHarnessCatalogView,
+  type HarnessCatalogView,
+} from "./harness-view.js";
 export type { RunLaunchView, LaunchOutcome } from "./run-launch-view.js";
 export { createLiveRunLaunchView } from "./run-launch-view.js";
 // The Run Workbench, Previous Runs, and Run Actions view types are the App prop

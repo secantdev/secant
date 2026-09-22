@@ -17,6 +17,7 @@ import {
 } from "../../src/harness/harness.js";
 import {
   App,
+  createLiveHarnessCatalogView,
   createLiveRunLaunchView,
   createLiveRunWorkbenchView,
   type BundleCatalogView,
@@ -222,6 +223,7 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
       <App
         view={workspaceView(workspaceProjection.snapshot)}
         bundles={catalogView(listProjection.snapshot, focusProjection.snapshot)}
+        harnesses={createLiveHarnessCatalogView(wired.projectionPort)}
         launch={launch}
         run={createLiveRunWorkbenchView(wired.projectionPort)}
         runList={inertRunListView()}
@@ -233,14 +235,16 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
     { width: 120, height: 32 },
   );
   await rendered.waitForFrame((frame) => frame.includes("Secant"));
-  rendered.mockInput.pressArrow("down");
-  rendered.mockInput.pressEnter();
+  rendered.mockInput.pressEnter(); // Start a Run is the first, default entry
   await rendered.waitForFrame((frame) => frame.includes("acknowledge"));
   rendered.mockInput.pressKey("a");
   await rendered.waitForFrame((frame) => frame.includes("Trust acknowledged"));
   rendered.mockInput.pressEnter();
   await rendered.waitForFrame((frame) => frame.includes("Choose a Harness"));
-  rendered.mockInput.pressEnter();
+  rendered.mockInput.pressEnter(); // choose the highlighted Harness → model field
+  await rendered.waitForFrame((frame) => frame.includes("Model"));
+  await rendered.renderOnce();
+  rendered.mockInput.pressEnter(); // Harness default → Review
   await rendered.waitForFrame((frame) => frame.includes("Review"));
   rendered.mockInput.pressEnter();
   await rendered.waitForFrame((frame) =>

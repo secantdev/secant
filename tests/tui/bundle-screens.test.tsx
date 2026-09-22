@@ -3,7 +3,11 @@ import { test } from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
-import { inertRunActionsView, inertRunListView } from "./inert.js";
+import {
+  inertHarnessCatalogView,
+  inertRunActionsView,
+  inertRunListView,
+} from "./inert.js";
 import type {
   BundleCatalogView,
   RunLaunchView,
@@ -240,6 +244,7 @@ async function mount(rows = ROWS, width = 80, height = 40) {
       <App
         view={approvedWorkspace()}
         bundles={bundles(rows)}
+        harnesses={inertHarnessCatalogView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}
@@ -261,6 +266,7 @@ function selectedLine(frame: string): string {
 test("bundle-catalog-two-pane: one catalog shows installed count, sorted rows, and visible focus", async () => {
   const { t } = await mount();
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame((f) => f.includes("Proof Bundle"));
   const frame = t.captureCharFrame();
@@ -285,6 +291,7 @@ test("bundle-catalog-two-pane: one catalog shows installed count, sorted rows, a
 test("Workflow Bundles searches the existing list snapshot and keeps the inspector on one screen", async () => {
   const { t } = await mount();
   await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame((frame) => frame.includes("3 installed"));
 
@@ -367,6 +374,7 @@ test("a trusted Bundle uses the shared Trust wording in its inspector", async ()
       <App
         view={approvedWorkspace()}
         bundles={view}
+        harnesses={inertHarnessCatalogView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}
@@ -378,6 +386,7 @@ test("a trusted Bundle uses the shared Trust wording in its inspector", async ()
     { width: 80, height: 40 },
   );
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame((f) => f.includes("Trusted Flow"));
   await t.waitForFrame((f) => f.includes("A trusted pipeline"));
@@ -387,6 +396,7 @@ test("a trusted Bundle uses the shared Trust wording in its inspector", async ()
 test("empty Catalog names the headless install commands", async () => {
   const { t } = await mount([]);
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame(
     (f) => f.includes("No installed Workflow") && f.includes("Bundles"),
@@ -422,6 +432,7 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
       <App
         view={approvedWorkspace()}
         bundles={view}
+        harnesses={inertHarnessCatalogView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}
@@ -433,6 +444,7 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
     { width: 80, height: 40 },
   );
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame((f) => f.includes("Catalog error"));
   const frame = t.captureCharFrame();
@@ -477,6 +489,7 @@ test("a focused Bundle whose managed bytes are gone shows its Problem", async ()
       <App
         view={approvedWorkspace()}
         bundles={view}
+        harnesses={inertHarnessCatalogView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}
@@ -488,6 +501,7 @@ test("a focused Bundle whose managed bytes are gone shows its Problem", async ()
     { width: 80, height: 24 },
   );
   await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame(
     (frame) =>
@@ -500,6 +514,7 @@ test("a focused Bundle whose managed bytes are gone shows its Problem", async ()
 test("moving the result focus updates the inspector with numbered Workflow commands and allowed facts", async () => {
   const { t } = await mount();
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter(); // Home -> list
   await t.waitForFrame((f) => f.includes("Proof Bundle"));
   t.mockInput.pressArrow("down"); // select the second row (Proof Bundle 2.0.0)
@@ -534,6 +549,7 @@ test("moving the result focus updates the inspector with numbered Workflow comma
 test("pane focus is visible and inspector scrolling clamps at both ends", async () => {
   const { t } = await mount(ROWS, 80, 18);
   await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame((frame) => frame.includes("Alpha Flow"));
   t.mockInput.pressArrow("down");
@@ -580,6 +596,7 @@ test("pane focus is visible and inspector scrolling clamps at both ends", async 
 test("small terminals stack the result and inspector panes without overflow", async () => {
   const { t } = await mount(ROWS, 50, 24);
   await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame((frame) => frame.includes("Inspector"));
   const frame = t.captureCharFrame();
@@ -605,6 +622,7 @@ test("small terminals stack the result and inspector panes without overflow", as
 test("Back returns to Home or the originating Start a Run Bundle step", async () => {
   const homeRun = await mount();
   await homeRun.t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  homeRun.t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   homeRun.t.mockInput.pressEnter();
   await homeRun.t.waitForFrame((frame) => frame.includes("3 installed"));
   homeRun.t.mockInput.pressEscape();
@@ -614,8 +632,7 @@ test("Back returns to Home or the originating Start a Run Bundle step", async ()
 
   const startRun = await mount();
   await startRun.t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
-  startRun.t.mockInput.pressArrow("down");
-  startRun.t.mockInput.pressEnter();
+  startRun.t.mockInput.pressEnter(); // Start a Run is the first, default entry
   await startRun.t.waitForFrame((frame) => frame.includes("Start a Run"));
   startRun.t.mockInput.pressArrow("down");
   await startRun.t.waitForFrame((frame) => frame.includes("› Proof Bundle"));
@@ -631,6 +648,7 @@ test("Back returns to Home or the originating Start a Run Bundle step", async ()
 test("search owns printable keys while Ctrl+C quits from either pane", async () => {
   const listRun = await mount();
   await listRun.t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  listRun.t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   listRun.t.mockInput.pressEnter();
   await listRun.t.waitForFrame((f) => f.includes("Proof Bundle"));
   listRun.t.mockInput.pressKey("q");
@@ -644,6 +662,7 @@ test("search owns printable keys while Ctrl+C quits from either pane", async () 
 
   const inspectRun = await mount();
   await inspectRun.t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  inspectRun.t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   inspectRun.t.mockInput.pressEnter();
   await inspectRun.t.waitForFrame((f) => f.includes("Proof Bundle"));
   inspectRun.t.mockInput.pressArrow("down");
@@ -662,6 +681,7 @@ test("long catalog content stays bounded at 80×24 without corrupting visible ro
   async function openCatalog(height: number) {
     const { t } = await mount(ROWS, 80, height);
     await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+    t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
     t.mockInput.pressEnter(); // Home -> list
     await t.waitForFrame((f) => f.includes("Proof Bundle"));
     t.mockInput.pressArrow("down"); // select Proof Bundle 2.0.0
@@ -698,6 +718,7 @@ test("long catalog content stays bounded at 80×24 without corrupting visible ro
 test("list fits a small width and after resize without overflow", async () => {
   const { t } = await mount(ROWS, 40, 20);
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
   await t.waitForFrame((f) => f.includes("Proof Bundle"));
   for (const line of t.captureCharFrame().split("\n")) {

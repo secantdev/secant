@@ -3,7 +3,11 @@ import { test } from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
-import { inertRunActionsView, inertRunListView } from "./inert.js";
+import {
+  inertHarnessCatalogView,
+  inertRunActionsView,
+  inertRunListView,
+} from "./inert.js";
 import type {
   AnswerOutcome,
   BundleCatalogView,
@@ -398,6 +402,7 @@ async function mountApp(
       <App
         view={approvedWorkspace()}
         bundles={oneBundle()}
+        harnesses={inertHarnessCatalogView()}
         launch={launchTo(launchRunId)}
         run={control.view}
         runList={inertRunListView()}
@@ -409,8 +414,7 @@ async function mountApp(
     { width, height },
   );
   await t.waitForFrame((f) => f.includes("Secant"));
-  t.mockInput.pressArrow("down"); // Home: select Start a Run
-  t.mockInput.pressEnter();
+  t.mockInput.pressEnter(); // Home: Start a Run is the first, default entry
   await t.waitForFrame((f) => f.includes("esc back")); // chooser
   t.mockInput.pressEnter(); // trusted + no inputs → Review
   await t.waitForFrame((f) => f.includes("Review"));

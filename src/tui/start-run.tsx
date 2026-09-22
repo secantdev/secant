@@ -13,7 +13,8 @@ import {
 import { createStore, reconcile } from "solid-js/store";
 import type {
   FieldViolation,
-  HarnessChoice,
+  HarnessFocus,
+  HarnessSummary,
   InstalledBundleFocus,
   InstalledBundleSummary,
   LaunchRunInput,
@@ -22,39 +23,59 @@ import type {
 } from "../application/projection-port.js";
 import { BundleCatalog } from "./bundle-catalog.js";
 import { useBundleCatalogView } from "./bundle-view.js";
+import {
+  discoveryWord,
+  harnessRowStatus,
+  qualificationWord,
+} from "./harness-format.js";
+import { useHarnessCatalogView } from "./harness-view.js";
 import { useBindings } from "./keymap.js";
 import { useRunLaunchView, type LaunchOutcome } from "./run-launch-view.js";
 import { useExit } from "./vendor/exit.js";
 import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
-import { useWorkspaceView } from "./workspace-view.js";
 
-// The Start-a-Run flow (#90): from Home, one decision per screen — choose an
-// Installed Bundle (with a read-only side panel and, for an untrusted digest, an
-// inline trust acknowledgement that gates Continue), provide the Bundle-declared
-// Launch inputs typed by their Artifact type (skipped when none), review, then
-// Start. It drives the *same* `launch-run` Operation the headless client does,
+// The Start-a-Run flow (#90, #191): from Home — where it is now the first and
+// default entry — one decision per screen. Choose an Installed Bundle (with a
+// read-only side panel, a `View Bundle Details` jump into the Bundle catalog, and
+// an inline trust acknowledgement that gates Continue), choose a Harness and model
+// for an Agent-bearing Bundle, provide the Bundle-declared Launch inputs (skipped
+// when none), review, then Start. The steps are numbered `N of M` with Harness
+// omitted for a Command-only Bundle and Inputs omitted when the Bundle declares
+// none. It drives the *same* `launch-run` Operation the headless client does,
 // through the `run-launch-view` seam, and renders each refusal at the step that
 // owns the correction while the other draft choices stay intact.
 //
-// State that survives back-navigation (chosen Bundle index, entered input values,
-// the acknowledged digest) lives in this one component, so stepping back never
-// loses a draft; only leaving the flow entirely (Escape at the chooser) discards
-// it. Exactly one step renders at a time (a Solid <Switch>), so each step's key
-// bindings exist only while it is active and cannot conflict.
+// The Harness step reads the spawn-free `harness-catalog` list for its rows and
+// worded qualification/availability; choosing a Harness opens that one's focus,
+// which qualifies only it and carries the supported-model declaration the model
+// field renders (a choice list, free-text entry, or `Harness default` alone).
+//
+// State that survives back-navigation (chosen Bundle index, chosen Harness, the
+// requested model, entered input values, the acknowledged digest) lives in this one
+// component, so stepping back never loses a draft; only leaving the flow entirely
+// (Escape at the chooser) discards it. Exactly one step renders at a time (a Solid
+// <Switch>), so each step's key bindings exist only while it is active.
 
 type Step = "choose" | "harness" | "inputs" | "review" | "pending";
 
 const NARROW_BREAKPOINT = 60;
+
+// `Harness default` means no requested model: the Harness's own configuration
+// decides. It is the first option in both the list and free-text model fields.
+const HARNESS_DEFAULT = "Harness default";
 
 export function StartRun(props: {
   onLeave: () => void;
   onStarted: (runId: string, bundleName: string) => void;
 }) {
   const bundles = useBundleCatalogView();
-  const workspace = useWorkspaceView();
+  const harnessCatalog = useHarnessCatalogView();
   const launch = useRunLaunchView();
   const list = bundles.openList();
+  // The Harness list is opened once for the whole flow: a list open is discovery
+  // only and spawns nothing (#191). Only choosing a Harness opens its focus.
+  const harnessList = harnessCatalog.openList();
 
   const rows = (): readonly InstalledBundleSummary[] => {
     const result = list().result;
@@ -68,7 +89,14 @@ export function StartRun(props: {
   const [step, setStep] = createSignal<Step>("choose");
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [selected, setSelected] = createSignal(0);
-  const [selectedHarnessIndex, setSelectedHarnessIndex] = createSignal(0);
+  // The chosen Harness id (undefined until the user chooses one) and the requested
+  // model draft (undefined means `Harness default`). Both survive back-navigation.
+  const [chosenHarnessId, setChosenHarnessId] = createSignal<
+    string | undefined
+  >();
+  const [requestedModel, setRequestedModel] = createSignal<
+    string | undefined
+  >();
   // Every digest the user has acknowledged trust for. A set (not one slot) so an
   // acknowledgement survives moving to another Bundle and back (trust is
   // digest-scoped, ADR 0021).
@@ -89,14 +117,23 @@ export function StartRun(props: {
 
   const active = () => Math.min(selected(), Math.max(0, rows().length - 1));
   const selectedSummary = () => rows()[active()];
-  const harnessChoices = () => workspace.snapshot().harnesses;
-  const selectedHarness = (): HarnessChoice | undefined => {
-    const choices = harnessChoices();
-    const index = Math.min(
-      selectedHarnessIndex(),
-      Math.max(0, choices.length - 1),
-    );
-    return choices[index];
+
+  const harnessRows = (): readonly HarnessSummary[] => harnessList().harnesses;
+  const chosenHarnessSummary = (): HarnessSummary | undefined =>
+    harnessRows().find((harness) => harness.id === chosenHarnessId());
+  // The focus for the chosen Harness, re-opened when the choice changes: the memo
+  // owns each openFocus subscription and disposes the previous on re-run. Opening a
+  // focus qualifies exactly that Harness; nothing is opened until one is chosen.
+  const harnessFocusAccessor = createMemo(() => {
+    const id = chosenHarnessId();
+    if (id === undefined) return undefined;
+    return harnessCatalog.openFocus({ id });
+  });
+  const chosenHarnessFocus = (): HarnessFocus | undefined => {
+    const accessor = harnessFocusAccessor();
+    if (accessor === undefined) return undefined;
+    const result = accessor().result;
+    return result.found ? result.harness : undefined;
   };
 
   // The focus for the selected Bundle, re-opened when the selection changes: the
@@ -153,14 +190,18 @@ export function StartRun(props: {
     );
   };
 
+  // The user has chosen a Harness (opening its focus qualifies only that one). A
+  // different choice resets the model draft, since the previous model may not be
+  // one the new Harness supports; the launch revalidates regardless.
+  const chooseHarness = (id: string) => {
+    if (chosenHarnessId() !== id) setRequestedModel(undefined);
+    setChosenHarnessId(id);
+  };
+
   const continueFromHarness = () => {
     const bundle = focusBundle();
-    const harness = selectedHarness();
-    if (
-      bundle === undefined ||
-      harness === undefined ||
-      harness.availability !== "available"
-    ) {
+    const focus = chosenHarnessFocus();
+    if (bundle === undefined || focus === undefined || focus.unavailable) {
       return;
     }
     setChooserProblem(undefined);
@@ -183,12 +224,15 @@ export function StartRun(props: {
   const startLaunch = () => {
     const bundle = focusBundle();
     if (bundle === undefined) return;
+    const needsHarness = routingNeedsHarness(bundle.routing);
     const input: LaunchRunInput = {
       bundle: { id: bundle.id, version: bundle.version },
       launchInputs: declaredValues(),
-      harness: routingNeedsHarness(bundle.routing)
-        ? selectedHarness()?.id
-        : undefined,
+      harness: needsHarness ? chosenHarnessId() : undefined,
+      // The draft carries the requested model into the launch; a Command-only
+      // Bundle asks for neither Harness nor model (#191). `Harness default` is the
+      // absence of a requested model, so it rides as `undefined`.
+      requestedModel: needsHarness ? requestedModel() : undefined,
       trustDigest:
         bundle.trust.state === "not-yet-trusted" ? bundle.digest : undefined,
     };
@@ -248,6 +292,25 @@ export function StartRun(props: {
     );
   };
 
+  // The ordered steps present for a Bundle, so each step can render its `N of M`
+  // position: Harness only when the routing needs one, Inputs only when the Bundle
+  // declares launch inputs (#191). `pending` is not a numbered step.
+  const stepSequence = (bundle: InstalledBundleFocus): Step[] => {
+    const sequence: Step[] = ["choose"];
+    if (routingNeedsHarness(bundle.routing)) sequence.push("harness");
+    if (bundle.launchInputs.length > 0) sequence.push("inputs");
+    sequence.push("review");
+    return sequence;
+  };
+  const stepLabel = (which: Step): string => {
+    const bundle = focusBundle();
+    if (bundle === undefined) return "";
+    const sequence = stepSequence(bundle);
+    const position = sequence.indexOf(which);
+    if (position === -1) return "";
+    return `Step ${position + 1} of ${sequence.length}`;
+  };
+
   return (
     <Show
       when={catalogOpen()}
@@ -264,6 +327,7 @@ export function StartRun(props: {
               acknowledged={acknowledged}
               acknowledge={acknowledge}
               canContinue={canContinue}
+              stepLabel={() => stepLabel("choose")}
               onContinue={continueFromChoose}
               onViewDetails={() => setCatalogOpen(true)}
               onBack={props.onLeave}
@@ -272,9 +336,13 @@ export function StartRun(props: {
           </Match>
           <Match when={step() === "harness"}>
             <HarnessStep
-              choices={harnessChoices}
-              selected={selectedHarnessIndex}
-              setSelected={setSelectedHarnessIndex}
+              rows={harnessRows}
+              chosenId={chosenHarnessId}
+              choose={chooseHarness}
+              focus={chosenHarnessFocus}
+              model={requestedModel}
+              setModel={setRequestedModel}
+              stepLabel={() => stepLabel("harness")}
               problem={chooserProblem}
               onContinue={continueFromHarness}
               onBack={() => setStep("choose")}
@@ -286,6 +354,7 @@ export function StartRun(props: {
               values={values}
               setValue={(name, value) => setValues(name, value)}
               findings={fieldFindings}
+              stepLabel={() => stepLabel("inputs")}
               onContinue={() => setStep("review")}
               onBack={() =>
                 setStep(focusNeedsHarness(focusBundle()) ? "harness" : "choose")
@@ -295,8 +364,10 @@ export function StartRun(props: {
           <Match when={step() === "review"}>
             <ReviewStep
               bundle={focusBundle}
-              harness={selectedHarness}
+              harness={chosenHarnessSummary}
+              model={requestedModel}
               values={values}
+              stepLabel={() => stepLabel("review")}
               onStart={startLaunch}
               onBack={backFromReview}
             />
@@ -346,6 +417,19 @@ function focusNeedsHarness(bundle: InstalledBundleFocus | undefined): boolean {
   return bundle !== undefined && routingNeedsHarness(bundle.routing);
 }
 
+// A muted `Step N of M` line under a step title (blank while no Bundle is
+// selected — the empty/errored Catalog has no sequence to count).
+function StepCount(props: { label: Accessor<string> }) {
+  const { theme } = useTheme();
+  return (
+    <Show when={props.label().length > 0}>
+      <text fg={theme.textMuted} flexShrink={0}>
+        {props.label()}
+      </text>
+    </Show>
+  );
+}
+
 // --- choose ----------------------------------------------------------------
 
 function ChooseStep(props: {
@@ -358,6 +442,7 @@ function ChooseStep(props: {
   acknowledged: Accessor<boolean>;
   acknowledge: () => void;
   canContinue: Accessor<boolean>;
+  stepLabel: Accessor<string>;
   onContinue: () => void;
   onViewDetails: () => void;
   onBack: () => void;
@@ -441,6 +526,7 @@ function ChooseStep(props: {
       <text attributes={TextAttributes.BOLD} fg={theme.text} flexShrink={0}>
         Start a Run
       </text>
+      <StepCount label={props.stepLabel} />
       <Show when={props.problem()}>
         {(problem) => (
           <box flexDirection="column" flexShrink={0}>
@@ -606,12 +692,18 @@ function SidePanel(props: {
   );
 }
 
-// --- Harness selection ----------------------------------------------------
+// --- Harness selection + model --------------------------------------------
+
+type HarnessPhase = "list" | "model";
 
 function HarnessStep(props: {
-  choices: Accessor<readonly HarnessChoice[]>;
-  selected: Accessor<number>;
-  setSelected: (index: number) => void;
+  rows: Accessor<readonly HarnessSummary[]>;
+  chosenId: Accessor<string | undefined>;
+  choose: (id: string) => void;
+  focus: Accessor<HarnessFocus | undefined>;
+  model: Accessor<string | undefined>;
+  setModel: (model: string | undefined) => void;
+  stepLabel: Accessor<string>;
   problem: Accessor<Problem | undefined>;
   onContinue: () => void;
   onBack: () => void;
@@ -620,17 +712,81 @@ function HarnessStep(props: {
   const exit = useExit();
   const dialog = useDialog();
   const dimensions = useTerminalDimensions();
-  const move = (delta: number) => {
-    const count = props.choices().length;
-    if (count === 0) return;
-    const next = Math.max(0, Math.min(props.selected() + delta, count - 1));
-    props.setSelected(next);
-  };
-  const active = () => props.choices()[props.selected()];
-  const canContinue = () => active()?.availability === "available";
 
+  // Start on the model field when a Harness is already chosen (a return visit,
+  // e.g. after a refusal), otherwise on the list. Choosing spawns nothing until it
+  // happens: the initial open with nothing chosen never opens a focus.
+  const chosenIndex = () =>
+    Math.max(
+      0,
+      props.rows().findIndex((harness) => harness.id === props.chosenId()),
+    );
+  const [highlight, setHighlight] = createSignal(
+    props.chosenId() === undefined ? 0 : chosenIndex(),
+  );
+  const [phase, setPhase] = createSignal<HarnessPhase>(
+    props.chosenId() === undefined ? "list" : "model",
+  );
+
+  const move = (delta: number) => {
+    const count = props.rows().length;
+    if (count === 0) return;
+    setHighlight(Math.max(0, Math.min(highlight() + delta, count - 1)));
+  };
+
+  const chooseHighlighted = () => {
+    const harness = props.rows()[highlight()];
+    if (harness === undefined) return;
+    props.choose(harness.id);
+    setPhase("model");
+  };
+
+  const declaration = () => props.focus()?.supportedModels;
+  // A qualified Harness declares a model list, free-text entry, or (when it exposes
+  // no model selection) neither — then only `Harness default` is offered, with no
+  // field to change and no requested model.
+  const modelMode = (): "list" | "free-text" | "default-only" => {
+    const decl = declaration();
+    return decl?.kind === "list"
+      ? "list"
+      : decl?.kind === "free-text"
+        ? "free-text"
+        : "default-only";
+  };
+  const available = () =>
+    props.focus() !== undefined && props.focus()?.unavailable === undefined;
+  // The model choices for a list-declaring Harness, `Harness default` first.
+  const modelOptions = (): readonly string[] => {
+    const decl = declaration();
+    return decl?.kind === "list"
+      ? [HARNESS_DEFAULT, ...decl.models]
+      : [HARNESS_DEFAULT];
+  };
+  const modelLabel = () => props.model() ?? HARNESS_DEFAULT;
+  const cycleModel = (delta: number) => {
+    const options = modelOptions();
+    if (options.length <= 1) return;
+    const index = Math.max(0, options.indexOf(modelLabel()));
+    const next = (index + delta + options.length) % options.length;
+    const chosen = options[next] ?? HARNESS_DEFAULT;
+    props.setModel(chosen === HARNESS_DEFAULT ? undefined : chosen);
+  };
+  const editModel = (value: string) => {
+    // Store the trimmed model: nothing downstream trims (Preflight matches the
+    // free-text model verbatim), so a stray leading/trailing space would fail an
+    // otherwise-valid model. Blank still means `Harness default`.
+    const trimmed = value.trim();
+    props.setModel(trimmed.length === 0 ? undefined : trimmed);
+  };
+
+  const tryContinue = () => {
+    if (available()) props.onContinue();
+  };
+
+  // List phase: move the highlight (spawn-free) and choose a Harness. `q` quits —
+  // no text field is focused here.
   useBindings(() => ({
-    enabled: dialog.stack.length === 0,
+    enabled: phase() === "list" && dialog.stack.length === 0,
     bindings: [
       {
         key: "up",
@@ -646,9 +802,9 @@ function HarnessStep(props: {
       },
       {
         key: "return",
-        desc: "Continue",
+        desc: "Choose Harness",
         group: "Harness",
-        cmd: () => props.onContinue(),
+        cmd: () => chooseHighlighted(),
       },
       {
         key: "escape",
@@ -658,6 +814,57 @@ function HarnessStep(props: {
       },
       { key: "q", desc: "Quit", group: "Harness", cmd: () => exit() },
       { key: "ctrl+c", desc: "Quit", group: "Harness", cmd: () => exit() },
+    ],
+  }));
+  // Model phase, common: Enter continues (gated on the chosen Harness being
+  // available), Escape returns to the list to choose another. `q` is bound only when
+  // no free-text field is focused (below) — never while it is, per the keymap rule.
+  useBindings(() => ({
+    enabled: phase() === "model" && dialog.stack.length === 0,
+    bindings: [
+      {
+        key: "return",
+        desc: "Continue",
+        group: "Harness",
+        cmd: () => tryContinue(),
+      },
+      {
+        key: "escape",
+        desc: "Choose another Harness",
+        group: "Harness",
+        cmd: () => setPhase("list"),
+      },
+      { key: "ctrl+c", desc: "Quit", group: "Harness", cmd: () => exit() },
+    ],
+  }));
+  // No free-text field is focused for the list or default-only variants, so `q`
+  // quits there; the list variant also cycles the model with ←/→.
+  useBindings(() => ({
+    enabled:
+      phase() === "model" &&
+      modelMode() !== "free-text" &&
+      dialog.stack.length === 0,
+    bindings: [{ key: "q", desc: "Quit", group: "Harness", cmd: () => exit() }],
+  }));
+  useBindings(() => ({
+    enabled:
+      phase() === "model" &&
+      modelMode() === "list" &&
+      available() &&
+      dialog.stack.length === 0,
+    bindings: [
+      {
+        key: "left",
+        desc: "Previous model",
+        group: "Harness",
+        cmd: () => cycleModel(-1),
+      },
+      {
+        key: "right",
+        desc: "Next model",
+        group: "Harness",
+        cmd: () => cycleModel(1),
+      },
     ],
   }));
 
@@ -674,6 +881,7 @@ function HarnessStep(props: {
       <text attributes={TextAttributes.BOLD} fg={theme.text} flexShrink={0}>
         Choose a Harness
       </text>
+      <StepCount label={props.stepLabel} />
       <Show when={props.problem()}>
         {(problem) => (
           <box flexDirection="column" flexShrink={0}>
@@ -685,32 +893,155 @@ function HarnessStep(props: {
           </box>
         )}
       </Show>
-      <box flexDirection="column" flexGrow={1} overflow="hidden">
-        <For each={props.choices()}>
-          {(choice, index) => (
-            <box flexDirection="column" flexShrink={0}>
-              <text
-                fg={index() === props.selected() ? theme.text : theme.textMuted}
-                attributes={
-                  index() === props.selected() ? TextAttributes.BOLD : 0
-                }
-                flexShrink={0}
-              >
-                {`${index() === props.selected() ? "› " : "  "}${choice.name} (${choice.id}) — ${choice.availability}`}
-              </text>
-              <Show when={choice.unavailableReason}>
-                {(reason) => (
-                  <text fg={theme.textMuted} flexShrink={0}>
-                    {`  ${reason()}`}
+      <Switch>
+        <Match when={phase() === "list"}>
+          <box flexDirection="column" flexGrow={1} overflow="hidden">
+            <For each={props.rows()}>
+              {(harness, index) => (
+                <box flexDirection="column" flexShrink={0}>
+                  <text
+                    fg={index() === highlight() ? theme.text : theme.textMuted}
+                    attributes={
+                      index() === highlight() ? TextAttributes.BOLD : 0
+                    }
+                    flexShrink={0}
+                  >
+                    {`${index() === highlight() ? "› " : "  "}${harness.name} (${harness.id}) — ${harnessRowStatus(harness)}`}
                   </text>
-                )}
-              </Show>
-            </box>
+                  <text fg={theme.textMuted} flexShrink={0}>
+                    {`  ${discoveryWord(harness.discovery)}`}
+                  </text>
+                </box>
+              )}
+            </For>
+          </box>
+          <text fg={theme.text} flexShrink={0}>
+            ↑/↓ move · enter choose · esc back · q quit
+          </text>
+        </Match>
+        <Match when={phase() === "model"}>
+          <ModelField
+            harness={chosenHarnessName}
+            focus={props.focus}
+            mode={modelMode}
+            available={available}
+            modelLabel={modelLabel}
+            modelOptions={modelOptions}
+            model={props.model}
+            editModel={editModel}
+          />
+        </Match>
+      </Switch>
+    </box>
+  );
+
+  function chosenHarnessName(): string {
+    const harness =
+      props.rows().find((row) => row.id === props.chosenId()) ??
+      props.rows()[highlight()];
+    return harness === undefined
+      ? (props.chosenId() ?? "(none)")
+      : `${harness.name} (${harness.id})`;
+  }
+}
+
+function ModelField(props: {
+  harness: () => string;
+  focus: Accessor<HarnessFocus | undefined>;
+  mode: Accessor<"list" | "free-text" | "default-only">;
+  available: Accessor<boolean>;
+  modelLabel: Accessor<string>;
+  modelOptions: Accessor<readonly string[]>;
+  model: Accessor<string | undefined>;
+  editModel: (value: string) => void;
+}) {
+  const { theme } = useTheme();
+  const dimensions = useTerminalDimensions();
+  const inputWidth = () => Math.max(10, dimensions().width - 4);
+  const focus = () => props.focus();
+
+  return (
+    <box flexDirection="column" gap={1} flexGrow={1} overflow="hidden">
+      <box flexDirection="column" flexShrink={0}>
+        <text fg={theme.text} flexShrink={0}>
+          {`Harness: ${props.harness()}`}
+        </text>
+        <Show
+          when={focus()}
+          fallback={
+            <text fg={theme.textMuted} flexShrink={0}>
+              Qualifying…
+            </text>
+          }
+        >
+          {(resolved) => (
+            <text fg={theme.textMuted} flexShrink={0}>
+              {qualificationWord(resolved().qualification)}
+            </text>
           )}
-        </For>
+        </Show>
       </box>
-      <text fg={canContinue() ? theme.text : theme.textMuted} flexShrink={0}>
-        ↑/↓ move · enter continue · esc back · q quit
+      <Show
+        when={props.available()}
+        fallback={
+          <Show when={focus()?.unavailable}>
+            {(unavailable) => (
+              <box flexDirection="column" flexShrink={0}>
+                <text fg={theme.warning} flexShrink={0}>
+                  {`Unavailable · ${unavailable().explanation}`}
+                </text>
+                <text fg={theme.textMuted} flexShrink={0}>
+                  {unavailable().remediation}
+                </text>
+                <text fg={theme.textMuted} flexShrink={0}>
+                  esc to choose another Harness
+                </text>
+              </box>
+            )}
+          </Show>
+        }
+      >
+        <box flexDirection="column" flexShrink={0}>
+          <text fg={theme.textMuted} flexShrink={0}>
+            Model
+          </text>
+          <Switch>
+            <Match when={props.mode() === "list"}>
+              <text fg={theme.text} flexShrink={0}>
+                {`‹ ${props.modelLabel()} › — ←/→ to choose from: ${props
+                  .modelOptions()
+                  .join(", ")}`}
+              </text>
+            </Match>
+            <Match when={props.mode() === "free-text"}>
+              <box flexDirection="column" flexShrink={0}>
+                <input
+                  focused
+                  width={inputWidth()}
+                  value={props.model() ?? ""}
+                  onInput={(value: string) => props.editModel(value)}
+                />
+                <text fg={theme.textMuted} flexShrink={0}>
+                  Leave blank for Harness default.
+                </text>
+              </box>
+            </Match>
+            <Match when={props.mode() === "default-only"}>
+              <text fg={theme.text} flexShrink={0}>
+                {`${HARNESS_DEFAULT} — this Harness manages its own model.`}
+              </text>
+            </Match>
+          </Switch>
+        </box>
+      </Show>
+      <text fg={theme.textMuted} flexShrink={0}>
+        {!props.available()
+          ? "esc choose another Harness · ctrl+c quit"
+          : props.mode() === "list"
+            ? "←/→ model · enter continue · esc choose another · q quit"
+            : props.mode() === "free-text"
+              ? "type model · enter continue · esc choose another"
+              : "enter continue · esc choose another · q quit"}
       </text>
     </box>
   );
@@ -727,6 +1058,7 @@ function InputsStep(props: {
   values: Record<string, string>;
   setValue: (name: string, value: string) => void;
   findings: Accessor<readonly FieldViolation[] | undefined>;
+  stepLabel: Accessor<string>;
   onContinue: () => void;
   onBack: () => void;
 }) {
@@ -844,6 +1176,7 @@ function InputsStep(props: {
       <text attributes={TextAttributes.BOLD} fg={theme.text} flexShrink={0}>
         Launch inputs
       </text>
+      <StepCount label={props.stepLabel} />
       <Show when={props.findings() !== undefined}>
         <text fg={theme.error} flexShrink={0}>
           One or more inputs are missing or invalid.
@@ -898,8 +1231,10 @@ function InputsStep(props: {
 
 function ReviewStep(props: {
   bundle: Accessor<InstalledBundleFocus | undefined>;
-  harness: Accessor<HarnessChoice | undefined>;
+  harness: Accessor<HarnessSummary | undefined>;
+  model: Accessor<string | undefined>;
   values: Record<string, string>;
+  stepLabel: Accessor<string>;
   onStart: () => void;
   onBack: () => void;
 }) {
@@ -941,6 +1276,7 @@ function ReviewStep(props: {
       <text attributes={TextAttributes.BOLD} fg={theme.text} flexShrink={0}>
         Review
       </text>
+      <StepCount label={props.stepLabel} />
       <Show
         when={props.bundle()}
         fallback={<text fg={theme.error}>No Bundle selected.</text>}
@@ -958,7 +1294,7 @@ function ReviewStep(props: {
             </box>
             <Show when={routingNeedsHarness(bundle().routing)}>
               <text fg={theme.text} flexShrink={0}>
-                {`Harness: ${props.harness()?.name ?? "(not selected)"} (${props.harness()?.id ?? "none"})`}
+                {`Harness: ${props.harness()?.name ?? "(not selected)"} (${props.harness()?.id ?? "none"}) · model ${props.model() ?? HARNESS_DEFAULT}`}
               </text>
             </Show>
             <Show

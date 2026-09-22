@@ -1,6 +1,6 @@
 // The tui Module's public entrypoint. The composition root mounts `App` onto the
 // renderer it owns via `mountTui`. The per-screen view types are the App prop
-// contract; the read-only workspace/bundle live views are built only inside
+// contract; the read-only workspace/catalog live views are built only inside
 // `mount.tsx`. The one exception is the launch seam (`createLiveRunLaunchView`):
 // it is exported here so #90's renderer tests can drive the genuinely-new write
 // path over fake `operation`/`run` snapshots across the Module boundary (which the

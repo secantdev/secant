@@ -69,7 +69,12 @@ const ROWS: InstalledBundleSummary[] = [
       note: "needs Secant ≥ 0.2",
     },
   }),
-  summary({ id: "com.example.proof", version: "2.0.0", name: "Proof Bundle" }),
+  summary({
+    id: "com.example.proof",
+    version: "2.0.0",
+    name: "Proof Bundle",
+    description: "Proof of the pipeline",
+  }),
   summary({
     id: "com.example.proof",
     version: "1.0.0",
@@ -93,7 +98,10 @@ const PROOF_FOCUS: InstalledBundleFocus = {
       node: "repeat",
       until: "done",
       reviewCheckpoint: { interval: 3, message: "check in" },
-      steps: [{ id: "work", kind: "agent" }],
+      steps: [
+        { id: "work", kind: "agent" },
+        { id: "build", kind: "command" },
+      ],
     },
   ],
   workspacePrerequisites: ["git"],
@@ -106,7 +114,7 @@ const PROOF_FOCUS: InstalledBundleFocus = {
     digest: "a1b2c3",
     origin: { kind: "local-file", location: "/bundles/x.wfb" },
     platforms: ["macos", "linux", "windows"],
-    stepKindCounts: { agent: 2 },
+    stepKindCounts: { agent: 2, command: 1 },
     commands: [
       {
         stepId: "build",
@@ -136,24 +144,50 @@ function bundles(rows: InstalledBundleSummary[]): BundleCatalogView {
   return {
     openList: () => list,
     openFocus(selector: BundleFocusSelector) {
-      const found =
+      const selected = rows.find(
+        (row) => row.id === selector.id && row.version === selector.version,
+      );
+      const bundle =
         selector.id === PROOF_FOCUS.id &&
-        selector.version === PROOF_FOCUS.version;
+        selector.version === PROOF_FOCUS.version
+          ? PROOF_FOCUS
+          : selected === undefined
+            ? undefined
+            : {
+                ...selected,
+                author: {},
+                launchInputs: [],
+                routing: [],
+                workspacePrerequisites: [],
+                producedArtifacts: [],
+                executionSummary: {
+                  platform: "macos" as const,
+                  identity: { id: selected.id, version: selected.version },
+                  digest: selected.digest,
+                  origin: selected.origin,
+                  platforms: selected.platforms,
+                  stepKindCounts: {},
+                  commands: [],
+                  warning: "Bundles can run arbitrary code.",
+                },
+                compositionFindings: [],
+              };
       const [focus] = createSignal<BundleFocusSnapshot>({
         family: "bundle-catalog",
         view: "focus",
         selection: selector,
-        result: found
-          ? { found: true, bundle: PROOF_FOCUS }
-          : {
-              found: false,
-              problem: {
-                code: "not-found",
-                explanation: "No such Bundle.",
-                remediation: "Run `secant bundle list`.",
-                possibleEffects: "none",
+        result:
+          bundle !== undefined
+            ? { found: true, bundle }
+            : {
+                found: false,
+                problem: {
+                  code: "not-found",
+                  explanation: "No such Bundle.",
+                  remediation: "Run `secant bundle list`.",
+                  possibleEffects: "none",
+                },
               },
-            },
       });
       return focus;
     },
@@ -221,25 +255,23 @@ async function mount(rows = ROWS, width = 80, height = 40) {
 
 /** The single list line carrying the focus glyph identifies the selected row. */
 function selectedLine(frame: string): string {
-  return frame.split("\n").find((line) => line.includes("› ")) ?? "";
+  return frame.split("\n").find((line) => line.includes("│ › ")) ?? "";
 }
 
-test("Home opens the Bundle list showing every summary fact, sorted", async () => {
+test("bundle-catalog-two-pane: one catalog shows installed count, sorted rows, and visible focus", async () => {
   const { t } = await mount();
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
   t.mockInput.pressEnter();
   await t.waitForFrame((f) => f.includes("Proof Bundle"));
   const frame = t.captureCharFrame();
-  // Every summary fact carried by text.
+  assert.match(frame, /3 installed/);
+  assert.match(frame, /Find an installed Bundle/);
+  assert.match(frame, /Inspector/);
   assert.match(frame, /Alpha Flow/);
   assert.match(frame, /com\.example\.alpha@1\.0\.0/);
-  assert.match(frame, /\[stable\]/);
-  assert.match(frame, /\[prerelease\]/);
-  assert.match(frame, /sha256:a1b2c3/);
   assert.match(frame, /local-file/);
-  assert.match(frame, /macos, linux, windows/);
-  assert.match(frame, /needs Secant ≥ 0\.2/); // the engine note
-  assert.match(frame, /not yet trusted/);
+  assert.match(frame, /No launch inputs/);
+  assert.match(frame, /Start a Run proceeds from Harness to/);
   // Sorted: name asc (Alpha before Proof), then version desc (2.0.0 before 1.0.0).
   assert.ok(frame.indexOf("Alpha Flow") < frame.indexOf("Proof Bundle"));
   assert.ok(
@@ -250,7 +282,54 @@ test("Home opens the Bundle list showing every summary fact, sorted", async () =
   assert.match(selectedLine(frame), /Alpha Flow/);
 });
 
-test("a trusted Bundle reads as trusted in the list and inspection", async () => {
+test("Workflow Bundles searches the existing list snapshot and keeps the inspector on one screen", async () => {
+  const { t } = await mount();
+  await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("3 installed"));
+
+  const initial = t.captureCharFrame();
+  assert.match(initial, /Find an installed Bundle/);
+  assert.match(initial, /Alpha Flow/);
+  assert.match(initial, /com\.example\.alpha@1\.0\.0/);
+
+  await t.mockInput.typeText("pipeline");
+  await t.waitForFrame((frame) => !frame.includes("Alpha Flow"));
+  const filtered = t.captureCharFrame();
+  assert.match(filtered, /Proof Bundle/);
+  assert.match(filtered, /Proof of the pipeline/);
+  assert.doesNotMatch(filtered, /Alpha Flow/);
+
+  const replaceQuery = async (current: string, next: string) => {
+    for (let index = 0; index < current.length; index += 1) {
+      t.mockInput.pressBackspace();
+    }
+    await t.mockInput.typeText(next);
+  };
+  await replaceQuery("pipeline", "com.example.alpha");
+  await t.waitForFrame((frame) => frame.includes("Alpha Flow"));
+  assert.doesNotMatch(t.captureCharFrame(), /Proof Bundle/);
+
+  await replaceQuery("com.example.alpha", "/bundles/x.wfb");
+  await t.waitForFrame((frame) => frame.includes("Proof Bundle"));
+  assert.match(t.captureCharFrame(), /Alpha Flow/);
+
+  await replaceQuery("/bundles/x.wfb", "Alpha Flow");
+  await t.waitForFrame((frame) => !frame.includes("Proof Bundle"));
+  assert.match(t.captureCharFrame(), /Alpha Flow/);
+  assert.doesNotMatch(t.captureCharFrame(), /Proof Bundle/);
+
+  await replaceQuery("Alpha Flow", "missing");
+  await t.waitForFrame(
+    (frame) =>
+      frame.includes("No matching Workflow") && frame.includes("Bundles"),
+  );
+  const empty = t.captureCharFrame();
+  assert.match(empty, /Try a different name, id/);
+  assert.match(empty, /description, or origin/);
+});
+
+test("a trusted Bundle uses the shared Trust wording in its inspector", async () => {
   const trustedSummary = summary({
     id: "com.example.trusted",
     version: "1.0.0",
@@ -301,9 +380,6 @@ test("a trusted Bundle reads as trusted in the list and inspection", async () =>
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
   t.mockInput.pressEnter();
   await t.waitForFrame((f) => f.includes("Trusted Flow"));
-  assert.match(t.captureCharFrame(), /trusted \(granted 2026-09-12/);
-
-  t.mockInput.pressEnter(); // list -> inspection
   await t.waitForFrame((f) => f.includes("A trusted pipeline"));
   assert.match(t.captureCharFrame(), /trusted \(granted 2026-09-12/);
 });
@@ -312,10 +388,13 @@ test("empty Catalog names the headless install commands", async () => {
   const { t } = await mount([]);
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
   t.mockInput.pressEnter();
-  await t.waitForFrame((f) => f.includes("Catalog is empty"));
+  await t.waitForFrame(
+    (f) => f.includes("No installed Workflow") && f.includes("Bundles"),
+  );
   const frame = t.captureCharFrame();
-  assert.match(frame, /secant bundle build/);
-  assert.match(frame, /secant bundle install/);
+  assert.match(frame, /Install one with `secant/);
+  assert.match(frame, /bundle build` or `secant/);
+  assert.match(frame, /bundle install`/);
 });
 
 test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)", async () => {
@@ -362,7 +441,63 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
   assert.doesNotMatch(frame, /Catalog is empty/);
 });
 
-test("Enter inspects; Escape returns with the same row focused", async () => {
+test("a focused Bundle whose managed bytes are gone shows its Problem", async () => {
+  const row = summary({
+    id: "com.example.missing",
+    version: "1.0.0",
+    name: "Missing Bytes",
+  });
+  const [list] = createSignal<BundleCatalogSnapshot>({
+    family: "bundle-catalog",
+    view: "list",
+    result: { found: true, bundles: [row] },
+  });
+  const view: BundleCatalogView = {
+    openList: () => list,
+    openFocus(selector) {
+      const [focus] = createSignal<BundleFocusSnapshot>({
+        family: "bundle-catalog",
+        view: "focus",
+        selection: selector,
+        result: {
+          found: false,
+          problem: {
+            code: "bundle-bytes-missing",
+            explanation: "The selected Bundle's managed bytes are missing.",
+            remediation: "Reinstall it.",
+            possibleEffects: "none",
+          },
+        },
+      });
+      return focus;
+    },
+  };
+  const t = await testRender(
+    () => (
+      <App
+        view={approvedWorkspace()}
+        bundles={view}
+        launch={noLaunch()}
+        run={noRunView()}
+        runList={inertRunListView()}
+        actions={inertRunActionsView()}
+        renderer={makeFakeRenderer().port}
+        exit={() => {}}
+      />
+    ),
+    { width: 80, height: 24 },
+  );
+  await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame(
+    (frame) =>
+      frame.includes("The selected Bundle's managed bytes are") &&
+      frame.includes("missing."),
+  );
+  assert.match(t.captureCharFrame(), /Missing Bytes/);
+});
+
+test("moving the result focus updates the inspector with numbered Workflow commands and allowed facts", async () => {
   const { t } = await mount();
   await t.waitForFrame((f) => f.includes("Workflow Bundles"));
   t.mockInput.pressEnter(); // Home -> list
@@ -371,38 +506,139 @@ test("Enter inspects; Escape returns with the same row focused", async () => {
   await t.waitForFrame(() =>
     selectedLine(t.captureCharFrame()).includes("Proof Bundle"),
   );
-  t.mockInput.pressEnter(); // list -> inspection
   await t.waitForFrame((f) => f.includes("Proof of the pipeline"));
   const focus = t.captureCharFrame();
-  // Every exact-focus fact, including Execution summary and findings.
+  // The accepted catalog facts, including shared Trust wording and generated
+  // Execution summary, stay on the same screen as the result list.
   assert.match(focus, /Proof of the pipeline/);
   assert.match(focus, /sha256:a1b2c3/);
   assert.match(focus, />=0\.1\.0/);
   assert.match(focus, /not yet trusted/);
-  assert.match(focus, /Ada/);
   assert.match(focus, /target \(text\).*the goal/s);
-  assert.match(focus, /plan \(agent\)/);
-  assert.match(focus, /repeat until done/);
-  assert.match(focus, /review every 3/);
+  assert.match(focus, /1\. plan \(agent\)/);
+  assert.match(focus, /2\. Repeat until done/);
+  assert.match(focus, /2\.2\. build \(command\)/);
+  assert.match(focus, /\$ make/);
   assert.match(focus, /git/);
-  assert.match(focus, /report \(file\)/);
-  assert.match(focus, /Execution summary \(platform macos\)/);
+  assert.match(focus, /Execution summary · macos/);
   assert.match(focus, /make/);
-  assert.match(focus, /warning: Bundles can run arbitrary code/);
-  assert.match(focus, /\[warning\] C001/); // severity readable without colour
-
-  t.mockInput.pressEscape(); // inspection -> list
-  await until(() => !t.captureCharFrame().includes("Proof of the pipeline"));
-  // Focus restored to the same row.
-  assert.match(selectedLine(t.captureCharFrame()), /Proof Bundle/);
+  assert.match(focus, /Warning · Bundles can run arbitrary code/);
+  assert.doesNotMatch(focus, /Ada|report \(file\)|C001/);
+  assert.doesNotMatch(
+    focus,
+    /acknowledge trust|install Bundle|uninstall|launch Bundle/i,
+  );
+  assert.match(selectedLine(focus), /Proof Bundle/);
 });
 
-test("q quits from both the list and the inspection view", async () => {
+test("pane focus is visible and inspector scrolling clamps at both ends", async () => {
+  const { t } = await mount(ROWS, 80, 18);
+  await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Alpha Flow"));
+  t.mockInput.pressArrow("down");
+  await t.waitForFrame((frame) => frame.includes("Proof of the pipeline"));
+
+  assert.match(t.captureCharFrame(), /› Find an installed Bundle/);
+  t.mockInput.pressTab();
+  await t.waitForFrame((frame) => frame.includes("› Inspector"));
+  const top = t.captureCharFrame();
+  assert.doesNotMatch(selectedLine(top), /Proof Bundle/);
+  t.mockInput.pressArrow("left");
+  await t.waitForFrame((frame) => frame.includes("› Find an installed Bundle"));
+  t.mockInput.pressTab();
+  await t.waitForFrame((frame) => frame.includes("› Inspector"));
+  t.mockInput.pressKey("\u001B[6~");
+  await t.renderOnce();
+  assert.notEqual(t.captureCharFrame(), top);
+  t.mockInput.pressKey("\u001B[5~");
+  await t.renderOnce();
+  assert.equal(t.captureCharFrame(), top);
+
+  for (let index = 0; index < 60; index += 1) {
+    t.mockInput.pressArrow("down");
+  }
+  await t.renderOnce();
+  const bottom = t.captureCharFrame();
+  assert.match(bottom, /Warning · Bundles can run arbitrary code/);
+  assert.doesNotMatch(bottom, /Proof of the pipeline/);
+
+  t.mockInput.pressKey("\u001B[6~");
+  await t.renderOnce();
+  assert.equal(t.captureCharFrame(), bottom);
+
+  for (let index = 0; index < 60; index += 1) {
+    t.mockInput.pressArrow("up");
+  }
+  await t.renderOnce();
+  assert.equal(t.captureCharFrame(), top);
+  t.mockInput.pressKey("\u001B[5~");
+  await t.renderOnce();
+  assert.equal(t.captureCharFrame(), top);
+});
+
+test("small terminals stack the result and inspector panes without overflow", async () => {
+  const { t } = await mount(ROWS, 50, 24);
+  await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Inspector"));
+  const frame = t.captureCharFrame();
+  const lines = frame.split("\n");
+  const resultsLine = lines.findIndex((line) =>
+    line.includes("Find an installed Bundle"),
+  );
+  const inspectorLine = lines.findIndex((line) => line.includes("Inspector"));
+  assert.ok(resultsLine >= 0);
+  assert.ok(inspectorLine > resultsLine);
+  assert.equal(
+    lines.some(
+      (line) =>
+        line.includes("Find an installed Bundle") && line.includes("Inspector"),
+    ),
+    false,
+  );
+  for (const line of lines) {
+    assert.ok(line.length <= 50, `overflows 50 cols: ${JSON.stringify(line)}`);
+  }
+});
+
+test("Back returns to Home or the originating Start a Run Bundle step", async () => {
+  const homeRun = await mount();
+  await homeRun.t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  homeRun.t.mockInput.pressEnter();
+  await homeRun.t.waitForFrame((frame) => frame.includes("3 installed"));
+  homeRun.t.mockInput.pressEscape();
+  await until(() => !homeRun.t.captureCharFrame().includes("3 installed"));
+  await homeRun.t.waitForFrame((frame) => /^ Secant\s*$/m.test(frame));
+  assert.doesNotMatch(homeRun.t.captureCharFrame(), /3 installed/);
+
+  const startRun = await mount();
+  await startRun.t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
+  startRun.t.mockInput.pressArrow("down");
+  startRun.t.mockInput.pressEnter();
+  await startRun.t.waitForFrame((frame) => frame.includes("Start a Run"));
+  startRun.t.mockInput.pressArrow("down");
+  await startRun.t.waitForFrame((frame) => frame.includes("› Proof Bundle"));
+  startRun.t.mockInput.pressKey("v");
+  await startRun.t.waitForFrame((frame) => frame.includes("3 installed"));
+  assert.match(startRun.t.captureCharFrame(), /Proof of the pipeline/);
+  startRun.t.mockInput.pressEscape();
+  await until(() => !startRun.t.captureCharFrame().includes("3 installed"));
+  await startRun.t.waitForFrame((frame) => /^ Start a Run\s*$/m.test(frame));
+  assert.match(startRun.t.captureCharFrame(), /› Proof Bundle/);
+});
+
+test("search owns printable keys while Ctrl+C quits from either pane", async () => {
   const listRun = await mount();
   await listRun.t.waitForFrame((f) => f.includes("Workflow Bundles"));
   listRun.t.mockInput.pressEnter();
   await listRun.t.waitForFrame((f) => f.includes("Proof Bundle"));
   listRun.t.mockInput.pressKey("q");
+  await listRun.t.waitForFrame((frame) =>
+    frame.includes("No matching Workflow"),
+  );
+  assert.equal(listRun.exits.length, 0);
+  listRun.t.mockInput.pressCtrlC();
   await listRun.t.waitFor(() => listRun.exits.length > 0);
   assert.equal(listRun.exits.length, 1);
 
@@ -411,15 +647,19 @@ test("q quits from both the list and the inspection view", async () => {
   inspectRun.t.mockInput.pressEnter();
   await inspectRun.t.waitForFrame((f) => f.includes("Proof Bundle"));
   inspectRun.t.mockInput.pressArrow("down");
-  inspectRun.t.mockInput.pressEnter();
   await inspectRun.t.waitForFrame((f) => f.includes("Proof of the pipeline"));
+  inspectRun.t.mockInput.pressArrow("right");
+  await inspectRun.t.waitForFrame((f) => f.includes("› Inspector"));
   inspectRun.t.mockInput.pressKey("q");
+  await inspectRun.t.renderOnce();
+  assert.equal(inspectRun.exits.length, 0);
+  inspectRun.t.mockInput.pressCtrlC();
   await inspectRun.t.waitFor(() => inspectRun.exits.length > 0);
   assert.equal(inspectRun.exits.length, 1);
 });
 
-test("inspection fits 80×24, clipping a long Bundle instead of corrupting it", async () => {
-  async function openInspect(height: number) {
+test("long catalog content stays bounded at 80×24 without corrupting visible rows", async () => {
+  async function openCatalog(height: number) {
     const { t } = await mount(ROWS, 80, height);
     await t.waitForFrame((f) => f.includes("Workflow Bundles"));
     t.mockInput.pressEnter(); // Home -> list
@@ -428,7 +668,6 @@ test("inspection fits 80×24, clipping a long Bundle instead of corrupting it", 
     await t.waitForFrame(() =>
       selectedLine(t.captureCharFrame()).includes("Proof Bundle"),
     );
-    t.mockInput.pressEnter(); // list -> inspection
     await t.waitForFrame((f) => f.includes("Proof of the pipeline"));
     return t;
   }
@@ -440,8 +679,8 @@ test("inspection fits 80×24, clipping a long Bundle instead of corrupting it", 
     if (lines.at(-1) === "") lines.pop();
     return lines;
   };
-  const full = rows((await openInspect(40)).captureCharFrame());
-  const clipped = rows((await openInspect(24)).captureCharFrame());
+  const full = rows((await openCatalog(40)).captureCharFrame());
+  const clipped = rows((await openCatalog(24)).captureCharFrame());
 
   // No horizontal overflow, and no rows past the box height.
   for (const line of clipped) {

@@ -7,8 +7,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - OpenTUI `<text>` lays out multiple children as separate inline spans, which garbles a line (fragments drop or overlap). Give every `<text>` a single
   concatenated string child, not a mix of literals and `{expr}` siblings.
 - A flex column with a fixed `height` shrinks overflowing children to fit, corrupting their content rather than clipping. When a screen's content can
-  exceed the terminal height, set `overflow="hidden"` on the container and `flexShrink={0}` on the rows/sections so each keeps its full height. Vertical
-  scroll for long content is a later slice, not a reason to drop this guard.
+  exceed the terminal height, set `overflow="hidden"` on the container and `flexShrink={0}` on the rows/sections so each keeps its full height. A screen
+  that owns a bounded `<scrollbox>` still keeps full-height content rows inside it; scroll does not replace the guard.
 - A focused OpenTUI `<input>` and the `@opentui/keymap` layer divide keys by binding: any key the keymap binds fires its command even while an input is
   focused; only unbound printable keys and backspace reach the input. So never bind a bare letter key (e.g. `q` to quit) on a text-entry screen, and gate
   `left`/`right` with a reactive `enabled` so choice/verdict fields cycle without stealing a text field's cursor. Native `<input>`/`<select>`/`<textarea>`
@@ -96,12 +96,15 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   seam that re-opens its Projection to grow a page); a write goes through a per-screen submit seam (`run-actions-view.tsx` — resume/cancel/delete, mirroring
   `run-launch-view.tsx`). The Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`, and declares its key
   value (`{ name?, ctrl? }`, A16) so the Workbench needs no cast.
+- `bundle-catalog.tsx` owns the presentation-only search, pane focus, selection, and scroll controller over `bundle-view.tsx`; its focused fact rendering
+  is the pure `bundle-catalog-inspector.tsx` private submodule. Neither introduces an Action Offer or another Projection selector.
 - Two private helpers back those seams: `follow.ts` (`followProjection`) owns the read seams' follow, health, and reconnect loop (A22); `submit-and-settle.ts`
   (`submitAndSettle`) owns submit-then-follow and reopens a lost pending Operation receipt (A23). `run-inspection.tsx` holds the Workbench's
   reference-inspection overlay — its state, key loop, and view — split out of `run-workbench.tsx` (A26). `run-workbench-views.tsx` holds the Workbench's
   four pure presentational leaves; state, focus, modal precedence, and the key dispatcher stay in `run-workbench.tsx` (A12).
-- `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; reuses the single-active-index selection model of `bundle-list.tsx`).
-- `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-screen status wording — keep it matching `headless/render.ts` so
+- `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; its single-active-index selection model descends from the historical
+  `bundle-list.tsx`, now replaced by `bundle-catalog.tsx`).
+- `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-catalog status wording — keep it matching `headless/render.ts` so
   the TUI and headless surfaces say the same thing about the same fact.
 - The Workbench header renders durable `run.selectedHarness` on a worded `Selected` line and latest-Attempt `run.harness`/`effectiveModel` on a separate
   `Observed` line (#125, #147). Before an Attempt only selection appears; the compact observed line drops the executable path. Command-only Runs show neither,

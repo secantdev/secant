@@ -20,6 +20,7 @@ import type {
   Problem,
   RoutingNodeView,
 } from "../application/projection-port.js";
+import { BundleCatalog } from "./bundle-catalog.js";
 import { useBundleCatalogView } from "./bundle-view.js";
 import { useBindings } from "./keymap.js";
 import { useRunLaunchView, type LaunchOutcome } from "./run-launch-view.js";
@@ -65,6 +66,7 @@ export function StartRun(props: {
   };
 
   const [step, setStep] = createSignal<Step>("choose");
+  const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [selected, setSelected] = createSignal(0);
   const [selectedHarnessIndex, setSelectedHarnessIndex] = createSignal(0);
   // Every digest the user has acknowledged trust for. A set (not one slot) so an
@@ -247,58 +249,70 @@ export function StartRun(props: {
   };
 
   return (
-    <Switch>
-      <Match when={step() === "choose"}>
-        <ChooseStep
-          rows={rows}
-          listProblem={listProblem}
-          selected={active}
-          setSelected={setSelected}
-          focus={focusBundle}
-          untrusted={untrusted}
-          acknowledged={acknowledged}
-          acknowledge={acknowledge}
-          canContinue={canContinue}
-          onContinue={continueFromChoose}
-          onBack={props.onLeave}
-          problem={chooserProblem}
-        />
-      </Match>
-      <Match when={step() === "harness"}>
-        <HarnessStep
-          choices={harnessChoices}
-          selected={selectedHarnessIndex}
-          setSelected={setSelectedHarnessIndex}
-          problem={chooserProblem}
-          onContinue={continueFromHarness}
-          onBack={() => setStep("choose")}
-        />
-      </Match>
-      <Match when={step() === "inputs"}>
-        <InputsStep
-          bundle={focusBundle}
-          values={values}
-          setValue={(name, value) => setValues(name, value)}
-          findings={fieldFindings}
-          onContinue={() => setStep("review")}
-          onBack={() =>
-            setStep(focusNeedsHarness(focusBundle()) ? "harness" : "choose")
-          }
-        />
-      </Match>
-      <Match when={step() === "review"}>
-        <ReviewStep
-          bundle={focusBundle}
-          harness={selectedHarness}
-          values={values}
-          onStart={startLaunch}
-          onBack={backFromReview}
-        />
-      </Match>
-      <Match when={step() === "pending"}>
-        <PendingStep />
-      </Match>
-    </Switch>
+    <Show
+      when={catalogOpen()}
+      fallback={
+        <Switch>
+          <Match when={step() === "choose"}>
+            <ChooseStep
+              rows={rows}
+              listProblem={listProblem}
+              selected={active}
+              setSelected={setSelected}
+              focus={focusBundle}
+              untrusted={untrusted}
+              acknowledged={acknowledged}
+              acknowledge={acknowledge}
+              canContinue={canContinue}
+              onContinue={continueFromChoose}
+              onViewDetails={() => setCatalogOpen(true)}
+              onBack={props.onLeave}
+              problem={chooserProblem}
+            />
+          </Match>
+          <Match when={step() === "harness"}>
+            <HarnessStep
+              choices={harnessChoices}
+              selected={selectedHarnessIndex}
+              setSelected={setSelectedHarnessIndex}
+              problem={chooserProblem}
+              onContinue={continueFromHarness}
+              onBack={() => setStep("choose")}
+            />
+          </Match>
+          <Match when={step() === "inputs"}>
+            <InputsStep
+              bundle={focusBundle}
+              values={values}
+              setValue={(name, value) => setValues(name, value)}
+              findings={fieldFindings}
+              onContinue={() => setStep("review")}
+              onBack={() =>
+                setStep(focusNeedsHarness(focusBundle()) ? "harness" : "choose")
+              }
+            />
+          </Match>
+          <Match when={step() === "review"}>
+            <ReviewStep
+              bundle={focusBundle}
+              harness={selectedHarness}
+              values={values}
+              onStart={startLaunch}
+              onBack={backFromReview}
+            />
+          </Match>
+          <Match when={step() === "pending"}>
+            <PendingStep />
+          </Match>
+        </Switch>
+      }
+    >
+      <BundleCatalog
+        selected={active}
+        setSelected={setSelected}
+        onBack={() => setCatalogOpen(false)}
+      />
+    </Show>
   );
 }
 
@@ -345,6 +359,7 @@ function ChooseStep(props: {
   acknowledge: () => void;
   canContinue: Accessor<boolean>;
   onContinue: () => void;
+  onViewDetails: () => void;
   onBack: () => void;
   problem: Accessor<Problem | undefined>;
 }) {
@@ -366,12 +381,12 @@ function ChooseStep(props: {
   // still needs it — never on an empty or errored Catalog where `a` does nothing.
   const chooserFooter = () => {
     if (props.canContinue()) {
-      return "↑/↓ move · enter continue · esc back · q quit";
+      return "↑/↓ move · v view details · enter continue · esc back · q quit";
     }
     if (props.untrusted() && !props.acknowledged()) {
-      return "↑/↓ move · acknowledge trust (a) to continue · esc back · q quit";
+      return "↑/↓ move · v view details · acknowledge trust (a) to continue · esc back · q quit";
     }
-    return "↑/↓ move · esc back · q quit";
+    return "↑/↓ move · v view details · esc back · q quit";
   };
 
   useBindings(() => ({
@@ -389,6 +404,12 @@ function ChooseStep(props: {
         desc: "Acknowledge trust",
         group: "Start a Run",
         cmd: () => props.acknowledge(),
+      },
+      {
+        key: "v",
+        desc: "View Bundle Details",
+        group: "Start a Run",
+        cmd: () => props.onViewDetails(),
       },
       {
         key: "return",
@@ -556,11 +577,10 @@ function SidePanel(props: {
             <text fg={theme.textMuted}>Workflow</text>
             <text fg={theme.text}>{formatRouting(bundle().routing)}</text>
           </box>
-          {/* ponytail: a calm pointer, not a control — full commands and the
-              Execution summary live in Workflow Bundles ▸ inspect, so this panel
-              never duplicates them (AC: side panel limited to the four facts). */}
+          {/* A calm navigation pointer — full commands and the Execution summary
+              live in Workflow Bundles, so this panel never duplicates them. */}
           <text fg={theme.textMuted} flexShrink={0}>
-            Full details: Workflow Bundles ▸ inspect.
+            Press v to View Bundle Details.
           </text>
           <Show when={props.untrusted()}>
             <box flexDirection="column" flexShrink={0}>

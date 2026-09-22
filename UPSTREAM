@@ -35,8 +35,8 @@ OpenTUI (@opentui/core, @opentui/keymap, @opentui/solid)
 VENDORED PATHS
 --------------
 
-All entries below were copied on 2026-09-10 from the OpenCode checkout at
-commit 1ead9e3d7f.
+The initial entries were copied on 2026-09-10. Later entries record their own
+copy date. Every path comes from the OpenCode checkout at commit 1ead9e3d7f.
 
 1. src/tui/vendor/theme.ts
    Copied from: packages/tui/src/theme/index.ts
@@ -92,6 +92,26 @@ commit 1ead9e3d7f.
    Date: 2026-09-10
    Local modifications: none. Vendored unmodified.
 
+6. src/tui/vendor/panels.tsx
+   Copied from: packages/tui/src/feature-plugins/system/diff-viewer-ui.tsx
+   Date: 2026-09-22
+   Local modifications:
+     - Retains the axis-aware PanelGroup and bounded Panel layout used by the
+       diff viewer's two-pane shell.
+     - Drops diff-specific separators, edge glyphs, border variants, and the
+       upstream theme dependency.
+     - Adds a title and leading focus glyph so either Bundle-catalog pane reads
+       as focused without colour, including after the panes stack.
+
+7. src/tui/vendor/scroll.ts
+   Copied from: packages/tui/src/feature-plugins/system/diff-viewer.tsx
+   Date: 2026-09-22
+   Local modifications:
+     - Reduces the diff viewer's keyboard `scrollBy` paths to one vertical
+       helper for the Bundle inspector.
+     - Computes and applies the bounded destination explicitly, retaining
+       clamping at the first and last line as a tested catalog invariant.
+
 
 REBUILT AGAINST (NOT VENDORED COPIES)
 -------------------------------------
@@ -104,8 +124,10 @@ studied for architecture and behaviour.
   src/tui/vendor/theme-context.tsx   rebuilt against packages/tui/src/context/theme.tsx
   src/tui/approval-dialog.tsx        rebuilt against packages/tui/src/ui/dialog-confirm.tsx
   src/tui/home.tsx                   rebuilt against packages/tui/src/routes/index.tsx (the Home route)
-  src/tui/bundle-list.tsx            rebuilt against packages/tui/src/ui/dialog-select.tsx
-  src/tui/bundle-inspect.tsx         rebuilt against packages/tui/src/feature-plugins/system/diff-viewer.tsx
+  src/tui/bundle-catalog.tsx         rebuilt against packages/tui/src/ui/dialog-select.tsx and
+                                     packages/tui/src/feature-plugins/system/diff-viewer.tsx
+  src/tui/bundle-catalog-inspector.tsx
+                                     rebuilt against packages/tui/src/feature-plugins/system/diff-viewer.tsx
 
 (`app.tsx` carried a "rebuilt against packages/tui/src/app.tsx" line that never cited
 OpenCode in the source and was never actually studied against it — #127 audit A47 —
@@ -115,7 +137,7 @@ Added 2026-09-12 for #57 (list and inspect Workflow Bundles in the TUI). Both
 screens render the read-only `bundle-catalog` Projection through the Projection
 Port; no OpenCode source crosses for them. What was taken and changed:
 
-  bundle-list.tsx (from dialog-select.tsx):
+  bundle-list.tsx (from dialog-select.tsx; replaced by bundle-catalog.tsx in #190):
     Taken:   the selection model (one active index moved by the arrow keys,
              Return opens the active row) and the active-row highlight
              (background + bold).
@@ -124,18 +146,22 @@ Port; no OpenCode source crosses for them. What was taken and changed:
              reads without colour (ADR 0024 / #19). Movement clamps at the ends
              rather than wrapping. OpenCode's fuzzy-filter/group/flat option
              store collapses to the single Projection-driven list. The empty
-             state names the headless install commands. Scroll for long lists is
-             deferred (M2), so no scrollbox is vendored.
+             state names the headless install commands. #190 amends the original
+             entry: the selection now drives the persistent inspector, substring
+             search stays local to the Projection snapshot, movement still
+             clamps rather than wraps, and scroll is now supplied by the vendored
+             helper above.
 
-  bundle-inspect.tsx (from diff-viewer.tsx):
+  bundle-inspect.tsx (from diff-viewer.tsx; replaced by bundle-catalog.tsx and its
+  private bundle-catalog-inspector.tsx submodule in #190):
     Taken:   a full-size route box and Escape = navigate back to the screen you
              came from (here restoring the list's selected row).
-    Changed: no scrollbox and no split/pane focus model (large content and the
-             timeline are M2); a plain top-to-bottom render of the focus
-             Projection, worded to match the headless `bundle inspect`.
-
-No new vendored (copied) files were needed: the screens build on the primitives
-the shell already established, so the VENDORED PATHS list is unchanged.
+    Changed: #190 replaces the full-size route with the persistent inspector,
+             split into bundle-catalog-inspector.tsx as the pure fact/routing
+             renderer under bundle-catalog.tsx's Projection/focus controller.
+             The copied PanelGroup/Panel subset supplies the two-pane/stacked
+             layout, and the copied scroll helper drives the inspector's pinned
+             OpenTUI scrollbox with explicit end clamping.
 
 Added 2026-09-14 for the M2 Run screens (#89–#93: watch, review, and browse
 Runs in the timeline-first Run Workbench). No OpenCode source crosses; each file

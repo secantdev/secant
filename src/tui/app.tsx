@@ -9,10 +9,8 @@ import {
   Switch,
   type ParentProps,
 } from "solid-js";
-import type { BundleFocusSelector } from "../application/projection-port.js";
 import { ApprovalDialog } from "./approval-dialog.js";
-import { BundleInspect } from "./bundle-inspect.js";
-import { BundleList } from "./bundle-list.js";
+import { BundleCatalog } from "./bundle-catalog.js";
 import {
   BundleCatalogViewProvider,
   type BundleCatalogView,
@@ -49,18 +47,17 @@ import {
 // The application root. The approval dialog overlays Home through the vendored
 // dialog primitive while the launch Workspace is unapproved; approving flips the
 // snapshot and clears it. Once approved, a small screen signal navigates Home →
-// Bundle list → Bundle inspection: exactly one screen mounts at a time, so each
-// screen's key bindings exist only while it is active and cannot conflict. The
-// list's selected index lives here so Escape from inspection restores the same
-// row (#57). The Previous Runs list (#92) works the same way, and a Run opened
+// the unified Workflow Bundles catalog: exactly one screen mounts at a time, so
+// each screen's key bindings exist only while it is active and cannot conflict.
+// The catalog's selected index lives here so a Home round-trip restores the same
+// row. The Previous Runs list (#92) works the same way, and a Run opened
 // from it records that origin so Escape (and a delete) returns to the list, while
 // a Run opened from Start a Run returns to Home.
 
 type Screen =
   | { readonly name: "home" }
   | { readonly name: "start-run" }
-  | { readonly name: "bundle-list" }
-  | { readonly name: "bundle-inspect"; readonly selector: BundleFocusSelector }
+  | { readonly name: "bundle-catalog" }
   | { readonly name: "previous-runs" }
   | {
       readonly name: "run-workbench";
@@ -78,15 +75,9 @@ function Route(props: { renderer: RendererPort }) {
   const [screen, setScreen] = createSignal<Screen>({ name: "home" });
   const [selected, setSelected] = createSignal(0);
   // The Previous Runs list's selected row, kept here so Escape from a Run restores
-  // it (like the Bundle list's `selected`).
+  // it (like the Bundle catalog's `selected`).
   const [runSelected, setRunSelected] = createSignal(0);
   const [deletedRunNotice, setDeletedRunNotice] = createSignal<string>();
-  // Narrow the union to the inspect variant so its `selector` reaches the child
-  // typed, with no `as` cast: the accessor is undefined for every other screen.
-  const inspecting = () => {
-    const current = screen();
-    return current.name === "bundle-inspect" ? current : undefined;
-  };
   // The same narrowing for the Workbench, so its Run id reaches the child typed.
   const watching = () => {
     const current = screen();
@@ -129,7 +120,7 @@ function Route(props: { renderer: RendererPort }) {
       fallback={
         <Home
           onStartRun={() => setScreen({ name: "start-run" })}
-          onOpenBundles={() => setScreen({ name: "bundle-list" })}
+          onOpenBundles={() => setScreen({ name: "bundle-catalog" })}
           onOpenPreviousRuns={() => setScreen({ name: "previous-runs" })}
         />
       }
@@ -188,21 +179,12 @@ function Route(props: { renderer: RendererPort }) {
           onBack={() => setScreen({ name: "home" })}
         />
       </Match>
-      <Match when={screen().name === "bundle-list"}>
-        <BundleList
+      <Match when={screen().name === "bundle-catalog"}>
+        <BundleCatalog
           selected={selected}
           setSelected={setSelected}
-          onOpen={(selector) => setScreen({ name: "bundle-inspect", selector })}
           onBack={() => setScreen({ name: "home" })}
         />
-      </Match>
-      <Match when={inspecting()}>
-        {(active) => (
-          <BundleInspect
-            selector={active().selector}
-            onBack={() => setScreen({ name: "bundle-list" })}
-          />
-        )}
       </Match>
     </Switch>
   );

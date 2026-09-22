@@ -3,7 +3,7 @@ import type {
   EngineRange,
 } from "../application/projection-port.js";
 
-// Semantic text for the status facts both Bundle screens carry, worded to match
+// Semantic text for the status facts the Bundle catalog carries, worded to match
 // the headless client (headless.ts renderEngine/renderTrust) so the TUI shows
 // exactly the same facts. Every status reads without colour: the words are the
 // signal, colour is only added on top.

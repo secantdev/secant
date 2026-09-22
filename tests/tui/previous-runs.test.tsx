@@ -12,7 +12,10 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import { inertHarnessCatalogView } from "./inert.js";
+import {
+  inertHarnessCatalogView,
+  inertLaunchPreparationView,
+} from "./inert.js";
 import { makeFakeRenderer, until } from "./renderer-fixture.js";
 import type {
   BundleCatalogSnapshot,
@@ -321,6 +324,7 @@ async function mountHome(options: MountOptions = {}) {
         view={approvedWorkspace()}
         bundles={noBundles()}
         harnesses={inertHarnessCatalogView()}
+        preparation={inertLaunchPreparationView()}
         launch={noLaunch()}
         run={options.runView ?? runViewOf(options.run ?? runOf())}
         runList={runListView(

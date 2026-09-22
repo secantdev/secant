@@ -5,6 +5,7 @@ import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
 import {
   inertHarnessCatalogView,
+  inertLaunchPreparationView,
   inertRunActionsView,
   inertRunListView,
 } from "./inert.js";
@@ -245,6 +246,7 @@ async function mount(rows = ROWS, width = 80, height = 40) {
         view={approvedWorkspace()}
         bundles={bundles(rows)}
         harnesses={inertHarnessCatalogView()}
+        preparation={inertLaunchPreparationView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}
@@ -375,6 +377,7 @@ test("a trusted Bundle uses the shared Trust wording in its inspector", async ()
         view={approvedWorkspace()}
         bundles={view}
         harnesses={inertHarnessCatalogView()}
+        preparation={inertLaunchPreparationView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}
@@ -433,6 +436,7 @@ test("a list whose managed bytes are gone shows the Problem, not rows (#74 A3)",
         view={approvedWorkspace()}
         bundles={view}
         harnesses={inertHarnessCatalogView()}
+        preparation={inertLaunchPreparationView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}
@@ -490,6 +494,7 @@ test("a focused Bundle whose managed bytes are gone shows its Problem", async ()
         view={approvedWorkspace()}
         bundles={view}
         harnesses={inertHarnessCatalogView()}
+        preparation={inertLaunchPreparationView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}

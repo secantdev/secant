@@ -30,21 +30,25 @@ import {
 } from "./harness-format.js";
 import { useHarnessCatalogView } from "./harness-view.js";
 import { useBindings } from "./keymap.js";
+import { useLaunchPreparationView } from "./launch-preparation-view.js";
 import { useRunLaunchView, type LaunchOutcome } from "./run-launch-view.js";
 import { useExit } from "./vendor/exit.js";
 import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
+import { useWorkspaceView } from "./workspace-view.js";
 
-// The Start-a-Run flow (#90, #191): from Home — where it is now the first and
+// The Start-a-Run flow (#90, #191, #192): from Home — where it is now the first and
 // default entry — one decision per screen. Choose an Installed Bundle (with a
 // read-only side panel, a `View Bundle Details` jump into the Bundle catalog, and
 // an inline trust acknowledgement that gates Continue), choose a Harness and model
 // for an Agent-bearing Bundle, provide the Bundle-declared Launch inputs (skipped
 // when none), review, then Start. The steps are numbered `N of M` with Harness
 // omitted for a Command-only Bundle and Inputs omitted when the Bundle declares
-// none. It drives the *same* `launch-run` Operation the headless client does,
-// through the `run-launch-view` seam, and renders each refusal at the step that
-// owns the correction while the other draft choices stay intact.
+// none. Review opens `launch-preparation` for the complete draft, renders every
+// finding while assessment settles, and exposes Start only from the ready Offer.
+// Submission drives the same `launch-run` Operation as headless through the
+// `run-launch-view` seam; refusal routes only by `correction`, clears only that
+// field, and leaves every unrelated draft choice intact.
 //
 // The Harness step reads the spawn-free `harness-catalog` list for its rows and
 // worded qualification/availability; choosing a Harness opens that one's focus,
@@ -94,6 +98,9 @@ export function StartRun(props: {
   const [chosenHarnessId, setChosenHarnessId] = createSignal<
     string | undefined
   >();
+  const [harnessFindingId, setHarnessFindingId] = createSignal<
+    string | undefined
+  >();
   const [requestedModel, setRequestedModel] = createSignal<
     string | undefined
   >();
@@ -111,6 +118,7 @@ export function StartRun(props: {
   const [fieldFindings, setFieldFindings] = createSignal<
     readonly FieldViolation[] | undefined
   >();
+  const [notice, setNotice] = createSignal<string>();
   const [outcome, setOutcome] = createSignal<
     Accessor<LaunchOutcome> | undefined
   >();
@@ -194,7 +202,10 @@ export function StartRun(props: {
   // different choice resets the model draft, since the previous model may not be
   // one the new Harness supports; the launch revalidates regardless.
   const chooseHarness = (id: string) => {
-    if (chosenHarnessId() !== id) setRequestedModel(undefined);
+    if (chosenHarnessId() !== id && harnessFindingId() !== id) {
+      setRequestedModel(undefined);
+    }
+    setHarnessFindingId(undefined);
     setChosenHarnessId(id);
   };
 
@@ -221,11 +232,13 @@ export function StartRun(props: {
     return collected;
   };
 
-  const startLaunch = () => {
+  const launchDraft = (): LaunchRunInput => {
     const bundle = focusBundle();
-    if (bundle === undefined) return;
+    if (bundle === undefined) {
+      throw new Error("Review requires a selected Bundle");
+    }
     const needsHarness = routingNeedsHarness(bundle.routing);
-    const input: LaunchRunInput = {
+    return {
       bundle: { id: bundle.id, version: bundle.version },
       launchInputs: declaredValues(),
       harness: needsHarness ? chosenHarnessId() : undefined,
@@ -234,15 +247,22 @@ export function StartRun(props: {
       // absence of a requested model, so it rides as `undefined`.
       requestedModel: needsHarness ? requestedModel() : undefined,
       trustDigest:
-        bundle.trust.state === "not-yet-trusted" ? bundle.digest : undefined,
+        bundle.trust.state === "not-yet-trusted" && acknowledged()
+          ? bundle.digest
+          : undefined,
     };
+  };
+
+  const startLaunch = (input: LaunchRunInput) => {
+    const bundle = focusBundle();
+    if (bundle === undefined) return;
     setFieldFindings(undefined);
     setChooserProblem(undefined);
     submittedBundleName = bundle.name;
     // Show pending BEFORE submitting: the live seam settles synchronously, so
     // storing the outcome fires the settlement effect at once — a later
     // `setStep("pending")` would clobber the receipt it just set and wedge the
-    // screen on "Launching". Pending first lets the effect advance from it.
+    // screen on "Checking launch". Pending first lets the effect advance from it.
     setStep("pending");
     setOutcome(() => launch.launch(input));
   };
@@ -269,14 +289,37 @@ export function StartRun(props: {
     }
     const problem = settled.problem;
     setOutcome(undefined);
-    if (problem.fieldViolations !== undefined) {
+    setNotice("Run not started");
+    setChooserProblem(problem);
+    if (problem.correction === "inputs") {
       setFieldFindings(problem.fieldViolations);
+      const invalidated = new Set(
+        problem.fieldViolations?.map((violation) => violation.field) ?? [],
+      );
+      const preserved: Record<string, string> = {};
+      for (const [name, value] of Object.entries(values)) {
+        if (!invalidated.has(name)) preserved[name] = value;
+      }
+      setValues(reconcile(preserved));
       setStep("inputs");
     } else if (problem.correction === "harness") {
-      setChooserProblem(problem);
+      setHarnessFindingId(chosenHarnessId());
+      setChosenHarnessId(undefined);
       setStep("harness");
+    } else if (problem.correction === "model") {
+      setRequestedModel(undefined);
+      setStep("harness");
+    } else if (problem.correction === "trust") {
+      const bundle = focusBundle();
+      if (bundle !== undefined) {
+        setAckedDigests((current) => {
+          const next = new Set(current);
+          next.delete(bundle.digest);
+          return next;
+        });
+      }
+      setStep("review");
     } else {
-      setChooserProblem(problem);
       setStep("choose");
     }
   });
@@ -332,18 +375,23 @@ export function StartRun(props: {
               onViewDetails={() => setCatalogOpen(true)}
               onBack={props.onLeave}
               problem={chooserProblem}
+              notice={notice}
+              onDismissNotice={() => setNotice(undefined)}
             />
           </Match>
           <Match when={step() === "harness"}>
             <HarnessStep
               rows={harnessRows}
               chosenId={chosenHarnessId}
+              findingHarnessId={harnessFindingId}
               choose={chooseHarness}
               focus={chosenHarnessFocus}
               model={requestedModel}
               setModel={setRequestedModel}
               stepLabel={() => stepLabel("harness")}
               problem={chooserProblem}
+              notice={notice}
+              onDismissNotice={() => setNotice(undefined)}
               onContinue={continueFromHarness}
               onBack={() => setStep("choose")}
             />
@@ -354,6 +402,9 @@ export function StartRun(props: {
               values={values}
               setValue={(name, value) => setValues(name, value)}
               findings={fieldFindings}
+              problem={chooserProblem}
+              notice={notice}
+              onDismissNotice={() => setNotice(undefined)}
               stepLabel={() => stepLabel("inputs")}
               onContinue={() => setStep("review")}
               onBack={() =>
@@ -366,8 +417,12 @@ export function StartRun(props: {
               bundle={focusBundle}
               harness={chosenHarnessSummary}
               model={requestedModel}
-              values={values}
+              draft={launchDraft}
+              canAcknowledgeTrust={() => untrusted() && !acknowledged()}
+              onAcknowledgeTrust={acknowledge}
               stepLabel={() => stepLabel("review")}
+              notice={notice}
+              onDismissNotice={() => setNotice(undefined)}
               onStart={startLaunch}
               onBack={backFromReview}
             />
@@ -417,6 +472,11 @@ function focusNeedsHarness(bundle: InstalledBundleFocus | undefined): boolean {
   return bundle !== undefined && routingNeedsHarness(bundle.routing);
 }
 
+function workspaceName(path: string): string {
+  const withoutTrailingSeparator = path.replace(/[\\/]+$/, "");
+  return withoutTrailingSeparator.split(/[\\/]/).at(-1) ?? path;
+}
+
 // A muted `Step N of M` line under a step title (blank while no Bundle is
 // selected — the empty/errored Catalog has no sequence to count).
 function StepCount(props: { label: Accessor<string> }) {
@@ -426,6 +486,35 @@ function StepCount(props: { label: Accessor<string> }) {
       <text fg={theme.textMuted} flexShrink={0}>
         {props.label()}
       </text>
+    </Show>
+  );
+}
+
+function RunNotStartedNotice(props: {
+  notice: Accessor<string | undefined>;
+  onDismiss: () => void;
+  group: string;
+}) {
+  const { theme } = useTheme();
+  const dialog = useDialog();
+  useBindings(() => ({
+    enabled: props.notice() !== undefined && dialog.stack.length === 0,
+    bindings: [
+      {
+        key: "ctrl+d",
+        desc: "Dismiss notice",
+        group: props.group,
+        cmd: props.onDismiss,
+      },
+    ],
+  }));
+  return (
+    <Show when={props.notice()}>
+      {(message) => (
+        <text fg={theme.warning} flexShrink={0}>
+          {`ⓘ ${message()} · ctrl+d dismiss`}
+        </text>
+      )}
     </Show>
   );
 }
@@ -447,6 +536,8 @@ function ChooseStep(props: {
   onViewDetails: () => void;
   onBack: () => void;
   problem: Accessor<Problem | undefined>;
+  notice: Accessor<string | undefined>;
+  onDismissNotice: () => void;
 }) {
   const { theme } = useTheme();
   const exit = useExit();
@@ -527,11 +618,16 @@ function ChooseStep(props: {
         Start a Run
       </text>
       <StepCount label={props.stepLabel} />
+      <RunNotStartedNotice
+        notice={props.notice}
+        onDismiss={props.onDismissNotice}
+        group="Start a Run"
+      />
       <Show when={props.problem()}>
         {(problem) => (
           <box flexDirection="column" flexShrink={0}>
             <text attributes={TextAttributes.BOLD} fg={theme.error}>
-              {`Launch refused: ${problem().code}`}
+              Correction needed
             </text>
             <text fg={theme.textMuted}>{problem().explanation}</text>
             <text fg={theme.textMuted}>{problem().remediation}</text>
@@ -699,12 +795,15 @@ type HarnessPhase = "list" | "model";
 function HarnessStep(props: {
   rows: Accessor<readonly HarnessSummary[]>;
   chosenId: Accessor<string | undefined>;
+  findingHarnessId: Accessor<string | undefined>;
   choose: (id: string) => void;
   focus: Accessor<HarnessFocus | undefined>;
   model: Accessor<string | undefined>;
   setModel: (model: string | undefined) => void;
   stepLabel: Accessor<string>;
   problem: Accessor<Problem | undefined>;
+  notice: Accessor<string | undefined>;
+  onDismissNotice: () => void;
   onContinue: () => void;
   onBack: () => void;
 }) {
@@ -716,13 +815,20 @@ function HarnessStep(props: {
   // Start on the model field when a Harness is already chosen (a return visit,
   // e.g. after a refusal), otherwise on the list. Choosing spawns nothing until it
   // happens: the initial open with nothing chosen never opens a focus.
-  const chosenIndex = () =>
+  const initialIndex = () =>
     Math.max(
       0,
-      props.rows().findIndex((harness) => harness.id === props.chosenId()),
+      props
+        .rows()
+        .findIndex(
+          (harness) =>
+            harness.id === (props.chosenId() ?? props.findingHarnessId()),
+        ),
     );
   const [highlight, setHighlight] = createSignal(
-    props.chosenId() === undefined ? 0 : chosenIndex(),
+    props.chosenId() === undefined && props.findingHarnessId() === undefined
+      ? 0
+      : initialIndex(),
   );
   const [phase, setPhase] = createSignal<HarnessPhase>(
     props.chosenId() === undefined ? "list" : "model",
@@ -882,11 +988,16 @@ function HarnessStep(props: {
         Choose a Harness
       </text>
       <StepCount label={props.stepLabel} />
+      <RunNotStartedNotice
+        notice={props.notice}
+        onDismiss={props.onDismissNotice}
+        group="Harness"
+      />
       <Show when={props.problem()}>
         {(problem) => (
           <box flexDirection="column" flexShrink={0}>
             <text attributes={TextAttributes.BOLD} fg={theme.error}>
-              {`Launch refused: ${problem().code}`}
+              Correction needed
             </text>
             <text fg={theme.textMuted}>{problem().explanation}</text>
             <text fg={theme.textMuted}>{problem().remediation}</text>
@@ -1058,6 +1169,9 @@ function InputsStep(props: {
   values: Record<string, string>;
   setValue: (name: string, value: string) => void;
   findings: Accessor<readonly FieldViolation[] | undefined>;
+  problem: Accessor<Problem | undefined>;
+  notice: Accessor<string | undefined>;
+  onDismissNotice: () => void;
   stepLabel: Accessor<string>;
   onContinue: () => void;
   onBack: () => void;
@@ -1067,7 +1181,15 @@ function InputsStep(props: {
   const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const inputs = () => props.bundle()?.launchInputs ?? [];
-  const [field, setField] = createSignal(0);
+  const firstInvalidated = () => {
+    const finding = props.findings()?.[0];
+    if (finding === undefined) return 0;
+    return Math.max(
+      0,
+      inputs().findIndex((input) => input.name === finding.field),
+    );
+  };
+  const [field, setField] = createSignal(firstInvalidated());
   const inputWidth = () => Math.max(10, dimensions().width - 4);
 
   const current = () => inputs()[field()];
@@ -1177,10 +1299,22 @@ function InputsStep(props: {
         Launch inputs
       </text>
       <StepCount label={props.stepLabel} />
+      <RunNotStartedNotice
+        notice={props.notice}
+        onDismiss={props.onDismissNotice}
+        group="Launch inputs"
+      />
       <Show when={props.findings() !== undefined}>
-        <text fg={theme.error} flexShrink={0}>
-          One or more inputs are missing or invalid.
-        </text>
+        <box flexDirection="column" flexShrink={0}>
+          <text fg={theme.error}>
+            One or more inputs are missing or invalid.
+          </text>
+          <Show when={props.problem()}>
+            {(problem) => (
+              <text fg={theme.textMuted}>{problem().remediation}</text>
+            )}
+          </Show>
+        </box>
       </Show>
       <box flexDirection="column" gap={1} flexGrow={1} overflow="hidden">
         <For each={inputs()}>
@@ -1233,15 +1367,40 @@ function ReviewStep(props: {
   bundle: Accessor<InstalledBundleFocus | undefined>;
   harness: Accessor<HarnessSummary | undefined>;
   model: Accessor<string | undefined>;
-  values: Record<string, string>;
+  draft: Accessor<LaunchRunInput>;
+  canAcknowledgeTrust: Accessor<boolean>;
+  onAcknowledgeTrust: () => void;
   stepLabel: Accessor<string>;
-  onStart: () => void;
+  notice: Accessor<string | undefined>;
+  onDismissNotice: () => void;
+  onStart: (draft: LaunchRunInput) => void;
   onBack: () => void;
 }) {
   const { theme } = useTheme();
   const exit = useExit();
   const dialog = useDialog();
   const dimensions = useTerminalDimensions();
+  const preparation = useLaunchPreparationView();
+  const workspace = useWorkspaceView();
+  const openedAssessment = createMemo(() => preparation.open(props.draft()));
+  const assessment = () => openedAssessment()();
+  const launchOffer = () =>
+    assessment().actionOffers.find((offer) => offer.action === "launch-run");
+  const canStart = () =>
+    assessment().status === "ready" && launchOffer() !== undefined;
+  const trustPosture = () => {
+    if (
+      assessment().findings.some((finding) => finding.correction === "trust")
+    ) {
+      return "Trust: Acknowledgement required";
+    }
+    if (assessment().draft.trustDigest !== undefined) {
+      return "Trust: Exact digest acknowledged for this launch";
+    }
+    return assessment().status === "assessing"
+      ? "Trust: Checking"
+      : "Trust: Already trusted";
+  };
 
   useBindings(() => ({
     enabled: dialog.stack.length === 0,
@@ -1250,7 +1409,20 @@ function ReviewStep(props: {
         key: "return",
         desc: "Start Run",
         group: "Review",
-        cmd: () => props.onStart(),
+        cmd: () => {
+          const offer = launchOffer();
+          if (assessment().status === "ready" && offer !== undefined) {
+            props.onStart(offer.draft);
+          }
+        },
+      },
+      {
+        key: "a",
+        desc: "Acknowledge trust",
+        group: "Review",
+        cmd: () => {
+          if (props.canAcknowledgeTrust()) props.onAcknowledgeTrust();
+        },
       },
       {
         key: "escape",
@@ -1269,7 +1441,7 @@ function ReviewStep(props: {
       height={dimensions().height}
       flexDirection="column"
       padding={1}
-      gap={1}
+      gap={dimensions().height < 24 ? 0 : 1}
       overflow="hidden"
       backgroundColor={theme.background}
     >
@@ -1277,21 +1449,52 @@ function ReviewStep(props: {
         Review
       </text>
       <StepCount label={props.stepLabel} />
+      <RunNotStartedNotice
+        notice={props.notice}
+        onDismiss={props.onDismissNotice}
+        group="Review"
+      />
+      <Show when={assessment().status === "assessing"}>
+        <text fg={theme.textMuted} flexShrink={0}>
+          Checking launch
+        </text>
+      </Show>
+      <Show when={assessment().status === "ready"}>
+        <text fg={theme.success} flexShrink={0}>
+          Ready to start
+        </text>
+      </Show>
+      <Show when={assessment().status === "not-ready"}>
+        <text fg={theme.warning} flexShrink={0}>
+          Not ready
+        </text>
+      </Show>
+      <For each={assessment().findings}>
+        {(finding) => (
+          <box flexDirection="column" flexShrink={0}>
+            <text fg={theme.warning}>{finding.explanation}</text>
+            <text fg={theme.textMuted}>{finding.remediation}</text>
+          </box>
+        )}
+      </For>
       <Show
         when={props.bundle()}
         fallback={<text fg={theme.error}>No Bundle selected.</text>}
       >
         {(bundle) => (
-          <box flexDirection="column" gap={1} flexGrow={1} overflow="hidden">
-            <box flexDirection="column" flexShrink={0}>
-              <text fg={theme.text}>{`${bundle().name}`}</text>
-              <text
-                fg={theme.textMuted}
-              >{`${bundle().id}@${bundle().version}`}</text>
-              <text
-                fg={theme.textMuted}
-              >{`digest: sha256:${bundle().digest}`}</text>
-            </box>
+          <box flexDirection="column" flexGrow={1} overflow="hidden">
+            <text fg={theme.text} flexShrink={0}>
+              {`Workflow: ${formatRouting(bundle().routing)}`}
+            </text>
+            <text fg={theme.text} flexShrink={0}>
+              {`Bundle: ${assessment().draft.bundle.name ?? bundle().name} (${assessment().draft.bundle.id}@${assessment().draft.bundle.version ?? bundle().version})`}
+            </text>
+            <text fg={theme.textMuted} flexShrink={0}>
+              {`Bundle digest: sha256:${assessment().draft.bundle.digest ?? bundle().digest}`}
+            </text>
+            <text fg={theme.text} flexShrink={0}>
+              {`Workspace: ${workspaceName(workspace.snapshot().path)} · ${workspace.snapshot().path}`}
+            </text>
             <Show when={routingNeedsHarness(bundle().routing)}>
               <text fg={theme.text} flexShrink={0}>
                 {`Harness: ${props.harness()?.name ?? "(not selected)"} (${props.harness()?.id ?? "none"}) · model ${props.model() ?? HARNESS_DEFAULT}`}
@@ -1302,21 +1505,28 @@ function ReviewStep(props: {
               fallback={<text fg={theme.textMuted}>No launch inputs.</text>}
             >
               <box flexDirection="column" flexShrink={0}>
-                <text fg={theme.textMuted}>Launch inputs</text>
+                <text fg={theme.textMuted}>Launch inputs:</text>
                 <For each={bundle().launchInputs}>
                   {(input) => (
                     <text fg={theme.text}>
-                      {`  ${input.name}: ${props.values[input.name] ?? "(not set)"}`}
+                      {`  ${input.name}: ${assessment().draft.launchInputs[input.name] ?? "(not set)"}`}
                     </text>
                   )}
                 </For>
               </box>
             </Show>
+            <text fg={theme.text} flexShrink={0}>
+              {trustPosture()}
+            </text>
           </box>
         )}
       </Show>
       <text fg={theme.textMuted} flexShrink={0}>
-        enter start · esc back · q quit
+        {canStart()
+          ? "enter start · esc back · q quit"
+          : props.canAcknowledgeTrust()
+            ? "a acknowledge trust · esc back · q quit"
+            : "start unavailable · esc back · q quit"}
       </text>
     </box>
   );
@@ -1332,8 +1542,13 @@ function PendingStep() {
   useBindings(() => ({
     enabled: dialog.stack.length === 0,
     bindings: [
-      { key: "q", desc: "Quit", group: "Launching", cmd: () => exit() },
-      { key: "ctrl+c", desc: "Quit", group: "Launching", cmd: () => exit() },
+      { key: "q", desc: "Quit", group: "Checking launch", cmd: () => exit() },
+      {
+        key: "ctrl+c",
+        desc: "Quit",
+        group: "Checking launch",
+        cmd: () => exit(),
+      },
     ],
   }));
   return (
@@ -1346,7 +1561,7 @@ function PendingStep() {
       backgroundColor={theme.background}
     >
       <text fg={theme.text} flexShrink={0}>
-        Launching… running Preflight.
+        Checking launch
       </text>
     </box>
   );

@@ -5,6 +5,7 @@ import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
 import {
   inertHarnessCatalogView,
+  inertLaunchPreparationView,
   inertRunActionsView,
   inertRunListView,
 } from "./inert.js";
@@ -406,6 +407,7 @@ async function mountApp(
         view={approvedWorkspace()}
         bundles={oneBundle()}
         harnesses={inertHarnessCatalogView()}
+        preparation={inertLaunchPreparationView()}
         launch={launchTo(launchRunId)}
         run={control.view}
         runList={inertRunListView()}

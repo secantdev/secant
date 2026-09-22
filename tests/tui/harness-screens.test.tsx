@@ -18,7 +18,11 @@ import type {
   RunWorkbenchView,
   WorkspaceView,
 } from "../../src/tui/tui.js";
-import { inertRunActionsView, inertRunListView } from "./inert.js";
+import {
+  inertLaunchPreparationView,
+  inertRunActionsView,
+  inertRunListView,
+} from "./inert.js";
 import { makeFakeRenderer, until } from "./renderer-fixture.js";
 
 const QUALIFIED_CODEX: HarnessFocus = {
@@ -232,6 +236,7 @@ async function mount(options: TMountOptions = {}) {
         view={workspace()}
         bundles={emptyBundles()}
         harnesses={catalog.view}
+        preparation={inertLaunchPreparationView()}
         launch={noLaunch()}
         run={noRun()}
         runList={inertRunListView()}

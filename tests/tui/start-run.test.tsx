@@ -7,6 +7,7 @@ import { inertRunActionsView, inertRunListView } from "./inert.js";
 import type {
   BundleCatalogView,
   HarnessCatalogView,
+  LaunchPreparationView,
   LaunchOutcome,
   RunLaunchView,
   RunWorkbenchView,
@@ -23,6 +24,7 @@ import type {
   HarnessFocusSnapshot,
   HarnessSummary,
   InstalledBundleFocus,
+  LaunchPreparationSnapshot,
   LaunchRunInput,
   OpenedProjection,
   OperationSnapshot,
@@ -35,15 +37,12 @@ import type {
   WorkspaceSnapshot,
 } from "../../src/application/projection-port.js";
 
-// In-memory renderer tests for the Start-a-Run flow (#90, #191). Most drive the
-// flow through a hand-driven `RunLaunchView` over fake `bundle-catalog` and
-// `harness-catalog` snapshots — the chooser + side panel, the `View Bundle Details`
-// jump, the trust-acknowledge control, the worded Harness rows with the list/
-// free-text/`Harness default` model field, `N of M` step numbering, typed inputs
-// with inline per-input findings, review, pending feedback, each refusal routed to
-// its owning step, and the transition into the Run Workbench on success (#91
-// replaced #90's receipt). The last group exercises the real launch seam
-// (`createLiveRunLaunchView`) over fake `operation`/`run` snapshots.
+// In-memory renderer tests for the Start-a-Run flow (#90, #191, #192). They drive
+// the real App over fake Bundle, Harness, launch-preparation, and launch seams:
+// assessment states and complete Review fields, ready-only submission, precise
+// inline findings, every correction route with selective clearing, the dismissible
+// refusal notice, and success into the Workbench. The last group exercises the live
+// launch seam over fake `operation`/`run` snapshots.
 //
 // #191 slice coverage (AC7): keymap and focus (choose/model/inputs bindings and the
 // spawn-free-until-choose Harness step), terminal layout and small sizes (40/30-col
@@ -53,6 +52,11 @@ import type {
 // mechanics and large content do not apply — this slice owns no timeline or
 // scrollable region — and the Windows Terminal check does not apply because it
 // changes neither the renderer nor a pin.
+//
+// #192 slice coverage: Review and refusal tests cover keyboard focus, 40x20 and
+// narrow layouts, worded colour-independent states, notice dismissal, and the
+// fake-view-seam renderer path. Timeline mechanics and large content do not apply;
+// renderer/pin code is unchanged, so the Windows Terminal check does not apply.
 
 const WORKSPACE = "/tmp/secant-launch-workspace";
 
@@ -277,6 +281,190 @@ function fakeLaunch() {
   return { view, calls, resolve: (o: LaunchOutcome) => setOutcome(() => o) };
 }
 
+function preparation(status: LaunchPreparationSnapshot["status"] = "ready") {
+  const view: LaunchPreparationView = {
+    open(draft) {
+      const actionOffers: LaunchPreparationSnapshot["actionOffers"] =
+        status === "ready"
+          ? [
+              {
+                action: "launch-run",
+                draft,
+                trustRequired: draft.trustDigest !== undefined,
+                consequence: "Create and start a Run.",
+              },
+            ]
+          : [];
+      const [snapshot] = createSignal<LaunchPreparationSnapshot>({
+        family: "launch-preparation",
+        status,
+        draft: {
+          bundle: { id: draft.bundle.id, version: draft.bundle.version },
+          harness: draft.harness,
+          requestedModel: draft.requestedModel,
+          launchInputs: draft.launchInputs,
+          trustDigest: draft.trustDigest,
+        },
+        findings: [],
+        actionOffers,
+      });
+      return snapshot;
+    },
+  };
+  return view;
+}
+
+function controlledPreparation() {
+  let updateSnapshot:
+    ((snapshot: LaunchPreparationSnapshot) => void) | undefined;
+  let openedDraft: LaunchRunInput | undefined;
+  const view: LaunchPreparationView = {
+    open(draft) {
+      openedDraft = draft;
+      const [snapshot, setSnapshot] = createSignal<LaunchPreparationSnapshot>({
+        family: "launch-preparation",
+        status: "assessing",
+        draft: {
+          bundle: { id: draft.bundle.id, version: draft.bundle.version },
+          harness: draft.harness,
+          requestedModel: draft.requestedModel,
+          launchInputs: draft.launchInputs,
+          trustDigest: draft.trustDigest,
+        },
+        findings: [],
+        actionOffers: [],
+      });
+      updateSnapshot = (next) => setSnapshot(() => next);
+      return snapshot;
+    },
+  };
+  const settle = (
+    status: "ready" | "not-ready",
+    findings: readonly Problem[],
+  ) => {
+    if (openedDraft === undefined || updateSnapshot === undefined) {
+      throw new Error("Review must open preparation before it can settle");
+    }
+    const actionOffers: LaunchPreparationSnapshot["actionOffers"] =
+      status === "ready"
+        ? [
+            {
+              action: "launch-run",
+              draft: openedDraft,
+              trustRequired: openedDraft.trustDigest !== undefined,
+              consequence: "Create and start a Run.",
+            },
+          ]
+        : [];
+    updateSnapshot({
+      family: "launch-preparation",
+      status,
+      draft: {
+        bundle: {
+          id: openedDraft.bundle.id,
+          version: openedDraft.bundle.version,
+          digest: "alpha0000",
+          name: "Alpha",
+        },
+        harness: openedDraft.harness,
+        requestedModel: openedDraft.requestedModel,
+        launchInputs: openedDraft.launchInputs,
+        trustDigest: openedDraft.trustDigest,
+      },
+      findings,
+      executionSummary: ALPHA.executionSummary,
+      actionOffers,
+    });
+  };
+  return { view, settle };
+}
+
+function readyPreparationFor(
+  bundle: InstalledBundleFocus,
+): LaunchPreparationView {
+  return {
+    open(draft) {
+      const [snapshot] = createSignal<LaunchPreparationSnapshot>({
+        family: "launch-preparation",
+        status: "ready",
+        draft: {
+          bundle: {
+            id: bundle.id,
+            version: bundle.version,
+            digest: bundle.digest,
+            name: bundle.name,
+          },
+          harness: draft.harness,
+          requestedModel: draft.requestedModel,
+          launchInputs: draft.launchInputs,
+          trustDigest: draft.trustDigest,
+        },
+        findings: [],
+        executionSummary: bundle.executionSummary,
+        actionOffers: [
+          {
+            action: "launch-run",
+            draft,
+            trustRequired: draft.trustDigest !== undefined,
+            consequence: "Create and start a Run.",
+          },
+        ],
+      });
+      return snapshot;
+    },
+  };
+}
+
+function trustPreparation(bundle: InstalledBundleFocus): LaunchPreparationView {
+  return {
+    open(draft) {
+      const acknowledged = draft.trustDigest === bundle.digest;
+      const findings: readonly Problem[] = acknowledged
+        ? []
+        : [
+            {
+              code: "bundle-trust-required",
+              explanation: "Trust acknowledgement is required.",
+              remediation: "Acknowledge this exact Bundle digest.",
+              possibleEffects: "none",
+              correction: "trust",
+            },
+          ];
+      const actionOffers: LaunchPreparationSnapshot["actionOffers"] =
+        acknowledged
+          ? [
+              {
+                action: "launch-run",
+                draft,
+                trustRequired: true,
+                consequence: "Create and start a Run.",
+              },
+            ]
+          : [];
+      const [snapshot] = createSignal<LaunchPreparationSnapshot>({
+        family: "launch-preparation",
+        status: acknowledged ? "ready" : "not-ready",
+        draft: {
+          bundle: {
+            id: bundle.id,
+            version: bundle.version,
+            digest: bundle.digest,
+            name: bundle.name,
+          },
+          harness: draft.harness,
+          requestedModel: draft.requestedModel,
+          launchInputs: draft.launchInputs,
+          trustDigest: draft.trustDigest,
+        },
+        findings,
+        executionSummary: bundle.executionSummary,
+        actionOffers,
+      });
+      return snapshot;
+    },
+  };
+}
+
 // The Run Workbench opens only after a successful launch; most flow tests never
 // get there. This stub throws if opened, so a stray transition is caught.
 function noRunView(): RunWorkbenchView {
@@ -387,6 +575,7 @@ async function mountFlow(
   height = 40,
   runView: RunWorkbenchView = noRunView(),
   harnessesView: HarnessCatalogView = defaultHarnessCatalog(),
+  preparationView: LaunchPreparationView = preparation(),
 ) {
   const exits: unknown[] = [];
   const t = await testRender(
@@ -395,6 +584,7 @@ async function mountFlow(
         view={approvedWorkspace()}
         bundles={bundlesView}
         harnesses={harnessesView}
+        preparation={preparationView}
         launch={launchView}
         run={runView}
         runList={inertRunListView()}
@@ -452,6 +642,17 @@ const AGENT_BETA = focus({
   description: "An agent Bundle with draft input.",
   digest: "agentbeta111",
   trust: { state: "app-release" },
+  launchInputs: [
+    { name: "target", type: "text", description: "What to build" },
+  ],
+  routing: [{ node: "step", step: { id: "work", kind: "agent" } }],
+});
+const UNTRUSTED_AGENT_BETA = focus({
+  id: "dev.untrusted-agent-beta",
+  name: "Untrusted Agent Beta",
+  description: "An untrusted agent Bundle with one input.",
+  digest: "untrustedagentbeta111",
+  trust: { state: "not-yet-trusted" },
   launchInputs: [
     { name: "target", type: "text", description: "What to build" },
   ],
@@ -517,10 +718,19 @@ test("chooser lists Bundles with the side panel; untrusted shows the acknowledge
 });
 
 test("a Bundle with no declared inputs skips the inputs screen and reaches review, digest shown once", async () => {
-  const { t } = await mountFlow(catalog([ALPHA]), fakeLaunch().view);
+  const { t } = await mountFlow(
+    catalog([ALPHA]),
+    fakeLaunch().view,
+    100,
+    40,
+    noRunView(),
+    defaultHarnessCatalog(),
+    preparation("assessing"),
+  );
   t.mockInput.pressEnter(); // Alpha is trusted + no inputs → straight to review
   await t.waitForFrame((f) => f.includes("Review"));
   const frame = t.captureCharFrame();
+  assert.match(frame, /Checking launch/);
   assert.match(frame, /No launch inputs/);
   assert.match(frame, /sha256:alpha0000/);
   assert.equal(
@@ -528,6 +738,87 @@ test("a Bundle with no declared inputs skips the inputs screen and reaches revie
     1,
     "digest shown exactly once",
   );
+});
+
+test("[start-run-review-assessment] assessing and not-ready block Start Run; ready enables it and launch settles visibly", async () => {
+  const launch = fakeLaunch();
+  const assessment = controlledPreparation();
+  const { t } = await mountFlow(
+    catalog([ALPHA]),
+    launch.view,
+    100,
+    40,
+    noRunView(),
+    defaultHarnessCatalog(),
+    assessment.view,
+  );
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Checking launch"));
+  t.mockInput.pressEnter();
+  await t.renderOnce();
+  assert.equal(launch.calls.length, 0, "assessing cannot submit");
+
+  assessment.settle("not-ready", [
+    {
+      code: "workspace-prerequisite-failed",
+      explanation: "Workspace prerequisite not met.",
+      remediation: "Launch Secant from a Git worktree root.",
+      possibleEffects: "none",
+      correction: "workspace",
+    },
+  ]);
+  await t.waitForFrame((frame) => frame.includes("Workspace prerequisite"));
+  const refused = t.captureCharFrame();
+  assert.match(refused, /Not ready/);
+  assert.match(refused, /Launch Secant from a Git worktree root/);
+  assert.doesNotMatch(refused, /workspace-prerequisite-failed/);
+  t.mockInput.pressEnter();
+  await t.renderOnce();
+  assert.equal(launch.calls.length, 0, "not-ready cannot submit");
+
+  assessment.settle("ready", []);
+  await t.waitForFrame((frame) => frame.includes("Ready to start"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Checking launch"));
+  assert.equal(launch.calls.length, 1);
+});
+
+test("[start-run-review-assessment] Review renders the complete assessed draft and exact trust posture", async () => {
+  const { t } = await mountFlow(
+    catalog([UNTRUSTED_AGENT_BETA]),
+    fakeLaunch().view,
+    100,
+    40,
+    noRunView(),
+    defaultHarnessCatalog(),
+    readyPreparationFor(UNTRUSTED_AGENT_BETA),
+  );
+  t.mockInput.pressKey("a");
+  await t.waitForFrame((frame) => frame.includes("Trust acknowledged"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Model"));
+  t.mockInput.pressArrow("right");
+  await t.waitForFrame((frame) => frame.includes("claude-sonnet"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Launch inputs"));
+  t.mockInput.pressKey("h");
+  t.mockInput.pressKey("i");
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Review"));
+
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Workflow.*work \(agent\)/s);
+  assert.match(frame, /Bundle.*Untrusted Agent Beta/s);
+  assert.match(frame, /sha256:untrustedagentbeta111/);
+  assert.match(frame, /Workspace.*secant-launch-workspace/s);
+  assert.match(frame, new RegExp(WORKSPACE.replaceAll("/", "\\/")));
+  assert.match(frame, /Harness: Claude Code \(claude-code\)/);
+  assert.match(frame, /model claude-sonnet/);
+  assert.match(frame, /target: hi/);
+  assert.match(frame, /Trust: Exact digest acknowledged for this launch/);
+  assert.equal(frame.split("untrustedagentbeta111").length - 1, 1);
 });
 
 test("[both-client-harness-selection] the Harness step shows worded rows, spawns nothing until a Harness is chosen, then qualifies only that one", async () => {
@@ -566,7 +857,7 @@ test("[both-client-harness-selection] the Harness step shows worded rows, spawns
   assert.match(t.captureCharFrame(), /Harness: Codex \(codex\)/);
 
   t.mockInput.pressEnter();
-  await t.waitForFrame((candidate) => candidate.includes("Launching"));
+  await t.waitForFrame((candidate) => candidate.includes("Checking launch"));
   assert.equal(launch.calls[0]?.harness, "codex");
   assert.equal(launch.calls[0]?.requestedModel, undefined);
 });
@@ -588,7 +879,7 @@ test("changing a Harness after a selected-Harness refusal preserves unrelated in
   t.mockInput.pressEnter(); // inputs → review
   await t.waitForFrame((frame) => frame.includes("Harness: Codex"));
   t.mockInput.pressEnter(); // Start
-  await t.waitForFrame((frame) => frame.includes("Launching"));
+  await t.waitForFrame((frame) => frame.includes("Checking launch"));
   launch.resolve({
     kind: "refused",
     problem: {
@@ -600,10 +891,12 @@ test("changing a Harness after a selected-Harness refusal preserves unrelated in
       details: { harness: "codex" },
     },
   });
-  await t.waitForFrame((frame) => frame.includes("harness-not-found"));
-  t.mockInput.pressEscape(); // model → list, to choose another Harness
-  // A lone Escape is held briefly by OpenTUI key disambiguation — poll in real time.
-  await until(() => t.captureCharFrame().includes("enter choose"));
+  await t.waitForFrame((frame) => frame.includes("Codex could not be found"));
+  const refused = t.captureCharFrame();
+  assert.match(refused, /Run not started/);
+  assert.match(refused, /enter choose/);
+  assert.match(refused, /› Codex/, "the invalidated Harness receives focus");
+  assert.doesNotMatch(refused, /harness-not-found/);
   t.mockInput.pressArrow("up"); // highlight Claude Code
   t.mockInput.pressEnter(); // choose Claude Code → model phase
   await t.waitForFrame((frame) => frame.includes("Model"));
@@ -614,6 +907,75 @@ test("changing a Harness after a selected-Harness refusal preserves unrelated in
   t.mockInput.pressEnter();
   await t.waitForFrame((frame) => frame.includes("Harness: Claude Code"));
   assert.match(t.captureCharFrame(), /target: hi/);
+});
+
+test("a Harness refusal preserves its model choice when the same Harness is selected again", async () => {
+  const launch = fakeLaunch();
+  const { t } = await mountFlow(catalog([AGENT_ALPHA]), launch.view);
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Model"));
+  t.mockInput.pressArrow("right");
+  await t.waitForFrame((frame) => frame.includes("‹ claude-sonnet ›"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Review"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Checking launch"));
+  launch.resolve({
+    kind: "refused",
+    problem: {
+      code: "harness-not-ready",
+      explanation: "Claude Code is no longer ready.",
+      remediation: "Authenticate Claude Code or choose another Harness.",
+      possibleEffects: "none",
+      correction: "harness",
+    },
+  });
+
+  await t.waitForFrame((frame) => frame.includes("no longer ready"));
+  assert.match(t.captureCharFrame(), /› Claude Code/);
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Model"));
+  assert.match(t.captureCharFrame(), /‹ claude-sonnet ›/);
+});
+
+test("a model refusal keeps the Harness and inputs but clears only the requested model", async () => {
+  const launch = fakeLaunch();
+  const { t } = await mountFlow(catalog([AGENT_BETA]), launch.view);
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Model"));
+  t.mockInput.pressArrow("right");
+  await t.waitForFrame((frame) => frame.includes("‹ claude-sonnet ›"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Launch inputs"));
+  t.mockInput.pressKey("h");
+  t.mockInput.pressKey("i");
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Review"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Checking launch"));
+  launch.resolve({
+    kind: "refused",
+    problem: {
+      code: "requested-model-unavailable",
+      explanation: "The selected model is no longer available.",
+      remediation: "Choose a currently supported model.",
+      possibleEffects: "none",
+      correction: "model",
+    },
+  });
+
+  await t.waitForFrame((frame) => frame.includes("selected model"));
+  const model = t.captureCharFrame();
+  assert.match(model, /Harness: Claude Code/);
+  assert.match(model, /‹ Harness default ›/);
+  assert.match(model, /Run not started/);
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Launch inputs"));
+  assert.match(t.captureCharFrame(), /hi/);
 });
 
 test("an unavailable Harness names its reason and remediation, cannot continue, and relayouts after resize", async () => {
@@ -695,7 +1057,7 @@ test("[start-run-model-choice] a list Harness offers Harness default first then 
   await t.waitForFrame((frame) => frame.includes("Review"));
   assert.match(t.captureCharFrame(), /model claude-sonnet/);
   t.mockInput.pressEnter(); // Start
-  await t.waitForFrame((frame) => frame.includes("Launching"));
+  await t.waitForFrame((frame) => frame.includes("Checking launch"));
   assert.equal(launch.calls[0]?.requestedModel, "claude-sonnet");
 });
 
@@ -728,7 +1090,7 @@ test("[start-run-model-choice] a free-text Harness accepts a typed model, and bl
   await t.waitForFrame((frame) => frame.includes("Review"));
   assert.match(t.captureCharFrame(), /model o4/);
   t.mockInput.pressEnter(); // Start
-  await t.waitForFrame((frame) => frame.includes("Launching"));
+  await t.waitForFrame((frame) => frame.includes("Checking launch"));
   assert.equal(launch.calls[0]?.requestedModel, "o4");
 });
 
@@ -743,7 +1105,7 @@ test("a Command-only Bundle asks for neither Harness nor model and numbers its s
   assert.match(review, /Step 2 of 2/);
   assert.doesNotMatch(review, /Harness:/); // no Harness/model for a Command-only Bundle
   t.mockInput.pressEnter(); // Start
-  await t.waitForFrame((f) => f.includes("Launching"));
+  await t.waitForFrame((f) => f.includes("Checking launch"));
   assert.equal(launch.calls[0]?.harness, undefined);
   assert.equal(launch.calls[0]?.requestedModel, undefined);
 });
@@ -776,7 +1138,7 @@ test("pending feedback then a transition into the Workbench for the Run id; a tr
   t.mockInput.pressEnter(); // → review
   await t.waitForFrame((f) => f.includes("Review"));
   t.mockInput.pressEnter(); // Start
-  await t.waitForFrame((f) => f.includes("Launching"));
+  await t.waitForFrame((f) => f.includes("Checking launch"));
   assert.equal(launch.calls.length, 1);
   assert.equal(launch.calls[0]?.trustDigest, undefined);
 
@@ -817,7 +1179,7 @@ test("renders exactly the declared inputs, carries the acknowledged trustDigest,
   assert.match(review, /mode: fast/);
 
   t.mockInput.pressEnter(); // Start
-  await t.waitForFrame((f) => f.includes("Launching"));
+  await t.waitForFrame((f) => f.includes("Checking launch"));
   assert.equal(
     launch.calls[0]?.trustDigest,
     "beta1111",
@@ -837,6 +1199,7 @@ test("renders exactly the declared inputs, carries the acknowledged trustDigest,
       explanation: "invalid",
       remediation: "fix",
       possibleEffects: "none",
+      correction: "inputs",
       fieldViolations: [
         { field: "target", explanation: "must be non-empty text." },
       ],
@@ -845,13 +1208,27 @@ test("renders exactly the declared inputs, carries the acknowledged trustDigest,
   await t.waitForFrame((f) => f.includes("must be non-empty text."));
   const refused = t.captureCharFrame();
   assert.match(refused, /Launch inputs/);
+  assert.match(refused, /Run not started · ctrl\+d dismiss/);
   assert.match(refused, /must be non-empty text\./);
-  assert.match(refused, /hi/, "the entered draft survives the refusal");
+  assert.match(refused, /› target/, "the invalidated field receives focus");
+  assert.doesNotMatch(refused, /hi/, "the invalidated input is cleared");
 
-  // Dismissing feedback (moving focus) never removes the inline finding.
-  t.mockInput.pressArrow("down");
+  // A printable `d` still reaches the focused input while the notice is present.
+  t.mockInput.pressKey("d");
+  await t.waitForFrame((frame) => frame.includes("d"));
+  assert.match(t.captureCharFrame(), /Run not started/);
+  t.mockInput.pressBackspace();
+  // Dismissing the notice never removes the inline finding.
+  t.mockInput.pressKey("d", { ctrl: true });
   await t.renderOnce();
+  assert.doesNotMatch(t.captureCharFrame(), /Run not started/);
   assert.match(t.captureCharFrame(), /must be non-empty text\./);
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Review"));
+  const preserved = t.captureCharFrame();
+  assert.match(preserved, /target:/);
+  assert.doesNotMatch(preserved, /target: hi/);
+  assert.match(preserved, /mode: fast/);
 });
 
 test("an input draft does not leak into another Bundle's same-named input", async () => {
@@ -902,7 +1279,7 @@ async function refuseFromReview(problem: Problem) {
   t.mockInput.pressEnter(); // → review
   await t.waitForFrame((f) => f.includes("Review"));
   t.mockInput.pressEnter(); // Start
-  await t.waitForFrame((f) => f.includes("Launching"));
+  await t.waitForFrame((f) => f.includes("Checking launch"));
   launch.resolve({ kind: "refused", problem });
   return t;
 }
@@ -914,11 +1291,13 @@ test("a Workspace prerequisite failure returns to Bundle selection with the reme
     remediation:
       "Launch from the root of a Git worktree, or choose another Bundle.",
     possibleEffects: "none",
+    correction: "workspace",
   });
-  await t.waitForFrame((f) => f.includes("workspace-prerequisite-failed"));
+  await t.waitForFrame((f) => f.includes("not a Git worktree root"));
   const frame = t.captureCharFrame();
   assert.match(frame, /Start a Run/); // back on the chooser
-  assert.match(frame, /Launch refused: workspace-prerequisite-failed/);
+  assert.match(frame, /Run not started/);
+  assert.doesNotMatch(frame, /workspace-prerequisite-failed/);
   assert.match(frame, /choose another Bundle/);
   assert.doesNotMatch(frame, /Timeline/); // never transitioned into the Workbench
 });
@@ -931,12 +1310,75 @@ test("a corrupted Bundle returns to selection advising reinstalling it", async (
     remediation:
       "Reinstall the Bundle to restore an intact copy, then launch again.",
     possibleEffects: "none",
+    correction: "bundle",
   });
-  await t.waitForFrame((f) => f.includes("bundle-snapshot-corrupt"));
+  await t.waitForFrame((f) => f.includes("installed Bundle is corrupted"));
   const frame = t.captureCharFrame();
   assert.match(frame, /corrupted/);
   assert.match(frame, /Reinstall the Bundle/);
   assert.doesNotMatch(frame, /Timeline/); // never transitioned into the Workbench
+});
+
+test("a Command refusal routes to Bundle selection without exposing its code", async () => {
+  const t = await refuseFromReview({
+    code: "command-executable-not-found",
+    explanation: "A required command is no longer available.",
+    remediation: "Install the command, or choose another Bundle.",
+    possibleEffects: "none",
+    correction: "command",
+  });
+  await t.waitForFrame((frame) => frame.includes("required command"));
+  const refused = t.captureCharFrame();
+  assert.match(refused, /Start a Run/);
+  assert.match(refused, /Run not started/);
+  assert.doesNotMatch(refused, /command-executable-not-found/);
+});
+
+test("a trust refusal returns to Review and requires acknowledgement of the exact digest again", async () => {
+  const launch = fakeLaunch();
+  const { t } = await mountFlow(
+    catalog([BETA]),
+    launch.view,
+    40,
+    20,
+    noRunView(),
+    defaultHarnessCatalog(),
+    trustPreparation(BETA),
+  );
+  t.mockInput.pressKey("a");
+  await t.renderOnce();
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Launch inputs"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Ready to start"));
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Checking launch"));
+  launch.resolve({
+    kind: "refused",
+    problem: {
+      code: "bundle-trust-required",
+      explanation: "Trust acknowledgement is required.",
+      remediation: "Acknowledge this exact Bundle digest.",
+      possibleEffects: "none",
+      correction: "trust",
+    },
+  });
+
+  await t.waitForFrame((frame) =>
+    frame.includes("Trust acknowledgement is required"),
+  );
+  const refused = t.captureCharFrame();
+  assert.match(refused, /Review/);
+  assert.match(refused, /Not ready/);
+  assert.match(refused, /Run not started/);
+  assert.match(refused, /Trust: Acknowledgement required/);
+  assert.doesNotMatch(refused, /bundle-trust-required/);
+  for (const line of refused.split("\n")) {
+    assert.ok(line.length <= 40, `overflow at 40: ${JSON.stringify(line)}`);
+  }
+  t.mockInput.pressKey("a");
+  await t.waitForFrame((frame) => frame.includes("Ready to start"));
+  assert.match(t.captureCharFrame(), /Exact digest acknowledged/);
 });
 
 test("declining trust launches nothing and cannot continue", async () => {

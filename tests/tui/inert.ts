@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import type {
   HarnessCatalogView,
+  LaunchPreparationView,
   RunActionsView,
   RunListView,
 } from "../../src/tui/tui.js";
@@ -8,6 +9,8 @@ import type {
   HarnessCatalogSnapshot,
   HarnessFocusSelector,
   HarnessFocusSnapshot,
+  LaunchPreparationSnapshot,
+  LaunchRunInput,
 } from "../../src/application/projection-port.js";
 
 // Inert seams for the App screens a given render never opens (A28): an empty
@@ -58,6 +61,38 @@ export function inertHarnessCatalogView(): HarnessCatalogView {
         },
       });
       return snapshot;
+    },
+  };
+}
+
+export function inertLaunchPreparationView(): LaunchPreparationView {
+  return {
+    open: (draft: LaunchRunInput) => {
+      const snapshot: LaunchPreparationSnapshot = {
+        family: "launch-preparation",
+        status: "ready",
+        draft: {
+          bundle: {
+            id: draft.bundle.id,
+            version: draft.bundle.version,
+          },
+          harness: draft.harness,
+          requestedModel: draft.requestedModel,
+          launchInputs: draft.launchInputs,
+          trustDigest: draft.trustDigest,
+        },
+        findings: [],
+        actionOffers: [
+          {
+            action: "launch-run",
+            draft,
+            trustRequired: draft.trustDigest !== undefined,
+            consequence: "Create and start a Run.",
+          },
+        ],
+      };
+      const [accessor] = createSignal(snapshot);
+      return accessor;
     },
   };
 }

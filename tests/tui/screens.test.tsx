@@ -5,6 +5,7 @@ import { createSignal } from "solid-js";
 import { App } from "../../src/tui/tui.js";
 import {
   inertHarnessCatalogView,
+  inertLaunchPreparationView,
   inertRunActionsView,
   inertRunListView,
 } from "./inert.js";
@@ -121,6 +122,7 @@ async function mount(width = 60, height = 16) {
         view={view}
         bundles={emptyBundles()}
         harnesses={inertHarnessCatalogView()}
+        preparation={inertLaunchPreparationView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={inertRunListView()}
@@ -167,6 +169,7 @@ async function mountApproved(
         view={view}
         bundles={emptyBundles()}
         harnesses={inertHarnessCatalogView()}
+        preparation={inertLaunchPreparationView()}
         launch={noLaunch()}
         run={noRunView()}
         runList={runList}

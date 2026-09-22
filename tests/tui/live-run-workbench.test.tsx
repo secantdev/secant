@@ -18,6 +18,7 @@ import {
 import {
   App,
   createLiveHarnessCatalogView,
+  createLiveLaunchPreparationView,
   createLiveRunLaunchView,
   createLiveRunWorkbenchView,
   type BundleCatalogView,
@@ -224,6 +225,7 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
         view={workspaceView(workspaceProjection.snapshot)}
         bundles={catalogView(listProjection.snapshot, focusProjection.snapshot)}
         harnesses={createLiveHarnessCatalogView(wired.projectionPort)}
+        preparation={createLiveLaunchPreparationView(wired.projectionPort)}
         launch={launch}
         run={createLiveRunWorkbenchView(wired.projectionPort)}
         runList={inertRunListView()}

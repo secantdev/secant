@@ -44,6 +44,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - A live update is told from a durable one by kind, and the settling watermark drives the preview-to-authoritative swap (`reduceRunUpdate`, `run-view.tsx`):
   a `live` overlay at phase `settling` records the durable `settledCountAtSettling`; the next `durable` update whose settled-Turn count passes it drops the
   live overlay and preview and shows the authoritative snapshot alone. A `preview` update only refreshes the streaming text.
+- `follow.ts` alone owns Projection observer health and reconnect ordering. A terminal update preserves last-known state as `disconnected`; explicit reconnect
+  crosses `loading` and `catching-up` before `current`. Workbench Operation controls read only current offers, while timeline live-edge remains a separate scroll fact.
 - Typed-but-unsent interactive text (the `draft` signal) clears only on a **fresh** interactive Step (the focus effect keyed on the Step id), so it survives a
   Turn settle and a tab away within the same Step; a send clears it optimistically before dispatch, so a refused send loses the text (the refusal re-surfaces,
   the draft does not).
@@ -94,8 +96,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   seam that re-opens its Projection to grow a page); a write goes through a per-screen submit seam (`run-actions-view.tsx` — resume/cancel/delete, mirroring
   `run-launch-view.tsx`). The Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`, and declares its key
   value (`{ name?, ctrl? }`, A16) so the Workbench needs no cast.
-- Two private helpers back those seams: `follow.ts` (`followProjection`) is the one follow-snapshot loop the read seams share (A22); `submit-and-settle.ts`
-  (`submitAndSettle`) is the one submit-then-follow-the-operation-stream loop the write seams share (A23). `run-inspection.tsx` holds the Workbench's
+- Two private helpers back those seams: `follow.ts` (`followProjection`) owns the read seams' follow, health, and reconnect loop (A22); `submit-and-settle.ts`
+  (`submitAndSettle`) owns submit-then-follow and reopens a lost pending Operation receipt (A23). `run-inspection.tsx` holds the Workbench's
   reference-inspection overlay — its state, key loop, and view — split out of `run-workbench.tsx` (A26). `run-workbench-views.tsx` holds the Workbench's
   four pure presentational leaves; state, focus, modal precedence, and the key dispatcher stay in `run-workbench.tsx` (A12).
 - `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; reuses the single-active-index selection model of `bundle-list.tsx`).

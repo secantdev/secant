@@ -23,6 +23,7 @@ export {
   type RunWorkbenchView,
   type RunWorkbenchProjection,
   type AnswerOutcome,
+  type TRunViewFreshness,
 } from "./run-view.js";
 export type {
   RunListView,

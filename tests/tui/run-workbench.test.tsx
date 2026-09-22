@@ -7,9 +7,11 @@ import { inertRunActionsView, inertRunListView } from "./inert.js";
 import type {
   AnswerOutcome,
   BundleCatalogView,
+  RunActionOutcome,
   RunActionsView,
   RunLaunchView,
   RunWorkbenchView,
+  TRunViewFreshness,
   WorkspaceView,
 } from "../../src/tui/tui.js";
 import { makeFakeRenderer, type FakeRenderer } from "./renderer-fixture.js";
@@ -42,6 +44,10 @@ import type {
 // updates on the live edge, the paging anchor + new-activity count +
 // jump-to-latest, reference inspection with a truncation marker, focus movement
 // and Escape, small-width breakpoints and resize without overflow (AC1–AC8).
+// Issue #193 changes no large-content surface, so that deferred item is
+// inapplicable. It changes neither Renderer nor dependency pins, so the Windows
+// Terminal human check is not applicable; this deterministic renderer scenario
+// runs in the canonical test suite on Windows, macOS, and Linux.
 
 const WORKSPACE = "/tmp/secant-workbench-ws";
 
@@ -130,6 +136,12 @@ function makeRunView(initial: RunSnapshot) {
   const [snapshot, setSnapshot] = createSignal<RunSnapshot>(initial);
   const [live, setLive] = createSignal<RunLiveOverlay>();
   const [preview, setPreview] = createSignal<string>();
+  const [freshness, setFreshness] = createSignal<TRunViewFreshness>({
+    kind: "current",
+    catchUp: "fresh",
+    lastConfirmedAt: "2026-09-22T10:30:00.000Z",
+  });
+  const reconnects: string[] = [];
   const reads = new Map<string, ResourceRead>();
   // Transcript pages, keyed by the requested `older` cursor ("" for the newest).
   const transcripts = new Map<string, TranscriptRead>();
@@ -172,7 +184,13 @@ function makeRunView(initial: RunSnapshot) {
     decision: "allow" | "deny";
   }[] = [];
   const view: RunWorkbenchView = {
-    openRun: () => ({ snapshot, live, preview }),
+    openRun: () => ({
+      snapshot,
+      live,
+      preview,
+      freshness,
+      reconnect: () => reconnects.push("reconnect"),
+    }),
     readResource: (reference) =>
       reads.get(refKey(reference)) ?? {
         found: false,
@@ -240,6 +258,8 @@ function makeRunView(initial: RunSnapshot) {
       setPreview(overlay?.preview);
     },
     setPreview,
+    setFreshness,
+    reconnects,
     setRead: (key: string, read: ResourceRead) => reads.set(key, read),
     setTranscript: (cursor: string, read: TranscriptRead) =>
       transcripts.set(cursor, read),
@@ -485,6 +505,63 @@ test("header, progress, and timeline render the facts headless run show prints",
   assert.match(frame, /attempt-settled passed/);
 });
 
+test("workbench-view-freshness: four stream-health tokens replace scroll-live and gate Operations", async () => {
+  const resumeOffer: ResumeRunOffer = {
+    action: "resume-run",
+    runId: "run-1",
+    consequence: "continue from the resting Step.",
+  };
+  const [pendingResume] = createSignal<RunActionOutcome>({ kind: "pending" });
+  const mounted = await mountWorkbench(
+    runOf({
+      state: "halted",
+      actionOffers: [resumeOffer],
+      timeline: events(2),
+    }),
+    100,
+    40,
+    okActions({ resume: () => pendingResume }),
+  );
+  const { t, control, renderer } = mounted;
+  assert.match(t.captureCharFrame(), /View current/);
+  assert.doesNotMatch(t.captureCharFrame(), /\(live\)/);
+  renderer.key("r");
+  await t.renderOnce();
+
+  control.setFreshness({
+    kind: "loading",
+    lastConfirmedAt: "2026-09-22T10:30:00.000Z",
+  });
+  await t.renderOnce();
+  assert.match(t.captureCharFrame(), /View loading/);
+
+  control.setFreshness({
+    kind: "catching-up",
+    catchUp: "continuous",
+    lastConfirmedAt: "2026-09-22T10:30:00.000Z",
+  });
+  await t.renderOnce();
+  assert.match(t.captureCharFrame(), /View catching up/);
+
+  control.setFreshness({
+    kind: "disconnected",
+    reason: "observer-lagged",
+    lastConfirmedAt: "2026-09-22T10:30:00.000Z",
+  });
+  await t.renderOnce();
+  const disconnected = t.captureCharFrame();
+  assert.match(disconnected, /View disconnected/);
+  assert.match(disconnected, /last confirmed 2026-09-22 10:30:00Z/);
+  assert.match(disconnected, /r Reconnect/);
+  assert.match(disconnected, /View freshness · not Run state/);
+  assert.match(disconnected, /Operation pending · resume/);
+  assert.doesNotMatch(disconnected, /r resume/);
+
+  renderer.key("r");
+  await t.renderOnce();
+  assert.deepEqual(control.reconnects, ["reconnect"]);
+});
+
 test("reopened history renders End Step distinctly from a settled Command Attempt (#134 A19)", async () => {
   const { t } = await mountWorkbench(
     runOf({
@@ -681,7 +758,7 @@ test("launching transitions to the Workbench before the Run rests, and progress 
   await t.renderOnce();
   const frame = t.captureCharFrame();
   assert.match(frame, / e2/); // the newest row appeared while running
-  assert.match(frame, /\(live\)/);
+  assert.match(frame, /View current/);
 });
 
 test("the timeline follows the live edge as durable updates append events", async () => {
@@ -691,7 +768,7 @@ test("the timeline follows the live edge as durable updates append events", asyn
     16,
   );
   const first = t.captureCharFrame();
-  assert.match(first, /\(live\)/);
+  assert.match(first, /View current/);
   assert.match(first, / e5/); // newest visible
   control.setRun(runOf({ timeline: events(9) }));
   await t.renderOnce();
@@ -936,7 +1013,7 @@ test("live rows respect paused timeline following and contribute to the new-acti
   await press(t, renderer, "end");
   const latest = t.captureCharFrame();
   assert.match(latest, /Assistant preview · new streamed content/);
-  assert.match(latest, /\(live\)/);
+  assert.match(latest, /View current/);
 });
 
 test("gate, request, interactive Turn, and agent Turn have colour-independent labels", async () => {
@@ -1029,7 +1106,7 @@ test("scrolling up anchors the first visible row, counts new activity, and jump-
   const scrolled = t.captureCharFrame();
   const topLine = scrolled.split("\n").find((line) => / e\d/.test(line));
   assert.ok(topLine, "a timeline row is visible");
-  assert.doesNotMatch(scrolled, /\(live\)/); // no longer following
+  assert.match(scrolled, /View current/); // freshness is independent of scrolling
 
   // New events append; the first visible row stays anchored and the count grows.
   control.setRun(runOf({ timeline: events(36) }));
@@ -1044,7 +1121,7 @@ test("scrolling up anchors the first visible row, counts new activity, and jump-
 
   await press(t, renderer, "end"); // jump to the live edge
   const live = t.captureCharFrame();
-  assert.match(live, /\(live\)/);
+  assert.match(live, /View current/);
   assert.match(live, / e35/); // the newest event
   assert.doesNotMatch(live, /new · end to jump/);
 });
@@ -1055,14 +1132,14 @@ test("timeline paging is wired: home reaches the oldest event, end returns to th
     100,
     14,
   );
-  assert.match(t.captureCharFrame(), /\(live\)/);
+  assert.match(t.captureCharFrame(), /View current/);
   await press(t, renderer, "pageup"); // detaches from the live edge
-  assert.doesNotMatch(t.captureCharFrame(), /\(live\)/);
+  assert.match(t.captureCharFrame(), /View current/);
   await press(t, renderer, "home"); // jump to the oldest
   assert.match(t.captureCharFrame(), / e0 /);
   await press(t, renderer, "end"); // back to the live edge
   const live = t.captureCharFrame();
-  assert.match(live, /\(live\)/);
+  assert.match(live, /View current/);
   assert.match(live, / e29/);
 });
 
@@ -1750,9 +1827,9 @@ test("the checkpoint interaction fits small widths without overflow and states b
   assert.match(frame, /Stop Run/);
 });
 
-// --- not found -------------------------------------------------------------
+// --- deleted between launch and initial open -------------------------------
 
-test("a Run that is not found shows the Problem and Escape leaves", async () => {
+test("a launched Run missing on initial open returns to Previous Runs with its Bundle notice", async () => {
   const control = makeRunView({
     family: "run",
     runId: "ghost",
@@ -1768,10 +1845,9 @@ test("a Run that is not found shows the Problem and Escape leaves", async () => 
   });
   const renderer = makeFakeRenderer(80, 24);
   const { t } = await mountApp(control, renderer, "ghost", 80, 24);
-  await t.waitForFrame((f) => f.includes("not found"));
-  assert.match(t.captureCharFrame(), /No such Run/);
-  await press(t, renderer, "escape");
-  assert.match(t.captureCharFrame(), /Secant/); // back on Home
+  await t.waitForFrame((frame) => frame.includes("was deleted"));
+  assert.match(t.captureCharFrame(), /Alpha Flow was deleted/);
+  assert.doesNotMatch(t.captureCharFrame(), /No such Run/);
 });
 
 // --- Run Actions: resume / cancel / delete (#92 ticket, AC3) ---------------
@@ -1892,8 +1968,8 @@ test("delete confirms then dispatches and leaves the Workbench", async () => {
   assert.match(t.captureCharFrame(), /Delete is permanent/);
   await press(t, renderer, "y"); // confirm
   assert.equal(removed, 1);
-  // Reached from Start a Run, so a delete returns to Home.
-  assert.match(t.captureCharFrame(), /Secant/);
+  assert.match(t.captureCharFrame(), /Previous Runs/);
+  assert.match(t.captureCharFrame(), /Alpha Flow was deleted/);
   assert.doesNotMatch(t.captureCharFrame(), /Timeline/);
 });
 

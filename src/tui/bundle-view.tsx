@@ -57,9 +57,9 @@ export function createLiveBundleCatalogView(
   // opened by the caller so its selector-typed overload fixes the snapshot type.
   return {
     openList: () =>
-      followProjection(port.openProjection({ family: "bundle-catalog" })),
+      followProjection(() => port.openProjection({ family: "bundle-catalog" })),
     openFocus: (selector) =>
-      followProjection(
+      followProjection(() =>
         port.openProjection({ family: "bundle-catalog", focus: selector }),
       ),
   };

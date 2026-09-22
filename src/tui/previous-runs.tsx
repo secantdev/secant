@@ -55,7 +55,9 @@ type DisplayItem =
 export function PreviousRuns(props: {
   selected: Accessor<number>;
   setSelected: (index: number) => void;
-  onOpen: (runId: string) => void;
+  notice: Accessor<string | undefined>;
+  onDismissNotice: () => void;
+  onOpen: (runId: string, bundleName: string) => void;
   onBack: () => void;
 }) {
   const { theme } = useTheme();
@@ -94,7 +96,8 @@ export function PreviousRuns(props: {
   });
 
   // Interior height less the title, filter line, and footer (padding=1 trims 2).
-  const viewportH = () => Math.max(1, dimensions().height - 5);
+  const viewportH = () =>
+    Math.max(1, dimensions().height - (props.notice() === undefined ? 5 : 6));
 
   // The visible slice, clamping `top` so it never scrolls past the ends; appends
   // below the viewport leave this slice untouched (the paging anchor, #92 AC2).
@@ -166,10 +169,16 @@ export function PreviousRuns(props: {
         group: "Runs",
         cmd: () => {
           const row = rows()[active()];
-          if (row) props.onOpen(row.runId);
+          if (row) props.onOpen(row.runId, row.bundleName);
         },
       },
       { key: "f", desc: "Filter", group: "Runs", cmd: toggleFilter },
+      {
+        key: "d",
+        desc: "Dismiss notice",
+        group: "Runs",
+        cmd: props.onDismissNotice,
+      },
       { key: "escape", desc: "Back", group: "Runs", cmd: props.onBack },
       { key: "q", desc: "Quit", group: "Runs", cmd: () => exit() },
       { key: "ctrl+c", desc: "Quit", group: "Runs", cmd: () => exit() },
@@ -188,6 +197,13 @@ export function PreviousRuns(props: {
       <text attributes={TextAttributes.BOLD} fg={theme.text} flexShrink={0}>
         Previous Runs
       </text>
+      <Show when={props.notice()}>
+        {(notice) => (
+          <text fg={theme.text} flexShrink={0}>
+            {`ⓘ ${notice()} · d dismiss`}
+          </text>
+        )}
+      </Show>
       <text fg={theme.textMuted} flexShrink={0}>
         {`Filter: ${resumable() ? "Resumable" : "All Runs"} · f to toggle`}
       </text>

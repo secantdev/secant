@@ -48,7 +48,7 @@ const NARROW_BREAKPOINT = 60;
 
 export function StartRun(props: {
   onLeave: () => void;
-  onStarted: (runId: string) => void;
+  onStarted: (runId: string, bundleName: string) => void;
 }) {
   const bundles = useBundleCatalogView();
   const workspace = useWorkspaceView();
@@ -74,6 +74,7 @@ export function StartRun(props: {
     new Set(),
   );
   const [values, setValues] = createStore<Record<string, string>>({});
+  let submittedBundleName: string | undefined;
   const [chooserProblem, setChooserProblem] = createSignal<
     Problem | undefined
   >();
@@ -191,6 +192,7 @@ export function StartRun(props: {
     };
     setFieldFindings(undefined);
     setChooserProblem(undefined);
+    submittedBundleName = bundle.name;
     // Show pending BEFORE submitting: the live seam settles synchronously, so
     // storing the outcome fires the settlement effect at once — a later
     // `setStep("pending")` would clobber the receipt it just set and wedge the
@@ -213,7 +215,10 @@ export function StartRun(props: {
     const settled = accessor();
     if (settled.kind === "pending") return;
     if (settled.kind === "launched") {
-      props.onStarted(settled.runId);
+      if (submittedBundleName === undefined) {
+        throw new Error("a launched Run must retain its submitted Bundle name");
+      }
+      props.onStarted(settled.runId, submittedBundleName);
       return;
     }
     const problem = settled.problem;

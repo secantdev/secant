@@ -21,7 +21,10 @@ import type {
   TranscriptPageReference,
   TranscriptRead,
 } from "../application/projection-port.js";
-import { followProjectionUpdates } from "./follow.js";
+import {
+  followProjectionUpdates,
+  type TProjectionStreamHealth,
+} from "./follow.js";
 import { submitAndSettle, type SettleOutcome } from "./submit-and-settle.js";
 
 // The view-state the Run Workbench renders, mirroring bundle-view.tsx: it opens
@@ -41,6 +44,7 @@ import { submitAndSettle, type SettleOutcome } from "./submit-and-settle.js";
  *  `applied` (the open snapshot then drops the checkpoint and its offer) or a
  *  refusal Problem. This is the shared submit-and-settle outcome (A23). */
 export type AnswerOutcome = SettleOutcome;
+export type TRunViewFreshness = TProjectionStreamHealth;
 
 /** The durable Run snapshot joined with its explicitly separate ephemeral Turn
  * overlay and replaceable assistant preview. The Port keeps those update kinds
@@ -50,6 +54,8 @@ export interface RunWorkbenchProjection {
   readonly snapshot: Accessor<RunSnapshot>;
   readonly live: Accessor<RunLiveOverlay | undefined>;
   readonly preview: Accessor<string | undefined>;
+  readonly freshness: Accessor<TRunViewFreshness>;
+  reconnect(): void;
 }
 
 export interface RunWorkbenchView {
@@ -133,7 +139,7 @@ export function createLiveRunWorkbenchView(
 ): RunWorkbenchView {
   return {
     openRun: (runId) =>
-      followRunProjection(port.openProjection({ family: "run", runId })),
+      followRunProjection(() => port.openProjection({ family: "run", runId })),
     readResource: (reference) => port.readResource(reference),
     readTranscript: (reference) => port.readTranscript(reference),
     // The one Workbench write: the same submit-and-settle protocol headless `run
@@ -203,17 +209,19 @@ export function createLiveRunWorkbenchView(
  * a settling overlay is cleared once the durable `turn-settled` truth lands, so
  * replaceable text can never remain beside its authoritative content. */
 function followRunProjection(
-  opened: OpenedProjection<RunSnapshot>,
+  open: () => OpenedProjection<RunSnapshot>,
 ): RunWorkbenchProjection {
-  const followed = followProjectionUpdates<RunSnapshot, FollowedRun>(
-    opened,
-    { snapshot: opened.snapshot },
-    reduceRunUpdate,
-  );
+  const followed = followProjectionUpdates<RunSnapshot, FollowedRun>({
+    open,
+    seed: (snapshot) => ({ snapshot }),
+    reduce: reduceRunUpdate,
+  });
   return {
-    snapshot: () => followed().snapshot,
-    live: () => followed().live,
-    preview: () => followed().preview,
+    snapshot: () => followed.state().snapshot,
+    live: () => followed.state().live,
+    preview: () => followed.state().preview,
+    freshness: followed.freshness,
+    reconnect: followed.reconnect,
   };
 }
 

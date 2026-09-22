@@ -65,6 +65,7 @@ type Screen =
   | {
       readonly name: "run-workbench";
       readonly runId: string;
+      readonly knownBundleName?: string;
       readonly from: "start-run" | "previous-runs";
     };
 
@@ -79,6 +80,7 @@ function Route(props: { renderer: RendererPort }) {
   // The Previous Runs list's selected row, kept here so Escape from a Run restores
   // it (like the Bundle list's `selected`).
   const [runSelected, setRunSelected] = createSignal(0);
+  const [deletedRunNotice, setDeletedRunNotice] = createSignal<string>();
   // Narrow the union to the inspect variant so its `selector` reaches the child
   // typed, with no `as` cast: the accessor is undefined for every other screen.
   const inspecting = () => {
@@ -135,15 +137,20 @@ function Route(props: { renderer: RendererPort }) {
       <Match when={screen().name === "start-run"}>
         <StartRun
           onLeave={() => setScreen({ name: "home" })}
-          onStarted={(runId) =>
-            setScreen({ name: "run-workbench", runId, from: "start-run" })
+          onStarted={(runId, bundleName) =>
+            setScreen({
+              name: "run-workbench",
+              runId,
+              knownBundleName: bundleName,
+              from: "start-run",
+            })
           }
         />
       </Match>
       <Match when={watching()}>
         {(active) => {
-          // A Run opened from the Previous Runs list returns there on Escape and
-          // on delete; one from Start a Run returns to Home.
+          // Escape restores the originating screen. Deletion always returns to
+          // Previous Runs, where the durable list can explain the missing subject.
           const back = () =>
             setScreen(
               active().from === "previous-runs"
@@ -153,9 +160,13 @@ function Route(props: { renderer: RendererPort }) {
           return (
             <RunWorkbench
               runId={active().runId}
+              knownBundleName={active().knownBundleName}
               renderer={props.renderer}
               onLeave={back}
-              onDeleted={back}
+              onDeleted={(name) => {
+                setDeletedRunNotice(`${name} was deleted`);
+                setScreen({ name: "previous-runs" });
+              }}
             />
           );
         }}
@@ -164,8 +175,15 @@ function Route(props: { renderer: RendererPort }) {
         <PreviousRuns
           selected={runSelected}
           setSelected={setRunSelected}
-          onOpen={(runId) =>
-            setScreen({ name: "run-workbench", runId, from: "previous-runs" })
+          notice={deletedRunNotice}
+          onDismissNotice={() => setDeletedRunNotice(undefined)}
+          onOpen={(runId, bundleName) =>
+            setScreen({
+              name: "run-workbench",
+              runId,
+              knownBundleName: bundleName,
+              from: "previous-runs",
+            })
           }
           onBack={() => setScreen({ name: "home" })}
         />

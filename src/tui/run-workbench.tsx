@@ -39,6 +39,7 @@ import {
   type Openable,
 } from "./run-inspection.js";
 import { followSettlement } from "./run-control-effects.js";
+import type { TProjectionStreamHealth } from "./follow.js";
 import {
   createRequestControl,
   HarnessRequestControl,
@@ -123,9 +124,10 @@ type Focus = "timeline" | "details" | "checkpoint" | "interactive" | "steer";
 
 export function RunWorkbench(props: {
   runId: string;
+  knownBundleName?: string;
   renderer: RendererPort;
   onLeave: () => void;
-  onDeleted: () => void;
+  onDeleted: (name: string) => void;
 }) {
   const { theme } = useTheme();
   const exit = useExit();
@@ -136,6 +138,7 @@ export function RunWorkbench(props: {
   const snapshot = opened.snapshot;
   const live = opened.live;
   const preview = opened.preview;
+  const freshness = opened.freshness;
 
   const [dims, setDims] = createSignal(props.renderer.size());
   onCleanup(
@@ -146,10 +149,23 @@ export function RunWorkbench(props: {
     const result = snapshot().result;
     return result.found ? result.run : undefined;
   };
+  const viewCurrent = () => freshness().kind === "current";
+  const actionableRun = () => (viewCurrent() ? run() : undefined);
   const notFound = (): Problem | undefined => {
     const result = snapshot().result;
     return result.found ? undefined : result.problem;
   };
+  let observedRunName = props.knownBundleName;
+  createEffect(() => {
+    const result = snapshot().result;
+    if (result.found) {
+      observedRunName = result.run.bundle.name;
+      return;
+    }
+    if (freshness().kind === "current" && observedRunName !== undefined) {
+      props.onDeleted(observedRunName);
+    }
+  });
   const blockedBasis = () => {
     const current = run();
     if ((live()?.outstanding.length ?? 0) > 0)
@@ -166,7 +182,7 @@ export function RunWorkbench(props: {
   };
 
   const answerOffer = createMemo<AnswerHumanGateOffer | undefined>(() =>
-    run()?.actionOffers.find(
+    actionableRun()?.actionOffers.find(
       (offer): offer is AnswerHumanGateOffer =>
         offer.action === "answer-human-gate",
     ),
@@ -182,11 +198,11 @@ export function RunWorkbench(props: {
   // gate below. The controllers read the same live overlay / durable snapshot the
   // Workbench already follows and dispatch over run-view's write seams.
   const requestControl = createRequestControl({
-    live,
+    live: () => (viewCurrent() ? live() : undefined),
     answerRequest: (offer, decision) => view.answerRequest(offer, decision),
   });
   const gateControl = createGateControl({
-    run,
+    run: actionableRun,
     answerOffer,
     answerText: (gate, text) => view.answerText(gate, text),
     onLeave: props.onLeave,
@@ -216,7 +232,7 @@ export function RunWorkbench(props: {
   // Workbench never re-derives it. `actionRefusal` shows a refused dispatch;
   // `pending` arms the confirming keypress a takeover, cancel, or delete requires.
   const offers = createMemo(() => {
-    const list = run()?.actionOffers ?? [];
+    const list = actionableRun()?.actionOffers ?? [];
     return {
       resume: list.find(
         (offer): offer is ResumeRunOffer => offer.action === "resume-run",
@@ -330,7 +346,7 @@ export function RunWorkbench(props: {
   // and `end` offers are present only at a Turn boundary (no live Turn), so they gate
   // whether Enter dispatches and whether End Step is armable.
   const interactiveStepActive = () => {
-    const current = run();
+    const current = actionableRun();
     // `blocked` is the boundary (between Turns); `running` is a live human Turn (the
     // Run runs under `running` while a Turn is in flight, #122). Focus stays on the
     // input across both. Guarded on the Step kind, so ordinary agent-step execution
@@ -343,7 +359,7 @@ export function RunWorkbench(props: {
     );
   };
   const interactiveOffers = createMemo(() => {
-    const list = run()?.actionOffers ?? [];
+    const list = actionableRun()?.actionOffers ?? [];
     return {
       send: list.find(
         (offer): offer is SendInteractiveTurnOffer =>
@@ -405,6 +421,18 @@ export function RunWorkbench(props: {
   const steerPending = () => {
     const accessor = steerOutcome();
     return accessor !== undefined && accessor().kind === "pending";
+  };
+  const pendingOperation = () => {
+    const flight = actionFlight();
+    if (flight !== undefined && flight.outcome().kind === "pending") {
+      return flight.op;
+    }
+    if (answerOutcome()?.().kind === "pending") return "answer";
+    if (interactivePending()) return "interactive Turn";
+    if (steerPending()) return "steer";
+    if (requestControl.pending()) return "request answer";
+    if (gateControl.pending()) return "gate answer";
+    return undefined;
   };
   // The Steer input owns the bottom region only when actually composing and the offer
   // is still available; a request/gate modal (modalControl) always takes precedence.
@@ -523,7 +551,7 @@ export function RunWorkbench(props: {
   // free-text gate control, the Review checkpoint interaction, the interactive-agent
   // input, or the plain footer — each replacing the passive footer while its offer is
   // live (#92, #121, #122). A Run rests at only one, so they never render together.
-  const bottomHeight = () =>
+  const interactionHeight = () =>
     requestControl.active() !== undefined
       ? REQUEST_HEIGHT
       : gateControl.active() !== undefined
@@ -535,6 +563,9 @@ export function RunWorkbench(props: {
             : steerActive()
               ? STEER_HEIGHT
               : 1;
+  const bottomHeight = () =>
+    interactionHeight() +
+    (!viewCurrent() && pendingOperation() !== undefined ? 1 : 0);
   const chrome = () =>
     headerRows() +
     (hasGateLine() ? 1 : 0) +
@@ -569,7 +600,6 @@ export function RunWorkbench(props: {
     const accessor = answerOutcome();
     return accessor !== undefined && accessor().kind === "pending";
   };
-
   const dispatchAnswer = (answer: "continue" | "stop") => {
     if (answerPending()) return;
     const checkpoint = run()?.checkpoint;
@@ -614,7 +644,10 @@ export function RunWorkbench(props: {
       setActionFlight(undefined);
     } else {
       setActionFlight(undefined);
-      if (flight.op === "delete") props.onDeleted();
+      if (flight.op === "delete") {
+        const name = run()?.bundle.name;
+        if (name !== undefined) props.onDeleted(name);
+      }
     }
   });
 
@@ -804,6 +837,10 @@ export function RunWorkbench(props: {
     if (name === "t" && !typing && !steerTyping) {
       const target = transcriptTarget();
       if (target !== undefined) inspection.open(target);
+      return;
+    }
+    if (name === "r" && freshness().kind === "disconnected") {
+      opened.reconnect();
       return;
     }
     // A pending takeover/Cancel/Delete/End-Step waits for its confirming keypress:
@@ -1006,6 +1043,8 @@ export function RunWorkbench(props: {
           {(current) => (
             <Workbench
               run={current}
+              freshness={freshness}
+              pendingOperation={pendingOperation}
               compactHeader={compactHeader}
               detailsShown={detailsShown}
               detailsHeight={DETAILS_HEIGHT}
@@ -1107,8 +1146,14 @@ function livenessText(run: RunView): string {
   }
 }
 
+function formatConfirmedAt(confirmedAt: string): string {
+  return confirmedAt.replace("T", " ").replace(".000Z", "Z");
+}
+
 function Workbench(props: {
   run: Accessor<RunView>;
+  freshness: Accessor<TProjectionStreamHealth>;
+  pendingOperation: Accessor<string | undefined>;
   compactHeader: Accessor<boolean>;
   detailsShown: Accessor<boolean>;
   detailsHeight: number;
@@ -1173,13 +1218,21 @@ function Workbench(props: {
     const badge =
       !activity.atLive && activity.newActivity > 0
         ? `  ▼ ${activity.newActivity} new · end to jump`
-        : activity.atLive
-          ? "  (live)"
-          : "";
+        : "";
     return `${marker}Timeline${badge}`;
   };
 
   const footer = () => {
+    const health = props.freshness();
+    if (health.kind === "disconnected") {
+      return `View freshness · not Run state · disconnected · last confirmed ${formatConfirmedAt(health.lastConfirmedAt)} · r Reconnect · esc back · q quit`;
+    }
+    if (health.kind === "loading") {
+      return "View freshness · not Run state · loading · controls unavailable · esc back · q quit";
+    }
+    if (health.kind === "catching-up") {
+      return "View freshness · not Run state · catching up · controls unavailable · esc back · q quit";
+    }
     const transcript = props.transcriptAvailable() ? " · t transcript" : "";
     return props.focus() === "details"
       ? `↑/↓ select · enter open${transcript} · tab timeline · esc back · q quit`
@@ -1194,6 +1247,18 @@ function Workbench(props: {
     props.blockedBasis() === undefined
       ? displayState()
       : `${displayState()} · ${props.blockedBasis()}`;
+  const freshnessToken = () => {
+    switch (props.freshness().kind) {
+      case "current":
+        return "View current";
+      case "loading":
+        return "View loading";
+      case "disconnected":
+        return "View disconnected";
+      case "catching-up":
+        return "View catching up";
+    }
+  };
   const selectedHarnessLine = () => {
     const selected = run().selectedHarness;
     return selected === undefined ? undefined : `Selected · ${selected}`;
@@ -1220,14 +1285,17 @@ function Workbench(props: {
           fallback={
             <text fg={stateColor(theme, run().state)}>
               {clip(
-                `Run ${run().runId} — ${stateWithBasis()} · ${livenessText(run())}`,
+                `Run ${run().runId} — ${stateWithBasis()} · ${freshnessToken()} · ${livenessText(run())}`,
                 w(),
               )}
             </text>
           }
         >
           <text fg={theme.text} attributes={TextAttributes.BOLD}>
-            {clip(`${run().bundle.name} — ${stateWithBasis()}`, w())}
+            {clip(
+              `${run().bundle.name} — ${stateWithBasis()} · ${freshnessToken()}`,
+              w(),
+            )}
           </text>
           <text fg={theme.textMuted}>
             {clip(
@@ -1427,6 +1495,20 @@ function Workbench(props: {
           selected={props.selected}
           theme={theme}
         />
+      </Show>
+
+      <Show
+        when={
+          props.freshness().kind !== "current"
+            ? props.pendingOperation()
+            : undefined
+        }
+      >
+        {(operation) => (
+          <text fg={theme.warning} flexShrink={0}>
+            {clip(`Operation pending · ${operation()}`, w())}
+          </text>
+        )}
       </Show>
 
       {/* The bottom region: one control replaces the passive footer input while its

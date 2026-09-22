@@ -80,6 +80,12 @@ function runViewOf(run: RunView): RunWorkbenchView {
       snapshot,
       live: () => undefined,
       preview: () => undefined,
+      freshness: () => ({
+        kind: "current",
+        catchUp: "fresh",
+        lastConfirmedAt: "2026-09-22T10:30:00.000Z",
+      }),
+      reconnect() {},
     }),
     readResource: () => ({
       found: false,
@@ -107,6 +113,94 @@ function runViewOf(run: RunView): RunWorkbenchView {
     steer: () => () => ({ kind: "applied" }),
     answerText: () => () => ({ kind: "applied" }),
     answerRequest: () => () => ({ kind: "applied" }),
+  };
+}
+
+function disappearingRunView(run: RunView): {
+  readonly view: RunWorkbenchView;
+  deleted(): void;
+} {
+  const [snapshot, setSnapshot] = createSignal<RunSnapshot>({
+    family: "run",
+    runId: run.runId,
+    result: { found: true, run },
+  });
+  const base = runViewOf(run);
+  return {
+    view: {
+      openRun: () => ({
+        snapshot,
+        live: () => undefined,
+        preview: () => undefined,
+        freshness: () => ({
+          kind: "current",
+          catchUp: "rebased",
+          lastConfirmedAt: "2026-09-22T10:30:00.000Z",
+        }),
+        reconnect() {},
+      }),
+      readResource: base.readResource,
+      readTranscript: base.readTranscript,
+      answer: base.answer,
+      sendInteractiveTurn: base.sendInteractiveTurn,
+      endInteractiveStep: base.endInteractiveStep,
+      steer: base.steer,
+      answerText: base.answerText,
+      answerRequest: base.answerRequest,
+    },
+    deleted() {
+      setSnapshot({
+        family: "run",
+        runId: run.runId,
+        result: {
+          found: false,
+          problem: {
+            code: "run-not-found",
+            explanation: `Run ${run.runId} no longer exists.`,
+            remediation: "Return to Previous Runs.",
+            possibleEffects: "none",
+          },
+        },
+      });
+    },
+  };
+}
+
+function missingRunView(run: RunView): RunWorkbenchView {
+  const base = runViewOf(run);
+  const [snapshot] = createSignal<RunSnapshot>({
+    family: "run",
+    runId: run.runId,
+    result: {
+      found: false,
+      problem: {
+        code: "run-not-found",
+        explanation: `Run ${run.runId} no longer exists.`,
+        remediation: "Return to Previous Runs.",
+        possibleEffects: "none",
+      },
+    },
+  });
+  return {
+    openRun: () => ({
+      snapshot,
+      live: () => undefined,
+      preview: () => undefined,
+      freshness: () => ({
+        kind: "current",
+        catchUp: "fresh",
+        lastConfirmedAt: "2026-09-22T10:30:00.000Z",
+      }),
+      reconnect() {},
+    }),
+    readResource: base.readResource,
+    readTranscript: base.readTranscript,
+    answer: base.answer,
+    sendInteractiveTurn: base.sendInteractiveTurn,
+    endInteractiveStep: base.endInteractiveStep,
+    steer: base.steer,
+    answerText: base.answerText,
+    answerRequest: base.answerRequest,
   };
 }
 
@@ -209,6 +303,7 @@ interface MountOptions {
   resumable?: RunListRow[];
   page?: number;
   run?: RunView;
+  runView?: RunWorkbenchView;
   onRemove?: (runId: string) => void;
   width?: number;
   height?: number;
@@ -225,7 +320,7 @@ async function mountHome(options: MountOptions = {}) {
         view={approvedWorkspace()}
         bundles={noBundles()}
         launch={noLaunch()}
-        run={runViewOf(options.run ?? runOf())}
+        run={options.runView ?? runViewOf(options.run ?? runOf())}
         runList={runListView(
           options.all ?? [],
           options.resumable ?? [],
@@ -510,4 +605,36 @@ test("delete from the Workbench returns to the list without that Run", async () 
   const frame = t.captureCharFrame();
   assert.doesNotMatch(frame, /run-doomed/); // the Run is gone from the list
   assert.match(frame, /run-a/); // the other Run remains
+});
+
+test("a Run deleted outside the Workbench returns to Previous Runs with a dismissible notice", async () => {
+  const run = runOf({ runId: "run-doomed" });
+  const disappearing = disappearingRunView(run);
+  const { t } = await openList({
+    all: [row({ runId: run.runId, bundleName: run.bundle.name })],
+    runView: disappearing.view,
+  });
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("Timeline"));
+
+  disappearing.deleted();
+  await t.waitForFrame((frame) => frame.includes("was deleted"));
+  assert.match(t.captureCharFrame(), /Alpha Flow was deleted/);
+
+  t.mockInput.pressKey("d");
+  await t.renderOnce();
+  assert.doesNotMatch(t.captureCharFrame(), /was deleted/);
+});
+
+test("a Run deleted between list selection and initial open uses the row name in its notice", async () => {
+  const run = runOf({ runId: "run-doomed" });
+  const { t } = await openList({
+    all: [row({ runId: run.runId, bundleName: run.bundle.name })],
+    runView: missingRunView(run),
+  });
+
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => frame.includes("was deleted"));
+  assert.match(t.captureCharFrame(), /Alpha Flow was deleted/);
+  assert.doesNotMatch(t.captureCharFrame(), /Run run-doomed not found/);
 });

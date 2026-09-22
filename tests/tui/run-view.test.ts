@@ -2,15 +2,18 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createRoot } from "solid-js";
 import type {
+  OperationSnapshot,
   ProjectionPort,
   ProjectionSelector,
   ProjectionUpdate,
+  RunGateReference,
   RunLiveOverlay,
   RunSnapshot,
   RunView,
 } from "../../src/application/projection-port.js";
 import {
   createLiveRunWorkbenchView,
+  type TRunViewFreshness,
   type RunWorkbenchProjection,
 } from "../../src/tui/tui.js";
 
@@ -98,6 +101,10 @@ async function flushUpdates(): Promise<void> {
   await Promise.resolve();
 }
 
+function healthKind(projection: RunWorkbenchProjection): string {
+  return projection.freshness().kind;
+}
+
 /** Open a live Run projection over a hand-driven update queue, so a test can push each
  *  update lane (durable, live, preview, closed) and read the joined view. */
 function openLiveProjection(initial: RunSnapshot): {
@@ -106,7 +113,12 @@ function openLiveProjection(initial: RunSnapshot): {
   dispose: () => void;
 } {
   const updates = new UpdateQueue<ProjectionUpdate<RunSnapshot>>();
-  const opened = { snapshot: initial, updates, close() {} };
+  const opened = {
+    snapshot: initial,
+    catchUp: "fresh" as const,
+    updates,
+    close() {},
+  };
   const port = {
     openProjection: () => opened,
     submit() {
@@ -167,6 +179,145 @@ test("a closed update clears the live overlay and preview so a lost Turn leaves 
   assert.equal(projection.preview(), undefined);
   dispose();
   updates.end();
+});
+
+test("the Run follow seam reports loss and reopens through loading and catching-up to current", async () => {
+  const first = new UpdateQueue<ProjectionUpdate<RunSnapshot>>();
+  const second = new UpdateQueue<ProjectionUpdate<RunSnapshot>>();
+  const opened = [
+    {
+      snapshot: snapshotOf(runOf()),
+      catchUp: "fresh" as const,
+      updates: first,
+      close() {},
+    },
+    {
+      snapshot: snapshotOf(runOf({ state: "halted" })),
+      catchUp: "rebased" as const,
+      updates: second,
+      close() {},
+    },
+  ];
+  let opens = 0;
+  const port = {
+    openProjection() {
+      const projection = opened[opens];
+      opens += 1;
+      if (projection === undefined) throw new Error("unexpected third open");
+      return projection;
+    },
+    submit() {
+      throw new Error("submit is not used");
+    },
+    readResource() {
+      throw new Error("readResource is not used");
+    },
+  } as unknown as ProjectionPort;
+  const observed: TRunViewFreshness[] = [];
+  let projection!: RunWorkbenchProjection;
+  const dispose = createRoot((dispose) => {
+    projection = createLiveRunWorkbenchView(port).openRun("run-1");
+    return dispose;
+  });
+
+  assert.equal(healthKind(projection), "current");
+  const lastConfirmedAt = projection.freshness().lastConfirmedAt;
+  first.push({ kind: "closed", reason: "observer-lagged" });
+  await flushUpdates();
+  assert.deepEqual(projection.freshness(), {
+    kind: "disconnected",
+    reason: "observer-lagged",
+    lastConfirmedAt,
+  });
+
+  projection.reconnect();
+  observed.push(projection.freshness());
+  await Promise.resolve();
+  observed.push(projection.freshness());
+  await Promise.resolve();
+  observed.push(projection.freshness());
+  assert.deepEqual(
+    observed.map((health) => health.kind),
+    ["loading", "catching-up", "current"],
+  );
+  const result = projection.snapshot().result;
+  assert.equal(result.found, true);
+  if (result.found) {
+    assert.equal(result.run.state, "halted");
+  }
+  assert.equal(opens, 2);
+
+  dispose();
+  first.end();
+  second.end();
+});
+
+test("a pending Operation receipt survives stream loss and settles from the reopened Projection", async () => {
+  const first = new UpdateQueue<ProjectionUpdate<OperationSnapshot>>();
+  const second = new UpdateQueue<ProjectionUpdate<OperationSnapshot>>();
+  const third = new UpdateQueue<ProjectionUpdate<OperationSnapshot>>();
+  const pending: OperationSnapshot = {
+    family: "operation",
+    operationId: "op-1",
+    outcome: { status: "pending" },
+  };
+  const streams = [first, second, third];
+  let opens = 0;
+  const port = {
+    submit() {
+      return { admitted: true, operationId: "op-1" } as const;
+    },
+    openProjection(selector: ProjectionSelector) {
+      assert.deepEqual(selector, {
+        family: "operation",
+        operationId: "op-1",
+      });
+      const updates = streams[opens];
+      opens += 1;
+      if (updates === undefined) throw new Error("unexpected third open");
+      return {
+        snapshot: pending,
+        catchUp: "fresh" as const,
+        updates,
+        close() {},
+      };
+    },
+    readResource() {
+      throw new Error("readResource is not used");
+    },
+  } as unknown as ProjectionPort;
+  const gate: RunGateReference = {
+    runId: "run-1",
+    stepId: "review",
+    attemptId: "attempt-1",
+    shape: "approve-reject",
+  };
+
+  const outcome = createLiveRunWorkbenchView(port).answer(gate, "continue");
+  assert.equal(outcome().kind, "pending");
+  first.push({ kind: "closed", reason: "temporarily-unavailable" });
+  await flushUpdates();
+  assert.equal(outcome().kind, "pending");
+  assert.equal(opens, 2);
+
+  second.push({ kind: "closed", reason: "observer-lagged" });
+  await flushUpdates();
+  assert.equal(outcome().kind, "pending");
+  assert.equal(opens, 3);
+
+  third.push({
+    kind: "durable",
+    snapshot: {
+      family: "operation",
+      operationId: "op-1",
+      outcome: { status: "applied" },
+    },
+  });
+  await flushUpdates();
+  assert.equal(outcome().kind, "applied");
+  first.end();
+  second.end();
+  third.end();
 });
 
 test("a durable update whose liveness leaves live-here drops the live overlay (A8) — fails at HEAD", async () => {

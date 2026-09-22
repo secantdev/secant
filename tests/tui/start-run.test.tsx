@@ -219,6 +219,12 @@ function succeedingRunView(): RunWorkbenchView {
         snapshot,
         live: () => undefined,
         preview: () => undefined,
+        freshness: () => ({
+          kind: "current",
+          catchUp: "fresh",
+          lastConfirmedAt: "2026-09-22T10:30:00.000Z",
+        }),
+        reconnect() {},
       };
     },
     readResource() {

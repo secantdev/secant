@@ -46,7 +46,7 @@ export function useWorkspaceView(): WorkspaceView {
 export function createLiveWorkspaceView(port: ProjectionPort): WorkspaceView {
   // Follow the one `workspace` Projection through the shared helper (A22) so
   // approval flips the screen from the dialog to Home.
-  const snapshot = followProjection(
+  const snapshot = followProjection(() =>
     port.openProjection({ family: "workspace" }),
   );
 

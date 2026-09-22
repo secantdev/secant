@@ -28,8 +28,9 @@ export type SettleOutcome =
  * delete, a cancel of a Run not live in this process) is already settled on the
  * opened snapshot; an async one (launch/resume/answer driving execution, or a
  * cancel-as-abort of a live Run) settles on the operation stream's first durable
- * update — no sleep, no poll. Call from an event handler; the Projection closes
- * itself once settled, so no reactive owner is required.
+ * update — no sleep, no poll. Observer loss reopens the same Operation receipt;
+ * the pending outcome never disappears. Call from an event handler; the
+ * Projection closes itself once settled, so no reactive owner is required.
  */
 export function submitAndSettle(
   port: ProjectionPort,
@@ -43,10 +44,6 @@ export function submitAndSettle(
     setOutcome({ kind: "refused", problem: admission.problem });
     return outcome;
   }
-  const opened = port.openProjection({
-    family: "operation",
-    operationId: admission.operationId,
-  });
   const settle = (op: OperationOutcome): boolean => {
     if (op.status === "applied") {
       setOutcome({ kind: "applied" });
@@ -58,19 +55,31 @@ export function submitAndSettle(
     }
     return false;
   };
-  if (settle(opened.snapshot.outcome)) {
-    opened.close();
-    return outcome;
-  }
   void (async () => {
-    for await (const update of opened.updates) {
-      if (update.kind === "durable" && settle(update.snapshot.outcome)) break;
-      // A `closed` update ends the follow with the outcome still `pending`: the
-      // observer was lost before the Operation settled. Re-open on loss is a later
-      // slice (matches the follow-snapshot seams), not M2.
-      if (update.kind === "closed") break;
+    let settled = false;
+    while (!settled) {
+      const opened = port.openProjection({
+        family: "operation",
+        operationId: admission.operationId,
+      });
+      if (settle(opened.snapshot.outcome)) {
+        opened.close();
+        break;
+      }
+      let lost = false;
+      for await (const update of opened.updates) {
+        if (update.kind === "durable" && settle(update.snapshot.outcome)) {
+          settled = true;
+          break;
+        }
+        if (update.kind === "closed") {
+          lost = true;
+          break;
+        }
+      }
+      opened.close();
+      if (!lost) break;
     }
-    opened.close();
   })();
   return outcome;
 }

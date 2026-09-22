@@ -84,6 +84,11 @@ export interface LaunchRunInput {
    * routing. Application validates the semantic id against the closed registry;
    * callers pass a string so unknown external input becomes a typed Problem. */
   readonly harness?: string;
+  /** An optional model to request for an Agent-bearing routing, pinned immutably on
+   *  the Run and threaded into prepare (#187). Irrelevant for a Command-only routing
+   *  (refused as such). A string so an unknown value becomes a typed prepare failure,
+   *  never a substitution; an omitted model means the Harness default. */
+  readonly requestedModel?: string;
   /** The exact installed digest the caller acknowledges trusting. Required only
    *  when the installed digest is not yet trusted (ADR 0021). */
   readonly trustDigest?: string;
@@ -714,6 +719,11 @@ export interface RunView {
   readonly sessions?: readonly RunSessionView[];
   /** The effective model the latest Agent-step Attempt ran under (#116). */
   readonly effectiveModel?: string;
+  /** The immutable model requested at launch, threaded into prepare (#187). Sits
+   *  beside `effectiveModel` so the requested and observed models stay distinct
+   *  facts. Additive to the frozen `--json`; absent when no model was requested and
+   *  for a Command-only Run. */
+  readonly requestedModel?: string;
   /** The immutable semantic Harness selected for this Run before its first
    *  Attempt. Additive to the frozen `--json`; absent for Command-only Runs. */
   readonly selectedHarness?: HarnessChoice["id"];

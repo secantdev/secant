@@ -73,6 +73,10 @@ export interface RunRecord {
   /** The immutable semantic Harness selected for this Run. Absent for a
    *  Command-only Run and for a pre-M4 Run not yet upgraded. */
   readonly selectedHarness?: SelectedHarnessId;
+  /** The immutable model requested at launch, threaded into prepare (#187). Absent
+   *  when no model was requested (the Harness default applies) and for a
+   *  Command-only Run. Free text; the Store never validates it to a closed set. */
+  readonly requestedModel?: string;
   readonly state: string; // canonical Run state, including a durable `blocked` pause
   readonly createdAt: string; // ISO 8601
 }
@@ -105,6 +109,9 @@ export interface CreateRunRequest {
   readonly launch: unknown; // JSON-serialisable; stored opaque
   /** Required by Application for an Agent-bearing Run; omitted for Command-only. */
   readonly selectedHarness?: SelectedHarnessId;
+  /** The model requested at launch, pinned immutably; omitted when none was
+   *  requested and for a Command-only Run (#187). */
+  readonly requestedModel?: string;
   readonly at: Date;
 }
 
@@ -967,6 +974,9 @@ export function openRunGroup(
           launch: request.launch,
           ...(request.selectedHarness !== undefined
             ? { selectedHarness: request.selectedHarness }
+            : {}),
+          ...(request.requestedModel !== undefined
+            ? { requestedModel: request.requestedModel }
             : {}),
           state: "created",
           createdAt: request.at.toISOString(),

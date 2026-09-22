@@ -112,6 +112,33 @@ test("[both-client-harness-selection] run launch rejects --harness for a Command
   assert.equal(h.runGroup?.listRuns().length, 0);
 });
 
+test("[requested-model-durability] run launch rejects --model for a Command-only Bundle", async (t) => {
+  const h = await harness(t);
+  const { id, digest } = await h.install();
+  h.approve();
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "launch", id, "--trust", digest, "--model", "requested-opus"],
+      h.io,
+    ),
+    1,
+  );
+  assert.match(h.stderr(), /requested-model-irrelevant/);
+  assert.equal(h.runGroup?.listRuns().length, 0);
+});
+
+test("run resume has no --model option", async (t) => {
+  const h = await harness(t);
+  const code = await runHeadless(
+    h.clients,
+    ["run", "resume", "some-run", "--model", "opus"],
+    h.io,
+  );
+  assert.notEqual(code, 0);
+  assert.match(h.stderr(), /unknown-option/);
+});
+
 test("run launch on an uninstalled Bundle exits non-zero with a Problem", async (t) => {
   const h = await harness(t);
   h.approve();

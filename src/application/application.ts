@@ -1231,6 +1231,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         digest: entry.digest,
         supportsInteractiveTurns: deps.supportsInteractiveTurns ?? false,
         harnessSelection: input.harness,
+        requestedModel: input.requestedModel,
         harnessRegistry: deps.harnessRegistry ?? [],
       },
       process,
@@ -1273,6 +1274,9 @@ export function createApplication(deps: ApplicationDependencies): Application {
       bundleSnapshotDigest: entry.digest,
       launch: input.launchInputs,
       selectedHarness: pre.selectedHarness,
+      ...(pre.requestedModel !== undefined
+        ? { requestedModel: pre.requestedModel }
+        : {}),
       at: new Date(),
     });
     if (needsGrant) {

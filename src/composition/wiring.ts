@@ -227,6 +227,11 @@ function makeRunExecution(params: TMakeRunExecutionParams): RunExecution {
     const facts = harnessFacts(catalog, digest);
     const prepared = await adapter.prepare({
       workspace: owner.record.workspacePath,
+      // The immutable requested model reaches prepare identically on launch and on
+      // resume; absent means the Harness default, never a substitute (#187, ADR 0022).
+      ...(owner.record.requestedModel !== undefined
+        ? { requestedModel: owner.record.requestedModel }
+        : {}),
     });
     if (!prepared.ok) {
       const harnessFailure = harnessRegistry.preparationFailure(
@@ -275,6 +280,10 @@ function makePrepareRunInteractiveStep(
     const adapter = harnessRegistry.adapter(selectedHarness);
     const prepared = await adapter.prepare({
       workspace: owner.record.workspacePath,
+      // Resume reuses the durable requested model with no fallback (#187).
+      ...(owner.record.requestedModel !== undefined
+        ? { requestedModel: owner.record.requestedModel }
+        : {}),
     });
     if (!prepared.ok) {
       return {

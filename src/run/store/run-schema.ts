@@ -13,6 +13,11 @@ export const runRecord = sqliteTable("run_record", {
   // Nullable only for Command-only Runs and Runs created before M4. Agent-bearing
   // Runs created from M4 onward pin their semantic Harness at creation.
   selected_harness: text("selected_harness"),
+  // The immutable requested model pinned at launch, applied at each Adapter's native
+  // point through prepare (#187). Free text, never validated to a closed set here.
+  // Null when the launch requested no model (the Harness default is used, never a
+  // substitute) and for a Command-only Run, which prepares no Harness.
+  requested_model: text("requested_model"),
   state: text("state").notNull(),
   created_at: text("created_at").notNull(),
 });

@@ -1,0 +1,1 @@
+ALTER TABLE `run_record` ADD `requested_model` text;

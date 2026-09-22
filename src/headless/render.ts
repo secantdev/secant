@@ -137,6 +137,11 @@ export function renderRun(run: RunView): string {
           `Observed version: ${run.harness.executableVersion}`,
         ]
       : []),
+    // The immutable model requested at launch (#187), beside the observed effective
+    // model so the two stay distinct. Omitted when no model was requested.
+    ...(run.requestedModel !== undefined
+      ? [`Requested model: ${run.requestedModel}`]
+      : []),
     // The effective model the latest Agent-step Attempt ran under (#116), from the
     // Harness init message. Omitted for a Command-only Run.
     ...(run.effectiveModel !== undefined

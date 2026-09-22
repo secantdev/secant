@@ -97,6 +97,7 @@ const runRecordRow = z.object({
   bundle_snapshot_digest: z.string(),
   launch: z.string(),
   selected_harness: selectedHarnessId.nullable(),
+  requested_model: z.string().nullable(),
   state: z.string(),
   created_at: z.string(),
 });
@@ -205,6 +206,9 @@ function toRunRecord(row: z.infer<typeof runRecordRow>): RunRecord {
     ...(row.selected_harness !== null
       ? { selectedHarness: row.selected_harness }
       : {}),
+    ...(row.requested_model !== null
+      ? { requestedModel: row.requested_model }
+      : {}),
     state: row.state,
     createdAt: row.created_at,
   };
@@ -269,6 +273,7 @@ export function stageRunStore(params: TStageRunStoreParams): void {
           bundle_snapshot_digest: record.bundleSnapshotDigest,
           launch: JSON.stringify(record.launch ?? null),
           selected_harness: record.selectedHarness ?? null,
+          requested_model: record.requestedModel ?? null,
           state: record.state,
           created_at: record.createdAt,
         })

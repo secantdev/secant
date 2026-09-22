@@ -131,6 +131,7 @@ function runResult(
   const facts = derived.facts;
   const trackedState = context.state ?? record.state;
   const selectedHarness = record.selectedHarness;
+  const requestedModel = record.requestedModel;
   // Legality of cancel/delete is decided here, inside Secant (#87): an owned Run
   // can be cancelled; an unowned resting or terminal Run can be deleted. Read from the coordination record, which
   // is the same whether the Run is live in this process or another.
@@ -302,6 +303,7 @@ function runResult(
             }
           : {}),
         ...(effectiveModel !== undefined ? { effectiveModel } : {}),
+        ...(requestedModel !== undefined ? { requestedModel } : {}),
         ...(selectedHarness !== undefined ? { selectedHarness } : {}),
         ...(harnessIdentity !== undefined
           ? {

@@ -54,6 +54,10 @@ export interface PreflightRequest {
   /** The caller's semantic Harness selection. Required only when the routing's
    * Step kinds declare Harness capability needs. */
   readonly harnessSelection?: string;
+  /** The caller's requested model (#187). Accepted only when the routing needs a
+   *  Harness; refused as irrelevant for a Command-only routing. Free text, not
+   *  validated to a closed set here — an unknown model fails later at prepare. */
+  readonly requestedModel?: string;
   /** Closed registry entries with native state already normalized away. */
   readonly harnessRegistry: readonly ApplicationHarnessRegistration[];
 }
@@ -62,6 +66,7 @@ export type PreflightResult =
   | {
       readonly ok: true;
       readonly selectedHarness?: HarnessChoice["id"];
+      readonly requestedModel?: string;
     }
   | { readonly problem: Problem };
 
@@ -106,6 +111,11 @@ export function preflight(
   if (capabilityNeeds.size === 0) {
     if (request.harnessSelection !== undefined) {
       return { problem: harnessSelectionIrrelevant(request.harnessSelection) };
+    }
+    // A Command-only routing prepares no Harness, so a requested model would never
+    // be applied: refuse it as irrelevant rather than pin a value nothing reads (#187).
+    if (request.requestedModel !== undefined) {
+      return { problem: requestedModelIrrelevant(request.requestedModel) };
     }
   } else {
     const selected = selectHarness(request);
@@ -209,8 +219,14 @@ function finishPreflight(params: TFinishPreflightParams): PreflightResult {
     }
   }
 
-  if (selectedHarness === undefined) return { ok: true };
-  return { ok: true, selectedHarness };
+  // The requested model rides through on the Agent-bearing path (a Command-only
+  // routing refused a present model above, so it is undefined here) (#187).
+  const requestedModel = request.requestedModel;
+  return {
+    ok: true,
+    ...(selectedHarness !== undefined ? { selectedHarness } : {}),
+    ...(requestedModel !== undefined ? { requestedModel } : {}),
+  };
 }
 
 type TSelectedHarness =
@@ -410,6 +426,16 @@ function harnessSelectionIrrelevant(selection: string): Problem {
     possibleEffects: "none",
     correction: "harness-selection",
     details: { harness: selection },
+  };
+}
+
+function requestedModelIrrelevant(model: string): Problem {
+  return {
+    code: "requested-model-irrelevant",
+    explanation: `This Bundle is Command-only, so model "${model}" would never be used.`,
+    remediation: "Launch the Bundle again without a model.",
+    possibleEffects: "none",
+    details: { model },
   };
 }
 

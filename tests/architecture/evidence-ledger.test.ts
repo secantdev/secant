@@ -12,6 +12,9 @@ const PROCESS_FREE_MARKER_EXCEPTIONS = new Set([
   // Production composition is present, but the fake Harness scenario reaches no
   // Command, Git probe, or recorded Harness child.
   "tests/tui/live-run-workbench.test.tsx",
+  // Born process-free (#187): wireApplication runs against the fake Process, fake
+  // Git, and fake Harness Adapter, so no real child is ever reached.
+  "tests/application/requested-model.test.ts",
 ]);
 
 const SUBPROCESS_SOURCE_PATTERNS = [

@@ -72,6 +72,10 @@ export function registerRunCommands(
     .option(
       "--harness <id>",
       "select claude-code or codex for an Agent-bearing Bundle",
+    )
+    .option(
+      "--model <id>",
+      "request a model for an Agent-bearing Bundle (Command-only Bundles reject it)",
     );
   addHarnessRequestsOption(launch)
     .option("--json", "print the Run snapshot as JSON")
@@ -82,6 +86,7 @@ export function registerRunCommands(
           trust?: string;
           input: string[];
           harness?: string;
+          model?: string;
           harnessRequests?: string;
           json?: boolean;
         },
@@ -112,6 +117,7 @@ export function registerRunCommands(
               trust: options.trust,
               inputs: inputs.values,
               harness: options.harness,
+              model: options.model,
               harnessRequests: policy.policy,
             }),
           ),
@@ -522,6 +528,7 @@ interface TLaunchRunParams {
   readonly trust?: string;
   readonly inputs: Record<string, string>;
   readonly harness?: string;
+  readonly model?: string;
   readonly harnessRequests: HarnessRequestPolicy;
 }
 
@@ -536,6 +543,7 @@ async function launchRun(params: TLaunchRunParams): Promise<number> {
       launchInputs: inputs,
       trustDigest: params.trust,
       harness: params.harness,
+      requestedModel: params.model,
     },
   });
   if (!admission.admitted) return fail(io, json, admission.problem);

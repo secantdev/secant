@@ -9,6 +9,7 @@ import runHarnessIdentity from "./run/20260917061423_easy_iceman/migration.sql" 
 import runOwnership from "./run/20260918034612_curvy_piledriver/migration.sql" with { type: "text" };
 import runSteerCapability from "./run/20260918050415_sudden_black_tom/migration.sql" with { type: "text" };
 import runSelectedHarness from "./run/20260918104828_ancient_rocket_racer/migration.sql" with { type: "text" };
+import runRequestedModel from "./run/20260922090555_superb_lily_hollister/migration.sql" with { type: "text" };
 import type { MigrationsJournal } from "drizzle-orm/migrator";
 
 // A migration's journal `name` and `timestamp` are the two load-bearing fields
@@ -66,4 +67,5 @@ export const runMigrations: MigrationsJournal = [
   journalEntry("20260918034612_curvy_piledriver", runOwnership),
   journalEntry("20260918050415_sudden_black_tom", runSteerCapability),
   journalEntry("20260918104828_ancient_rocket_racer", runSelectedHarness),
+  journalEntry("20260922090555_superb_lily_hollister", runRequestedModel),
 ];

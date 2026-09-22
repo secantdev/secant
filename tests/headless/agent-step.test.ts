@@ -453,6 +453,45 @@ async function runShow(wired: Wiring, runId: string): Promise<string> {
   return out.join("");
 }
 
+test("[requested-model-durability] run launch --model is accepted for an Agent Bundle and run show prints it beside the effective model", async (t) => {
+  const { wired, bundleId, digest, docPath } = wireAgent(t);
+  const out: string[] = [];
+  const err: string[] = [];
+  const io: HeadlessIO = {
+    out: (text) => out.push(text),
+    err: (text) => err.push(text),
+    cwd: () => process.cwd(),
+  };
+  const launchCode = await runHeadless(
+    wired,
+    [
+      "run",
+      "launch",
+      bundleId,
+      "--trust",
+      digest,
+      "--input",
+      `doc=${docPath}`,
+      "--harness",
+      "claude-code",
+      "--model",
+      "requested-opus",
+    ],
+    io,
+  );
+  assert.equal(launchCode, 0, `${out.join("")}\n${err.join("")}`);
+  const runId = /^Run (\S+)$/m.exec(out.join(""))?.[1];
+  assert.ok(runId);
+  const record = wired.runGroup.readRun(runId);
+  assert.ok(record.ok);
+  assert.equal(record.run.requestedModel, "requested-opus");
+
+  const shown = await runShow(wired, runId);
+  assert.match(shown, /Requested model: requested-opus/);
+  // The observed effective model stays a separate line: requested vs effective.
+  assert.match(shown, /Observed effective model: claude-/);
+});
+
 test("a command -> agent -> command Bundle runs the plain Turn to succeeded (#116)", async (t) => {
   const { run } = await launchAgentRun(t);
 

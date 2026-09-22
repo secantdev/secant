@@ -14,6 +14,12 @@ try {
   await new Promise<void>((resolve) => {
     process.stdin.once("data", () => resolve());
   });
+  if (mode === "barrier") {
+    process.stdout.write("creating\n");
+    await new Promise<void>((resolve) => {
+      process.stdin.once("data", () => resolve());
+    });
+  }
   const result = group.createRun({
     operationId,
     bundleSnapshotDigest: "sha256:concurrent-writer",

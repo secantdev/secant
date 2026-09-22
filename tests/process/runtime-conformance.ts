@@ -1136,16 +1136,16 @@ async function storeOwnerDeathRecovery(): Promise<void> {
   const processAdapter = createProcessAdapter();
   const home = runtimeTemp("secant-runtime-owner-home-");
   const workspace = runtimeTemp("secant-runtime-owner-ws-");
-  const child = await startStoreWriter(
+  const child = await startStoreWriter({
     processAdapter,
     home,
     workspace,
-    "owner-op",
-    true,
-  );
-  await child.ready;
+    operationId: "owner-op",
+    mode: "hold",
+  });
+  await child.waitFor("ready\n");
   await child.process.writeStdin(new TextEncoder().encode("create\n"));
-  await child.created;
+  await child.waitFor("created\n");
   const interruption = await child.process.interrupt(5_000);
   assert.equal(
     interruption.close.kind === "exited" ||
@@ -1197,26 +1197,35 @@ async function storeConcurrentWriter(): Promise<void> {
   const processAdapter = createProcessAdapter();
   const home = runtimeTemp("secant-runtime-concurrent-home-");
   const workspace = runtimeTemp("secant-runtime-concurrent-ws-");
-  const first = await startStoreWriter(processAdapter, home, workspace, "op-1");
-  const second = await startStoreWriter(
+  const first = await startStoreWriter({
     processAdapter,
     home,
     workspace,
-    "op-2",
-  );
-  await Promise.all([first.ready, second.ready]);
+    operationId: "op-1",
+    mode: "barrier",
+  });
+  const second = await startStoreWriter({
+    processAdapter,
+    home,
+    workspace,
+    operationId: "op-2",
+    mode: "barrier",
+  });
+  await Promise.all([first.waitFor("ready\n"), second.waitFor("ready\n")]);
   await Promise.all([
     first.process.writeStdin(new TextEncoder().encode("create\n")),
     second.process.writeStdin(new TextEncoder().encode("create\n")),
   ]);
-  const closes = await Promise.all([
-    first.process.closeStdin(5_000),
-    second.process.closeStdin(5_000),
+  await Promise.all([
+    first.waitFor("creating\n"),
+    second.waitFor("creating\n"),
   ]);
-  assert.deepEqual(
-    closes.map((close) => close.kind),
-    ["exited", "exited"],
-  );
+  await Promise.all([
+    first.process.writeStdin(new TextEncoder().encode("continue\n")),
+    second.process.writeStdin(new TextEncoder().encode("continue\n")),
+  ]);
+  await Promise.all([first.waitFor("created\n"), second.waitFor("created\n")]);
+  await Promise.all([first.close(), second.close()]);
   const group = openRunGroup(home, workspace, { process: processAdapter });
   try {
     assert.equal(group.listRuns().length, 2);
@@ -1281,25 +1290,28 @@ async function storeLockedCoordination(): Promise<void> {
   }
 }
 
-async function startStoreWriter(
-  processAdapter: ProcessAdapter,
-  home: string,
-  workspace: string,
-  operationId: string,
-  holdAfterCreate = false,
-): Promise<{
+type TStartStoreWriterParams = {
+  readonly processAdapter: ProcessAdapter;
+  readonly home: string;
+  readonly workspace: string;
+  readonly operationId: string;
+  readonly mode?: "exit" | "hold" | "barrier";
+};
+
+async function startStoreWriter(params: TStartStoreWriterParams): Promise<{
   readonly process: OwnedProcess;
-  readonly ready: Promise<void>;
-  readonly created: Promise<void>;
+  readonly waitFor: (expected: string) => Promise<void>;
+  readonly close: () => Promise<void>;
 }> {
-  const spawned = await processAdapter.spawnOwnedProcess({
+  const mode = params.mode ?? "exit";
+  const spawned = await params.processAdapter.spawnOwnedProcess({
     executable,
     args: [
       CONCURRENT_CREATE_WORKER,
-      home,
-      workspace,
-      operationId,
-      ...(holdAfterCreate ? ["hold"] : []),
+      params.home,
+      params.workspace,
+      params.operationId,
+      mode,
     ],
     cwd: process.cwd(),
     env: process.env,
@@ -1308,10 +1320,35 @@ async function startStoreWriter(
   assert.equal(spawned.ok, true);
   if (!spawned.ok) throw new Error("store writer did not launch");
   const output = observeOutput(spawned.process.stdout);
+  const stderr = collectText(spawned.process.stderr);
+  const waitFor = async (expected: string): Promise<void> => {
+    try {
+      await output.waitFor(expected);
+    } catch (cause) {
+      const [close, diagnostics] = await Promise.all([
+        spawned.process.closed(),
+        stderr,
+      ]);
+      throw new Error(
+        `store writer missed ${JSON.stringify(expected)}; close=${JSON.stringify(close)}; stderr=${JSON.stringify(diagnostics)}`,
+        { cause },
+      );
+    }
+  };
   return {
     process: spawned.process,
-    ready: output.waitFor("ready\n"),
-    created: output.waitFor("created\n"),
+    waitFor,
+    async close() {
+      const [close, diagnostics] = await Promise.all([
+        spawned.process.closeStdin(5_000),
+        stderr,
+      ]);
+      assert.deepEqual(
+        close,
+        { kind: "exited", status: 0 },
+        diagnostics || "store writer did not exit successfully",
+      );
+    },
   };
 }
 

@@ -11,6 +11,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
+import type {
+  CleanupReport,
+  HarnessAdapter,
+  HarnessProfile,
+} from "../../src/harness/harness.js";
 import type { ProcessAdapter } from "../../src/process/process.js";
 import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import {
@@ -25,6 +30,235 @@ import { createFakeGitProcess } from "../run/store/fake-git-process.js";
 /** Await a submitted Run Operation's settled outcome (execution settles async). */
 async function settled(wired: Wiring, operationId: string): Promise<void> {
   await awaitSettled(wired.projectionPort, operationId);
+}
+
+const QUALIFICATION_PROFILE: HarnessProfile = {
+  harness: "Claude Code",
+  executable: "PATH name 'claude' -> /tools/claude",
+  executableVersion: "9.9.9",
+  platform: "linux",
+  adapterRevision: "wiring-test-v1",
+  configurationPosture: "Uses the user's existing Claude Code configuration.",
+  recovery: { mode: "native-reattach", evidence: "Native resume." },
+  interruption: { mode: "active-turn", evidence: "Native interrupt." },
+  approvals: { available: true, evidence: "Native approvals." },
+  clarifications: { available: true, evidence: "Native questions." },
+  steer: { available: true, evidence: "Native steering." },
+  modelSelection: {
+    at: "launch",
+    declaration: { kind: "free-text" },
+    evidence: "Launch model flag.",
+  },
+  modelObservation: { available: true, evidence: "Model events." },
+  recoveryCoordinate: {
+    timing: "before-submission",
+    evidence: "Known before content.",
+  },
+  skillDelivery: { mode: "plain-path", evidence: "Path delivery." },
+  fileDelivery: { mode: "plain-path", evidence: "Path delivery." },
+};
+
+function qualificationAdapter(
+  trace: string[],
+  cleanup: CleanupReport = { clean: true, detail: "closed" },
+): HarnessAdapter {
+  return {
+    async prepare(options) {
+      trace.push(`prepare:${options.workspace}`);
+      return {
+        ok: true,
+        harness: {
+          profile: QUALIFICATION_PROFILE,
+          startTurn() {
+            throw new Error("qualification must not start a Turn");
+          },
+          async close() {
+            trace.push("close");
+            return cleanup;
+          },
+        },
+      };
+    },
+  };
+}
+
+test("Harness catalog qualification prepares and immediately closes before publishing the profile", async (t) => {
+  const workspace = realpathSync.native(makeTempDir("secant-wire-qualify-ws-"));
+  const trace: string[] = [];
+  const wired = wireApplication({
+    secantHome: makeTempDir("secant-wire-qualify-home-"),
+    launchCwd: workspace,
+    harnessAdapter: qualificationAdapter(trace),
+    process: wiringProcess(),
+  });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+
+  const opened = wired.projectionPort.openProjection({
+    family: "harness-catalog",
+    focus: { id: "claude-code" },
+  });
+  t.after(() => opened.close());
+  const update = await opened.updates[Symbol.asyncIterator]().next();
+  assert.ok(update.value && update.value.kind === "durable");
+  assert.deepEqual(trace, [`prepare:${workspace}`, "close"]);
+  if (update.value?.kind !== "durable") throw new Error("unreachable");
+  assert.equal(update.value.snapshot.result.found, true);
+  if (!update.value.snapshot.result.found) throw new Error("unreachable");
+  assert.equal(
+    update.value.snapshot.result.harness.qualification.state,
+    "qualified",
+  );
+  assert.equal(
+    update.value.snapshot.result.harness.configurationPosture,
+    QUALIFICATION_PROFILE.configurationPosture,
+  );
+});
+
+test("Harness catalog reports an unclean immediate close as not-ready", async (t) => {
+  const trace: string[] = [];
+  const wired = wireApplication({
+    secantHome: makeTempDir("secant-wire-unclean-home-"),
+    launchCwd: makeTempDir("secant-wire-unclean-ws-"),
+    harnessAdapter: qualificationAdapter(trace, {
+      clean: false,
+      detail: "the qualification child could not be reaped",
+      failure: {
+        phase: "cleanup",
+        category: "cleanup-timeout",
+        possibleEffects: "possible",
+        diagnostics: "The Harness process may still be exiting.",
+      },
+    }),
+    process: wiringProcess(),
+  });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+
+  const opened = wired.projectionPort.openProjection({
+    family: "harness-catalog",
+    focus: { id: "claude-code" },
+  });
+  t.after(() => opened.close());
+  const update = await opened.updates[Symbol.asyncIterator]().next();
+  assert.ok(update.value && update.value.kind === "durable");
+  assert.deepEqual(
+    trace.map((entry) => entry.split(":", 1)[0]),
+    ["prepare", "close"],
+  );
+  if (update.value?.kind !== "durable") throw new Error("unreachable");
+  assert.equal(update.value.snapshot.result.found, true);
+  if (!update.value.snapshot.result.found) throw new Error("unreachable");
+  const harness = update.value.snapshot.result.harness;
+  assert.equal(harness.qualification.state, "not-ready");
+  assert.equal(harness.unavailable?.possibleEffects, "unknown");
+  assert.match(harness.unavailable?.explanation ?? "", /still be exiting/);
+  assert.equal(harness.diagnosticReference?.type, "harness-diagnostic");
+});
+
+const qualificationFailureCases: readonly {
+  readonly name: string;
+  readonly adapter: () => HarnessAdapter;
+  readonly category: string;
+  readonly possibleEffects: "none" | "unknown";
+}[] = [
+  {
+    name: "typed prepare refusal",
+    adapter: () => ({
+      async prepare() {
+        return {
+          ok: false,
+          failure: {
+            phase: "prepare",
+            category: "protocol-corruption",
+            possibleEffects: "none",
+            diagnostics: "The qualification response was invalid.",
+            cause: new Error("invalid native response"),
+          },
+        };
+      },
+    }),
+    category: "protocol-corruption",
+    possibleEffects: "none",
+  },
+  {
+    name: "thrown prepare",
+    adapter: () => ({
+      async prepare() {
+        throw new Error("prepare threw");
+      },
+    }),
+    category: "prepare-exception",
+    possibleEffects: "none",
+  },
+  {
+    name: "thrown close",
+    adapter: () => ({
+      async prepare() {
+        return {
+          ok: true,
+          harness: {
+            profile: QUALIFICATION_PROFILE,
+            startTurn() {
+              throw new Error("qualification must not start a Turn");
+            },
+            async close() {
+              throw new Error("close threw");
+            },
+          },
+        };
+      },
+    }),
+    category: "cleanup-exception",
+    possibleEffects: "unknown",
+  },
+  {
+    name: "unclean close without typed failure",
+    adapter: () =>
+      qualificationAdapter([], {
+        clean: false,
+        detail: "the Harness could not confirm cleanup",
+      }),
+    category: "cleanup",
+    possibleEffects: "unknown",
+  },
+];
+
+for (const failureCase of qualificationFailureCases) {
+  test(`Harness catalog translates ${failureCase.name} to not-ready`, async (t) => {
+    const wired = wireApplication({
+      secantHome: makeTempDir("secant-wire-qualify-failure-home-"),
+      launchCwd: makeTempDir("secant-wire-qualify-failure-ws-"),
+      harnessAdapter: failureCase.adapter(),
+      process: wiringProcess(),
+    });
+    t.after(() => {
+      wired.runGroup.close();
+      wired.catalog.close();
+    });
+    const opened = wired.projectionPort.openProjection({
+      family: "harness-catalog",
+      focus: { id: "claude-code" },
+    });
+    t.after(() => opened.close());
+    const update = await opened.updates[Symbol.asyncIterator]().next();
+    assert.ok(update.value && update.value.kind === "durable");
+    if (update.value?.kind !== "durable") throw new Error("unreachable");
+    assert.equal(update.value.snapshot.result.found, true);
+    if (!update.value.snapshot.result.found) throw new Error("unreachable");
+    const harness = update.value.snapshot.result.harness;
+    assert.equal(harness.qualification.state, "not-ready");
+    assert.equal(harness.unavailable?.details?.category, failureCase.category);
+    assert.equal(
+      harness.unavailable?.possibleEffects,
+      failureCase.possibleEffects,
+    );
+    assert.equal("cause" in (harness.unavailable ?? {}), false);
+  });
 }
 
 // The composition wiring suite (#74 A18): it constructs the Application through

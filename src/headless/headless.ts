@@ -11,6 +11,7 @@ import type {
 } from "../application/projection-port.js";
 import { renderFocus, renderRow } from "./render.js";
 import { registerRunCommands, splitSelector } from "./run-commands.js";
+import { registerHarnessCommands } from "./harness-commands.js";
 
 // The headless client speaks the Application Interfaces and nothing else: the
 // Projection Port for the Workspace and Bundle-management for `bundle build`.
@@ -292,6 +293,8 @@ function buildProgram(
         ),
       );
     });
+
+  registerHarnessCommands(program, { io, execute, settle, fail });
 
   // The `run` command group lives in a private file that registers onto this
   // program (A25); it touches only io/execute/fail/settle, which the entry owns.

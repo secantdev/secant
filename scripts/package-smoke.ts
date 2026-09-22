@@ -426,6 +426,78 @@ try {
     workspaceCatalogScenario,
   );
 
+  async function harnessCatalogHeadlessScenario(): Promise<void> {
+    const claudeDirectory = join(smokeRoot, "harness-catalog-claude");
+    const codexDirectory = join(smokeRoot, "harness-catalog-codex");
+    installReplayerAt(claudeDirectory, "2.1.273 (Claude Code)");
+    installCodexReplayerAt(codexDirectory, "codex-qualification");
+    const catalogEnv = {
+      ...workspaceEnv,
+      PATH: `${claudeDirectory}${delimiter}${codexDirectory}${delimiter}${workspaceEnv.PATH ?? ""}`,
+    };
+
+    const listed = JSON.parse(
+      run(binary, ["harness", "list", "--json"], {
+        cwd: workspaceDirectory,
+        env: catalogEnv,
+      }),
+    );
+    const ids = (listed.harnesses ?? []).map(
+      (harness: { id: string }) => harness.id,
+    );
+    if (
+      listed.family !== "harness-catalog" ||
+      listed.view !== "list" ||
+      ids.join(",") !== "claude-code,codex" ||
+      listed.harnesses.some(
+        (harness: { qualification?: { state?: string } }) =>
+          harness.qualification?.state !== "not-checked",
+      ) ||
+      "actionOffers" in listed
+    ) {
+      throw new Error(
+        `harness list --json did not remain spawn-free and action-free: ${JSON.stringify(listed)}`,
+      );
+    }
+
+    const focused = JSON.parse(
+      run(binary, ["harness", "inspect", "codex", "--json"], {
+        cwd: workspaceDirectory,
+        env: catalogEnv,
+      }),
+    );
+    if (
+      focused.id !== "codex" ||
+      !["qualified", "qualified-with-limits"].includes(
+        focused.qualification?.state,
+      ) ||
+      focused.supportedModels?.kind !== "list" ||
+      !Array.isArray(focused.supportedModels.models) ||
+      focused.capabilities?.length !== 6 ||
+      typeof focused.configurationPosture !== "string" ||
+      "actionOffers" in focused
+    ) {
+      throw new Error(
+        `harness inspect --json did not carry the normalized qualified focus: ${JSON.stringify(focused)}`,
+      );
+    }
+
+    assertRefuses(binary, [
+      {
+        args: ["harness", "inspect", "gemini"],
+        match: "harness-not-found",
+        cwd: workspaceDirectory,
+        env: catalogEnv,
+        detail: "did not refuse an unknown semantic Harness id",
+      },
+    ]);
+  }
+
+  await runNamedScenario(
+    "harness-catalog-headless",
+    harnessCatalogHeadlessScenario,
+  );
+
   async function installAndCatalogScenario() {
     // Build the Proof Bundle with --no-install --output on this OS (issue #51,
     // AC8; issue #52, AC5). `run` throws on a non-zero exit, and `bundle build`

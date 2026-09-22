@@ -8,6 +8,7 @@ import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
 import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import type { HarnessProfile } from "../../src/harness/harness.js";
 
 // This suite exercises Bundle and Workspace commands only, so it wires no Run
 // Store or execution.
@@ -16,6 +17,57 @@ function harness(t: TestContext) {
     slug: "secant-headless",
     runSupport: false,
   });
+}
+
+const HEADLESS_HARNESS_PROFILE: HarnessProfile = {
+  harness: "Codex",
+  executable: "PATH name 'codex' -> /tools/codex",
+  executableVersion: "1.2.3",
+  platform: "linux",
+  adapterRevision: "headless-test-v1",
+  configurationPosture: "Uses the user's existing Codex configuration.",
+  recovery: { mode: "native-reattach", evidence: "Native resume." },
+  interruption: { mode: "active-turn", evidence: "Native interrupt." },
+  approvals: { available: true, evidence: "Native approvals." },
+  clarifications: { available: true, evidence: "Native questions." },
+  steer: { available: true, evidence: "Native steering." },
+  modelSelection: {
+    at: "launch",
+    declaration: { kind: "list", models: ["gpt-5", "gpt-5-mini"] },
+    evidence: "Observed models.",
+  },
+  modelObservation: { available: true, evidence: "Model events." },
+  recoveryCoordinate: {
+    timing: "before-submission",
+    evidence: "Known before content.",
+  },
+  skillDelivery: { mode: "plain-path", evidence: "Path delivery." },
+  fileDelivery: { mode: "plain-path", evidence: "Path delivery." },
+};
+
+function harnessCatalog(t: TestContext) {
+  let qualificationCalls = 0;
+  const opened = openHeadlessHarness(t, {
+    slug: "secant-headless-harness-catalog",
+    runSupport: false,
+    now: () => new Date("2026-09-22T00:00:00.000Z"),
+    harnessRegistry: [
+      {
+        choice: { id: "codex", name: "Codex", availability: "available" },
+        servedCapabilities: ["agent-turn", "interactive-turns"],
+        discover: () => ({
+          kind: "found",
+          source: "path",
+          description: "PATH name 'codex'",
+        }),
+        qualify: async () => {
+          qualificationCalls++;
+          return { ok: true, profile: HEADLESS_HARNESS_PROFILE };
+        },
+      },
+    ],
+  });
+  return { ...opened, qualificationCalls: () => qualificationCalls };
 }
 
 test("approve then show --json reports approved with the canonical path", async (t) => {
@@ -136,9 +188,181 @@ test("--help lists every command, including bundle install, and exits zero", asy
     "bundle inspect",
     "bundle build",
     "bundle install",
+    "harness list",
+    "harness inspect",
   ]) {
     assert.match(text, new RegExp(command.replace(/ /g, "\\s")));
   }
+  assert.equal(h.stderr(), "");
+});
+
+test("harness list text and JSON discover without qualification", async (t) => {
+  const h = harnessCatalog(t);
+  assert.equal(await h.run(["harness", "list"]), 0);
+  assert.match(h.stdout(), /Codex/);
+  assert.match(h.stdout(), /Discovery: found via PATH name 'codex'/);
+  assert.match(h.stdout(), /Qualification: not checked/);
+  assert.equal(h.qualificationCalls(), 0);
+
+  h.reset();
+  assert.equal(await h.run(["harness", "list", "--json"]), 0);
+  assert.deepEqual(JSON.parse(h.stdout()), {
+    family: "harness-catalog",
+    view: "list",
+    harnesses: [
+      {
+        id: "codex",
+        name: "Codex",
+        discovery: {
+          state: "found",
+          source: "path",
+          description: "PATH name 'codex'",
+        },
+        qualification: { state: "not-checked" },
+      },
+    ],
+  });
+  assert.equal(h.qualificationCalls(), 0);
+});
+
+test("harness inspect awaits qualification and freezes text and inner JSON", async (t) => {
+  const h = harnessCatalog(t);
+  assert.equal(await h.run(["harness", "inspect", "codex"]), 0);
+  const text = h.stdout();
+  assert.match(text, /^Codex \(codex\)$/m);
+  assert.match(text, /Qualification: qualified/);
+  assert.match(text, /Supported models: gpt-5, gpt-5-mini/);
+  assert.match(text, /Session recovery: Available/);
+  assert.match(
+    text,
+    /Configuration: Uses the user's existing Codex configuration/,
+  );
+  assert.equal(h.qualificationCalls(), 1);
+
+  h.reset();
+  assert.equal(await h.run(["harness", "inspect", "codex", "--json"]), 0);
+  assert.deepEqual(JSON.parse(h.stdout()), {
+    id: "codex",
+    name: "Codex",
+    discovery: {
+      state: "found",
+      source: "path",
+      description: "PATH name 'codex'",
+    },
+    qualification: {
+      state: "qualified",
+      observation: {
+        executable: "PATH name 'codex' -> /tools/codex",
+        executableVersion: "1.2.3",
+        platform: "linux",
+        checkedAt: "2026-09-22T00:00:00.000Z",
+      },
+    },
+    supportedModels: { kind: "list", models: ["gpt-5", "gpt-5-mini"] },
+    capabilities: [
+      {
+        capability: "session-recovery",
+        name: "Session recovery",
+        description: "Resume a Harness Session after process loss.",
+        state: "available",
+      },
+      {
+        capability: "same-turn-steering",
+        name: "Same-Turn steering",
+        description: "Send guidance while the current Turn is still working.",
+        state: "available",
+      },
+      {
+        capability: "turn-interruption",
+        name: "Turn interruption",
+        description: "Stop the current Turn and its native work.",
+        state: "available",
+      },
+      {
+        capability: "tool-approvals",
+        name: "Tool approvals",
+        description: "Review tool actions raised by the Harness.",
+        state: "available",
+      },
+      {
+        capability: "structured-questions",
+        name: "Structured questions",
+        description: "Answer structured questions raised by the Harness.",
+        state: "available",
+      },
+      {
+        capability: "effective-model",
+        name: "Effective model",
+        description: "Observe the model that actually served a Turn.",
+        state: "available",
+      },
+    ],
+    configurationPosture: "Uses the user's existing Codex configuration.",
+  });
+  assert.equal(h.qualificationCalls(), 1);
+});
+
+test("harness inspect refuses a missing or unknown semantic id", async (t) => {
+  const h = harnessCatalog(t);
+  assert.equal(await h.run(["harness", "inspect"]), 1);
+  assert.match(h.stderr(), /missing-harness-id/);
+
+  h.reset();
+  assert.equal(await h.run(["harness", "inspect", "gemini"]), 1);
+  assert.match(h.stderr(), /harness-not-found/);
+  assert.equal(h.qualificationCalls(), 0);
+
+  h.reset();
+  assert.equal(await h.run(["harness", "inspect", "--json"]), 1);
+  assert.deepEqual(JSON.parse(h.stdout()), {
+    code: "missing-harness-id",
+    explanation: "harness inspect needs a Harness id.",
+    remediation: "Run `secant harness inspect <id>`.",
+    possibleEffects: "none",
+  });
+
+  h.reset();
+  assert.equal(await h.run(["harness", "inspect", "gemini", "--json"]), 1);
+  assert.deepEqual(JSON.parse(h.stdout()), {
+    code: "harness-not-found",
+    explanation: "Harness 'gemini' is not registered in this Secant build.",
+    remediation: "Run `secant harness list` to see the registered Harnesses.",
+    possibleEffects: "none",
+    details: { harnessId: "gemini" },
+  });
+});
+
+test("harness inspect renders a registered authentication refusal as inspectable state", async (t) => {
+  const h = openHeadlessHarness(t, {
+    slug: "secant-headless-harness-auth",
+    runSupport: false,
+    harnessRegistry: [
+      {
+        choice: { id: "codex", name: "Codex", availability: "available" },
+        servedCapabilities: ["agent-turn", "interactive-turns"],
+        discover: () => ({
+          kind: "found",
+          source: "path",
+          description: "PATH name 'codex'",
+        }),
+        qualify: async () => ({
+          ok: false,
+          failure: {
+            phase: "prepare",
+            category: "authentication",
+            possibleEffects: "none",
+            diagnostics: "Login is required.",
+          },
+        }),
+      },
+    ],
+  });
+
+  assert.equal(await h.run(["harness", "inspect", "codex"]), 0);
+  assert.match(h.stdout(), /Qualification: not ready/);
+  assert.match(h.stdout(), /Authentication: Log in separately through Codex/);
+  assert.match(h.stdout(), /Remediation: Log in separately through Codex/);
+  assert.match(h.stdout(), /Diagnostic: harness-diagnostic:codex:/);
   assert.equal(h.stderr(), "");
 });
 

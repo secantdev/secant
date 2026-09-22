@@ -1,4 +1,5 @@
 import type {
+  ApplicationHarnessQualification,
   ApplicationHarnessRegistration,
   RunHarnessPreparationFailure,
   THarnessDiscovery,
@@ -40,7 +41,14 @@ export class HarnessRegistry {
     THarnessRegistryEntry
   >;
 
-  constructor(overrides: HarnessRegistryOverrides = {}) {
+  constructor(
+    qualificationWorkspace: string,
+    overrides: HarnessRegistryOverrides = {},
+  ) {
+    const claudeCodeAdapter =
+      overrides.claudeCodeAdapter === undefined
+        ? createClaudeCodeAdapter()
+        : overrides.claudeCodeAdapter;
     const claudeCode: THarnessRegistryEntry = {
       application: {
         choice: {
@@ -56,12 +64,15 @@ export class HarnessRegistry {
               : overrides.discoverClaudeCode();
           return normalizeDiscovery(discovery, CLAUDE_CODE_EXECUTABLE_ENV);
         },
+        qualify: () =>
+          qualifyAdapter(claudeCodeAdapter, qualificationWorkspace),
       },
-      adapter:
-        overrides.claudeCodeAdapter === undefined
-          ? createClaudeCodeAdapter()
-          : overrides.claudeCodeAdapter,
+      adapter: claudeCodeAdapter,
     };
+    const codexAdapter =
+      overrides.codexAdapter === undefined
+        ? createCodexAdapter()
+        : overrides.codexAdapter;
     const codex: THarnessRegistryEntry = {
       application: {
         choice: { id: "codex", name: "Codex", availability: "available" },
@@ -73,11 +84,9 @@ export class HarnessRegistry {
               : overrides.discoverCodex();
           return normalizeDiscovery(discovery, CODEX_EXECUTABLE_ENV);
         },
+        qualify: () => qualifyAdapter(codexAdapter, qualificationWorkspace),
       },
-      adapter:
-        overrides.codexAdapter === undefined
-          ? createCodexAdapter()
-          : overrides.codexAdapter,
+      adapter: codexAdapter,
     };
     this.entries = new Map([
       ["claude-code", claudeCode],
@@ -126,11 +135,86 @@ export class HarnessRegistry {
   }
 }
 
+async function qualifyAdapter(
+  adapter: HarnessAdapter,
+  workspace: string,
+): Promise<ApplicationHarnessQualification> {
+  let prepared: Awaited<ReturnType<HarnessAdapter["prepare"]>>;
+  try {
+    prepared = await adapter.prepare({ workspace });
+  } catch (error) {
+    return qualificationException("prepare", error);
+  }
+  if (!prepared.ok) {
+    return { ok: false, failure: qualificationFailure(prepared.failure) };
+  }
+
+  const profile = prepared.harness.profile;
+  try {
+    const cleanup = await prepared.harness.close();
+    if (!cleanup.clean) {
+      return {
+        ok: false,
+        failure:
+          cleanup.failure === undefined
+            ? {
+                phase: "cleanup",
+                category: "cleanup",
+                possibleEffects: "possible",
+                diagnostics: cleanup.detail,
+              }
+            : qualificationFailure(cleanup.failure),
+      };
+    }
+  } catch (error) {
+    return qualificationException("cleanup", error);
+  }
+  return { ok: true, profile };
+}
+
+function qualificationFailure(
+  failure: HarnessFailure,
+): Extract<ApplicationHarnessQualification, { ok: false }>["failure"] {
+  return {
+    phase: failure.phase,
+    category: failure.category,
+    possibleEffects: failure.possibleEffects,
+    retryEvidence: failure.retryEvidence,
+    diagnostics: failure.diagnostics,
+    cause: failure.cause,
+  };
+}
+
+function qualificationException(
+  phase: "prepare" | "cleanup",
+  error: unknown,
+): ApplicationHarnessQualification {
+  return {
+    ok: false,
+    failure: {
+      phase,
+      category: `${phase}-exception`,
+      possibleEffects: phase === "prepare" ? "none" : "possible",
+      diagnostics:
+        error instanceof Error
+          ? error.message
+          : `Harness ${phase} failed unexpectedly.`,
+      cause: error,
+    },
+  };
+}
+
 function normalizeDiscovery(
   discovery: HarnessDiscovery,
   executableEnvironmentVariable: string,
 ): THarnessDiscovery {
-  if (discovery.kind === "found") return { kind: "found" };
+  if (discovery.kind === "found") {
+    return {
+      kind: "found",
+      source: discovery.attempt.source,
+      description: discovery.attempt.description,
+    };
+  }
   if (discovery.kind === "unsupported-shim") {
     return {
       kind: "unsupported-shim",

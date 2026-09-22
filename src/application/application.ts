@@ -32,6 +32,7 @@ import {
   listSnapshot,
   type BundleCatalogDependencies,
 } from "./bundle-catalog.js";
+import { createHarnessCatalog } from "./harness-catalog.js";
 import type { BundleManagement } from "./bundle-management.js";
 import { createBundleManagement } from "./build-bundle.js";
 import {
@@ -109,6 +110,10 @@ import type {
   BundleFocusSnapshot,
   EndInteractiveStepInput,
   InterruptTurnInput,
+  HarnessCatalogSnapshot,
+  HarnessDiagnosticReference,
+  HarnessFocusSelector,
+  HarnessFocusSnapshot,
   LaunchRunInput,
   ResumeRunInput,
   SendInteractiveTurnInput,
@@ -138,6 +143,7 @@ import type {
 } from "./harness-registry.js";
 import { type ProcessAdapter } from "../process/process.js";
 export type {
+  ApplicationHarnessQualification,
   ApplicationHarnessRegistration,
   RunHarnessPreparationFailure,
   THarnessDiscovery,
@@ -338,6 +344,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
     deps.scheduleSettlement ??
     ((settle: () => void | Promise<void>) => settle());
   const now = deps.now ?? (() => new Date());
+  const harnessCatalog = createHarnessCatalog(deps.harnessRegistry ?? [], now);
   const budgets = deps.bundleBudgets ?? DEFAULT_BUDGETS;
   // Each Operation carries a settler (run inline by default, deferred under a
   // test), its outcome, and the streams watching it. Observers are added only
@@ -907,6 +914,14 @@ export function createApplication(deps: ApplicationDependencies): Application {
     readonly focus?: undefined;
   }): OpenedProjection<BundleCatalogSnapshot>;
   function openProjection(selector: {
+    readonly family: "harness-catalog";
+    readonly focus: HarnessFocusSelector;
+  }): OpenedProjection<HarnessFocusSnapshot>;
+  function openProjection(selector: {
+    readonly family: "harness-catalog";
+    readonly focus?: undefined;
+  }): OpenedProjection<HarnessCatalogSnapshot>;
+  function openProjection(selector: {
     readonly family: "run";
     readonly runId: string;
   }): OpenedProjection<RunSnapshot>;
@@ -978,6 +993,12 @@ export function createApplication(deps: ApplicationDependencies): Application {
           updates.close();
         },
       };
+    }
+    if (selector.family === "harness-catalog") {
+      if (selector.focus !== undefined) {
+        return harnessCatalog.openFocus(selector.focus);
+      }
+      return harnessCatalog.openList();
     }
     if (selector.family === "workspace") {
       const updates = new UpdateStream();
@@ -2748,8 +2769,12 @@ export function createApplication(deps: ApplicationDependencies): Application {
     },
 
     readResource(
-      reference: ResourceReference | DiagnosticReference,
+      reference:
+        ResourceReference | DiagnosticReference | HarnessDiagnosticReference,
     ): ResourceRead {
+      if (reference.type === "harness-diagnostic") {
+        return harnessCatalog.readDiagnostic(reference);
+      }
       const acquired = acquireForRead(reference.runId);
       if (!acquired.ok) return { found: false, problem: acquired.problem };
       const { owner, transient } = acquired;

@@ -28,12 +28,36 @@ async function fixture(
           availability: "available",
         },
         servedCapabilities: ["agent-turn", "interactive-turns"],
-        discover: () => ({ kind: "found" }),
+        discover: () => ({
+          kind: "found",
+          source: "path",
+          description: "PATH name 'claude'",
+        }),
+        qualify: async () => ({
+          ok: false,
+          failure: {
+            phase: "prepare",
+            category: "not-scripted",
+            possibleEffects: "none",
+          },
+        }),
       },
       {
         choice: { id: "codex", name: "Codex", availability: "available" },
         servedCapabilities: ["agent-turn", "interactive-turns"],
-        discover: () => ({ kind: "found" }),
+        discover: () => ({
+          kind: "found",
+          source: "path",
+          description: "PATH name 'codex'",
+        }),
+        qualify: async () => ({
+          ok: false,
+          failure: {
+            phase: "prepare",
+            category: "not-scripted",
+            possibleEffects: "none",
+          },
+        }),
       },
     ],
   });

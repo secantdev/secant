@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { type TestContext } from "node:test";
 import { type RunExecution } from "../../src/application/application.js";
+import type { ApplicationHarnessRegistration } from "../../src/application/application.js";
 import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
 import { executeRouting } from "../../src/run/execution/execution.js";
@@ -37,6 +38,10 @@ export interface HeadlessHarnessOptions {
   readonly commandTimeoutMs?: number;
   /** Override the Process double (default: the shared bundle-command fake). */
   readonly process?: ProcessAdapter;
+  /** Literal normalized Harness registrations for catalog/selection tests. */
+  readonly harnessRegistry?: readonly ApplicationHarnessRegistration[];
+  /** Application clock for deterministic Projection evidence. */
+  readonly now?: () => Date;
 }
 
 export interface HeadlessHarness {
@@ -95,6 +100,10 @@ export function openHeadlessHarness(
       ? { hostPlatform: opts.hostPlatform }
       : {}),
     ...(runSupport ? { runGroup, runExecution } : {}),
+    ...(opts.harnessRegistry !== undefined
+      ? { harnessRegistry: opts.harnessRegistry }
+      : {}),
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
   });
 
   const out: string[] = [];

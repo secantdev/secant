@@ -112,6 +112,8 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
     overrides.secantHome ??
     (process.env.SECANT_HOME?.trim() || join(homedir(), ".secant"));
   const launchWorkspacePath = overrides.launchCwd ?? process.cwd();
+  const canonicalLaunchWorkspacePath =
+    canonicalizeWorkspacePath(launchWorkspacePath);
   const host = overrides.hostPlatform ?? hostPlatform(process.platform);
   const processAdapter =
     overrides.process ?? overrides.processFactory?.() ?? createProcessAdapter();
@@ -131,18 +133,19 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
     // the one exported canonicaliser rather than a second `realpathSync.native`
     // site, so a fresh `run show` process reaches the same group directory as the
     // launch.
-    const runGroup = openRunGroup(
-      secantHome,
-      canonicalizeWorkspacePath(launchWorkspacePath),
-      { process: processAdapter },
-    );
+    const runGroup = openRunGroup(secantHome, canonicalLaunchWorkspacePath, {
+      process: processAdapter,
+    });
     try {
-      const harnessRegistry = new HarnessRegistry({
-        claudeCodeAdapter: overrides.harnessAdapter,
-        codexAdapter: overrides.codexHarnessAdapter,
-        discoverClaudeCode: overrides.discoverClaudeCode,
-        discoverCodex: overrides.discoverCodex,
-      });
+      const harnessRegistry = new HarnessRegistry(
+        canonicalLaunchWorkspacePath,
+        {
+          claudeCodeAdapter: overrides.harnessAdapter,
+          codexAdapter: overrides.codexHarnessAdapter,
+          discoverClaudeCode: overrides.discoverClaudeCode,
+          discoverCodex: overrides.discoverCodex,
+        },
+      );
       const application = createApplication({
         catalog,
         launchWorkspacePath,

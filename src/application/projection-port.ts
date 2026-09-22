@@ -14,6 +14,12 @@ export type ProjectionSelector =
   // `bundle-catalog` with no `focus` is the list; with a `focus` it is the exact
   // inspection of one Installed Bundle. Read-only: this family offers no Actions.
   | { readonly family: "bundle-catalog"; readonly focus?: BundleFocusSelector }
+  // Registered Harness discovery with optional exact qualification focus.
+  // Read-only: this family offers no Actions.
+  | {
+      readonly family: "harness-catalog";
+      readonly focus?: HarnessFocusSelector;
+    }
   // One launched Run by its id. Read-only: launching is an Operation, not a Run
   // Action; durable updates land as each publication commits.
   | { readonly family: "run"; readonly runId: string }
@@ -33,6 +39,12 @@ export type ProjectionSelector =
 export interface BundleFocusSelector {
   readonly id: string;
   readonly version?: string;
+}
+
+/** Selects one registered Harness by its semantic id. The string remains open at
+ * ingress so an unknown external id becomes a typed Problem. */
+export interface HarnessFocusSelector {
+  readonly id: string;
 }
 
 /** A durable user intent, correlated by a caller-generated operation id. The
@@ -292,6 +304,8 @@ export type ProjectionSnapshot =
   | OperationSnapshot
   | BundleCatalogSnapshot
   | BundleFocusSnapshot
+  | HarnessCatalogSnapshot
+  | HarnessFocusSnapshot
   | RunSnapshot
   | RunListSnapshot;
 
@@ -317,6 +331,106 @@ export interface HarnessChoice {
   readonly availability: "available" | "unavailable";
   readonly unavailableReason?: string;
 }
+
+// --- harness-catalog family -----------------------------------------------
+
+export type HarnessQualificationState =
+  "qualified" | "qualified-with-limits" | "not-ready" | "not-checked";
+
+export type HarnessCapabilityState =
+  "available" | "available-with-limits" | "unavailable" | "not-checked";
+
+export type HarnessDiscoveryView =
+  | {
+      readonly state: "found";
+      readonly source: "configured" | "path";
+      readonly description: string;
+    }
+  | {
+      readonly state: "unsupported-shim";
+      readonly name: string;
+      readonly path: string;
+      readonly executableEnvironmentVariable: string;
+    }
+  | {
+      readonly state: "not-found";
+      readonly searched: readonly string[];
+      readonly executableEnvironmentVariable: string;
+    };
+
+export interface HarnessObservationView {
+  readonly executable: string;
+  readonly executableVersion: string;
+  readonly platform: "windows" | "macos" | "linux";
+  readonly checkedAt: string;
+}
+
+export type HarnessQualificationView =
+  | { readonly state: "not-checked" }
+  | { readonly state: "not-ready"; readonly checkedAt: string }
+  | {
+      readonly state: "qualified" | "qualified-with-limits";
+      readonly observation: HarnessObservationView;
+    };
+
+export interface HarnessSummary {
+  readonly id: HarnessChoice["id"];
+  readonly name: string;
+  readonly discovery: HarnessDiscoveryView;
+  readonly qualification: HarnessQualificationView;
+}
+
+export interface HarnessCatalogSnapshot {
+  readonly family: "harness-catalog";
+  readonly view: "list";
+  readonly harnesses: readonly HarnessSummary[];
+}
+
+export interface HarnessCapabilityView {
+  readonly capability:
+    | "session-recovery"
+    | "same-turn-steering"
+    | "turn-interruption"
+    | "tool-approvals"
+    | "structured-questions"
+    | "effective-model";
+  readonly name: string;
+  readonly description: string;
+  readonly state: HarnessCapabilityState;
+  readonly limits?: string;
+}
+
+export type SupportedModelDeclarationView =
+  | { readonly kind: "list"; readonly models: readonly string[] }
+  | { readonly kind: "free-text" };
+
+export interface HarnessFocus extends HarnessSummary {
+  readonly supportedModels?: SupportedModelDeclarationView;
+  readonly capabilities: readonly HarnessCapabilityView[];
+  readonly configurationPosture?: string;
+  readonly authenticationInstructions?: string;
+  readonly unavailable?: Problem;
+  readonly diagnosticReference?: HarnessDiagnosticReference;
+}
+
+/** One process-held Harness qualification diagnostic. It carries semantic
+ * identity and observation time, never a cache key, path, or native id. */
+export interface HarnessDiagnosticReference {
+  readonly type: "harness-diagnostic";
+  readonly harnessId: HarnessChoice["id"];
+  readonly checkedAt: string;
+}
+
+export interface HarnessFocusSnapshot {
+  readonly family: "harness-catalog";
+  readonly view: "focus";
+  readonly selection: HarnessFocusSelector;
+  readonly result: HarnessFocusResult;
+}
+
+export type HarnessFocusResult =
+  | { readonly found: true; readonly harness: HarnessFocus }
+  | { readonly found: false; readonly problem: Problem };
 export type WorkspaceApprovalState =
   | { readonly state: "approved"; readonly approvedAt: string } // ISO 8601
   | { readonly state: "unapproved" };
@@ -1108,6 +1222,14 @@ export interface ProjectionPort {
     readonly focus?: undefined;
   }): OpenedProjection<BundleCatalogSnapshot>;
   openProjection(selector: {
+    readonly family: "harness-catalog";
+    readonly focus: HarnessFocusSelector;
+  }): OpenedProjection<HarnessFocusSnapshot>;
+  openProjection(selector: {
+    readonly family: "harness-catalog";
+    readonly focus?: undefined;
+  }): OpenedProjection<HarnessCatalogSnapshot>;
+  openProjection(selector: {
     readonly family: "run";
     readonly runId: string;
   }): OpenedProjection<RunSnapshot>;
@@ -1119,7 +1241,8 @@ export interface ProjectionPort {
   openProjection(selector: ProjectionSelector): OpenedProjection;
   submit(submission: Submission): SubmissionAdmission;
   readResource(
-    reference: ResourceReference | DiagnosticReference,
+    reference:
+      ResourceReference | DiagnosticReference | HarnessDiagnosticReference,
   ): ResourceRead;
   /** Resolve one transcript `page` or `export` Resource Reference (#124),
    *  validating the Run, Session, and cursor and returning normalized Problems —

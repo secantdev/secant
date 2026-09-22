@@ -222,6 +222,14 @@ function registeredHarness(params: {
       "interactive-turns",
     ],
     discover: params.discover,
+    qualify: async () => ({
+      ok: false,
+      failure: {
+        phase: "prepare",
+        category: "not-scripted",
+        possibleEffects: "none",
+      },
+    }),
   };
 }
 
@@ -442,7 +450,11 @@ test("[both-client-harness-selection] Agent launches require one known semantic 
       name: "Claude Code",
       discover: () => {
         claudeDiscoveries++;
-        return { kind: "found" };
+        return {
+          kind: "found",
+          source: "path",
+          description: "PATH name 'claude'",
+        };
       },
     }),
     registeredHarness({
@@ -450,7 +462,11 @@ test("[both-client-harness-selection] Agent launches require one known semantic 
       name: "Codex",
       discover: () => {
         codexDiscoveries++;
-        return { kind: "found" };
+        return {
+          kind: "found",
+          source: "path",
+          description: "PATH name 'codex'",
+        };
       },
     }),
   ];
@@ -505,7 +521,11 @@ test("[both-client-harness-selection] Command-only launches reject a Harness wit
       name: "Codex",
       discover: () => {
         discoveries++;
-        return { kind: "found" };
+        return {
+          kind: "found",
+          source: "path",
+          description: "PATH name 'codex'",
+        };
       },
     }),
   ];
@@ -532,7 +552,11 @@ test("an unavailable registered Harness is refused before discovery", (t) => {
       unavailableReason: "disabled for this build",
       discover: () => {
         discoveries++;
-        return { kind: "found" };
+        return {
+          kind: "found",
+          source: "path",
+          description: "PATH name 'codex'",
+        };
       },
     }),
   ]);
@@ -554,7 +578,11 @@ test("selected capability mismatch is refused before discovery", (t) => {
       servedCapabilities: [],
       discover: () => {
         discoveries++;
-        return { kind: "found" };
+        return {
+          kind: "found",
+          source: "path",
+          description: "PATH name 'codex'",
+        };
       },
     }),
   ]);

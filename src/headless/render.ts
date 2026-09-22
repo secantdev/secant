@@ -2,6 +2,10 @@ import type {
   BundleTrustState,
   EngineRange,
   ExecutionSummary,
+  HarnessDiscoveryView,
+  HarnessFocus,
+  HarnessQualificationView,
+  HarnessSummary,
   InstalledBundleFocus,
   InstalledBundleSummary,
   RoutingNodeView,
@@ -97,6 +101,112 @@ export function renderFocus(bundle: InstalledBundleFocus): string {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+export function renderHarnessRow(harness: HarnessSummary): string {
+  const lines = [
+    `${harness.name} (${harness.id})`,
+    `  Discovery: ${renderHarnessDiscovery(harness.discovery)}`,
+    `  Qualification: ${renderQualification(harness.qualification)}`,
+  ];
+  if (
+    harness.qualification.state === "qualified" ||
+    harness.qualification.state === "qualified-with-limits"
+  ) {
+    lines.push(...renderHarnessObservation(harness.qualification, "  "));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export function renderHarnessFocus(harness: HarnessFocus): string {
+  const lines = [
+    `${harness.name} (${harness.id})`,
+    `Discovery: ${renderHarnessDiscovery(harness.discovery)}`,
+    `Qualification: ${renderQualification(harness.qualification)}`,
+  ];
+  if (
+    harness.qualification.state === "qualified" ||
+    harness.qualification.state === "qualified-with-limits"
+  ) {
+    lines.push(...renderHarnessObservation(harness.qualification));
+  } else if (harness.qualification.state === "not-ready") {
+    lines.push(`Checked at: ${harness.qualification.checkedAt}`);
+  }
+
+  lines.push("");
+  if (harness.supportedModels === undefined) {
+    lines.push("Supported models: Not checked");
+  } else if (harness.supportedModels.kind === "free-text") {
+    lines.push("Supported models: Free-text model entry");
+  } else {
+    lines.push(
+      `Supported models: ${harness.supportedModels.models.join(", ")}`,
+    );
+  }
+
+  lines.push("", "Capabilities:");
+  for (const capability of harness.capabilities) {
+    const state = capability.state
+      .split("-")
+      .map((word) => word[0]?.toUpperCase() + word.slice(1))
+      .join(" ");
+    lines.push(`  ${capability.name}: ${state}`);
+    lines.push(`    ${capability.description}`);
+    if (capability.limits !== undefined) {
+      lines.push(`    Limits: ${capability.limits}`);
+    }
+  }
+
+  lines.push(
+    "",
+    `Configuration: ${harness.configurationPosture ?? "Not checked"}`,
+  );
+  if (harness.authenticationInstructions !== undefined) {
+    lines.push(`Authentication: ${harness.authenticationInstructions}`);
+  }
+  if (harness.unavailable !== undefined) {
+    lines.push(
+      `Unavailable: ${harness.unavailable.explanation}`,
+      `Remediation: ${harness.unavailable.remediation}`,
+    );
+  }
+  if (harness.diagnosticReference !== undefined) {
+    const reference = harness.diagnosticReference;
+    lines.push(
+      `Diagnostic: ${reference.type}:${reference.harnessId}:${reference.checkedAt}`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function renderHarnessDiscovery(discovery: HarnessDiscoveryView): string {
+  if (discovery.state === "found") {
+    return `found via ${discovery.description}`;
+  }
+  if (discovery.state === "unsupported-shim") {
+    return `unsupported shim ${discovery.path}`;
+  }
+  return `not found; searched ${discovery.searched.join(", ")}`;
+}
+
+function renderQualification(qualification: HarnessQualificationView): string {
+  return qualification.state.replaceAll("-", " ");
+}
+
+function renderHarnessObservation(
+  qualification: Extract<
+    HarnessQualificationView,
+    { state: "qualified" | "qualified-with-limits" }
+  >,
+  indentation = "",
+): readonly string[] {
+  const { observation } = qualification;
+  return [
+    `${indentation}Observed executable: ${observation.executable}`,
+    `${indentation}Observed version: ${observation.executableVersion}`,
+    `${indentation}Observed platform: ${observation.platform}`,
+    `${indentation}Checked at: ${observation.checkedAt}`,
+  ];
 }
 
 export function renderRun(run: RunView): string {

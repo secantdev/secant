@@ -69,6 +69,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   composition transfers an opaque Step driver onto the tracked Run. Every human Turn reuses it, and End, interrupt, cancel, or shutdown closes it exactly once. Preflight
   refuses discovery/capability failures before creation. A typed qualification/authentication/protocol `prepare` failure writes the created Run `halted` before content
   and settles the Operation with `selected-harness-unavailable`. `supportsInteractiveTurns` remains the client fact Application forwards to Preflight.
+- `harness-catalog` caches one qualification promise/result per semantic Harness id for the Application lifetime (#188). List calls discovery only; focus initially
+  reports `not-checked`, then publishes one durable normalized result. Qualification diagnostics are process-held Resources addressed by semantic id and checked time.
 - The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no **durable**
   snapshot; the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`). The live lane is
   separate — Turn activity reaches an open client through the live overlay below (#117), not through this durable write.

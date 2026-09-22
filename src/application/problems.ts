@@ -1,8 +1,13 @@
 import { generateExecutionSummary } from "../bundle/bundle.js";
 import type { AuthoredManifest, Platform } from "../workflow/workflow.js";
-import type { RunHarnessPreparationFailure } from "./harness-registry.js";
+import type {
+  ApplicationHarnessQualificationFailure,
+  RunHarnessPreparationFailure,
+} from "./harness-registry.js";
 import type {
   DiagnosticReference,
+  HarnessChoice,
+  HarnessDiagnosticReference,
   Problem,
   ResourceReference,
   RunGateReference,
@@ -95,6 +100,59 @@ export function runSupportUnavailable(): Problem {
   };
 }
 
+export function harnessNotFound(harnessId: string): Problem {
+  return {
+    code: "harness-not-found",
+    explanation: `Harness '${harnessId}' is not registered in this Secant build.`,
+    remediation: "Run `secant harness list` to see the registered Harnesses.",
+    possibleEffects: "none",
+    details: { harnessId },
+  };
+}
+
+export function harnessDiagnosticMissing(
+  reference: HarnessDiagnosticReference,
+): Problem {
+  return {
+    code: "harness-diagnostic-missing",
+    explanation: `The held qualification diagnostic for Harness '${reference.harnessId}' is no longer available.`,
+    remediation:
+      "Inspect the Harness again in the current Secant process to obtain its latest diagnostic reference.",
+    possibleEffects: "none",
+    details: {
+      harnessId: reference.harnessId,
+      checkedAt: reference.checkedAt,
+    },
+  };
+}
+
+export function harnessQualificationUnavailable(
+  harness: HarnessChoice,
+  failure: ApplicationHarnessQualificationFailure,
+): Problem {
+  const explanation = `${harness.name} is not ready (${failure.category}).`;
+  return {
+    code: "harness-qualification-unavailable",
+    explanation:
+      failure.diagnostics === undefined
+        ? explanation
+        : `${explanation} ${failure.diagnostics}`,
+    remediation:
+      failure.category === "authentication"
+        ? `Log in separately through ${harness.name}, then start a new Secant process to inspect it again.`
+        : `Check the installed ${harness.name} version and configuration, then start a new Secant process to inspect it again.`,
+    possibleEffects: problemEffectScope(failure.possibleEffects),
+    details: {
+      harnessId: harness.id,
+      phase: failure.phase,
+      category: failure.category,
+      ...(failure.retryEvidence === undefined
+        ? {}
+        : { retryEvidence: failure.retryEvidence }),
+    },
+  };
+}
+
 // One code for a Run whose canonical store cannot be read, whether the failure is
 // an `acquireRun` that returns nothing (Application) or a `readRun` that fails
 // (Run Projection). Collapsed from `runStoreUnreadable`/`runStoreDamaged` (A17).
@@ -170,7 +228,9 @@ export function selectedHarnessUnavailable(
 }
 
 function problemEffectScope(
-  scope: RunHarnessPreparationFailure["possibleEffects"],
+  scope:
+    | RunHarnessPreparationFailure["possibleEffects"]
+    | ApplicationHarnessQualificationFailure["possibleEffects"],
 ): Problem["possibleEffects"] {
   switch (scope) {
     case "none":

@@ -1,12 +1,17 @@
-import type { ProjectionUpdate } from "./projection-port.js";
+import type {
+  ProjectionSnapshot,
+  ProjectionUpdate,
+} from "./projection-port.js";
 
 /** A minimal single-consumer async push stream for durable Projection updates. */
-export class UpdateStream implements AsyncIterable<ProjectionUpdate> {
-  private readonly queue: ProjectionUpdate[] = [];
-  private waiting?: (result: IteratorResult<ProjectionUpdate>) => void;
+export class UpdateStream<
+  S extends ProjectionSnapshot = ProjectionSnapshot,
+> implements AsyncIterable<ProjectionUpdate<S>> {
+  private readonly queue: ProjectionUpdate<S>[] = [];
+  private waiting?: (result: IteratorResult<ProjectionUpdate<S>>) => void;
   private closed = false;
 
-  push(update: ProjectionUpdate): void {
+  push(update: ProjectionUpdate<S>): void {
     if (this.closed) return;
     const waiting = this.waiting;
     if (waiting !== undefined) {
@@ -27,7 +32,7 @@ export class UpdateStream implements AsyncIterable<ProjectionUpdate> {
     }
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<ProjectionUpdate> {
+  [Symbol.asyncIterator](): AsyncIterator<ProjectionUpdate<S>> {
     return {
       next: () => {
         const value = this.queue.shift();

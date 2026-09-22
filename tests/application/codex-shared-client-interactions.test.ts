@@ -59,6 +59,10 @@ function codexProfile(): HarnessProfile {
       at: "unavailable",
       evidence: "fake codex selects no model",
     },
+    modelObservation: {
+      available: true,
+      evidence: "fake codex observes its own model",
+    },
     recoveryCoordinate: {
       timing: "before-submission",
       evidence: "fake codex mints a thread id",

@@ -116,6 +116,8 @@ type TLiveQualification =
       readonly process: OwnedProcess;
       readonly diagnostics: CodexDiagnosticCapture;
       readonly connection: CodexJsonlConnection;
+      /** The non-hidden models `model/list` observed, in order. */
+      readonly models: readonly string[];
     }
   | { readonly ok: false; readonly failure: HarnessFailure };
 
@@ -163,13 +165,21 @@ class CodexAdapter implements HarnessAdapter {
       if (cacheKey !== undefined) this.cache.add(cacheKey);
     }
 
-    const live = await this.qualifyLive(discovery.target, options.workspace);
+    // An empty requested model means no model was requested, matching Claude Code;
+    // both Adapters treat `PrepareOptions.requestedModel` identically.
+    const requestedModel = normalizeRequestedModel(options.requestedModel);
+    const live = await this.qualifyLive(
+      discovery.target,
+      options.workspace,
+      requestedModel,
+    );
     if (!live.ok) return live;
     const profile = buildProfile({
       target: discovery.target,
       version: version.value,
       platform,
       probeRevision,
+      models: live.models,
     });
     return {
       ok: true,
@@ -184,6 +194,7 @@ class CodexAdapter implements HarnessAdapter {
           DEFAULT_HANDSHAKE_TIMEOUT_MS,
         this.overrides.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
         this.overrides.recordingObserver,
+        requestedModel,
       ),
     };
   }
@@ -310,6 +321,7 @@ class CodexAdapter implements HarnessAdapter {
   private async qualifyLive(
     target: TDiscoveredTarget,
     workspace: string,
+    requestedModel: string | undefined,
   ): Promise<TLiveQualification> {
     const spawn = this.overrides.spawn ?? spawnOwnedProcess;
     const spawned = await spawn({
@@ -361,12 +373,34 @@ class CodexAdapter implements HarnessAdapter {
           }),
         };
       }
-      await connection.listModels();
+      const models = await connection.listModels();
+      // A requested model the observed list does not admit is a typed unavailable
+      // prepare failure, never a silent substitution (ADR 0022) — including when the
+      // list is empty, so an unconfirmable model is rejected rather than forwarded.
+      // The child spawned for qualification is torn down through the same failure path.
+      if (requestedModel !== undefined && !models.includes(requestedModel)) {
+        return {
+          ok: false,
+          failure: await failedQualification({
+            process: spawned.process,
+            diagnostics: diagnosticCapture,
+            failure: failure(
+              "model-unavailable",
+              `Codex does not offer the requested model '${requestedModel}'. Available models: ${models.join(", ")}.`,
+            ),
+            cleanupTimeoutMs:
+              this.overrides.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
+            includeStderr: false,
+            observer: this.overrides.recordingObserver,
+          }),
+        };
+      }
       return {
         ok: true,
         process: spawned.process,
         diagnostics: diagnosticCapture,
         connection: connection.runtimeConnection(),
+        models,
       };
     } catch (cause) {
       const failureDiagnostics =
@@ -406,6 +440,9 @@ class CodexPreparedHarness implements PreparedHarness {
     private readonly controlTimeoutMs: number,
     private readonly cleanupTimeoutMs: number,
     private readonly observer: CodexRecordingObserver | undefined,
+    /** The caller's requested model, applied natively per Turn and kept private;
+     *  validated against the observed list at prepare. */
+    private readonly requestedModel: string | undefined,
   ) {
     this.connection.startRuntime({
       message: (message) => this.acceptMessage(message),
@@ -435,6 +472,7 @@ class CodexPreparedHarness implements PreparedHarness {
         this.connection,
         this.workspace,
         this.controlTimeoutMs,
+        this.requestedModel,
       );
       this.sessions.set(request.session, session);
     }
@@ -550,6 +588,8 @@ class CodexSession {
     private readonly connection: CodexJsonlConnection,
     private readonly workspace: string,
     private readonly controlTimeoutMs: number,
+    /** The caller's requested model, applied on turn/start and kept private. */
+    private readonly requestedModel: string | undefined,
   ) {}
 
   start(turn: CodexTurn): void {
@@ -663,6 +703,11 @@ class CodexSession {
           this.connection.request("turn/start", {
             threadId: coordinate.opaque,
             input: [{ type: "text", text: turn.request.input.text }],
+            // A caller-requested model is applied at the native per-Turn point; the
+            // effective model stays what thread/start observed, never the request.
+            ...(this.requestedModel !== undefined
+              ? { model: this.requestedModel }
+              : {}),
           }),
         timeoutMs: this.controlTimeoutMs,
         label: "turn/start runtime exchange",
@@ -1685,6 +1730,8 @@ interface TBuildProfile {
   readonly version: string;
   readonly platform: HarnessPlatform;
   readonly probeRevision: string;
+  /** The non-hidden models `model/list` observed during qualification. */
+  readonly models: readonly string[];
 }
 
 function buildProfile(options: TBuildProfile): HarnessProfile {
@@ -1696,7 +1743,7 @@ function buildProfile(options: TBuildProfile): HarnessProfile {
     platform: options.platform,
     adapterRevision: options.probeRevision,
     configurationPosture:
-      "user-compatible: inherits the user's Codex home and environment; experimental API is disabled, while model, reasoning effort, personality, approval policy, and sandbox policy remain unset by Secant.",
+      "user-compatible: inherits the user's Codex home and environment; experimental API is disabled, a caller-requested model is applied natively per Turn and none is set otherwise, while reasoning effort, personality, approval policy, and sandbox policy remain unset by Secant.",
     recovery: {
       mode: "native-reattach",
       evidence:
@@ -1724,8 +1771,14 @@ function buildProfile(options: TBuildProfile): HarnessProfile {
     },
     modelSelection: {
       at: "launch-and-per-turn",
+      declaration: { kind: "list", models: options.models },
       evidence:
-        "The stable protocol accepts native model selection at thread and Turn start; M4 leaves user-owned selection unchanged.",
+        "The stable protocol accepts native model selection at thread and Turn start; model/list enumerates the supported models observed during qualification.",
+    },
+    modelObservation: {
+      available: true,
+      evidence:
+        "thread/start and thread/resume report the effective model, distinct from any requested model.",
     },
     recoveryCoordinate: {
       timing: "before-submission",
@@ -1764,6 +1817,14 @@ function harnessPlatform(
     default:
       return undefined;
   }
+}
+
+/** Treat an absent or empty requested model as no request, so every Adapter reads
+ *  `PrepareOptions.requestedModel` the same way. */
+function normalizeRequestedModel(
+  value: string | undefined,
+): string | undefined {
+  return value === undefined || value.length === 0 ? undefined : value;
 }
 
 function failure(category: string, diagnostics: string): HarnessFailure {

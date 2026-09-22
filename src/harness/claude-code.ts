@@ -148,6 +148,9 @@ class ClaudeCodeAdapter implements HarnessAdapter {
         `Claude Code is not supported on platform '${process.platform}'.`,
       );
     }
+    // An empty requested model means no model was requested, matching Codex; both
+    // Adapters read `PrepareOptions.requestedModel` identically.
+    const requestedModel = normalizeRequestedModel(options.requestedModel);
 
     const discovery = this.discover(options);
     if (!discovery.ok) return { ok: false, failure: discovery.failure };
@@ -168,6 +171,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
           options.workspace,
           this.overrides.sessionId ?? randomUUID,
           this.overrides.spawn ?? spawnOwnedProcess,
+          requestedModel,
         ),
       };
     }
@@ -185,6 +189,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
         options.workspace,
         this.overrides.sessionId ?? randomUUID,
         this.overrides.spawn ?? spawnOwnedProcess,
+        requestedModel,
       ),
     };
   }
@@ -312,6 +317,9 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
     private readonly workspace: string,
     private readonly createSessionId: () => string,
     private readonly spawn: typeof spawnOwnedProcess,
+    /** The caller's requested model, forwarded to every launch as --model and
+     *  kept private; the free-text profile admits any value. */
+    private readonly requestedModel: string | undefined,
   ) {}
 
   /** Memoized bridge start. Its router raises each permission prompt on whatever
@@ -362,6 +370,7 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
         coordinate,
         () => this.ensureBridge(),
         this.spawn,
+        this.requestedModel,
       );
       this.sessions.set(request.session, session);
     }
@@ -478,6 +487,8 @@ class ClaudeCodeSession {
     sessionId: string,
     private readonly ensureBridge: () => Promise<PermissionBridge>,
     private readonly spawn: typeof spawnOwnedProcess,
+    /** The caller's requested model, forwarded as --model on every launch. */
+    private readonly requestedModel: string | undefined,
   ) {
     this.coordinate = { opaque: sessionId };
   }
@@ -721,6 +732,11 @@ class ClaudeCodeSession {
     const sessionArgs = resuming
       ? ["--resume", this.coordinate.opaque]
       : ["--session-id", this.coordinate.opaque];
+    // A caller-requested model is forwarded natively as --model; Claude Code's
+    // free-text profile admits any value, so no value is validated at the Seam.
+    // `requestedModel` is already normalized (empty means none).
+    const modelArgs =
+      this.requestedModel !== undefined ? ["--model", this.requestedModel] : [];
     const launched = await this.spawn({
       executable: this.target.executable,
       args: [
@@ -732,6 +748,7 @@ class ClaudeCodeSession {
         "stream-json",
         "--verbose",
         "--include-partial-messages",
+        ...modelArgs,
         ...sessionArgs,
         // The permission bridge: Claude relays every permission prompt to this
         // loopback tool and waits on it. The inline config carries the per-Run
@@ -1493,7 +1510,7 @@ function buildProfile(
     platform,
     adapterRevision: ADAPTER_REVISION,
     configurationPosture:
-      "user-compatible: no --bare, --strict-mcp-config, --allowedTools, --tools, --model, or permission-mode flag; the user's settings, hooks, MCP servers, skills, and CLAUDE.md apply.",
+      "user-compatible: no --bare, --strict-mcp-config, --allowedTools, --tools, or permission-mode flag; a caller-requested model is forwarded as --model and no model is selected otherwise; the user's settings, hooks, MCP servers, skills, and CLAUDE.md apply.",
     recovery: {
       mode: "native-reattach",
       evidence:
@@ -1522,9 +1539,15 @@ function buildProfile(
         "Claude Code's stream-json print mode has no same-Turn guidance frame: a further user message queues as the next Turn, so steer is rejected unsupported and never emulated.",
     },
     modelSelection: {
-      at: "unavailable",
+      at: "launch",
+      declaration: { kind: "free-text" },
       evidence:
-        "Secant selects no model in M3; the effective model is reported from the init message and result usage.",
+        "Claude Code accepts any model string at launch via --model; Secant forwards a caller-requested model and selects none otherwise.",
+    },
+    modelObservation: {
+      available: true,
+      evidence:
+        "The effective model is read from the init message and result usage, distinct from any requested model.",
     },
     recoveryCoordinate: {
       timing: "before-submission",
@@ -1553,6 +1576,14 @@ function fileIdentity(path: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Treat an absent or empty requested model as no request, so every Adapter reads
+ *  `PrepareOptions.requestedModel` the same way. */
+function normalizeRequestedModel(
+  value: string | undefined,
+): string | undefined {
+  return value === undefined || value.length === 0 ? undefined : value;
 }
 
 function harnessPlatform(

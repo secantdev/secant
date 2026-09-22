@@ -99,12 +99,41 @@ export type SteerCapability =
   | { readonly available: true; readonly evidence: string }
   | { readonly available: false; readonly evidence: string };
 
-/** Where model selection can occur, or that Crucible cannot select a model. */
+/** What models a Harness admits: an exact supported list the Adapter observed
+ *  during qualification, or free-text entry of any model string. The profile
+ *  supplies the list when the Harness exposes one and declares free-text otherwise
+ *  (ADR 0022, 2026-09-07 amendment). */
+export type ModelDeclaration =
+  | { readonly kind: "list"; readonly models: readonly string[] }
+  | { readonly kind: "free-text" };
+
+/** Where model selection can occur and what the Harness admits, or that Crucible
+ *  cannot select a model. Every selectable variant carries the declaration a
+ *  caller's requested model is checked against. */
 export type ModelSelectionCapability =
-  | { readonly at: "launch"; readonly evidence: string }
-  | { readonly at: "per-turn"; readonly evidence: string }
-  | { readonly at: "launch-and-per-turn"; readonly evidence: string }
+  | {
+      readonly at: "launch";
+      readonly declaration: ModelDeclaration;
+      readonly evidence: string;
+    }
+  | {
+      readonly at: "per-turn";
+      readonly declaration: ModelDeclaration;
+      readonly evidence: string;
+    }
+  | {
+      readonly at: "launch-and-per-turn";
+      readonly declaration: ModelDeclaration;
+      readonly evidence: string;
+    }
   | { readonly at: "unavailable"; readonly evidence: string };
+
+/** Whether the Adapter observes the effective model from native evidence, giving
+ *  the `model` event and a result's effective-model observation a declared source.
+ *  Independent of selection: a Harness may report its model without accepting one. */
+export type ModelObservationCapability =
+  | { readonly available: true; readonly evidence: string }
+  | { readonly available: false; readonly evidence: string };
 
 /** Whether a durable recovery coordinate can be recorded before submission,
  *  only after native acceptance (an unavoidable crash window), or never. */
@@ -146,6 +175,7 @@ export interface HarnessProfile {
   readonly clarifications: ClarificationsCapability;
   readonly steer: SteerCapability;
   readonly modelSelection: ModelSelectionCapability;
+  readonly modelObservation: ModelObservationCapability;
   readonly recoveryCoordinate: RecoveryCoordinateTiming;
   readonly skillDelivery: SkillDelivery;
   readonly fileDelivery: FileDelivery;
@@ -567,6 +597,12 @@ export interface PrepareOptions {
   /** An explicit configured executable path or command, tried before the
    *  canonical name. */
   readonly configuredExecutable?: string;
+  /** An optional caller-supplied model applied at each Adapter's native point and
+   *  kept private below the Seam. Validated against a declared list at prepare — an
+   *  unknown model is a typed unavailable failure, never a substitution — while a
+   *  free-text profile admits any value. The effective model reported on a Turn
+   *  stays a separate observed fact and never copies this request. */
+  readonly requestedModel?: string;
 }
 
 /** The value `prepare` returns: a prepared Harness or a typed failure. */

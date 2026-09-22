@@ -71,6 +71,7 @@ function profile(): HarnessProfile {
     clarifications: { available: false, evidence: "scripted fake" },
     steer: { available: false, evidence: "scripted fake" },
     modelSelection: { at: "unavailable", evidence: "scripted fake" },
+    modelObservation: { available: true, evidence: "scripted fake" },
     recoveryCoordinate: {
       timing: "before-submission",
       evidence: "scripted fake",

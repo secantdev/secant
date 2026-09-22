@@ -70,6 +70,10 @@ function claudeProfile(): HarnessProfile {
       at: "unavailable",
       evidence: "fake claude selects no model",
     },
+    modelObservation: {
+      available: true,
+      evidence: "fake claude observes its own model",
+    },
     recoveryCoordinate: {
       timing: "before-submission",
       evidence: "fake claude mints a session id",

@@ -41,7 +41,15 @@ function profile(overrides?: Partial<HarnessProfile>): HarnessProfile {
       evidence: "fake offers a question shape",
     },
     steer: { available: false, evidence: "fake rejects steer unless scripted" },
-    modelSelection: { at: "unavailable", evidence: "fake selects no model" },
+    modelSelection: {
+      at: "launch",
+      declaration: { kind: "list", models: ["fake-model-a", "fake-model-b"] },
+      evidence: "fake declares a supported-model list",
+    },
+    modelObservation: {
+      available: true,
+      evidence: "fake observes the effective model from its script",
+    },
     recoveryCoordinate: {
       timing: "before-submission",
       evidence: "fake mints the id before submission",
@@ -129,6 +137,19 @@ function fake(...turns: FakeTurnScript[]): FakeScript {
 const scenarios: ConformanceScenarios = {
   label: "fake",
   concurrentCount: 3,
+  // The fake declares a supported-model list, so the declaration case sees a list
+  // and the requested-model cases exercise both admission and typed rejection.
+  expectedDeclaration: { kind: "list", includes: ["fake-model-a"] },
+  requestedModel: "fake-model-a",
+  unknownModel: "fake-model-z",
+  requestedTurn: () =>
+    createFake(
+      fake({
+        events: [{ kind: "assistant-content", content: "hello" }],
+        result: COMPLETED_OPEN,
+      }),
+    ),
+  rejectsUnknownModel: () => createFake(fake({ result: COMPLETED_OPEN })),
   baseline: () =>
     createFake(
       fake({

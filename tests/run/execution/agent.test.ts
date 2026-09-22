@@ -42,6 +42,10 @@ function profile(overrides: Partial<HarnessProfile> = {}): HarnessProfile {
     clarifications: { available: false, evidence: "fake has no questions" },
     steer: { available: false, evidence: "fake has no steer" },
     modelSelection: { at: "unavailable", evidence: "fake selects no model" },
+    modelObservation: {
+      available: true,
+      evidence: "fake observes its own model",
+    },
     recoveryCoordinate: {
       timing: "before-submission",
       evidence: "fake records before submission",

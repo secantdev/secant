@@ -51,12 +51,13 @@ const fixtureCase = (name: string) =>
 // real plain Turn does not. The real plain recording is exercised separately below.
 const COMPLETED_CASE = fixtureCase("completed");
 const protocolCase = fixtureCase;
+// Flags Secant never passes at qualification (`--version`). `--model` is not
+// here: a launch forwards a caller-requested model as --model, exercised below.
 const FORBIDDEN_FLAGS = [
   "--bare",
   "--strict-mcp-config",
   "--allowedTools",
   "--tools",
-  "--model",
   "--permission-mode",
   "--session-id",
   "--resume",
@@ -1136,6 +1137,61 @@ test("one stream-json Turn yields normalized events and an authoritative complet
   });
 });
 
+test("a requested model is forwarded to the launch as --model, distinct from the effective model", async () => {
+  const replayer = installReplayer(VERSION, COMPLETED_CASE);
+  const workspace = makeTempDir("secant-claude-workspace-");
+  const prepared = await createClaudeCodeAdapter({
+    path: replayer.path,
+    env: {},
+    sessionId: () => "11111111-1111-4111-8111-111111111111",
+  }).prepare({ workspace, requestedModel: "claude-opus-4-1" });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+  // Free-text profile: the caller's model is admitted with no list check.
+  assert.equal(prepared.harness.profile.modelSelection.at, "launch");
+  if (prepared.harness.profile.modelSelection.at !== "launch") {
+    throw new Error("unreachable");
+  }
+  assert.deepEqual(prepared.harness.profile.modelSelection.declaration, {
+    kind: "free-text",
+  });
+
+  const turn = prepared.harness.startTurn({
+    session: "repair",
+    origin: "managed",
+    correlationKey: { opaque: "turn-1" },
+    input: { text: "Repair the failing test." },
+    recorder: {
+      admit() {
+        return Promise.resolve({ recorded: true });
+      },
+      checkpoint() {
+        return Promise.resolve({ recorded: true });
+      },
+    },
+  });
+  const result = await turn.result();
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") throw new Error("unreachable");
+  // Requested and effective stay distinct facts: the effective model is the one
+  // the init reported, never the request copied back.
+  assert.deepEqual(result.detail.effectiveModel, {
+    known: true,
+    model: "claude-sonnet-4-5",
+  });
+  await prepared.harness.close();
+
+  const invocation = replayer
+    .invocations()
+    .find((i) => i.args.includes("--session-id"));
+  assert.ok(invocation, "the Turn spawned a --session-id process");
+  const at = invocation.args.indexOf("--model");
+  assert.notEqual(at, -1, "the launch carries --model");
+  assert.equal(invocation.args[at + 1], "claude-opus-4-1");
+  // The model precedes the session flag, as the golden pins the launch order.
+  assert.ok(at < invocation.args.indexOf("--session-id"));
+});
+
 test("two large Turns reuse one live Session process and preserve intact stdin frames", async () => {
   const replayer = installReplayer(VERSION, protocolCase("two-turns"));
   const prepared = await createClaudeCodeAdapter({
@@ -1430,7 +1486,12 @@ test("the profile carries every M3 fact with its evidence and a user-compatible 
   assert.equal(profile.interruption.mode, "process-only");
   assert.equal(profile.approvals.available, true);
   assert.equal(profile.clarifications.available, false);
-  assert.equal(profile.modelSelection.at, "unavailable");
+  // Claude Code accepts any model string via --model at launch: it declares
+  // free-text entry, and observes the effective model from init/result.
+  assert.equal(profile.modelSelection.at, "launch");
+  if (profile.modelSelection.at !== "launch") throw new Error("unreachable");
+  assert.equal(profile.modelSelection.declaration.kind, "free-text");
+  assert.equal(profile.modelObservation.available, true);
   assert.equal(profile.recoveryCoordinate.timing, "before-submission");
   assert.equal(profile.skillDelivery.mode, "plain-path");
   assert.equal(profile.fileDelivery.mode, "plain-path");
@@ -1441,6 +1502,7 @@ test("the profile carries every M3 fact with its evidence and a user-compatible 
     profile.approvals,
     profile.clarifications,
     profile.modelSelection,
+    profile.modelObservation,
     profile.recoveryCoordinate,
     profile.skillDelivery,
     profile.fileDelivery,

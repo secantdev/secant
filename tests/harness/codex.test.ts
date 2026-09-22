@@ -1988,12 +1988,70 @@ test("Codex profile is truthful and user-compatible", async () => {
   assert.equal(profile.clarifications.available, false);
   assert.equal(profile.steer.available, true);
   assert.equal(profile.modelSelection.at, "launch-and-per-turn");
+  if (profile.modelSelection.at !== "launch-and-per-turn") {
+    throw new Error("unreachable");
+  }
+  // Codex declares the supported-model list its qualification observed and a
+  // source for the effective-model observation.
+  assert.equal(profile.modelSelection.declaration.kind, "list");
+  if (profile.modelSelection.declaration.kind !== "list") {
+    throw new Error("unreachable");
+  }
+  assert.ok(profile.modelSelection.declaration.models.includes("gpt-6-astra"));
+  assert.ok(profile.modelSelection.declaration.models.includes("gpt-5.6-sol"));
+  assert.equal(profile.modelObservation.available, true);
   assert.equal(profile.recoveryCoordinate.timing, "before-submission");
   assert.equal(profile.skillDelivery.mode, "plain-path");
   assert.equal(profile.fileDelivery.mode, "plain-path");
   assert.match(profile.configurationPosture, /user-compatible/);
   assert.match(profile.configurationPosture, /experimental.*disabled/i);
   await result.harness.close();
+});
+
+test("a requested model reaches turn/start natively and the effective model stays separate", async () => {
+  const installed = installSyntheticCodexReplayer();
+  const prepared = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+  }).prepare({ workspace: process.cwd(), requestedModel: "gpt-5.6-sol" });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok) throw new Error("unreachable");
+
+  const result = await prepared.harness.startTurn(turnRequest()).result();
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") throw new Error("unreachable");
+  // The effective model is what thread/start observed, never the request.
+  assert.deepEqual(result.detail.effectiveModel, {
+    known: true,
+    model: "recorded-model",
+  });
+  await prepared.harness.close();
+
+  const appServer = installed
+    .invocations()
+    .find((invocation) => invocation.args.join(" ") === "app-server");
+  assert.ok(appServer !== undefined);
+  const turnStart = appServer.stdinLines
+    .map((line) => JSON.parse(line))
+    .find((message) => message.method === "turn/start");
+  assert.ok(turnStart, "the Adapter sent a turn/start");
+  assert.equal(turnStart.params.model, "gpt-5.6-sol");
+});
+
+test("a requested model the observed list rejects fails prepare with a typed unavailable result", async () => {
+  const installed = installSyntheticCodexReplayer();
+  const result = await createCodexAdapter({
+    path: installed.path,
+    env: {},
+  }).prepare({
+    workspace: process.cwd(),
+    requestedModel: "no-such-secant-model",
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("unreachable");
+  assert.equal(result.failure.phase, "prepare");
+  assert.equal(result.failure.category, "model-unavailable");
+  assert.match(result.failure.diagnostics ?? "", /no-such-secant-model/);
 });
 
 test("required schema drift fails closed before app-server launch", async () => {

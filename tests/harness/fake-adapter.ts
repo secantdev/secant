@@ -28,6 +28,7 @@ import type {
   HarnessProfile,
   HarnessRequest,
   HarnessFailure,
+  PrepareOptions,
   PrepareResult,
   PreparedHarness,
   RecordingReceipt,
@@ -115,11 +116,32 @@ export function createFake(script: FakeScript): HarnessAdapterFactory {
 class FakeAdapter implements HarnessAdapter {
   constructor(private readonly script: FakeScript) {}
 
-  prepare(): Promise<PrepareResult> {
+  prepare(options: PrepareOptions): Promise<PrepareResult> {
     if (this.script.prepareFailure) {
       return Promise.resolve({
         ok: false,
         failure: this.script.prepareFailure,
+      });
+    }
+    // A requested model the profile's declared list does not admit is a typed
+    // unavailable prepare failure, never a substitution (ADR 0022). A free-text
+    // declaration admits any value; selection-unavailable profiles ignore it.
+    const selection = this.script.profile.modelSelection;
+    if (
+      options.requestedModel !== undefined &&
+      options.requestedModel.length > 0 &&
+      selection.at !== "unavailable" &&
+      selection.declaration.kind === "list" &&
+      !selection.declaration.models.includes(options.requestedModel)
+    ) {
+      return Promise.resolve({
+        ok: false,
+        failure: {
+          phase: "prepare",
+          category: "model-unavailable",
+          possibleEffects: "none",
+          diagnostics: `The fake Harness does not offer the requested model '${options.requestedModel}'.`,
+        },
       });
     }
     return Promise.resolve({

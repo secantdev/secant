@@ -136,7 +136,11 @@ export interface InterruptRecoveryScenarios extends TurnLifecycleScenarios {
  * prepare/profile subset.
  */
 export interface ConformanceScenarios
-  extends InterruptRecoveryScenarios, ApprovalRequestScenarios {
+  extends
+    InterruptRecoveryScenarios,
+    ApprovalRequestScenarios,
+    ModelDeclarationScenarios,
+    RequestedModelScenarios {
   /** A Turn that raises one request it does not await, expiring it at terminal. */
   expiringRequest(): HarnessAdapterFactory;
   /** A Turn that ends `lost` with the given unknown. */
@@ -563,6 +567,160 @@ export function runPrepareProfileCases(
   });
 }
 
+/**
+ * The model-declaration and model-observation profile facts every shipped Adapter
+ * and the fake must carry (ADR 0022, 2026-09-07 amendment): the model-selection
+ * capability declares either a supported-model list or free-text entry, and the
+ * profile declares a source for the effective-model observation.
+ */
+export interface ModelDeclarationScenarios {
+  readonly label: string;
+  baseline(): HarnessAdapterFactory;
+  /** What the baseline profile's model-selection capability must declare. A list
+   *  Adapter names models the list must include; a free-text Adapter names none. */
+  readonly expectedDeclaration:
+    | { readonly kind: "free-text" }
+    | { readonly kind: "list"; readonly includes: readonly string[] };
+}
+
+/** Run the model-declaration cases against one provider. */
+export function runModelDeclarationCases(
+  scenarios: ModelDeclarationScenarios,
+  register: RegisterConformanceCase,
+): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+
+  register(
+    name("the profile declares a model posture and a model-observation source"),
+    async () => {
+      const prepared = await prepare(scenarios.baseline());
+      const { modelSelection, modelObservation } = prepared.profile;
+      assert.notEqual(
+        modelSelection.at,
+        "unavailable",
+        "a shipped Adapter declares where selection can occur",
+      );
+      if (modelSelection.at === "unavailable") {
+        throw new Error("unreachable");
+      }
+      const declaration = modelSelection.declaration;
+      assert.equal(declaration.kind, scenarios.expectedDeclaration.kind);
+      if (
+        declaration.kind === "list" &&
+        scenarios.expectedDeclaration.kind === "list"
+      ) {
+        assert.ok(
+          declaration.models.length > 0,
+          "a list declaration is non-empty",
+        );
+        for (const model of scenarios.expectedDeclaration.includes) {
+          assert.ok(
+            declaration.models.includes(model),
+            `the declared list includes ${model}`,
+          );
+        }
+      }
+      assert.ok(
+        modelObservation.evidence.length > 0,
+        "the model-observation capability carries evidence",
+      );
+      await prepared.close();
+    },
+  );
+}
+
+/**
+ * The requested-model behaviours every Adapter and the fake must exhibit: a
+ * requested model is threaded through prepare to the Adapter's native mechanism
+ * while the effective model stays a separate observed fact, and a requested model
+ * a declared list does not admit fails prepare with a typed unavailable result
+ * rather than a substitution (ADR 0022).
+ */
+export interface RequestedModelScenarios {
+  readonly label: string;
+  readonly inputText?: string;
+  /** A model the baseline declaration admits, threaded through prepare. */
+  readonly requestedModel: string;
+  /** An Adapter that completes a Turn, prepared with `requestedModel`. */
+  requestedTurn(): HarnessAdapterFactory;
+  /** For a list-declaring Adapter, a model the list rejects. A free-text Adapter
+   *  admits any value and omits both this and `rejectsUnknownModel`. */
+  readonly unknownModel?: string;
+  rejectsUnknownModel?: () => HarnessAdapterFactory;
+}
+
+/** Run the requested-model cases against one provider. */
+export function runRequestedModelCases(
+  scenarios: RequestedModelScenarios,
+  register: RegisterConformanceCase,
+): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+
+  register(
+    name(
+      "a requested model reaches the Adapter and the effective model stays separate",
+    ),
+    async () => {
+      const prepared = await prepareWith(scenarios.requestedTurn(), {
+        requestedModel: scenarios.requestedModel,
+      });
+      const turn = prepared.startTurn(
+        request(recorder().recorder, { text: scenarios.inputText }),
+      );
+      const result = await turn.result();
+      assert.equal(result.kind, "completed");
+      if (result.kind !== "completed") throw new Error("unreachable");
+      // Requested and effective stay distinct facts: an observed effective model
+      // is never the request copied back.
+      if (result.detail.effectiveModel.known) {
+        assert.notEqual(
+          result.detail.effectiveModel.model,
+          scenarios.requestedModel,
+          "the effective model is observed, not the request",
+        );
+      }
+      await prepared.close();
+    },
+  );
+
+  register(
+    name("an empty requested model is treated as no model requested"),
+    async () => {
+      // Every Adapter reads `requestedModel` the same way: an empty string is no
+      // request, so even a list-declaring Adapter admits it without a list check.
+      const prepared = await prepareWith(scenarios.requestedTurn(), {
+        requestedModel: "",
+      });
+      const result = await prepared
+        .startTurn(request(recorder().recorder, { text: scenarios.inputText }))
+        .result();
+      assert.equal(result.kind, "completed");
+      await prepared.close();
+    },
+  );
+
+  const rejectsUnknownModel = scenarios.rejectsUnknownModel;
+  const unknownModel = scenarios.unknownModel;
+  if (rejectsUnknownModel !== undefined && unknownModel !== undefined) {
+    register(
+      name(
+        "a requested model the declared list rejects fails prepare with a typed unavailable result",
+      ),
+      async () => {
+        const adapter = rejectsUnknownModel()();
+        const result = await adapter.prepare({
+          workspace: process.cwd(),
+          requestedModel: unknownModel,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) throw new Error("unreachable");
+        assert.equal(result.failure.phase, "prepare");
+        assert.equal(result.failure.category, "model-unavailable");
+      },
+    );
+  }
+}
+
 /** Run the approval request/answer/expiry cases against one provider. Both the
  *  full suite (for the fake) and the Claude Code Adapter over the bridge call it.
  *  `interruptOutcome` names how the provider's interrupt of a live Turn settles
@@ -687,6 +845,8 @@ export function runConformanceSuite(
   const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
 
   runPrepareProfileCases(scenarios, register);
+  runModelDeclarationCases(scenarios, register);
+  runRequestedModelCases(scenarios, register);
   runTurnLifecycleCases(scenarios, register);
   runInterruptRecoveryCases(scenarios, register);
   runApprovalRequestCases(scenarios, register);
@@ -820,6 +980,19 @@ export function runConformanceSuite(
 
 async function prepare(factory: HarnessAdapterFactory) {
   const result = await factory().prepare({ workspace: process.cwd() });
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error("unreachable");
+  return result.harness;
+}
+
+async function prepareWith(
+  factory: HarnessAdapterFactory,
+  options: { readonly requestedModel: string },
+) {
+  const result = await factory().prepare({
+    workspace: process.cwd(),
+    requestedModel: options.requestedModel,
+  });
   assert.equal(result.ok, true);
   if (!result.ok) throw new Error("unreachable");
   return result.harness;

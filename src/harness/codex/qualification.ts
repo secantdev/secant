@@ -77,13 +77,19 @@ export class CodexQualificationConnection {
     return parseResult(result, accountResultSchema, "account/read");
   }
 
-  async listModels(): Promise<void> {
+  /** Run `model/list` and return the observed, non-hidden model ids in order —
+   *  the supported-model list Codex's profile declares and a requested model is
+   *  validated against. Previously the parsed list was validated and discarded. */
+  async listModels(): Promise<readonly string[]> {
     const result = await this.request("model/list", {
       cursor: null,
       includeHidden: false,
       limit: null,
     });
-    parseResult(result, modelResultSchema, "model/list");
+    const parsed = parseResult(result, modelResultSchema, "model/list");
+    return parsed.data
+      .filter((entry) => !entry.hidden)
+      .map((entry) => entry.model);
   }
 
   runtimeConnection(): CodexJsonlConnection {

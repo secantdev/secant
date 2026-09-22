@@ -37,7 +37,15 @@ function profile(): HarnessProfile {
       evidence: "fake offers a question shape",
     },
     steer: { available: false, evidence: "scripted fake" },
-    modelSelection: { at: "launch", evidence: "fake takes a model at launch" },
+    modelSelection: {
+      at: "launch",
+      declaration: { kind: "free-text" },
+      evidence: "fake takes any model at launch",
+    },
+    modelObservation: {
+      available: true,
+      evidence: "fake observes the effective model",
+    },
     recoveryCoordinate: {
       timing: "after-acceptance",
       evidence: "fake reveals the id after acceptance",

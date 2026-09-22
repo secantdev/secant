@@ -18,8 +18,10 @@ import {
   runApprovalRequestCases,
   runExactThreadRecoveryCases,
   runInterruptRecoveryCases,
+  runModelDeclarationCases,
   runNativeSteerCases,
   runPrepareProfileCases,
+  runRequestedModelCases,
   runTurnLifecycleCases,
   type ApprovalRequestScenarios,
   type InterruptRecoveryScenarios,
@@ -67,6 +69,33 @@ export function registerClaudeCodeReplayerConformance(
       }),
   };
   runPrepareProfileCases(scenarios, register);
+
+  // Claude Code declares free-text model entry and forwards a caller-requested
+  // model as --model; the effective model stays the init/result observation.
+  runModelDeclarationCases(
+    {
+      label: "claude-code",
+      baseline: scenarios.baseline,
+      expectedDeclaration: { kind: "free-text" },
+    },
+    register,
+  );
+  runRequestedModelCases(
+    {
+      label: "claude-code",
+      requestedModel: "requested-conformance-model",
+      requestedTurn: () => {
+        const replayer = installReplayer(VERSION, COMPLETED_CASE);
+        return () =>
+          createClaudeCodeAdapter({
+            path: replayer.path,
+            env: {},
+            sessionId: () => "77777777-7777-4777-8777-777777777777",
+          });
+      },
+    },
+    register,
+  );
 
   const turnScenarios: TurnLifecycleScenarios = {
     ...scenarios,
@@ -169,6 +198,39 @@ export function registerCodexReplayerConformance(
       prepareFailure: () => () =>
         createCodexAdapter({
           path: makeTempDir("secant-codex-empty-"),
+          env: {},
+        }),
+    },
+    register,
+  );
+
+  // Codex declares the supported-model list its qualification observed; a
+  // requested model is applied natively per Turn and one the list rejects fails
+  // prepare. `gpt-6-astra` is the default recorded model; `gpt-5.6-sol` a
+  // non-default one, distinct from the thread's observed effective model.
+  runModelDeclarationCases(
+    {
+      label: "codex",
+      baseline: () => () =>
+        createCodexAdapter({ path: replayer.path, env: {} }),
+      expectedDeclaration: { kind: "list", includes: ["gpt-6-astra"] },
+    },
+    register,
+  );
+  runRequestedModelCases(
+    {
+      label: "codex",
+      inputText: CODEX_RECORDING_INPUT.completion,
+      requestedModel: "gpt-5.6-sol",
+      requestedTurn: () => () =>
+        createCodexAdapter({
+          path: installSyntheticCodexReplayer().path,
+          env: {},
+        }),
+      unknownModel: "no-such-secant-model",
+      rejectsUnknownModel: () => () =>
+        createCodexAdapter({
+          path: installSyntheticCodexReplayer().path,
           env: {},
         }),
     },

@@ -21,19 +21,19 @@ remove the old subprocess assertion and mark that row `done` in the deletion cha
 mask a failure with a retry, sleep, timeout increase, or silent assertion removal in any layer. The issue #177 stress prototype is branch-only
 investigation evidence and stays out of this tree.
 
-The canonical test script (`scripts/test.ts`) runs two isolated file workers on every OS (`--parallel=2`). The enabler is a spawn-free semantic suite, not an
+The canonical test script (`scripts/test.ts`) runs three isolated file workers on every OS (`--parallel=3`). The enabler is a spawn-free semantic suite, not an
 upstream Bun fix: every suite that reached a real child under the runner has moved to standalone runtime conformance — the last two, the Claude Code and Codex
-Harness suites, in [#198](https://github.com/secantdev/secant/issues/198) — so no worker spawns a child at startup and the Bun 1.4.2 defect that once forced
-one worker on macOS and Linux can no longer fire. That defect was real, not a preference: on a CPU-constrained CI runner, two workers each spawning a child at
-startup occasionally made Bun drop a child's `exit`/`close`/stdio events entirely (the child exits, but the spawn never settles and the test times out at 30s).
-It first appeared on the macOS arm64 runner ([#149](https://github.com/secantdev/secant/issues/149)) and later on the ubuntu-latest runner
-([#150](https://github.com/secantdev/secant/issues/150)), so both were serialized until the spawns left the suite. Two is the highest worker count validated on
-the public `windows-latest` runner (issue #172 calibration: a documented 4 vCPUs / 16 GB RAM, 4 logical processors and 17,174,360,064 physical-memory bytes in
-[run 35507654564](https://github.com/secantdev/secant/actions/runs/35507654564), where three workers produced scattered 30 s child-process timeouts; per the
-no-retry protocol that first failure rejected three workers, so four was not tried); macOS and Linux match it. Isolation stays load-bearing: each file runs in
-its own worker, so module-level helpers and environment changes never leak across files. Tests within each file remain sequential; do not replace file
-parallelism with `--concurrent`, which would race their shared fixtures. Should child-lifecycle flakiness return, keep the spawn out of the semantic suite —
-never a retry, sleep, or timeout increase.
+Harness suites, in [#198](https://github.com/secantdev/secant/issues/198) — so no worker spawns a child at startup and the Bun 1.4.2 defect can no longer fire.
+That defect was real, not a preference: on a CPU-constrained CI runner, workers each spawning a child at startup occasionally made Bun drop a child's
+`exit`/`close`/stdio events entirely (the child exits, but the spawn never settles and the test times out at 30s). It first appeared on the macOS arm64 runner
+([#149](https://github.com/secantdev/secant/issues/149)) and later on the ubuntu-latest runner ([#150](https://github.com/secantdev/secant/issues/150)), which
+forced one worker there, and the issue #172 calibration then rejected three workers on the public `windows-latest` runner (4 logical processors and
+17,174,360,064 physical-memory bytes in [run 35507654564](https://github.com/secantdev/secant/actions/runs/35507654564)) with the same spawn-lifecycle
+symptoms — scattered 30 s child-process timeouts, an indeterminate Command attempt, a failed Harness schema probe. With every real-child spawn out of the suite
+that cause is gone, so the count is raised to three on every OS (one worker per logical processor on the Windows runner leaves the OS headroom), validated by the
+three-OS `check` matrix. Isolation stays load-bearing: each file runs in its own worker, so module-level helpers and environment changes never leak across files.
+Tests within each file remain sequential; do not replace file parallelism with `--concurrent`, which would race their shared fixtures. Should child-lifecycle
+flakiness return, keep the spawn out of the semantic suite — never a retry, sleep, or timeout increase.
 
 Package smoke tests copy the produced Bun compiled single-file executable out of `dist/` into an isolated temporary location and exercise it there. They
 are the CI acceptance seam for headless work and do not invoke a real Harness. This is the one home for the package-smoke enumeration — the support matrix

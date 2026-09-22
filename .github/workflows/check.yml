@@ -19,7 +19,10 @@ jobs:
   # The whole canonical gate on all three OS (Windows x64, macOS arm64, Linux x64
   # per ADR 0027): typecheck, format, lint, `bun test` with the Solid preload,
   # the host compile, and the compiled-binary smoke — under the pinned Bun alone,
-  # with no Node toolchain step (ADR 0030).
+  # with no Node toolchain step (ADR 0030). Run as the individual `bun run check`
+  # links rather than one `bun run check` step, so each link's per-OS duration is
+  # visible in CI; step order and stop-on-first-failure match the `&&` chain, and
+  # `bun run check` stays the one local entrypoint.
   check:
     strategy:
       fail-fast: false
@@ -33,8 +36,20 @@ jobs:
           # Reads the exact Bun pin from package.json's packageManager field.
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - name: Canonical check
-        run: bun run check
+      - name: Migrations check
+        run: bun run migrations:check
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Format check
+        run: bun run format:check
+      - name: Lint
+        run: bun run lint
+      - name: Test
+        run: bun run test
+      - name: Build
+        run: bun run build
+      - name: Compiled-binary smoke
+        run: bun run test:package
       - name: Process runtime conformance
         if: always()
         run: bun run test:runtime-conformance

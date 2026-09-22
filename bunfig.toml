@@ -7,7 +7,7 @@
 [test]
 preload = ["@opentui/solid/preload"]
 # The `test` package script (scripts/test.ts) supplies the runner settings that
-# cannot live here: two isolated file workers per OS and a 30s per-test timeout.
+# cannot live here: three isolated file workers per OS and a 30s per-test timeout.
 # File isolation keeps module-level test helpers owned by one file, while the
 # timeout covers Windows process creation and Bun cold-start. The launcher
 # explains why two workers hold on every OS: the semantic suite is spawn-free

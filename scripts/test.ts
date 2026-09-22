@@ -1,5 +1,5 @@
-// The canonical test launcher: Bun's test runner with four isolated file workers
-// on every OS (`--parallel=4`).
+// The canonical test launcher: Bun's test runner with three isolated file workers
+// on every OS (`--parallel=3`).
 //
 // Raising the worker count is safe because the semantic suite is spawn-free: every
 // suite that reached a real child under the runner moved to standalone runtime
@@ -7,12 +7,14 @@
 // so the Bun 1.4.2 child-lifecycle defect (#149, #150) — and the #172 three-worker
 // rejection it caused on the Windows runner — can no longer fire.
 //
-// The count is tuned by the split-out per-step CI timing (check.yml): the `bun
-// test` step is execution-bound on the Windows runner (the tests are I/O-heavy —
-// temp dirs, per-test SQLite — and run ~10x slower there than on Linux/macOS), and
-// that work parallelizes, so workers are set to the Windows runner's four logical
-// processors. Raise further only while the Windows `Test` step keeps dropping; a
-// green three-OS `check` matrix validates each count.
+// Three is where worker count stops paying off, measured on the split-out per-step
+// CI timing (check.yml). The `bun test` step is slow only on the Windows runner
+// (~190s vs ~20s on Linux/macOS) and is I/O-bound, not CPU-bound: the tests each
+// open a temp dir and a per-test SQLite database, and the workers contend on the
+// runner's disk rather than overlapping, so effective parallelism plateaus near
+// three. Raising to four was measured and moved the Windows `Test` step by ~0s, so
+// the count is held at three. The remaining Windows cost is the tests' own disk
+// I/O; no worker count reduces it.
 //
 // File isolation stays load-bearing: each file runs in its own worker, so
 // module-level helpers and environment changes never leak across files. Tests
@@ -26,7 +28,7 @@ import { spawnSync } from "node:child_process";
 
 const result = spawnSync(
   process.execPath,
-  ["test", "--parallel=4", "--timeout", "30000", ...process.argv.slice(2)],
+  ["test", "--parallel=3", "--timeout", "30000", ...process.argv.slice(2)],
   { stdio: "inherit" },
 );
 process.exit(result.status ?? 1);

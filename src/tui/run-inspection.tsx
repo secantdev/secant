@@ -10,6 +10,7 @@ import type {
   TranscriptPageReference,
   TranscriptRead,
 } from "../application/projection-port.js";
+import { RUN_TIMELINE_TRUNCATION_MARKER } from "../application/projection-port.js";
 import { clip } from "./clip.js";
 import {
   AT_LIVE,
@@ -18,6 +19,7 @@ import {
   timelineWindow,
   type TimelineScroll,
 } from "./run-timeline.js";
+import { clipRunContent } from "./run-timeline-rows.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 // The Run Workbench's reference-inspection overlay, split out of run-workbench.tsx
@@ -76,9 +78,59 @@ interface TranscriptInspection {
   /** The opaque cursor for the next older page, absent once the oldest is loaded. */
   readonly older?: string;
   readonly problem?: Problem;
+  /** A failed older-page read is visible without discarding the retry cursor or
+   * the transcript entries already on screen. */
+  readonly olderProblem?: Problem;
 }
 
 type Inspection = BlobInspection | TranscriptInspection;
+
+type TTranscriptInspectionParams = {
+  readonly title: string;
+  readonly pageRef: TranscriptPageReference;
+  readonly entries: readonly RunTranscriptEntryView[];
+  readonly older?: string;
+  readonly olderProblem?: Problem;
+};
+
+function transcriptInspection(
+  params: TTranscriptInspectionParams,
+): TranscriptInspection {
+  if (params.older !== undefined && params.olderProblem !== undefined) {
+    return {
+      kind: "transcript",
+      title: params.title,
+      pageRef: params.pageRef,
+      entries: params.entries,
+      older: params.older,
+      olderProblem: params.olderProblem,
+    };
+  }
+  if (params.older !== undefined) {
+    return {
+      kind: "transcript",
+      title: params.title,
+      pageRef: params.pageRef,
+      entries: params.entries,
+      older: params.older,
+    };
+  }
+  if (params.olderProblem !== undefined) {
+    return {
+      kind: "transcript",
+      title: params.title,
+      pageRef: params.pageRef,
+      entries: params.entries,
+      olderProblem: params.olderProblem,
+    };
+  }
+  return {
+    kind: "transcript",
+    title: params.title,
+    pageRef: params.pageRef,
+    entries: params.entries,
+  };
+}
 
 /** Large blob content is bounded: at most this many lines are inspected, with an
  *  explicit truncation marker past it (#91 AC4). A transcript is bounded instead
@@ -195,23 +247,36 @@ export function createInspection(deps: {
       ...current.pageRef,
       older: current.older,
     });
-    if (!read.found || read.type !== "transcript-page") {
+    if (!read.found) {
       // A failed read (e.g. a raced owner reacquire) leaves the cursor in place so
-      // a later scroll-up retries, rather than silently pretending the oldest was
-      // reached; the headless client surfaces the Problem explicitly.
+      // a later scroll-up retries. Keep the current entries and surface the Problem
+      // above them instead of silently pretending the oldest was reached.
+      setInspecting(
+        transcriptInspection({
+          title: current.title,
+          pageRef: current.pageRef,
+          entries: current.entries,
+          older: current.older,
+          olderProblem: read.problem,
+        }),
+      );
+      return;
+    }
+    if (read.type !== "transcript-page") {
       return;
     }
     // transcriptLines is a per-entry concatenation, so the prepended line count is
     // exactly the older page's lines — no need to re-render the whole transcript.
     const oldTop = window().top;
     const prepended = transcriptLines(read.entries).length;
-    setInspecting({
-      ...current,
-      entries: [...read.entries, ...current.entries],
-      ...(read.older !== undefined
-        ? { older: read.older }
-        : { older: undefined }),
-    });
+    setInspecting(
+      transcriptInspection({
+        title: current.title,
+        pageRef: current.pageRef,
+        entries: read.entries.concat(current.entries),
+        older: read.older,
+      }),
+    );
     setScroll({ mode: "paused", top: oldTop + prepended });
   };
 
@@ -226,13 +291,20 @@ export function createInspection(deps: {
         current.problem.remediation,
       ];
     }
-    if (current.kind === "transcript") return transcriptLines(current.entries);
-    return current.truncated
-      ? [
-          ...current.lines,
-          `… output truncated (first ${MAX_INSPECT_LINES} lines)`,
-        ]
-      : current.lines;
+    if (current.kind === "transcript") {
+      const content = transcriptLines(current.entries);
+      if (current.olderProblem === undefined) return content;
+      return [
+        `Notice [${current.olderProblem.code}]: ${current.olderProblem.explanation}`,
+        current.olderProblem.remediation,
+      ].concat(content);
+    }
+    if (!current.truncated) return current.lines;
+    const last = current.lines.at(-1);
+    if (last === undefined) return [RUN_TIMELINE_TRUNCATION_MARKER];
+    return current.lines
+      .slice(0, -1)
+      .concat(`${last} ${RUN_TIMELINE_TRUNCATION_MARKER}`);
   };
   const viewportH = () => Math.max(1, deps.interiorH() - 2); // title + footer
   const window = () => timelineWindow(scroll(), lines().length, viewportH());
@@ -311,7 +383,7 @@ export function InspectionView(props: {
         <For each={visible()}>
           {(line) => (
             <text fg={theme.text} flexShrink={0}>
-              {clip(line, w())}
+              {clipRunContent(line, w())}
             </text>
           )}
         </For>

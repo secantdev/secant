@@ -44,10 +44,12 @@ import type {
 // updates on the live edge, the paging anchor + new-activity count +
 // jump-to-latest, reference inspection with a truncation marker, focus movement
 // and Escape, small-width breakpoints and resize without overflow (AC1–AC8).
-// Issue #193 changes no large-content surface, so that deferred item is
-// inapplicable. It changes neither Renderer nor dependency pins, so the Windows
-// Terminal human check is not applicable; this deterministic renderer scenario
-// runs in the canonical test suite on Windows, macOS, and Linux.
+// Issue #195 covers the bounded-window marker, counted Jump-to-latest control,
+// large-content truncation parity, inspection paging notice, transient Operation
+// receipts, and the interaction regression guard at this public renderer seam. It
+// changes neither Renderer nor dependency pins, so the Windows Terminal human
+// check is not applicable; the named workbench-timeline-inspection scenario runs
+// in the canonical test suite on Windows, macOS, and Linux.
 
 const WORKSPACE = "/tmp/secant-workbench-ws";
 
@@ -1008,7 +1010,7 @@ test("live rows respect paused timeline following and contribute to the new-acti
     paused.split("\n").find((line) => / e\d/.test(line)),
     topLine,
   );
-  assert.match(paused, /\d+ new · end to jump/);
+  assert.match(paused, /\d+ new activities · Jump to latest/);
 
   await press(t, renderer, "end");
   const latest = t.captureCharFrame();
@@ -1123,7 +1125,7 @@ test("scrolling up anchors the first visible row, counts new activity, and jump-
   const live = t.captureCharFrame();
   assert.match(live, /View current/);
   assert.match(live, / e35/); // the newest event
-  assert.doesNotMatch(live, /new · end to jump/);
+  assert.doesNotMatch(live, /new activit(?:y|ies) · Jump to latest/);
 });
 
 test("timeline paging is wired: home reaches the oldest event, end returns to the live edge", async () => {
@@ -1141,6 +1143,50 @@ test("timeline paging is wired: home reaches the oldest event, end returns to th
   const live = t.captureCharFrame();
   assert.match(live, /View current/);
   assert.match(live, / e29/);
+});
+
+test("workbench-timeline-inspection: the bounded window marks its beginning and counts Jump to latest activity", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    runOf({ timeline: events(30) }),
+    100,
+    14,
+  );
+  assert.doesNotMatch(t.captureCharFrame(), /Beginning of Run history/);
+
+  await press(t, renderer, "home");
+  const beginning = t.captureCharFrame();
+  assert.match(beginning, /Beginning of Run history/);
+  assert.match(beginning, / e0 /);
+
+  await press(t, renderer, "down");
+  assert.doesNotMatch(t.captureCharFrame(), /Beginning of Run history/);
+
+  await press(t, renderer, "end");
+  await press(t, renderer, "up");
+  assert.match(t.captureCharFrame(), /1 new activity · Jump to latest/);
+
+  control.setRun(runOf({ timeline: events(32) }));
+  await t.renderOnce();
+  assert.match(t.captureCharFrame(), /3 new activities · Jump to latest/);
+
+  await press(t, renderer, "end");
+  assert.doesNotMatch(t.captureCharFrame(), /new activit(?:y|ies)/);
+
+  // A full live window still begins at index zero: the marker is presentation only,
+  // so it neither hides an activity nor manufactures a new-activity count.
+  const exact = await mountWorkbench(runOf({ timeline: events(7) }), 100, 14);
+  const exactFrame = exact.t.captureCharFrame();
+  assert.match(exactFrame, /Beginning of Run history/);
+  assert.match(exactFrame, / e0 /);
+  assert.match(exactFrame, / e6 /);
+  assert.doesNotMatch(exactFrame, /new activit(?:y|ies)/);
+
+  const narrow = await mountWorkbench(runOf({ timeline: events(30) }), 40, 14);
+  await press(narrow.t, narrow.renderer, "home");
+  const narrowBeginning = narrow.t.captureCharFrame();
+  assert.match(narrowBeginning, /Beginning of Run history/);
+  assert.match(narrowBeginning, /\d+ · Jump to latest/);
+  noOverflow(narrowBeginning, 40);
 });
 
 test("an empty timeline shows the no-activity placeholder", async () => {
@@ -1266,6 +1312,46 @@ test("paging older upward preserves the first visible entry (#124)", async () =>
   assert.match(t.captureCharFrame(), /O1/);
 });
 
+test("workbench-timeline-inspection: a failed older-page read is visible and keeps its retry cursor", async () => {
+  const { t, control, renderer } = await mountWorkbench(
+    transcriptRun(),
+    100,
+    10,
+  );
+  control.setTranscript("", {
+    found: true,
+    type: "transcript-page",
+    entries: txEntries("user", "N1", "N2", "N3", "N4"),
+    older: "c1",
+  });
+  control.setTranscript("c1", {
+    found: false,
+    problem: {
+      code: "transcript-page-stale",
+      explanation: "The older transcript page could not be read.",
+      remediation: "Scroll up to retry.",
+      possibleEffects: "none",
+    },
+  });
+
+  await press(t, renderer, "t");
+  await press(t, renderer, "home");
+  await press(t, renderer, "up");
+  const failed = t.captureCharFrame();
+  assert.match(failed, /Notice \[transcript-page-stale\]/);
+  assert.match(failed, /Scroll up to retry/);
+
+  control.setTranscript("c1", {
+    found: true,
+    type: "transcript-page",
+    entries: txEntries("user", "O1", "O2"),
+  });
+  await press(t, renderer, "up");
+  await press(t, renderer, "pageup");
+  assert.match(t.captureCharFrame(), /O1/);
+  assert.doesNotMatch(t.captureCharFrame(), /transcript-page-stale/);
+});
+
 test("a large transcript entry scrolls without truncation (#124)", async () => {
   const { t, control, renderer } = await mountWorkbench(
     transcriptRun(),
@@ -1355,6 +1441,58 @@ test("opening a large text output shows bounded content with a truncation marker
   await press(t, renderer, "escape");
   assert.doesNotMatch(t.captureCharFrame(), /output truncated/);
   assert.match(t.captureCharFrame(), /Details/);
+});
+
+test("workbench-timeline-inspection: timeline and inspection end truncated content with the same marker", async () => {
+  const timeline = await mountWorkbench(
+    runOf({
+      timeline: [
+        {
+          at: "T000",
+          event: "assistant-content",
+          detail: `${"x".repeat(157)} … output truncated`,
+        },
+        {
+          at: "T001",
+          event: "assistant-content",
+          detail: "Still thinking…",
+        },
+      ],
+    }),
+    100,
+    30,
+  );
+  const timelineFrame = timeline.t.captureCharFrame();
+  assert.match(timelineFrame, /Assistant.*… output truncated/);
+  assert.match(timelineFrame, /Still thinking…/);
+  assert.doesNotMatch(timelineFrame, /Still thinking … output truncated/);
+
+  const run = runOf({
+    outputs: [
+      {
+        name: "log",
+        type: "text",
+        reference: {
+          runId: "run-1",
+          artifactName: "log",
+          versionId: "v1",
+          type: "text",
+        },
+      },
+    ],
+  });
+  const inspection = await mountWorkbench(run, 100, 30);
+  inspection.control.setRead("log", {
+    found: true,
+    type: "text",
+    content: Array.from({ length: 501 }, (_, index) => `line-${index}`).join(
+      "\n",
+    ),
+  });
+  await press(inspection.t, inspection.renderer, "d");
+  await press(inspection.t, inspection.renderer, "return");
+  await press(inspection.t, inspection.renderer, "end");
+  assert.match(inspection.t.captureCharFrame(), /line-499.*… output truncated/);
 });
 
 test("captured output with colour escapes and carriage returns renders without them", async () => {
@@ -1920,6 +2058,32 @@ test("resume dispatches and the Workbench follows into the running Run", async (
   assert.doesNotMatch(frame, /r resume/);
 });
 
+test("workbench-timeline-inspection: a resume receipt moves from checking to applied and is dismissible", async () => {
+  const [outcome, setOutcome] = createSignal<RunActionOutcome>({
+    kind: "pending",
+  });
+  const actions = okActions({ resume: () => outcome });
+  const { t, renderer } = await mountWorkbench(
+    runOf({ state: "halted", actionOffers: [RESUME_OFFER] }),
+    100,
+    40,
+    actions,
+  );
+
+  await press(t, renderer, "r");
+  assert.match(t.captureCharFrame(), /Checking resume/);
+  assert.doesNotMatch(t.captureCharFrame(), /d dismiss/);
+
+  setOutcome({ kind: "ok" });
+  await t.renderOnce();
+  assert.match(t.captureCharFrame(), /Resume applied · d dismiss/);
+
+  await press(t, renderer, "d");
+  const dismissed = t.captureCharFrame();
+  assert.doesNotMatch(dismissed, /Resume applied/);
+  assert.doesNotMatch(dismissed, /› Details/);
+});
+
 test("resume takeover asks once with the owner pid before dispatching the offered form", async () => {
   const takeover = {
     ...RESUME_OFFER,
@@ -1949,7 +2113,7 @@ test("resume takeover asks once with the owner pid before dispatching the offere
   assert.deepEqual(received, takeover);
 });
 
-test("delete confirms then dispatches and leaves the Workbench", async () => {
+test("workbench-interaction-regression: delete stays armed until y confirms and then leaves", async () => {
   const control = makeRunView(
     snapshotOf(runOf({ state: "failed", actionOffers: [DELETE_OFFER] })),
   );
@@ -1995,7 +2159,7 @@ test("Escape backs out of an armed delete without dispatching or leaving", async
   assert.match(t.captureCharFrame(), /Timeline/); // still on the Workbench
 });
 
-test("cancel arms a confirmation and dispatches on y", async () => {
+test("workbench-interaction-regression: cancel stays armed until y confirms", async () => {
   const control = makeRunView(
     snapshotOf(runOf({ state: "running", actionOffers: [CANCEL_OFFER] })),
   );
@@ -2672,7 +2836,7 @@ test("Esc from Details returns focus to the timeline during a live Turn, never a
   assert.equal(interrupted, 0);
 });
 
-test("first Interrupt press arms the hint, second dispatches interrupt-turn, and the Workbench stays", async () => {
+test("workbench-interaction-regression: interrupt requires two Esc presses and keeps the Workbench", async () => {
   let interrupted: typeof INTERRUPT_OFFER | undefined;
   const actions = okActions({
     interrupt: (offer) => {
@@ -2695,7 +2859,7 @@ test("first Interrupt press arms the hint, second dispatches interrupt-turn, and
   assert.match(t.captureCharFrame(), /Timeline/); // did not leave the Workbench
 });
 
-test("an outstanding request hides the interrupt/steer controls and Esc denies rather than arming interrupt", async () => {
+test("workbench-interaction-regression: request modal owns Esc before interrupt and steer controls", async () => {
   // The interrupt/steer offers stand while a Turn is live even at awaiting-approval,
   // so without the modal guard the request control and the interrupt hint collide
   // over Esc. The request modal must own the bottom interaction.

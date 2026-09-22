@@ -66,7 +66,11 @@ import {
   type TimelineAction,
   type TimelineScroll,
 } from "./run-timeline.js";
-import { buildTimelineRows, type TimelineRow } from "./run-timeline-rows.js";
+import {
+  buildTimelineRows,
+  clipRunContent,
+  type TimelineRow,
+} from "./run-timeline-rows.js";
 import { useExit } from "./vendor/exit.js";
 import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
@@ -109,6 +113,32 @@ const INTERACTIVE_HEIGHT = 3;
  *  label, the native text-field line, and a hint/status line — three rows, like the
  *  interactive input it mirrors. */
 const STEER_HEIGHT = 3;
+
+type TActionOperation = "resume" | "cancel" | "delete" | "interrupt";
+type TAppliedActionOperation = Exclude<TActionOperation, "delete">;
+
+type TActionReceipt =
+  | { readonly kind: "pending"; readonly operation: TActionOperation }
+  | { readonly kind: "applied"; readonly operation: TAppliedActionOperation };
+
+const PENDING_ACTION_COPY: Record<TActionOperation, string> = {
+  resume: "Checking resume",
+  cancel: "Cancelling Run",
+  delete: "Deleting Run",
+  interrupt: "Interrupting Turn",
+};
+
+const APPLIED_ACTION_COPY: Record<TAppliedActionOperation, string> = {
+  resume: "Resume applied",
+  cancel: "Run cancelled",
+  interrupt: "Turn interrupted",
+};
+
+function actionReceiptText(receipt: TActionReceipt): string {
+  return receipt.kind === "pending"
+    ? PENDING_ACTION_COPY[receipt.operation]
+    : `${APPLIED_ACTION_COPY[receipt.operation]} · d dismiss`;
+}
 // REQUEST_HEIGHT and GATE_HEIGHT are owned by the split control files (A33), imported
 // above for the bottom-region precedence below.
 
@@ -264,9 +294,10 @@ export function RunWorkbench(props: {
   // starts `pending` and the effect below reports it. A second dispatch while one
   // is in flight is ignored.
   const [actionFlight, setActionFlight] = createSignal<{
-    readonly op: "resume" | "cancel" | "delete" | "interrupt";
+    readonly op: TActionOperation;
     readonly outcome: Accessor<RunActionOutcome>;
   }>();
+  const [actionReceipt, setActionReceipt] = createSignal<TActionReceipt>();
   // The Interrupt is a two-press bound key (Esc while a Turn is live, spec story 18):
   // the first press arms it and shows the hint, the second dispatches. It disarms on
   // any other key and whenever the live-Turn Offer disappears.
@@ -280,12 +311,14 @@ export function RunWorkbench(props: {
     const offer = offers().resume;
     if (offer === undefined || actionInFlight()) return;
     setActionRefusal(undefined);
+    setActionReceipt({ kind: "pending", operation: "resume" });
     setActionFlight({ op: "resume", outcome: actions.resume(offer) });
   };
   const dispatchInterrupt = () => {
     const offer = offers().interrupt;
     if (offer === undefined || actionInFlight()) return;
     setActionRefusal(undefined);
+    setActionReceipt({ kind: "pending", operation: "interrupt" });
     setActionFlight({ op: "interrupt", outcome: actions.interrupt(offer) });
   };
   // Called on the confirming keypress. Cancel keeps the Run's history; delete
@@ -295,12 +328,14 @@ export function RunWorkbench(props: {
     const offer = offers().cancel;
     if (offer === undefined || actionInFlight()) return;
     setActionRefusal(undefined);
+    setActionReceipt({ kind: "pending", operation: "cancel" });
     setActionFlight({ op: "cancel", outcome: actions.cancel(offer.runId) });
   };
   const confirmDelete = () => {
     const offer = offers().remove;
     if (offer === undefined || actionInFlight()) return;
     setActionRefusal(undefined);
+    setActionReceipt({ kind: "pending", operation: "delete" });
     setActionFlight({ op: "delete", outcome: actions.remove(offer.runId) });
   };
   const anyActionOffer = () => {
@@ -565,7 +600,8 @@ export function RunWorkbench(props: {
               : 1;
   const bottomHeight = () =>
     interactionHeight() +
-    (!viewCurrent() && pendingOperation() !== undefined ? 1 : 0);
+    (!viewCurrent() && pendingOperation() !== undefined ? 1 : 0) +
+    (actionReceipt() === undefined ? 0 : 1);
   const chrome = () =>
     headerRows() +
     (hasGateLine() ? 1 : 0) +
@@ -641,12 +677,16 @@ export function RunWorkbench(props: {
     if (settled.kind === "pending") return;
     if (settled.kind === "refused") {
       setActionRefusal(settled.problem);
+      setActionReceipt(undefined);
       setActionFlight(undefined);
     } else {
       setActionFlight(undefined);
       if (flight.op === "delete") {
+        setActionReceipt(undefined);
         const name = run()?.bundle.name;
         if (name !== undefined) props.onDeleted(name);
+      } else {
+        setActionReceipt({ kind: "applied", operation: flight.op });
       }
     }
   });
@@ -755,6 +795,7 @@ export function RunWorkbench(props: {
   });
   const win = () =>
     timelineWindow(scroll(), timelineRows().length, viewportH());
+  const beginningVisible = () => win().top === 0;
   const visibleRows = () => {
     const w = win();
     return timelineRows().slice(w.top, w.top + w.visible);
@@ -872,6 +913,10 @@ export function RunWorkbench(props: {
     if (steerTyping) {
       if (name === "return") dispatchSteer();
       else if (name === "escape") leaveSteer();
+      return;
+    }
+    if (name === "d" && actionReceipt()?.kind === "applied") {
+      setActionReceipt(undefined);
       return;
     }
     // Interrupt is a two-press Esc while an agent Turn is live (spec story 18): it
@@ -1045,12 +1090,14 @@ export function RunWorkbench(props: {
               run={current}
               freshness={freshness}
               pendingOperation={pendingOperation}
+              actionReceipt={actionReceipt}
               compactHeader={compactHeader}
               detailsShown={detailsShown}
               detailsHeight={DETAILS_HEIGHT}
               viewportH={viewportH}
               innerW={innerW}
               win={win}
+              beginningVisible={beginningVisible}
               visibleRows={visibleRows}
               blockedBasis={blockedBasis}
               focus={focus}
@@ -1154,12 +1201,14 @@ function Workbench(props: {
   run: Accessor<RunView>;
   freshness: Accessor<TProjectionStreamHealth>;
   pendingOperation: Accessor<string | undefined>;
+  actionReceipt: Accessor<TActionReceipt | undefined>;
   compactHeader: Accessor<boolean>;
   detailsShown: Accessor<boolean>;
   detailsHeight: number;
   viewportH: Accessor<number>;
   innerW: Accessor<number>;
   win: Accessor<ReturnType<typeof timelineWindow>>;
+  beginningVisible: Accessor<boolean>;
   visibleRows: Accessor<readonly TimelineRow[]>;
   blockedBasis: Accessor<string | undefined>;
   focus: Accessor<Focus>;
@@ -1217,9 +1266,19 @@ function Workbench(props: {
     const activity = props.win();
     const badge =
       !activity.atLive && activity.newActivity > 0
-        ? `  ▼ ${activity.newActivity} new · end to jump`
+        ? w() < 60
+          ? ` · ${activity.newActivity} · Jump to latest`
+          : `  ▼ ${activity.newActivity} ${activity.newActivity === 1 ? "new activity" : "new activities"} · Jump to latest`
         : "";
     return `${marker}Timeline${badge}`;
+  };
+
+  const timelineRowText = (row: TimelineRow, index: number) => {
+    const beginning =
+      props.beginningVisible() && index === 0
+        ? "Beginning of Run history · "
+        : "";
+    return `  ${beginning}${row.text}`;
   };
 
   const footer = () => {
@@ -1470,14 +1529,16 @@ function Workbench(props: {
           when={props.visibleRows().length > 0}
           fallback={
             <text fg={theme.textMuted} flexShrink={0}>
-              {"  (no activity yet)"}
+              {props.beginningVisible()
+                ? "  Beginning of Run history · (no activity yet)"
+                : "  (no activity yet)"}
             </text>
           }
         >
           <For each={props.visibleRows()}>
-            {(row) => (
+            {(row, index) => (
               <text fg={theme.text} flexShrink={0}>
-                {clip(`  ${row.text}`, w())}
+                {clipRunContent(timelineRowText(row, index()), w())}
               </text>
             )}
           </For>
@@ -1507,6 +1568,17 @@ function Workbench(props: {
         {(operation) => (
           <text fg={theme.warning} flexShrink={0}>
             {clip(`Operation pending · ${operation()}`, w())}
+          </text>
+        )}
+      </Show>
+
+      <Show when={props.actionReceipt()}>
+        {(receipt) => (
+          <text
+            fg={receipt().kind === "applied" ? theme.success : theme.warning}
+            flexShrink={0}
+          >
+            {clip(actionReceiptText(receipt()), w())}
           </text>
         )}
       </Show>

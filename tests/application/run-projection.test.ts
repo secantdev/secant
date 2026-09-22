@@ -1006,3 +1006,61 @@ test("the timeline is ordered by time, so a later event never precedes an earlie
   assert.ok(attemptIdx !== -1 && trustIdx !== -1);
   assert.ok(attemptIdx < trustIdx);
 });
+
+test("timeline detail keeps 160 characters and caps 161 at an explicit 160-character marker", (t) => {
+  const f = fixture(t);
+  const { digest } = installCommandBundle(f);
+  const created = f.runGroup.createRun({
+    operationId: "op-truncated-timeline",
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date("2026-09-22T10:00:00.000Z"),
+  });
+  assert.ok(created.outcome === "created");
+  if (created.outcome !== "created") throw new Error("unreachable");
+  const owner = f.runGroup.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+  assert.deepEqual(
+    owner.admitTurn({
+      turnId: "turn-1",
+      attemptId: "attempt-1",
+      session: "repair",
+      origin: "managed",
+      kind: "agent",
+      input: "repair",
+      recoveryCoordinate: "native-1",
+      harness: "codex",
+      at: new Date("2026-09-22T10:00:01.000Z"),
+    }),
+    { ok: true },
+  );
+  assert.deepEqual(
+    owner.appendTurnEvent({
+      turnId: "turn-1",
+      kind: "assistant-content",
+      payload: JSON.stringify({ content: "x".repeat(160) }),
+      at: new Date("2026-09-22T10:00:02.000Z"),
+    }),
+    { ok: true },
+  );
+  assert.deepEqual(
+    owner.appendTurnEvent({
+      turnId: "turn-1",
+      kind: "assistant-content",
+      payload: JSON.stringify({ content: "y".repeat(161) }),
+      at: new Date("2026-09-22T10:00:03.000Z"),
+    }),
+    { ok: true },
+  );
+
+  const result = runResult(f.app, created.runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  const details = result.run.timeline
+    .filter((event) => event.event === "assistant-content")
+    .map((event) => event.detail);
+  assert.equal(details[0], "x".repeat(160));
+  assert.equal(details[1]?.length, 160);
+  assert.match(details[1] ?? "", /^y+ … output truncated$/);
+});

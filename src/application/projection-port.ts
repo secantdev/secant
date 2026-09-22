@@ -569,6 +569,10 @@ export type RunTimelineKind =
  *  A subset of `StepKindName`, and independent of the Turn's `origin`. */
 export type RunTurnKind = "agent" | "interactive-agent";
 
+/** Explicit suffix on a bounded timeline detail. Clients preserve this wording at
+ * the end of the displayed content instead of inferring truncation from length. */
+export const RUN_TIMELINE_TRUNCATION_MARKER = "… output truncated";
+
 export interface RunTimelineEvent {
   readonly at: string; // ISO 8601
   readonly event: RunTimelineKind;

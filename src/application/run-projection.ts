@@ -43,6 +43,7 @@ import type {
   RunTurnKind,
   RunView,
 } from "./projection-port.js";
+import { RUN_TIMELINE_TRUNCATION_MARKER } from "./projection-port.js";
 import {
   bundleBytesCorrupt,
   bundleBytesMissing,
@@ -1054,9 +1055,14 @@ export function transcriptView(
 
 /** A one-line, capped detail for a timeline entry drawn from possibly-multiline
  *  content, so `run show`'s per-line timeline stays legible. */
+const TIMELINE_DETAIL_LIMIT = 160;
+
 function timelineDetail(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > 160 ? `${flat.slice(0, 157)}…` : flat;
+  if (flat.length <= TIMELINE_DETAIL_LIMIT) return flat;
+  const contentLimit =
+    TIMELINE_DETAIL_LIMIT - RUN_TIMELINE_TRUNCATION_MARKER.length - 1;
+  return `${flat.slice(0, contentLimit)} ${RUN_TIMELINE_TRUNCATION_MARKER}`;
 }
 
 /** The turn-event timeline entries for one Turn's normalized durable events. */

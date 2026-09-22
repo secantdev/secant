@@ -1,8 +1,11 @@
+import stringWidth from "string-width";
 import type {
   RunLiveOverlay,
   RunTimelineEvent,
   RunView,
 } from "../application/projection-port.js";
+import { RUN_TIMELINE_TRUNCATION_MARKER } from "../application/projection-port.js";
+import { clip } from "./clip.js";
 
 /** One single-line row in the Workbench's combined durable + live timeline. */
 export interface TimelineRow {
@@ -122,4 +125,20 @@ function liveTimelineRows(
 /** Collapse whitespace so a serialized tool input or usage string stays one line. */
 export function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+/** Clip one Workbench content row while preserving an explicit truncation suffix
+ * at the right edge. Ordinary rows retain the shared ellipsis behavior. */
+export function clipRunContent(text: string, width: number): string {
+  const suffix = ` ${RUN_TIMELINE_TRUNCATION_MARKER}`;
+  if (!text.endsWith(suffix)) return clip(text, width);
+  const suffixWidth = stringWidth(suffix);
+  if (width <= suffixWidth) {
+    return clip(RUN_TIMELINE_TRUNCATION_MARKER, width);
+  }
+  const content = text.slice(0, -suffix.length);
+  const contentWidth = width - suffixWidth;
+  if (stringWidth(content) <= contentWidth) return `${content}${suffix}`;
+  const clipped = clip(content, contentWidth);
+  return `${clipped.slice(0, -1)}${suffix}`;
 }

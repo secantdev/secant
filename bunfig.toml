@@ -1,11 +1,12 @@
-# Bun test runner config (ADR 0030). `@opentui/solid/preload` registers Solid's
-# universal transform so `.tsx` presentation tests are reactive and the OpenTUI
-# native renderer loads its FFI — the same transform `bun build --compile` gets
-# from `@opentui/solid/bun-plugin`. A bare `bun test` picks this up, so the gate
-# and a contributor's local run agree. Replaces the deleted Node runner + Babel
-# loader.
+# Bun test runner config (ADR 0030). `tests/preload.ts` registers `@opentui/solid/preload`
+# — Solid's universal transform, so `.tsx` presentation tests are reactive and the
+# OpenTUI native renderer loads its FFI, the same transform `bun build --compile` gets
+# from `@opentui/solid/bun-plugin` — but only for the workers that need it (`.tsx`
+# files), because loading the native renderer in every one-file worker is the
+# dominant `bun test` cost on the Windows runner. A bare `bun test` picks this up, so
+# the gate and a contributor's local run agree. Replaces the deleted Node runner + Babel loader.
 [test]
-preload = ["@opentui/solid/preload"]
+preload = ["./tests/preload.ts"]
 # The `test` package script (scripts/test.ts) supplies the runner settings that
 # cannot live here: three isolated file workers per OS and a 30s per-test timeout.
 # File isolation keeps module-level test helpers owned by one file, while the

@@ -1,53 +1,73 @@
 import type {
+  HarnessCapabilityState,
   HarnessDiscoveryView,
+  HarnessObservationView,
+  HarnessQualificationState,
   HarnessQualificationView,
   HarnessSummary,
 } from "../application/projection-port.js";
 
-// Worded, colour-independent Harness status for the Start a Run Harness step (and,
-// later, the Harness catalog screen): every state reads as words, never a raw enum
-// (#191). Kept beside `bundle-format.ts` so both surfaces say the same thing about
-// the same fact; the words match `headless/render.ts` up to capitalisation.
+// Worded, colour-independent Harness status shared by Start a Run and the
+// Harness catalog. The words mirror headless rendering up to capitalisation.
 
-/** A capitalised qualification chip: `Qualified`, `Qualified with limits`,
- *  `Not ready`, or `Not checked`. */
+export function isQualified(
+  qualification: HarnessQualificationView,
+): qualification is Extract<
+  HarnessQualificationView,
+  { state: "qualified" | "qualified-with-limits" }
+> {
+  return (
+    qualification.state === "qualified" ||
+    qualification.state === "qualified-with-limits"
+  );
+}
+
+export function qualificationObservation(
+  qualification: HarnessQualificationView,
+): HarnessObservationView | undefined {
+  return isQualified(qualification) ? qualification.observation : undefined;
+}
+
 export function qualificationWord(
   qualification: HarnessQualificationView,
 ): string {
-  switch (qualification.state) {
-    case "qualified":
-      return "Qualified";
-    case "qualified-with-limits":
-      return "Qualified with limits";
-    case "not-ready":
-      return "Not ready";
-    case "not-checked":
-      return "Not checked";
-  }
+  return qualificationLabel(qualification.state);
 }
 
-/** A one-line worded discovery summary: how the executable was found, or that it
- *  was not, without any raw enum. */
+export function qualificationLabel(state: HarnessQualificationState): string {
+  return titleCase(state);
+}
+
+export function capabilityLabel(state: HarnessCapabilityState): string {
+  return titleCase(state);
+}
+
 export function discoveryWord(discovery: HarnessDiscoveryView): string {
-  switch (discovery.state) {
-    case "found":
-      return `Found via ${discovery.description}`;
-    case "unsupported-shim":
-      return `Unsupported shim ${discovery.path}`;
-    case "not-found":
-      return `Not found; searched ${discovery.searched.join(", ")}`;
-  }
+  const words = discoveryLabel(discovery);
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
 }
 
-/** The row summary a Harness list entry shows beside its name: the qualification
- *  chip, and — when the executable was not found — that it is unavailable, so the
- *  user reads availability at a glance before focusing it (#191, story 17). */
+export function discoveryLabel(discovery: HarnessDiscoveryView): string {
+  if (discovery.state === "found") {
+    return `found via ${discovery.description}`;
+  }
+  if (discovery.state === "unsupported-shim") {
+    return `unsupported shim ${discovery.path}`;
+  }
+  return `not found; searched ${discovery.searched.join(", ")}`;
+}
+
 export function harnessRowStatus(harness: HarnessSummary): string {
   if (harness.discovery.state === "not-found") {
-    return `Unavailable · not found on PATH`;
+    return "Unavailable · not found on PATH";
   }
   if (harness.discovery.state === "unsupported-shim") {
-    return `Unavailable · unsupported shim`;
+    return "Unavailable · unsupported shim";
   }
   return qualificationWord(harness.qualification);
+}
+
+function titleCase(value: string): string {
+  const words = value.replaceAll("-", " ");
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
 }

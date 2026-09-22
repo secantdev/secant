@@ -11,6 +11,7 @@ import {
 import type {
   BundleCatalogView,
   RunLaunchView,
+  RunListState,
   RunListView,
   RunWorkbenchView,
   WorkspaceView,
@@ -133,10 +134,13 @@ async function mount(width = 60, height = 16) {
   return { t, view, exits };
 }
 
-async function mountApproved(liveRunCount: number) {
+async function mountApproved(
+  liveRunCount: number,
+  suppliedRunList?: RunListView,
+) {
   const [snapshot] = createSignal<WorkspaceSnapshot>(approved());
   const view: WorkspaceView = { snapshot, approve() {} };
-  const runList: RunListView = {
+  const runList: RunListView = suppliedRunList ?? {
     openRunList: () => ({
       state: () => ({
         rows: Array.from({ length: liveRunCount }, (_, index) => ({
@@ -257,6 +261,72 @@ test("the quit confirmation defaults to keeping live Runs and stays on Home", as
   assert.equal(exits.length, 0);
   assert.match(t.captureCharFrame(), /Secant/);
   assert.match(t.captureCharFrame(), /Workflow Bundles/);
+});
+
+test("Home orders its four entries, defaults to Start a Run, and omits unheld Harness qualification", async () => {
+  const { t } = await mountApproved(2);
+  const frame = t.captureCharFrame();
+  const start = frame.indexOf("Start a Run");
+  const bundles = frame.indexOf("Workflow Bundles");
+  const runs = frame.indexOf("Previous Runs");
+  const harnesses = frame.indexOf("Harnesses");
+
+  assert.ok(
+    start >= 0 && start < bundles && bundles < runs && runs < harnesses,
+  );
+  assert.match(frame, /› Start a Run/);
+  assert.match(frame, /0 installed Bundles · 2 previous Runs/);
+  assert.doesNotMatch(frame, /qualified/);
+});
+
+test("Home counts every page of Previous Runs in its summary", async () => {
+  const pagedRunList: RunListView = {
+    openRunList() {
+      const [state, setState] = createSignal<RunListState>({
+        rows: [
+          {
+            runId: "run-2",
+            bundleName: "Smoke",
+            activityAt: "2026-01-02T00:00:00.000Z",
+            live: false,
+            ownedByThisProcess: false,
+            group: "today" as const,
+          },
+        ],
+        filter: "all" as const,
+        beginningOfHistory: false,
+        hasMore: true,
+      });
+      return {
+        state,
+        setResumable() {},
+        loadMore() {
+          const newest = state().rows[0];
+          if (newest === undefined) {
+            throw new Error("paged Home fixture lost its newest Run");
+          }
+          setState({
+            rows: [
+              newest,
+              {
+                runId: "run-1",
+                bundleName: "Smoke",
+                activityAt: "2026-01-01T00:00:00.000Z",
+                live: false,
+                ownedByThisProcess: false,
+                group: "yesterday" as const,
+              },
+            ],
+            filter: "all",
+            beginningOfHistory: true,
+            hasMore: false,
+          });
+        },
+      };
+    },
+  };
+  const { t } = await mountApproved(0, pagedRunList);
+  await t.waitForFrame((frame) => frame.includes("2 previous Runs"));
 });
 
 test("layout fits a small width and after resize without overflow", async () => {

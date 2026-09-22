@@ -1,7 +1,10 @@
 import { TextAttributes } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/solid";
-import { createSignal, For, Show } from "solid-js";
+import { createEffect, For, Show, type Accessor } from "solid-js";
 import { useBindings } from "./keymap.js";
+import { useHarnessCatalogView } from "./harness-view.js";
+import { isQualified } from "./harness-format.js";
+import { useRunListView } from "./run-list-view.js";
 import { useExit } from "./vendor/exit.js";
 import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
@@ -15,28 +18,36 @@ import { useWorkspaceView } from "./workspace-view.js";
 // move, Enter opens the active entry.
 
 export function Home(props: {
+  selected: Accessor<number>;
+  setSelected: (index: number) => void;
   onStartRun: () => void;
   onOpenBundles: () => void;
   onOpenPreviousRuns: () => void;
+  onOpenHarnesses: () => void;
 }) {
   const { theme } = useTheme();
   const view = useWorkspaceView();
+  const previousRuns = useRunListView().openRunList();
+  const harnesses = useHarnessCatalogView().openList();
   const exit = useExit();
   const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const approved = () => view.snapshot().approval.state === "approved";
 
   // Start a Run is the first and default entry so the primary task is one keypress
-  // away (#191); Workflow Bundles and Previous Runs sit beside it.
+  // away (#191); Workflow Bundles, Previous Runs, and Harnesses sit beside it.
+  createEffect(() => {
+    if (previousRuns.state().hasMore) previousRuns.loadMore();
+  });
   const entries = () => [
     { label: "Start a Run", open: () => props.onStartRun() },
     { label: "Workflow Bundles", open: () => props.onOpenBundles() },
     { label: "Previous Runs", open: () => props.onOpenPreviousRuns() },
+    { label: "Harnesses", open: () => props.onOpenHarnesses() },
   ];
-  const [selected, setSelected] = createSignal(0);
   const move = (delta: number) =>
-    setSelected(
-      Math.max(0, Math.min(selected() + delta, entries().length - 1)),
+    props.setSelected(
+      Math.max(0, Math.min(props.selected() + delta, entries().length - 1)),
     );
 
   // Bindings are live only once the Workspace is approved and Home is the
@@ -50,7 +61,7 @@ export function Home(props: {
         key: "return",
         desc: "Open",
         group: "Home",
-        cmd: () => entries()[selected()]?.open(),
+        cmd: () => entries()[props.selected()]?.open(),
       },
       { key: "q", desc: "Quit", group: "Home", cmd: () => exit() },
       { key: "ctrl+c", desc: "Quit", group: "Home", cmd: () => exit() },
@@ -75,16 +86,27 @@ export function Home(props: {
         <text fg={theme.text}>{view.snapshot().path}</text>
       </box>
       <Show when={approved()}>
+        <text fg={theme.textMuted} flexShrink={0}>
+          {homeSummary({
+            bundleCount: view.snapshot().installedBundleCount,
+            runCount: previousRuns.state().rows.length,
+            qualifiedHarness: harnesses().harnesses.find((harness) =>
+              isQualified(harness.qualification),
+            )?.name,
+          })}
+        </text>
         <box flexDirection="column" flexShrink={0}>
           <text fg={theme.textMuted}>Menu</text>
           <For each={entries()}>
             {(entry, index) => (
               <text
                 fg={theme.text}
-                attributes={index() === selected() ? TextAttributes.BOLD : 0}
+                attributes={
+                  index() === props.selected() ? TextAttributes.BOLD : 0
+                }
                 flexShrink={0}
               >
-                {`${index() === selected() ? "› " : "  "}${entry.label}`}
+                {`${index() === props.selected() ? "› " : "  "}${entry.label}`}
               </text>
             )}
           </For>
@@ -95,4 +117,17 @@ export function Home(props: {
       </Show>
     </box>
   );
+}
+
+type THomeSummaryParams = {
+  bundleCount: number;
+  runCount: number;
+  qualifiedHarness: string | undefined;
+};
+
+function homeSummary(params: THomeSummaryParams): string {
+  const base = `${params.bundleCount} installed ${params.bundleCount === 1 ? "Bundle" : "Bundles"} · ${params.runCount} previous ${params.runCount === 1 ? "Run" : "Runs"}`;
+  return params.qualifiedHarness === undefined
+    ? base
+    : `${base} · ${params.qualifiedHarness} qualified`;
 }

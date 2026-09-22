@@ -293,7 +293,7 @@ test("Workflow Bundles searches the existing list snapshot and keeps the inspect
   await t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
   t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   t.mockInput.pressEnter();
-  await t.waitForFrame((frame) => frame.includes("3 installed"));
+  await t.waitForFrame((frame) => frame.includes("Find an installed Bundle"));
 
   const initial = t.captureCharFrame();
   assert.match(initial, /Find an installed Bundle/);
@@ -624,11 +624,15 @@ test("Back returns to Home or the originating Start a Run Bundle step", async ()
   await homeRun.t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
   homeRun.t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
   homeRun.t.mockInput.pressEnter();
-  await homeRun.t.waitForFrame((frame) => frame.includes("3 installed"));
+  await homeRun.t.waitForFrame((frame) =>
+    frame.includes("Find an installed Bundle"),
+  );
   homeRun.t.mockInput.pressEscape();
-  await until(() => !homeRun.t.captureCharFrame().includes("3 installed"));
+  await until(
+    () => !homeRun.t.captureCharFrame().includes("Find an installed Bundle"),
+  );
   await homeRun.t.waitForFrame((frame) => /^ Secant\s*$/m.test(frame));
-  assert.doesNotMatch(homeRun.t.captureCharFrame(), /3 installed/);
+  assert.doesNotMatch(homeRun.t.captureCharFrame(), /Find an installed Bundle/);
 
   const startRun = await mount();
   await startRun.t.waitForFrame((frame) => frame.includes("Workflow Bundles"));
@@ -637,10 +641,14 @@ test("Back returns to Home or the originating Start a Run Bundle step", async ()
   startRun.t.mockInput.pressArrow("down");
   await startRun.t.waitForFrame((frame) => frame.includes("› Proof Bundle"));
   startRun.t.mockInput.pressKey("v");
-  await startRun.t.waitForFrame((frame) => frame.includes("3 installed"));
+  await startRun.t.waitForFrame((frame) =>
+    frame.includes("Find an installed Bundle"),
+  );
   assert.match(startRun.t.captureCharFrame(), /Proof of the pipeline/);
   startRun.t.mockInput.pressEscape();
-  await until(() => !startRun.t.captureCharFrame().includes("3 installed"));
+  await until(
+    () => !startRun.t.captureCharFrame().includes("Find an installed Bundle"),
+  );
   await startRun.t.waitForFrame((frame) => /^ Start a Run\s*$/m.test(frame));
   assert.match(startRun.t.captureCharFrame(), /› Proof Bundle/);
 });

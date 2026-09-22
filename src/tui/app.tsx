@@ -20,6 +20,7 @@ import {
   type HarnessCatalogView,
 } from "./harness-view.js";
 import { Home } from "./home.js";
+import { HarnessCatalog } from "./harness-catalog.js";
 import { createTuiKeymap, KeymapProvider, useBindings } from "./keymap.js";
 import { PreviousRuns } from "./previous-runs.js";
 import type { RendererPort } from "./renderer/renderer.js";
@@ -51,10 +52,10 @@ import {
 // The application root. The approval dialog overlays Home through the vendored
 // dialog primitive while the launch Workspace is unapproved; approving flips the
 // snapshot and clears it. Once approved, a small screen signal navigates Home →
-// the unified Workflow Bundles catalog: exactly one screen mounts at a time, so
-// each screen's key bindings exist only while it is active and cannot conflict.
-// The catalog's selected index lives here so a Home round-trip restores the same
-// row. The Previous Runs list (#92) works the same way, and a Run opened
+// the task screens and read-only catalogs: exactly one screen mounts at a time,
+// so each screen's key bindings exist only while it is active and cannot conflict.
+// Catalog selection lives here so a Home round-trip restores the same row. The
+// Previous Runs list (#92) works the same way, and a Run opened
 // from it records that origin so Escape (and a delete) returns to the list, while
 // a Run opened from Start a Run returns to Home.
 
@@ -62,6 +63,7 @@ type Screen =
   | { readonly name: "home" }
   | { readonly name: "start-run" }
   | { readonly name: "bundle-catalog" }
+  | { readonly name: "harness-catalog" }
   | { readonly name: "previous-runs" }
   | {
       readonly name: "run-workbench";
@@ -77,7 +79,9 @@ function Route(props: { renderer: RendererPort }) {
   const approved = () => view.snapshot().approval.state === "approved";
 
   const [screen, setScreen] = createSignal<Screen>({ name: "home" });
+  const [homeSelected, setHomeSelected] = createSignal(0);
   const [selected, setSelected] = createSignal(0);
+  const [harnessSelected, setHarnessSelected] = createSignal(0);
   // The Previous Runs list's selected row, kept here so Escape from a Run restores
   // it (like the Bundle catalog's `selected`).
   const [runSelected, setRunSelected] = createSignal(0);
@@ -123,9 +127,12 @@ function Route(props: { renderer: RendererPort }) {
     <Switch
       fallback={
         <Home
+          selected={homeSelected}
+          setSelected={setHomeSelected}
           onStartRun={() => setScreen({ name: "start-run" })}
           onOpenBundles={() => setScreen({ name: "bundle-catalog" })}
           onOpenPreviousRuns={() => setScreen({ name: "previous-runs" })}
+          onOpenHarnesses={() => setScreen({ name: "harness-catalog" })}
         />
       }
     >
@@ -187,6 +194,13 @@ function Route(props: { renderer: RendererPort }) {
         <BundleCatalog
           selected={selected}
           setSelected={setSelected}
+          onBack={() => setScreen({ name: "home" })}
+        />
+      </Match>
+      <Match when={screen().name === "harness-catalog"}>
+        <HarnessCatalog
+          selected={harnessSelected}
+          setSelected={setHarnessSelected}
           onBack={() => setScreen({ name: "home" })}
         />
       </Match>

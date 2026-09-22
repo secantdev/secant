@@ -7,10 +7,11 @@
 [test]
 preload = ["@opentui/solid/preload"]
 # The `test` package script (scripts/test.ts) supplies the runner settings that
-# cannot live here: isolated file workers and a 30s per-test timeout. File
-# isolation keeps module-level test helpers owned by one file, while the timeout
-# covers Windows process creation and Bun cold-start. Worker count is per-OS: two
-# on Linux/Windows, one on macOS — the launcher explains why (a Bun 1.4.2
-# child-lifecycle defect that concurrent worker startup tips over on the macOS CI
-# runner, #149). This suite uses `node:test`, so the `[test].timeout` key applies
-# only to `bun:test` and never reached these tests (#86, #89).
+# cannot live here: two isolated file workers per OS and a 30s per-test timeout.
+# File isolation keeps module-level test helpers owned by one file, while the
+# timeout covers Windows process creation and Bun cold-start. The launcher
+# explains why two workers hold on every OS: the semantic suite is spawn-free
+# (#198), so the Bun 1.4.2 child-lifecycle defect that concurrent worker startup
+# once tipped over (#149) can no longer fire. This suite uses `node:test`, so the
+# `[test].timeout` key applies only to `bun:test` and never reached these tests
+# (#86, #89).

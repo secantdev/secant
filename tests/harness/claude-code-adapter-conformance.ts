@@ -1,10 +1,16 @@
-// The Claude Code Adapter (#111): discovery, non-conversational qualification,
-// the evidence-bearing profile, and the qualification cache. The shared
-// prepare/profile conformance cases run against it over the real replayer,
-// which keeps the fake honest; the cases below cover the Claude-Code-specific
-// facts the shared suite does not — discovery order and refusals, the M3 profile
-// facts and posture, that no forbidden flag or stdin content is ever built, and
-// cache reuse versus requalification on drift.
+// The Claude-Code-specific Adapter conformance cases: redaction, lenient frame
+// parsing, authentication classification, discovery order and refusals, the M3
+// profile facts and posture, launch/resume/--model argv, that no forbidden flag
+// or stdin content is ever built, and cache reuse versus requalification on
+// drift — the facts the shared conformance suite does not cover.
+//
+// These moved out of the process-free semantic suite (#198): every case drives
+// the real Claude Code Adapter (whose `prepare` spawns a `--version` child) or a
+// scripted process a real child cannot be made to emit on demand, so they run in
+// the standalone runtime-conformance runner (tests/process/runtime-conformance.ts),
+// not under the test runner. This file is not a `.test.ts`: a local `test` shim
+// collects each case and `registerClaudeCodeAdapterConformance` forwards them to
+// the runner; a `skip` option drops a case on the platform it does not apply to.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -16,7 +22,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
@@ -34,7 +39,21 @@ import type {
   spawnOwnedProcess,
 } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import {
+  collectAdapterConformanceCases,
+  type RegisterConformanceCase,
+} from "./conformance.js";
 import { installReplayer } from "./replayer.js";
+
+// Each `test(...)` below registers with the runtime-conformance runner instead of
+// the test runner; the shared collector carries `node:test`'s `{ skip }` option.
+const { test, forward } = collectAdapterConformanceCases();
+
+export function registerClaudeCodeAdapterConformance(
+  register: RegisterConformanceCase,
+): void {
+  forward(register);
+}
 
 const VERSION = "2.1.234 (Claude Code)";
 // Recorded and synthetic case directories both live under the committed fixtures

@@ -47,6 +47,8 @@ import {
   registerClaudeCodeReplayerConformance,
   registerCodexReplayerConformance,
 } from "../harness/replayer-conformance.js";
+import { registerClaudeCodeAdapterConformance } from "../harness/claude-code-adapter-conformance.js";
+import { registerCodexAdapterConformance } from "../harness/codex-adapter-conformance.js";
 import { writeCommandBundle } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { checkEntryDeclarations } from "../architecture/check-vendor-provenance.js";
@@ -260,6 +262,15 @@ registerClaudeCodeReplayerConformance((name, body) =>
   cases.push({ name, body }),
 );
 registerCodexReplayerConformance((name, body) => cases.push({ name, body }));
+
+// The Adapter-specific cases relocated from the process-free semantic suite
+// (#198): the Claude Code and Codex Harness suites no longer spawn under the test
+// runner, so their redaction, frame-parsing, discovery, argv, control, and
+// qualification cases run here as bounded runtime cases.
+registerClaudeCodeAdapterConformance((name, body) =>
+  cases.push({ name, body }),
+);
+registerCodexAdapterConformance((name, body) => cases.push({ name, body }));
 
 async function applicationOnDoubles(): Promise<void> {
   const git = createFakeGitProcess();

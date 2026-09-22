@@ -36,6 +36,43 @@ export type RegisterConformanceCase = (
   body: () => void | Promise<void>,
 ) => void;
 
+/** A body a relocated Adapter-specific conformance case runs. */
+export type ConformanceCaseBody = () => void | Promise<void>;
+
+/**
+ * Collects the Adapter-specific cases a `*-adapter-conformance.ts` file declares
+ * (relocated from the process-free semantic suite, #198). The file calls the
+ * returned `test` in place of `node:test` — the three-argument form carries
+ * `node:test`'s `{ skip }` option, so a case not applicable to a platform is
+ * simply not registered there — and `forward` hands the collected cases to the
+ * runtime-conformance runner.
+ */
+export function collectAdapterConformanceCases(): {
+  readonly test: (
+    name: string,
+    optionsOrBody: { readonly skip?: boolean } | ConformanceCaseBody,
+    maybeBody?: ConformanceCaseBody,
+  ) => void;
+  readonly forward: (register: RegisterConformanceCase) => void;
+} {
+  const cases: { readonly name: string; readonly body: ConformanceCaseBody }[] =
+    [];
+  return {
+    test(name, optionsOrBody, maybeBody) {
+      const body =
+        typeof optionsOrBody === "function" ? optionsOrBody : maybeBody;
+      const skip =
+        typeof optionsOrBody === "function" ? false : optionsOrBody.skip;
+      if (skip === true || body === undefined) return;
+      cases.push({ name, body });
+    },
+    forward(register) {
+      for (const registered of cases)
+        register(registered.name, registered.body);
+    },
+  };
+}
+
 /**
  * The prepare/profile subset of the suite: qualification and the evidence-
  * bearing profile, with no Turn. A prepare-only provider — the Claude Code

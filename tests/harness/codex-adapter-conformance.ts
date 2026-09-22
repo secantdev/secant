@@ -1,8 +1,21 @@
+// The Codex-specific Adapter conformance cases: native approval mapping and
+// fail-closed shapes, malformed/truncated/CRLF runtime framing, native
+// steer/interrupt control arbitration and error codes, exact-thread recovery,
+// recorded-fixture replay, discovery/resolution, the profile, and schema/model
+// qualification — the facts the shared conformance suite does not cover.
+//
+// These moved out of the process-free semantic suite (#198): every case drives
+// the real Codex Adapter (whose `prepare` spawns the qualification child) or the
+// synthetic replayer/scripted process a real child cannot be made to emit on
+// demand, so they run in the standalone runtime-conformance runner
+// (tests/process/runtime-conformance.ts), not under the test runner. This file is
+// not a `.test.ts`: a local `test` shim collects each case and
+// `registerCodexAdapterConformance` forwards them to the runner.
+
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import test from "node:test";
 import {
   CODEX_EXECUTABLE_ENV,
   createCodexAdapter,
@@ -26,7 +39,21 @@ import {
   CODEX_RECORDING_INPUT,
   codexTestRepairPrompt,
 } from "./codex-recording-cases.js";
+import {
+  collectAdapterConformanceCases,
+  type RegisterConformanceCase,
+} from "./conformance.js";
 import { createCodexRecordingCapture } from "./codex-recording.js";
+
+// Each `test(...)` below registers with the runtime-conformance runner instead of
+// the test runner; the shared collector carries `node:test`'s `{ skip }` option.
+const { test, forward } = collectAdapterConformanceCases();
+
+export function registerCodexAdapterConformance(
+  register: RegisterConformanceCase,
+): void {
+  forward(register);
+}
 
 // The shared prepare/profile, Turn-lifecycle, native-steer, interrupt/recovery,
 // exact-thread-recovery, and approval conformance cases over the real Codex

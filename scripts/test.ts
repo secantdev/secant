@@ -1,47 +1,32 @@
 // The canonical test launcher. It runs Bun's test runner with two isolated file
-// workers on Windows, but ONE on macOS and Linux (`--parallel=1`), because of a
-// Bun 1.4.2 defect — not a preference. Windows is also capped deliberately: its
-// four-logical-processor runner failed with scattered child-process lifecycle
-// failures at three workers (issue #172, run 35507654564), so two is the highest
-// validated count.
+// workers on every OS.
 //
-// The defect (#149): on a CPU-constrained CI runner — first the macOS arm64 runner
-// (3 vCPUs), then the ubuntu-latest runner (#150) — when
-// two isolated workers start and each spawns a child process at the same time, Bun
-// occasionally fails to wire up a child's lifecycle entirely. The child runs and
-// exits — Bun even populates `child.exitCode` — but the `exit` event, the `close`
-// event, and all stdout/stderr `data` are silently dropped. `spawnCommand`
-// (src/process/process.ts) resolves on `close`, so the Attempt never settles and
-// the test hits its 30s timeout. It is always the FIRST spawn in a freshly started,
-// starved worker; Bun runs one worker per file (`--isolate`), so any file's first
-// spawning test is a candidate, which is why the CI failures were scattered. It is
-// not our env-marker handling, not fd inheritance (workers are separate processes;
-// the pipes are cloexec), and not `detached` (it reproduces with `detached: false`).
-// Bun 1.4.2 is the latest stable, so there is no version to upgrade to.
+// The enabler is a spawn-free semantic suite, not an upstream Bun fix. The
+// serialization this replaces worked around a Bun 1.4.2 defect (#149, #150): on a
+// CPU-constrained CI runner, two isolated workers each spawning a child at
+// startup could make Bun drop that child's `exit`/`close`/stdio events entirely,
+// so the spawn never settled and the test timed out at 30s. Every suite that
+// reached a real child under the runner has since moved to the standalone
+// runtime-conformance runner — the last two, the Claude Code and Codex Harness
+// suites, in #198 — so no worker spawns a child at startup and the defect can no
+// longer fire. Bun 1.4.2 is unchanged; the race is avoided by removing the spawn,
+// not by a runtime fix.
 //
-// Two concurrent workers doubling the startup contention are what tip it over.
-// Serializing to one worker per file keeps full file isolation (each file still
-// runs in its own process — module-level helpers and env changes never leak) but
-// removes the concurrent first-spawn window, so the race does not fire on the
-// runner. This is a mitigation of a runtime bug, not a cure: enough external CPU
-// pressure can still starve even a single worker's first spawn. Revisit — and
-// restore `--parallel=2` on macOS and Linux — when Bun fixes child-process
-// lifecycle delivery under load. Do NOT "fix" this with a retry, a sleep, or a larger
-// timeout (docs/agents/testing.md): those hide the defect instead of avoiding it.
+// Two is the highest worker count validated on the four-logical-processor public
+// Windows runner (issue #172, run 35507654564); macOS and Linux match it. Full
+// file isolation stays load-bearing: each file runs in its own worker process, so
+// module-level helpers and environment changes never leak across files. Tests
+// within each file remain sequential; do NOT replace file parallelism with
+// `--concurrent`, which would race their shared fixtures. Should child-lifecycle
+// flakiness ever return, the fix is to keep the spawn out of the semantic suite,
+// never a retry, a sleep, or a larger timeout (docs/agents/testing.md).
 //
 // Extra arguments pass through, so `bun run test -- tests/foo.test.ts` still works.
 import { spawnSync } from "node:child_process";
 
-const parallel = process.platform === "win32" ? "2" : "1";
 const result = spawnSync(
   process.execPath,
-  [
-    "test",
-    `--parallel=${parallel}`,
-    "--timeout",
-    "30000",
-    ...process.argv.slice(2),
-  ],
+  ["test", "--parallel=2", "--timeout", "30000", ...process.argv.slice(2)],
   { stdio: "inherit" },
 );
 process.exit(result.status ?? 1);

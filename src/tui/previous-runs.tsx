@@ -195,10 +195,13 @@ export function PreviousRuns(props: {
         when={rows().length > 0}
         fallback={
           <box flexDirection="column" flexGrow={1} flexShrink={0}>
-            <text fg={theme.textMuted}>
+            <text fg={theme.textMuted} flexShrink={0}>
+              {resumable() ? "No resumable Runs" : "No previous Runs"}
+            </text>
+            <text fg={theme.textMuted} flexShrink={0}>
               {resumable()
-                ? "No resumable runs. Press f to show all runs."
-                : "No runs yet. Start a Run from Home."}
+                ? "Press f to show all Runs."
+                : "Start a Run from Home."}
             </text>
             <text fg={theme.textMuted}>esc back · q quit</text>
           </box>

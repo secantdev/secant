@@ -21,15 +21,18 @@ import type {
   WorkspaceSnapshot,
 } from "../../src/application/projection-port.js";
 
-// In-memory renderer tests for the Previous Runs list (#92), reached the real way:
+// In-memory renderer tests for the Previous Runs list (#92, verified by #196),
+// reached the real way:
 // Home → Previous Runs, over a fake `run-list` read seam. They cover ordering and
 // Today/Yesterday/Older grouping, the live-marked row, the Resumable filter, the
 // empty state, cursor paging with a stable first-visible row and the
 // beginning-of-history marker, small-width truncation and resize without overflow,
+// the focus glyph and state-free row at the smallest supported width, guarded quit,
 // and Enter → the Run's Workbench with Escape restoring the row and delete
-// returning to the list without that Run (AC1–AC7).
+// returning to the list without that Run.
 
 const WORKSPACE = "/tmp/secant-previous-runs";
+const SMALLEST_SUPPORTED_WIDTH = 30;
 
 // --- a fake Renderer Port we can drive (shared fixture, A52) -------------------
 
@@ -246,8 +249,9 @@ async function openList(options: MountOptions = {}) {
   mounted.t.mockInput.pressArrow("down"); // Previous Runs
   mounted.t.mockInput.pressEnter();
   // Wait for a list-only string: "Previous Runs" alone also names the Home menu
-  // entry, so it would match Home before navigation lands.
-  await mounted.t.waitForFrame((f) => f.includes("f filter"));
+  // entry, so it would match Home before navigation lands. The footer can clip at
+  // the smallest supported width, while the filter label remains visible.
+  await mounted.t.waitForFrame((f) => f.includes("Filter:"));
   return mounted;
 }
 
@@ -292,11 +296,18 @@ test("rows render newest-first under Today / Yesterday / Older with the live mar
   assert.match(selectedLine(frame), /run-a/);
 });
 
-test("the empty list is informational and offers only Back", async () => {
+test("both filters explain their empty Previous Runs state", async () => {
   const { t } = await openList({ all: [] });
-  const frame = t.captureCharFrame();
-  assert.match(frame, /No runs yet/);
-  assert.match(frame, /esc back/);
+  const all = t.captureCharFrame();
+  assert.match(all, /No previous Runs\s+Start a Run from Home\./);
+  assert.match(all, /esc back/);
+
+  t.mockInput.pressKey("f");
+  await t.waitForFrame((frame) => frame.includes("No resumable Runs"));
+  assert.match(
+    t.captureCharFrame(),
+    /No resumable Runs\s+Press f to show all Runs\./,
+  );
 });
 
 // --- AC1: the Resumable filter ----------------------------------------------
@@ -369,11 +380,48 @@ test("a small width keeps rows on one line, truncating the Bundle name, and resi
   assert.match(frame, /run-x/); // id survives
   assert.doesNotMatch(frame, /That Will Not Fit/); // Bundle name truncated
 
-  t.resize(30, 16);
+  t.resize(SMALLEST_SUPPORTED_WIDTH, 16);
   await t.renderOnce();
   for (const line of t.captureCharFrame().split("\n")) {
-    assert.ok(line.length <= 30, `overflows 30: ${JSON.stringify(line)}`);
+    assert.ok(
+      line.length <= SMALLEST_SUPPORTED_WIDTH,
+      `overflows ${SMALLEST_SUPPORTED_WIDTH}: ${JSON.stringify(line)}`,
+    );
   }
+});
+
+test("previous-runs-verified: focus, state-free rows, and guarded quit", async () => {
+  const { t, exits } = await openList({
+    all: [
+      row({
+        runId: "run-focus",
+        bundleName: "Focused Bundle",
+        group: "today",
+        live: true,
+        ownedByThisProcess: true,
+      }),
+    ],
+    width: SMALLEST_SUPPORTED_WIDTH,
+    height: 16,
+  });
+
+  const rowLine = selectedLine(t.captureCharFrame());
+  assert.match(rowLine, /^\s*› run-focus/);
+  assert.doesNotMatch(
+    rowLine,
+    /\b(?:running|blocked|halted|failed|succeeded|cancelled)\b/,
+  );
+
+  t.resize(40, 16);
+  await t.renderOnce();
+  t.mockInput.pressKey("q");
+  await t.waitForFrame((frame) => frame.includes("Halt 1 live Run and quit?"));
+  assert.deepEqual(exits, []);
+
+  t.mockInput.pressEnter();
+  await t.waitForFrame((frame) => !frame.includes("Halt 1 live Run and quit?"));
+  assert.deepEqual(exits, []);
+  assert.match(t.captureCharFrame(), /Previous Runs/);
 });
 
 // --- AC3: Enter opens the Workbench; Escape restores the row ----------------

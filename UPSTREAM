@@ -128,6 +128,9 @@ studied for architecture and behaviour.
                                      packages/tui/src/feature-plugins/system/diff-viewer.tsx
   src/tui/bundle-catalog-inspector.tsx
                                      rebuilt against packages/tui/src/feature-plugins/system/diff-viewer.tsx
+  src/tui/catalog-navigation.tsx     rebuilt against packages/tui/src/ui/dialog-select.tsx (#205: the
+                                     selection/search half of bundle-catalog.tsx, lifted out unchanged
+                                     and shared with harness-catalog.tsx; internal reuse, no new study)
 
 (`app.tsx` carried a "rebuilt against packages/tui/src/app.tsx" line that never cited
 OpenCode in the source and was never actually studied against it — #127 audit A47 —

@@ -96,8 +96,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   seam that re-opens its Projection to grow a page); a write goes through a per-screen submit seam (`run-actions-view.tsx` — resume/cancel/delete, mirroring
   `run-launch-view.tsx`). The Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`, and declares its key
   value (`{ name?, ctrl? }`, A16) so the Workbench needs no cast.
-- `bundle-catalog.tsx` owns the presentation-only search, pane focus, selection, and scroll controller over `bundle-view.tsx`; its focused fact rendering
-  is the pure `bundle-catalog-inspector.tsx` private submodule. Neither introduces an Action Offer or another Projection selector.
+- `catalog-navigation.tsx` (A4) owns both catalogs' search, pane focus, selection, bindings, and row/empty shells; filters, focus, and inspectors stay per
+  screen. `bundle-catalog.tsx` renders `bundle-view.tsx` via pure `bundle-catalog-inspector.tsx`; neither adds an Action Offer or Projection selector.
 - `harness-catalog.tsx` opens exact focus for the selected row and rehydrates only rows the list already marks checked, retaining those accessors for search;
   `harness-view.tsx` keeps list opening spawn-free, `harness-format.ts` owns shared wording, and the inspector renders normalized facts with no Actions.
 - Two private helpers back those seams: `follow.ts` (`followProjection`) owns the read seams' follow, health, and reconnect loop (A22); `submit-and-settle.ts`

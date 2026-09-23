@@ -229,7 +229,6 @@ async function mount(options: TMountOptions = {}) {
   const width = options.width ?? 100;
   const height = options.height ?? 36;
   const catalog = options.catalog ?? harnesses();
-  const exits: number[] = [];
   const t = await testRender(
     () => (
       <App
@@ -242,7 +241,7 @@ async function mount(options: TMountOptions = {}) {
         runList={inertRunListView()}
         actions={inertRunActionsView()}
         renderer={makeFakeRenderer().port}
-        exit={() => exits.push(1)}
+        exit={() => {}}
       />
     ),
     { width, height },
@@ -253,7 +252,7 @@ async function mount(options: TMountOptions = {}) {
   t.mockInput.pressArrow("down");
   t.mockInput.pressArrow("down");
   t.mockInput.pressEnter();
-  return { t, focused: catalog.focused, closed: catalog.closed, exits };
+  return { t, focused: catalog.focused, closed: catalog.closed };
 }
 
 test("harness-catalog-screen renders normalized rows and every inspector section", async () => {
@@ -351,19 +350,14 @@ test("Harness search uses held names, models, and capabilities and explains no m
   );
 });
 
-test("Harness keymap exposes focus without colour, restores Home, and leaves printable keys to search", async () => {
-  const { t, closed, exits } = await mount();
+// Pane switching, printable keys reaching search, and Ctrl+C from either pane
+// are the shared catalog navigation (`catalog-navigation.tsx`); their assertions
+// live once in bundle-screens.test.tsx.
+test("Harness keymap exposes focus without colour and restores Home", async () => {
+  const { t, closed } = await mount();
   await t.waitForFrame((frame) => frame.includes("2 discovered"));
   assert.match(t.captureCharFrame(), /│ › Codex/);
   assert.match(t.captureCharFrame(), /› Find a Harness/);
-
-  t.mockInput.pressTab();
-  await t.waitForFrame((frame) => frame.includes("› Inspector"));
-  t.mockInput.pressArrow("left");
-  await t.waitForFrame((frame) => frame.includes("› Find a Harness"));
-  t.mockInput.pressKey("q");
-  await t.waitForFrame((frame) => frame.includes("│ q"));
-  assert.equal(exits.length, 0);
 
   t.mockInput.pressEscape();
   await until(() => /^ Secant\s*$/m.test(t.captureCharFrame()));

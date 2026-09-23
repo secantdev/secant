@@ -658,6 +658,8 @@ test("Back returns to Home or the originating Start a Run Bundle step", async ()
   assert.match(startRun.t.captureCharFrame(), /› Proof Bundle/);
 });
 
+// With "pane focus is visible…" above, this is the one home for the shared catalog
+// navigation (`catalog-navigation.tsx`) that the Harness catalog also uses.
 test("search owns printable keys while Ctrl+C quits from either pane", async () => {
   const listRun = await mount();
   await listRun.t.waitForFrame((f) => f.includes("Workflow Bundles"));
@@ -684,6 +686,14 @@ test("search owns printable keys while Ctrl+C quits from either pane", async () 
   await inspectRun.t.waitForFrame((f) => f.includes("› Inspector"));
   inspectRun.t.mockInput.pressKey("q");
   await inspectRun.t.renderOnce();
+  assert.equal(inspectRun.exits.length, 0);
+  // Back on the list pane after the round-trip, printable keys reach search again.
+  inspectRun.t.mockInput.pressArrow("left");
+  await inspectRun.t.waitForFrame((f) =>
+    f.includes("› Find an installed Bundle"),
+  );
+  inspectRun.t.mockInput.pressKey("q");
+  await inspectRun.t.waitForFrame((f) => f.includes("No matching Workflow"));
   assert.equal(inspectRun.exits.length, 0);
   inspectRun.t.mockInput.pressCtrlC();
   await inspectRun.t.waitFor(() => inspectRun.exits.length > 0);

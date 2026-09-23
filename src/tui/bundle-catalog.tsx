@@ -1,13 +1,6 @@
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/solid";
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  Show,
-  type Accessor,
-} from "solid-js";
+import { createEffect, createMemo, For, Show, type Accessor } from "solid-js";
 import type {
   BundleFocusResult,
   InstalledBundleFocus,
@@ -15,22 +8,22 @@ import type {
 } from "../application/projection-port.js";
 import { BundleCatalogInspector } from "./bundle-catalog-inspector.js";
 import { useBundleCatalogView } from "./bundle-view.js";
-import { useBindings } from "./keymap.js";
-import { useDialog } from "./vendor/dialog.js";
-import { useExit } from "./vendor/exit.js";
+import {
+  CatalogEmptyState,
+  CatalogRow,
+  useCatalogNavigation,
+} from "./catalog-navigation.js";
 import { Panel, PanelGroup } from "./vendor/panels.js";
-import { scrollVertically } from "./vendor/scroll.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 // One read-only Workflow Bundles catalog over the existing list/focus
 // Projections. Its two-pane shape is reduced from OpenCode's diff viewer and its
-// selection/search shape from dialog-select.tsx at 1ead9e3d7f (see UPSTREAM).
+// selection/search shape from dialog-select.tsx at 1ead9e3d7f (see UPSTREAM),
+// now shared with the Harness catalog through catalog-navigation.tsx.
 // Secant keeps substring search presentation-only, exposes no Action Offers,
 // marks focus in words/glyphs, stacks at a small width, and clamps scrolling.
 
 const STACK_BREAKPOINT = 70;
-
-type Pane = "list" | "inspector";
 
 export function BundleCatalog(props: {
   selected: Accessor<number>;
@@ -38,13 +31,9 @@ export function BundleCatalog(props: {
   onBack: () => void;
 }) {
   const { theme } = useTheme();
-  const exit = useExit();
-  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const view = useBundleCatalogView();
   const snapshot = view.openList();
-  const [query, setQuery] = createSignal("");
-  const [pane, setPane] = createSignal<Pane>("list");
   let inspectorScroll: ScrollBoxRenderable | undefined;
 
   const rows = () => {
@@ -55,20 +44,16 @@ export function BundleCatalog(props: {
     const result = snapshot().result;
     return result.found ? undefined : result.problem;
   };
-  const matching = createMemo(() => filterBundles(rows(), query()));
-  const activeEntry = () => {
-    const selected = matching().find(
-      (entry) => entry.index === props.selected(),
-    );
-    return selected ?? matching()[0];
-  };
-
-  createEffect(() => {
-    const active = activeEntry();
-    if (active !== undefined && active.index !== props.selected()) {
-      props.setSelected(active.index);
-    }
-  });
+  const { query, pane, matching, activeEntry, updateQuery } =
+    useCatalogNavigation({
+      filter: (value) => filterBundles(rows(), value),
+      selected: props.selected,
+      setSelected: props.setSelected,
+      onBack: props.onBack,
+      group: "Workflow Bundles",
+      item: "Bundle",
+      inspector: () => inspectorScroll,
+    });
 
   const focus = createMemo(() => {
     const entry = activeEntry();
@@ -91,100 +76,6 @@ export function BundleCatalog(props: {
     scrolledBundle = identity;
     inspectorScroll?.scrollTo(0);
   });
-
-  const moveSelection = (delta: number) => {
-    const entries = matching();
-    if (entries.length === 0) return;
-    const position = Math.max(
-      0,
-      entries.findIndex((entry) => entry.index === activeEntry()?.index),
-    );
-    const next = Math.max(0, Math.min(position + delta, entries.length - 1));
-    const entry = entries[next];
-    if (entry !== undefined) props.setSelected(entry.index);
-  };
-
-  const updateQuery = (value: string) => {
-    setQuery(value);
-    const entries = filterBundles(rows(), value);
-    if (!entries.some((entry) => entry.index === props.selected())) {
-      const first = entries[0];
-      if (first !== undefined) props.setSelected(first.index);
-    }
-  };
-
-  const scroll = (delta: number) => scrollVertically(inspectorScroll, delta);
-
-  useBindings(() => ({
-    enabled: dialog.stack.length === 0,
-    bindings: [
-      {
-        key: "up",
-        desc: pane() === "list" ? "Previous Bundle" : "Scroll up",
-        group: "Workflow Bundles",
-        cmd: () => (pane() === "list" ? moveSelection(-1) : scroll(-1)),
-      },
-      {
-        key: "down",
-        desc: pane() === "list" ? "Next Bundle" : "Scroll down",
-        group: "Workflow Bundles",
-        cmd: () => (pane() === "list" ? moveSelection(1) : scroll(1)),
-      },
-      {
-        key: "tab",
-        desc: "Switch pane",
-        group: "Workflow Bundles",
-        cmd: () =>
-          setPane((current) => (current === "list" ? "inspector" : "list")),
-      },
-      {
-        key: "escape",
-        desc: "Back",
-        group: "Workflow Bundles",
-        cmd: props.onBack,
-      },
-      {
-        key: "ctrl+c",
-        desc: "Quit",
-        group: "Workflow Bundles",
-        cmd: () => exit(),
-      },
-    ],
-  }));
-  useBindings(() => ({
-    enabled: pane() === "inspector" && dialog.stack.length === 0,
-    bindings: [
-      {
-        key: "pageup",
-        desc: "Page inspector up",
-        group: "Workflow Bundles",
-        cmd: () => scroll(-Math.max(1, inspectorScroll?.viewport.height ?? 1)),
-      },
-      {
-        key: "pagedown",
-        desc: "Page inspector down",
-        group: "Workflow Bundles",
-        cmd: () => scroll(Math.max(1, inspectorScroll?.viewport.height ?? 1)),
-      },
-      {
-        key: "left",
-        desc: "Focus results",
-        group: "Workflow Bundles",
-        cmd: () => setPane("list"),
-      },
-    ],
-  }));
-  useBindings(() => ({
-    enabled: pane() === "list" && dialog.stack.length === 0,
-    bindings: [
-      {
-        key: "right",
-        desc: "Focus inspector",
-        group: "Workflow Bundles",
-        cmd: () => setPane("inspector"),
-      },
-    ],
-  }));
 
   const stacked = () => dimensions().width < STACK_BREAKPOINT;
   return (
@@ -234,13 +125,30 @@ export function BundleCatalog(props: {
               />
               <Show
                 when={matching().length > 0}
-                fallback={<NoMatches emptyCatalog={rows().length === 0} />}
+                fallback={
+                  <CatalogEmptyState
+                    title={
+                      rows().length === 0
+                        ? "No installed Workflow Bundles"
+                        : "No matching Workflow Bundles"
+                    }
+                    hint={
+                      rows().length === 0
+                        ? "Install one with `secant bundle build` or `secant bundle install`."
+                        : "Try a different name, id, description, or origin."
+                    }
+                  />
+                }
               >
                 <box flexDirection="column" flexGrow={1} overflow="hidden">
                   <For each={matching()}>
                     {(entry) => (
-                      <ResultRow
-                        bundle={entry.bundle}
+                      <CatalogRow
+                        title={entry.bundle.name}
+                        details={[
+                          `${entry.bundle.id}@${entry.bundle.version}`,
+                          `${entry.bundle.origin.kind} ${entry.bundle.origin.location}`,
+                        ]}
                         selected={entry.index === activeEntry()?.index}
                         focused={pane() === "list"}
                         onSelect={() => props.setSelected(entry.index)}
@@ -342,52 +250,4 @@ function foundBundle(
 
 function notFoundExplanation(result: BundleFocusResult): string | undefined {
   return result.found ? undefined : result.problem.explanation;
-}
-
-function NoMatches(props: { emptyCatalog: boolean }) {
-  const { theme } = useTheme();
-  return (
-    <box flexDirection="column" paddingTop={1} flexShrink={0}>
-      <text attributes={TextAttributes.BOLD} fg={theme.text}>
-        {props.emptyCatalog
-          ? "No installed Workflow Bundles"
-          : "No matching Workflow Bundles"}
-      </text>
-      <text fg={theme.textMuted}>
-        {props.emptyCatalog
-          ? "Install one with `secant bundle build` or `secant bundle install`."
-          : "Try a different name, id, description, or origin."}
-      </text>
-    </box>
-  );
-}
-
-function ResultRow(props: {
-  bundle: InstalledBundleSummary;
-  selected: boolean;
-  focused: boolean;
-  onSelect: () => void;
-}) {
-  const { theme } = useTheme();
-  return (
-    <box
-      flexDirection="column"
-      flexShrink={0}
-      backgroundColor={props.selected ? theme.backgroundElement : undefined}
-      onMouseUp={props.onSelect}
-    >
-      <text
-        fg={props.selected ? theme.text : theme.textMuted}
-        attributes={props.selected ? TextAttributes.BOLD : 0}
-      >
-        {`${props.selected && props.focused ? "› " : "  "}${props.bundle.name}`}
-      </text>
-      <text fg={theme.textMuted}>
-        {`  ${props.bundle.id}@${props.bundle.version}`}
-      </text>
-      <text fg={theme.textMuted}>
-        {`  ${props.bundle.origin.kind} ${props.bundle.origin.location}`}
-      </text>
-    </box>
-  );
 }

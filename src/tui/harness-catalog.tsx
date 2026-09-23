@@ -17,6 +17,11 @@ import type {
   HarnessFocusSnapshot,
   HarnessSummary,
 } from "../application/projection-port.js";
+import {
+  CatalogEmptyState,
+  CatalogRow,
+  useCatalogNavigation,
+} from "./catalog-navigation.js";
 import { HarnessCatalogInspector } from "./harness-catalog-inspector.js";
 import {
   discoveryLabel,
@@ -24,15 +29,10 @@ import {
   qualificationLabel,
 } from "./harness-format.js";
 import { useHarnessCatalogView } from "./harness-view.js";
-import { useBindings } from "./keymap.js";
-import { useDialog } from "./vendor/dialog.js";
-import { useExit } from "./vendor/exit.js";
 import { Panel, PanelGroup } from "./vendor/panels.js";
-import { scrollVertically } from "./vendor/scroll.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 const STACK_BREAKPOINT = 70;
-type THarnessPane = "list" | "inspector";
 
 type THarnessFilterParams = {
   harnesses: readonly HarnessSummary[];
@@ -51,14 +51,10 @@ export function HarnessCatalog(props: {
   onBack: () => void;
 }) {
   const { theme } = useTheme();
-  const exit = useExit();
-  const dialog = useDialog();
   const dimensions = useTerminalDimensions();
   const componentOwner = getOwner();
   const view = useHarnessCatalogView();
   const snapshot = view.openList();
-  const [query, setQuery] = createSignal("");
-  const [pane, setPane] = createSignal<THarnessPane>("list");
   const [openedFocus, setOpenedFocus] = createSignal<
     ReadonlyMap<string, THeldHarnessFocus>
   >(new Map());
@@ -87,19 +83,17 @@ export function HarnessCatalog(props: {
   onCleanup(() => {
     for (const held of openedFocus().values()) held.dispose();
   });
-  const matching = createMemo(() =>
-    filterHarnesses({ harnesses: rows(), query: query(), heldHarness }),
-  );
-  const activeEntry = () =>
-    matching().find((entry) => entry.index === props.selected()) ??
-    matching()[0];
-
-  createEffect(() => {
-    const active = activeEntry();
-    if (active !== undefined && active.index !== props.selected()) {
-      props.setSelected(active.index);
-    }
-  });
+  const { query, pane, matching, activeEntry, updateQuery } =
+    useCatalogNavigation({
+      filter: (value) =>
+        filterHarnesses({ harnesses: rows(), query: value, heldHarness }),
+      selected: props.selected,
+      setSelected: props.setSelected,
+      onBack: props.onBack,
+      group: "Harnesses",
+      item: "Harness",
+      inspector: () => inspectorScroll,
+    });
 
   const focus = createMemo(() => {
     const entry = activeEntry();
@@ -124,92 +118,6 @@ export function HarnessCatalog(props: {
       }
     }
   });
-
-  const moveSelection = (delta: number) => {
-    const entries = matching();
-    if (entries.length === 0) return;
-    const position = Math.max(
-      0,
-      entries.findIndex((entry) => entry.index === activeEntry()?.index),
-    );
-    const next = Math.max(0, Math.min(position + delta, entries.length - 1));
-    const entry = entries[next];
-    if (entry !== undefined) props.setSelected(entry.index);
-  };
-  const updateQuery = (value: string) => {
-    setQuery(value);
-    const entries = filterHarnesses({
-      harnesses: rows(),
-      query: value,
-      heldHarness,
-    });
-    if (!entries.some((entry) => entry.index === props.selected())) {
-      const first = entries[0];
-      if (first !== undefined) props.setSelected(first.index);
-    }
-  };
-  const scroll = (delta: number) => scrollVertically(inspectorScroll, delta);
-
-  useBindings(() => ({
-    enabled: dialog.stack.length === 0,
-    bindings: [
-      {
-        key: "up",
-        desc: pane() === "list" ? "Previous Harness" : "Scroll up",
-        group: "Harnesses",
-        cmd: () => (pane() === "list" ? moveSelection(-1) : scroll(-1)),
-      },
-      {
-        key: "down",
-        desc: pane() === "list" ? "Next Harness" : "Scroll down",
-        group: "Harnesses",
-        cmd: () => (pane() === "list" ? moveSelection(1) : scroll(1)),
-      },
-      {
-        key: "tab",
-        desc: "Switch pane",
-        group: "Harnesses",
-        cmd: () =>
-          setPane((current) => (current === "list" ? "inspector" : "list")),
-      },
-      { key: "escape", desc: "Back", group: "Harnesses", cmd: props.onBack },
-      { key: "ctrl+c", desc: "Quit", group: "Harnesses", cmd: () => exit() },
-    ],
-  }));
-  useBindings(() => ({
-    enabled: pane() === "inspector" && dialog.stack.length === 0,
-    bindings: [
-      {
-        key: "pageup",
-        desc: "Page inspector up",
-        group: "Harnesses",
-        cmd: () => scroll(-Math.max(1, inspectorScroll?.viewport.height ?? 1)),
-      },
-      {
-        key: "pagedown",
-        desc: "Page inspector down",
-        group: "Harnesses",
-        cmd: () => scroll(Math.max(1, inspectorScroll?.viewport.height ?? 1)),
-      },
-      {
-        key: "left",
-        desc: "Focus results",
-        group: "Harnesses",
-        cmd: () => setPane("list"),
-      },
-    ],
-  }));
-  useBindings(() => ({
-    enabled: pane() === "list" && dialog.stack.length === 0,
-    bindings: [
-      {
-        key: "right",
-        desc: "Focus inspector",
-        group: "Harnesses",
-        cmd: () => setPane("inspector"),
-      },
-    ],
-  }));
 
   const qualified = () =>
     rows().filter((harness) => isQualified(harness.qualification)).length;
@@ -259,7 +167,15 @@ export function HarnessCatalog(props: {
             focusedBackgroundColor={theme.backgroundElement}
             focusedTextColor={theme.text}
           />
-          <Show when={matching().length > 0} fallback={<NoMatches />}>
+          <Show
+            when={matching().length > 0}
+            fallback={
+              <CatalogEmptyState
+                title="No matching Harnesses"
+                hint="Try a different name, capability, model, or qualification state."
+              />
+            }
+          >
             <box flexDirection="column" flexGrow={1} overflow="hidden">
               <For each={matching()}>
                 {(entry) => (
@@ -364,7 +280,6 @@ function ResultRow(props: {
   focused: boolean;
   onSelect: () => void;
 }) {
-  const { theme } = useTheme();
   const modelCount = () => {
     const declaration = props.focusedHarness()?.supportedModels;
     return declaration?.kind === "list"
@@ -372,23 +287,13 @@ function ResultRow(props: {
       : "Models not yet observed";
   };
   return (
-    <box
-      flexDirection="column"
-      flexShrink={0}
-      backgroundColor={props.selected ? theme.backgroundElement : undefined}
-      onMouseUp={props.onSelect}
-    >
-      <text
-        fg={props.selected ? theme.text : theme.textMuted}
-        attributes={props.selected ? TextAttributes.BOLD : 0}
-      >
-        {`${props.selected && props.focused ? "› " : "  "}${props.harness.name} · ${qualificationLabel(props.harness.qualification.state)}`}
-      </text>
-      <text fg={theme.textMuted}>
-        {`  ${discoveryLabel(props.harness.discovery)}`}
-      </text>
-      <text fg={theme.textMuted}>{`  ${modelCount()}`}</text>
-    </box>
+    <CatalogRow
+      title={`${props.harness.name} · ${qualificationLabel(props.harness.qualification.state)}`}
+      details={[discoveryLabel(props.harness.discovery), modelCount()]}
+      selected={props.selected}
+      focused={props.focused}
+      onSelect={props.onSelect}
+    />
   );
 }
 
@@ -398,18 +303,4 @@ function foundHarness(result: HarnessFocusResult): HarnessFocus | undefined {
 
 function notFoundExplanation(result: HarnessFocusResult): string | undefined {
   return result.found ? undefined : result.problem.explanation;
-}
-
-function NoMatches() {
-  const { theme } = useTheme();
-  return (
-    <box flexDirection="column" paddingTop={1} flexShrink={0}>
-      <text attributes={TextAttributes.BOLD} fg={theme.text}>
-        No matching Harnesses
-      </text>
-      <text fg={theme.textMuted}>
-        Try a different name, capability, model, or qualification state.
-      </text>
-    </box>
-  );
 }

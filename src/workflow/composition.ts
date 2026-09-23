@@ -196,6 +196,20 @@ export function checkComposition(
       }
     }
 
+    // Suggestions are quick-choice answers to a free-text gate (#213): an
+    // approve-reject gate has no text answer for them to pre-fill.
+    if (
+      step.kind === "human-gate" &&
+      step.suggestions !== undefined &&
+      step.shape !== "free-text"
+    ) {
+      error(
+        "gate-suggestions-unsupported",
+        step.id,
+        `Step "${step.id}" declares suggestions, but only a free-text Human Gate takes a text answer they can pre-fill.`,
+      );
+    }
+
     // #9 makes the composition check the authority that every supported platform
     // resolves exactly one invocation. The strict validator already guarantees a
     // non-empty executable, so on a validated manifest this is a backstop; it is

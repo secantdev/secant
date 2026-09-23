@@ -1,5 +1,5 @@
 import { TextAttributes } from "@opentui/core";
-import { createMemo, createSignal, type Accessor } from "solid-js";
+import { createMemo, createSignal, Show, type Accessor } from "solid-js";
 import type {
   AnswerHumanGateOffer,
   Problem,
@@ -23,8 +23,11 @@ type Theme = ReturnType<typeof useTheme>["theme"];
 
 /** Rows the free-text Human Gate control occupies while it replaces the footer
  *  (#121, spec story 17): the gate message, the declared output name, the text
- *  entry line, and a status/hint line. */
-export const GATE_HEIGHT = 4;
+ *  entry line, and a status/hint line — plus the suggestion row when the gate
+ *  authored suggestions (#213). */
+export function gateHeight(gate: FreeTextGate): number {
+  return gate.suggestions.length > 0 ? 5 : 4;
+}
 
 /** An empty free-text answer is refused in the client before any dispatch (#121
  *  AC3): the Port would accept `text: ""`, but the Workbench never sends a blank. */
@@ -41,12 +44,16 @@ export type FreeTextGate = {
   gate: RunGateReference;
   message: string;
   outputName?: string;
+  /** Authored quick-choice answers (#213); empty when the gate authored none. */
+  suggestions: readonly string[];
 };
 
 export interface GateControl {
   /** The free-text gate the Run rests at, or undefined. */
   readonly active: Accessor<FreeTextGate | undefined>;
   readonly text: Accessor<string>;
+  /** The highlighted suggestion's index, or -1 for Other (the typed answer). */
+  readonly choice: Accessor<number>;
   /** Bound to the native text field's `onInput`. */
   onInput(value: string): void;
   readonly pending: Accessor<boolean>;
@@ -79,12 +86,35 @@ export function createGateControl(deps: {
       ...(pending.outputArtifactName !== undefined
         ? { outputName: pending.outputArtifactName }
         : {}),
+      suggestions: pending.suggestions ?? [],
     };
   });
 
   // Free-text Human Gate control state (#108): the typed answer, the in-flight
   // submission, and a refusal (an empty answer refused locally, or a Port refusal).
   const [text, setText] = createSignal("");
+  // Suggestion choice (#213): ↑/↓ cycle the authored suggestions and Other, filling
+  // the field with the chosen text, so a suggestion is submitted through the same
+  // text answer as a typed Other. Other restores what the human last typed.
+  const [choice, setChoice] = createSignal(-1);
+  const [typed, setTyped] = createSignal("");
+  const onInput = (value: string) => {
+    setText(value);
+    const suggestions = active()?.suggestions ?? [];
+    if (choice() !== -1 && value === suggestions[choice()]) return;
+    setChoice(-1);
+    setTyped(value);
+  };
+  const cycle = (step: 1 | -1) => {
+    const suggestions = active()?.suggestions ?? [];
+    if (suggestions.length === 0) return;
+    // Positions 0..n-1 are suggestions and n is Other.
+    const slots = suggestions.length + 1;
+    const current = choice() === -1 ? suggestions.length : choice();
+    const next = (current + step + slots) % slots;
+    setChoice(next === suggestions.length ? -1 : next);
+    setText(next === suggestions.length ? typed() : suggestions[next]!);
+  };
   const [outcome, setOutcome] = createSignal<Accessor<AnswerOutcome>>();
   const [refusal, setRefusal] = createSignal<Problem | undefined>();
   const pending = () => {
@@ -118,6 +148,8 @@ export function createGateControl(deps: {
     },
     () => {
       setText("");
+      setTyped("");
+      setChoice(-1);
       setRefusal(undefined);
     },
   );
@@ -131,6 +163,8 @@ export function createGateControl(deps: {
     if (active() === undefined) return false;
     if (name === "return") dispatch();
     else if (name === "escape") deps.onLeave();
+    else if (!pending() && name === "down") cycle(1);
+    else if (!pending() && name === "up") cycle(-1);
     // Every other key falls through to the focused native <input>.
     return true;
   };
@@ -138,7 +172,8 @@ export function createGateControl(deps: {
   return {
     active,
     text,
-    onInput: (value) => setText(value),
+    choice,
+    onInput,
     pending,
     refusal,
     handleKey,
@@ -153,6 +188,7 @@ export function createGateControl(deps: {
 export function FreeTextGateControl(props: {
   gate: Accessor<FreeTextGate>;
   text: Accessor<string>;
+  choice: Accessor<number>;
   onInput: (value: string) => void;
   pending: Accessor<boolean>;
   refusal: Accessor<Problem | undefined>;
@@ -166,12 +202,22 @@ export function FreeTextGateControl(props: {
     const refusal = props.refusal();
     if (refusal !== undefined)
       return `refused: ${refusal.explanation} ${refusal.remediation}`;
-    return "type your answer · enter submit · esc back · ctrl+c quit";
+    return props.gate().suggestions.length > 0
+      ? "↑↓ choose or type · enter submit · esc back · ctrl+c quit"
+      : "type your answer · enter submit · esc back · ctrl+c quit";
+  };
+  // The chosen entry is bracketed, so the choice reads without colour.
+  const choices = () => {
+    const labels = [...props.gate().suggestions, "Other (type)"];
+    const chosen = props.choice() === -1 ? labels.length - 1 : props.choice();
+    return labels
+      .map((label, index) => (index === chosen ? `[${label}]` : label))
+      .join(" · ");
   };
   return (
     <box
       flexDirection="column"
-      height={GATE_HEIGHT}
+      height={gateHeight(props.gate())}
       flexShrink={0}
       overflow="hidden"
       backgroundColor={theme.backgroundPanel}
@@ -185,6 +231,11 @@ export function FreeTextGateControl(props: {
           w(),
         )}
       </text>
+      <Show when={props.gate().suggestions.length > 0}>
+        <text fg={theme.text} flexShrink={0}>
+          {clip(`  Choose: ${choices()}`, w())}
+        </text>
+      </Show>
       <box flexDirection="row" flexShrink={0}>
         <text fg={theme.text} flexShrink={0}>
           {"  > "}

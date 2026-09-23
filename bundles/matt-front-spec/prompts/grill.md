@@ -8,5 +8,5 @@ at a time, wait for my answer, and dig into the vague or hand-wavy parts. Do not
 write any files during this conversation — this is the interview, not the spec.
 
 When you believe you understand the feature well enough to specify it, say so
-plainly and stop asking questions. A later step, after I approve, will ask you to
-write the spec from everything we discussed.
+plainly and stop asking questions. A later step, after I choose where the spec lives,
+will ask you to write the spec from everything we discussed.

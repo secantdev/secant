@@ -157,6 +157,13 @@ const pendingGateRow = z.object({
   shape: gateShape,
   message: z.string(),
   output_artifact_name: z.string().nullable(),
+  // A JSON string array, parsed and validated here at the read ingress (D7).
+  suggestions: z
+    .string()
+    .nullable()
+    .transform((value) =>
+      value === null ? null : z.array(z.string()).parse(JSON.parse(value)),
+    ),
   raised_at: z.string(),
 });
 
@@ -199,6 +206,7 @@ function toPendingGate(row: z.infer<typeof pendingGateRow>): PendingGateRecord {
     ...(row.output_artifact_name !== null
       ? { outputArtifactName: row.output_artifact_name }
       : {}),
+    ...(row.suggestions !== null ? { suggestions: row.suggestions } : {}),
     raisedAt: row.raised_at,
   };
 }
@@ -615,6 +623,10 @@ function recordPendingGate(params: TRecordPendingGateParams): void {
       shape: request.shape,
       message: request.message,
       output_artifact_name: request.outputArtifactName ?? null,
+      suggestions:
+        request.suggestions !== undefined
+          ? JSON.stringify(request.suggestions)
+          : null,
       raised_at: request.at.toISOString(),
     })
     .onConflictDoNothing({ target: pendingGates.attempt_id })

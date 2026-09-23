@@ -296,6 +296,11 @@ export function renderRun(run: RunView): string {
       ...(pendingGate.outputArtifactName !== undefined
         ? [`  output: ${pendingGate.outputArtifactName}`]
         : []),
+      ...(pendingGate.suggestions !== undefined
+        ? [
+            `  suggestions: ${pendingGate.suggestions.join(", ")} (or any other text)`,
+          ]
+        : []),
       `  gate: ${pendingGate.gate.shape} at step ${pendingGate.gate.stepId}` +
         ` (attempt ${pendingGate.gate.attemptId})`,
     );

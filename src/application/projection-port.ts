@@ -763,6 +763,10 @@ export interface RunPendingGateView {
   readonly gate: RunGateReference; // shape ∈ {approve-reject, free-text}
   readonly message: string; // the exact rendered message shown to the human
   readonly outputArtifactName?: string; // free-text's declared output artifact
+  /** free-text only: authored quick-choice answers a client offers beside a typed
+   *  Other entry (#213). Choosing one submits its text through the same
+   *  `answer-human-gate` `text` answer; the gate admits any other text too. */
+  readonly suggestions?: readonly string[];
 }
 
 /** One named Harness Session's last observed availability (#116), and — when the

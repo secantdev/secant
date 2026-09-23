@@ -351,8 +351,9 @@ async function applicationOnDoubles(): Promise<void> {
 // this case's job is the recorded-replayer traversal. Nothing is faked in place of a
 // spawn: the real Adapter discovers and spawns the PATH-installed replayer, which
 // replays the recorded grill and spec Turns. Two human grill Turns are sent, the Step
-// is ended, the approve-reject gate is answered, and the spec Turn's file-write
-// approval is allowed; the Run reaches `succeeded` with the spec written.
+// is ended, the suggested tracker gate is answered with its `Local` suggestion (#213),
+// and the spec Turn's file-write approval is allowed; the Run reaches `succeeded` with
+// the spec written and the chosen tracker rendered into the spec Turn exactly once.
 async function mattFrontReplayerWorkbench(): Promise<void> {
   const replayer = installReplayer(
     MATT_FRONT_REPLAYER_VERSION,
@@ -493,7 +494,7 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     ]);
 
     // End the interactive Step at a Turn boundary; the Run advances to the authored
-    // approve-reject gate and rests `blocked` at it.
+    // free-text tracker gate and rests `blocked` at it, offering its suggestions.
     assert.ok(
       wired.projectionPort.submit({
         operationId: "matt-front-end-grill",
@@ -506,10 +507,12 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
       "applied",
     );
     const atGate = readRun();
-    assert.equal(atGate.pendingGate?.gate.shape, "approve-reject");
-    assert.equal(atGate.pendingGate?.gate.stepId, "approve-spec");
+    assert.equal(atGate.pendingGate?.gate.shape, "free-text");
+    assert.equal(atGate.pendingGate?.gate.stepId, "choose-tracker");
+    assert.deepEqual(atGate.pendingGate?.suggestions, ["Local", "GitHub"]);
 
-    // Approve the gate; the spec Agent Step resumes the Session and raises a
+    // Choose the Local suggestion — the same `text` answer a typed Other sends; the
+    // spec Agent Step resumes the Session and raises a
     // file-write approval on the live overlay, then blocks awaiting it. Watch the
     // overlay for the outstanding request (the .tsx test watches the same overlay
     // rather than a rendered frame) and answer it `allow` over the Port — the exact
@@ -522,7 +525,7 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     wired.projectionPort.submit({
       operationId: "matt-front-answer-gate",
       operation: "answer-human-gate",
-      input: { runId, gate, answer: "continue" },
+      input: { runId, gate, text: "Local" },
     });
     let offer: AnswerHarnessRequestOffer | undefined;
     for await (const update of overlayWatch.updates) {
@@ -564,6 +567,15 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     const specFile = join(workspace, "specs", "spec.md");
     assert.ok(existsSync(specFile), "the spec Turn wrote specs/spec.md");
     assert.match(readFileSync(specFile, "utf8"), /Dark Mode Toggle/);
+    // The chosen tracker is bound into the spec Turn's prompt exactly once.
+    const doneTranscript =
+      wired.projectionPort.readTranscript(transcriptReference);
+    assert.ok(doneTranscript.found);
+    if (!doneTranscript.found) throw new Error("unreachable");
+    const specPrompt = doneTranscript.entries
+      .filter((entry) => entry.role === "user")
+      .at(-1)?.content;
+    assert.equal(specPrompt?.split("the tracker I chose: Local.").length, 2);
   } finally {
     wired.runGroup.close();
     wired.catalog.close();

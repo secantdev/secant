@@ -428,6 +428,22 @@ const cases: ReadonlyArray<{
     code: "agent-produces-unsupported",
     target: "grill",
   },
+  {
+    title: "suggestions on an approve-reject gate (#213)",
+    manifest: manifest({
+      routing: [
+        {
+          id: "gate",
+          kind: "human-gate",
+          shape: "approve-reject",
+          message: "ok?",
+          suggestions: ["yes"],
+        },
+      ],
+    }),
+    code: "gate-suggestions-unsupported",
+    target: "gate",
+  },
 ];
 
 test("an agent Step's declared text output composes and binds for a later prompt (#215)", () => {
@@ -482,8 +498,9 @@ test("every composition rule owns a distinct stable code", () => {
   const codes = new Set(cases.map((testCase) => testCase.code));
   // Eleven rules; the missing/wrong-kind asset rule carries two codes (twelve),
   // plus the Agent-produces rule (#116) makes thirteen, plus the
-  // interactive-agent-in-repeat rule (#122) makes fourteen.
-  assert.equal(codes.size, 14);
+  // interactive-agent-in-repeat rule (#122) makes fourteen, plus the
+  // gate-suggestions rule (#213) makes fifteen.
+  assert.equal(codes.size, 15);
 });
 
 test("flags a duplicate Step id", () => {

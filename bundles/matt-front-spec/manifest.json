@@ -2,38 +2,70 @@
   "formatVersion": 1,
   "bundle": {
     "id": "dev.secant.matt-front",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "name": "Matt Front Spec",
-    "description": "Interview the human to shape a feature, then write the spec in the same Session once they approve."
+    "description": "Interview the human to shape a feature, let them choose the tracker, then write the spec in the same Session."
   },
   "platforms": ["windows", "macos", "linux"],
   "inputs": {},
   "assets": [
-    { "path": "prompts/grill.md", "kind": "prompt" },
-    { "path": "prompts/spec.md", "kind": "prompt" },
-    { "path": "skills/grilling", "kind": "skill" },
-    { "path": "skills/spec-writing", "kind": "skill" }
+    {
+      "path": "prompts/grill.md",
+      "kind": "prompt"
+    },
+    {
+      "path": "prompts/spec.md",
+      "kind": "prompt"
+    },
+    {
+      "path": "skills/grilling",
+      "kind": "skill"
+    },
+    {
+      "path": "skills/spec-writing",
+      "kind": "skill"
+    }
   ],
   "routing": [
     {
       "id": "grill",
       "kind": "interactive-agent",
       "session": "spec",
-      "prompt": { "asset": "prompts/grill.md" },
-      "uses": [{ "asset": "skills/grilling" }]
+      "prompt": {
+        "asset": "prompts/grill.md"
+      },
+      "uses": [
+        {
+          "asset": "skills/grilling"
+        }
+      ]
     },
     {
-      "id": "approve-spec",
+      "id": "choose-tracker",
       "kind": "human-gate",
-      "shape": "approve-reject",
-      "message": "The interview is complete. Approve writing the spec from this conversation?"
+      "shape": "free-text",
+      "message": "The interview is complete. Where should the spec and tickets live? Choose Local or GitHub, or type another tracker your agent can reach.",
+      "suggestions": ["Local", "GitHub"],
+      "produces": [
+        {
+          "name": "tracker",
+          "type": "text"
+        }
+      ]
     },
     {
       "id": "write-spec",
       "kind": "agent",
       "session": "spec",
-      "prompt": { "asset": "prompts/spec.md" },
-      "uses": [{ "asset": "skills/spec-writing" }]
+      "requires": ["tracker"],
+      "prompt": {
+        "asset": "prompts/spec.md"
+      },
+      "uses": [
+        {
+          "asset": "skills/spec-writing"
+        }
+      ]
     }
   ]
 }

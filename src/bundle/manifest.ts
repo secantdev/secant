@@ -316,6 +316,7 @@ const humanGateStep = z.strictObject({
   shape: enumField(HUMAN_GATE_SHAPES, "invalid-gate-shape", "shape"),
   prompt: reference.optional(),
   message: nonEmptyString.optional(),
+  suggestions: z.array(nonEmptyString).min(1).optional(),
 });
 const agentFields = {
   ...stepCommon,

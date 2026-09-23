@@ -1044,6 +1044,53 @@ test("run show and --json carry the authored pending gate; blocked reads durable
   assert.match(snapshot.result.run.pendingGate?.gate.attemptId ?? "", /\S/);
 });
 
+test("a suggested free-text gate: run show names the suggestions, --json carries them, and --text answers with one (#213)", async (t) => {
+  const h = await harness(t);
+  const runId = await launchGate(h, {
+    id: "dev.secant.gate-cli-suggested",
+    shape: "free-text",
+    message: "Where should the spec live?",
+    outputName: "tracker",
+    suggestions: ["Local", "GitHub"],
+  });
+
+  assert.equal(await runHeadless(h.clients, ["run", "show", runId], h.io), 0);
+  assert.match(
+    h.stdout(),
+    /^ {2}suggestions: Local, GitHub \(or any other text\)$/m,
+  );
+  h.reset();
+
+  assert.equal(
+    await runHeadless(h.clients, ["run", "show", runId, "--json"], h.io),
+    0,
+  );
+  const snapshot = JSON.parse(h.stdout()) as {
+    result: { run: { pendingGate?: { suggestions?: string[] } } };
+  };
+  assert.deepEqual(snapshot.result.run.pendingGate?.suggestions, [
+    "Local",
+    "GitHub",
+  ]);
+  h.reset();
+
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["run", "answer", runId, "--text", "GitHub"],
+      h.io,
+    ),
+    0,
+  );
+  assert.match(h.stdout(), /^State: succeeded$/m);
+  h.reset();
+  assert.equal(
+    await runHeadless(h.clients, ["run", "read", `${runId}/tracker`], h.io),
+    0,
+  );
+  assert.match(h.stdout(), /^GitHub$/m);
+});
+
 test("answer-shape mismatches are refused and change nothing (#108, AC3)", async (t) => {
   const h = await harness(t);
   // --text to an approve-reject gate is refused; the Run stays blocked.

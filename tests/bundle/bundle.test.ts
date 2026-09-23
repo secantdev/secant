@@ -222,6 +222,42 @@ const rejections: ReadonlyArray<{
     code: "invalid-command-executable",
     path: "routing[0].command.executable",
   },
+  {
+    title: "an empty gate suggestion list (#213)",
+    folder: () =>
+      authoringFolder({
+        ...base(),
+        routing: [
+          {
+            id: "g",
+            kind: "human-gate",
+            shape: "free-text",
+            suggestions: [],
+            produces: [{ name: "t", type: "text" }],
+          },
+        ],
+      }),
+    code: "invalid-field",
+    path: "routing[0].suggestions",
+  },
+  {
+    title: "a blank gate suggestion (#213)",
+    folder: () =>
+      authoringFolder({
+        ...base(),
+        routing: [
+          {
+            id: "g",
+            kind: "human-gate",
+            shape: "free-text",
+            suggestions: [" "],
+            produces: [{ name: "t", type: "text" }],
+          },
+        ],
+      }),
+    code: "invalid-field",
+    path: "routing[0].suggestions[0]",
+  },
 ];
 
 for (const rejection of rejections) {

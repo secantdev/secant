@@ -49,7 +49,7 @@ import {
 import {
   createGateControl,
   FreeTextGateControl,
-  GATE_HEIGHT,
+  gateHeight,
   type FreeTextGate,
 } from "./run-gate-control.js";
 import {
@@ -141,7 +141,7 @@ function actionReceiptText(receipt: TActionReceipt): string {
     ? PENDING_ACTION_COPY[receipt.operation]
     : `${APPLIED_ACTION_COPY[receipt.operation]} · d dismiss`;
 }
-// REQUEST_HEIGHT and GATE_HEIGHT are owned by the split control files (A33), imported
+// REQUEST_HEIGHT and gateHeight are owned by the split control files (A33), imported
 // above for the bottom-region precedence below.
 
 const STEP_GLYPH: Record<RunStepStatus, string> = {
@@ -619,7 +619,7 @@ export function RunWorkbench(props: {
     requestControl.active() !== undefined
       ? REQUEST_HEIGHT
       : gateControl.active() !== undefined
-        ? GATE_HEIGHT
+        ? gateHeight(gateControl.active()!)
         : checkpointActive()
           ? CHECKPOINT_HEIGHT
           : interactiveStepActive()
@@ -1226,6 +1226,7 @@ export function RunWorkbench(props: {
               requestRefusal={requestControl.refusal}
               freeTextGate={gateControl.active}
               gateText={gateControl.text}
+              gateChoice={gateControl.choice}
               onGateInput={gateControl.onInput}
               gatePending={gateControl.pending}
               gateRefusal={gateControl.refusal}
@@ -1335,6 +1336,7 @@ function Workbench(props: {
   requestRefusal: Accessor<Problem | undefined>;
   freeTextGate: Accessor<FreeTextGate | undefined>;
   gateText: Accessor<string>;
+  gateChoice: Accessor<number>;
   onGateInput: (value: string) => void;
   gatePending: Accessor<boolean>;
   gateRefusal: Accessor<Problem | undefined>;
@@ -1722,6 +1724,7 @@ function Workbench(props: {
             <FreeTextGateControl
               gate={current}
               text={props.gateText}
+              choice={props.gateChoice}
               onInput={props.onGateInput}
               pending={props.gatePending}
               refusal={props.gateRefusal}

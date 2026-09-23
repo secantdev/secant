@@ -170,6 +170,7 @@ interface GatePause {
   readonly shape: HumanGateShape;
   readonly message: string; // the exact rendered message shown to the human
   readonly outputArtifactName?: string; // free-text's declared output artifact
+  readonly suggestions?: readonly string[]; // free-text's authored quick choices
 }
 interface InteractivePause {
   readonly pause: true;
@@ -544,6 +545,9 @@ async function runStepAttempts(
         ...(result.outputArtifactName !== undefined
           ? { outputArtifactName: result.outputArtifactName }
           : {}),
+        ...(result.suggestions !== undefined
+          ? { suggestions: result.suggestions }
+          : {}),
         at: context.now(),
       });
       if (!recorded.ok) {
@@ -728,6 +732,9 @@ async function runHumanGate(
     shape: step.shape,
     message: renderGateMessage(step, context),
     ...(outputArtifactName !== undefined ? { outputArtifactName } : {}),
+    ...(step.shape === "free-text" && step.suggestions !== undefined
+      ? { suggestions: step.suggestions }
+      : {}),
   };
 }
 

@@ -563,6 +563,9 @@ function pendingGateView(
     ...(pending.outputArtifactName !== undefined
       ? { outputArtifactName: pending.outputArtifactName }
       : {}),
+    ...(pending.suggestions !== undefined
+      ? { suggestions: pending.suggestions }
+      : {}),
   };
 }
 

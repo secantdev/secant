@@ -68,6 +68,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   the producing Attempt id) **and rests the Run `blocked` in the same transaction**, so a crash cannot leave the record without the pause; it is idempotent on the Attempt
   id (`onConflictDoNothing`), so a resume that re-reaches the gate re-records nothing. The gate is "pending" only until that Attempt settles: `pendingGate()` returns the
   row whose Attempt id is not yet in `attempts` (the Projection derives the authored gate from it, distinct from a derived checkpoint).
+  A `free-text` gate's authored `suggestions` (#213) ride the same row as a nullable JSON string array, parsed and validated at the read ingress; they only
+  pre-fill the `text` answer, so answering never checks the text against them.
   Unlike the derived checkpoint, the authored gate is answered by **settling its Attempt through `publishAttempt`** (into `attempt_log`, so resume skips the gate):
   `free-text` publishes the `text` answer as the declared output and advances `running`; approve settles succeeded with no output; reject settles failed and rests
   `failed`.

@@ -384,7 +384,7 @@ try {
     // Run Store, #134 added the persisted steer capability evidence, #138 added
     // the Run's semantic selected-Harness id, and #187 added the requested-model column.
     const runDatabasePath = join(groupDir, runId, "run.db");
-    assertMigrated(runDatabasePath, "Run Store", 9);
+    assertMigrated(runDatabasePath, "Run Store", 10);
     assertLegacyRunRemainsUnselected(runDatabasePath);
   }
 

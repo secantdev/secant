@@ -290,6 +290,8 @@ export interface GateBundleOptions {
   /** free-text only: the declared output artifact name the answer binds and the
    *  downstream Command requires. */
   readonly outputName?: string;
+  /** free-text only: the gate's authored quick-choice answers (#213). */
+  readonly suggestions?: readonly string[];
 }
 
 // An authored Human Gate Bundle (#108): `before` (a Command) → `gate` (an authored
@@ -313,6 +315,9 @@ export function writeGateBundle(options: GateBundleOptions): CommandBundle {
           kind: "human-gate",
           shape: "free-text",
           message,
+          ...(options.suggestions !== undefined
+            ? { suggestions: options.suggestions }
+            : {}),
           produces: [{ name: outputName, type: "text" }],
         }
       : { id: "gate", kind: "human-gate", shape: "approve-reject", message };

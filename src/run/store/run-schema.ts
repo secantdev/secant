@@ -110,6 +110,9 @@ export const pendingGates = sqliteTable("pending_gate", {
   shape: text("shape").notNull(),
   message: text("message").notNull(),
   output_artifact_name: text("output_artifact_name"),
+  // A free-text gate's authored suggestions as a JSON string array (#213); null
+  // for a gate without them and for every row raised before the column existed.
+  suggestions: text("suggestions"),
   raised_at: text("raised_at").notNull(),
 });
 

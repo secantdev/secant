@@ -3025,6 +3025,73 @@ test("the free-text gate control fits small widths without overflow and reads wi
   assert.match(frame, /enter submit/);
 });
 
+// #213: suggested free-text gate ------------------------------------
+
+function suggestedRunOf(): RunView {
+  return freeTextRunOf({
+    pendingGate: {
+      gate: FREE_TEXT_GATE,
+      message: "Where should the spec live?",
+      outputArtifactName: "tracker",
+      suggestions: ["Local", "GitHub"],
+    },
+  });
+}
+
+test("a suggested gate lists its suggestions beside Other, with Other chosen until the human picks (#213)", async () => {
+  const { t } = await mountWorkbench(suggestedRunOf());
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Human Gate · Where should the spec live\?/);
+  assert.match(frame, /Choose: Local · GitHub · \[Other \(type\)\]/);
+  assert.match(frame, /↑↓ choose or type · enter submit/);
+});
+
+test("down picks a suggestion into the field and Enter submits it as the gate's text answer (#213)", async () => {
+  const { t, control, renderer } = await mountWorkbench(suggestedRunOf());
+  await press(t, renderer, "down");
+  assert.match(t.captureCharFrame(), /Choose: \[Local\] · GitHub/);
+  assert.match(t.captureCharFrame(), /> Local/);
+  await press(t, renderer, "down");
+  assert.match(t.captureCharFrame(), /Choose: Local · \[GitHub\]/);
+  await press(t, renderer, "return");
+  assert.equal(control.texts.length, 1);
+  assert.equal(control.texts[0]?.text, "GitHub");
+  assert.deepEqual(control.texts[0]?.gate, FREE_TEXT_GATE);
+});
+
+test("up wraps to the last suggestion, and cycling back to Other restores the typed answer (#213)", async () => {
+  const { t, control, renderer } = await mountWorkbench(suggestedRunOf());
+  await type(t, "Linear");
+  await press(t, renderer, "up");
+  assert.match(t.captureCharFrame(), /\[GitHub\]/);
+  assert.match(t.captureCharFrame(), /> GitHub/);
+  await press(t, renderer, "down"); // past the last suggestion: back to Other
+  assert.match(t.captureCharFrame(), /\[Other \(type\)\]/);
+  assert.match(t.captureCharFrame(), /> Linear/);
+  await press(t, renderer, "return");
+  assert.equal(control.texts[0]?.text, "Linear");
+});
+
+test("editing a picked suggestion turns it into a typed Other answer (#213)", async () => {
+  const { t, control, renderer } = await mountWorkbench(suggestedRunOf());
+  await press(t, renderer, "down");
+  await type(t, " Enterprise");
+  assert.match(t.captureCharFrame(), /\[Other \(type\)\]/);
+  await press(t, renderer, "return");
+  assert.equal(control.texts[0]?.text, "Local Enterprise");
+});
+
+test("the suggested gate control fits small widths without overflow (#213)", async () => {
+  const { t, renderer } = await mountWorkbench(suggestedRunOf(), 100, 30);
+  noOverflow(t.captureCharFrame(), 100);
+  renderer.resize(40, 24);
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  noOverflow(frame, 40);
+  assert.match(frame, /Choose:/);
+  assert.match(frame, /enter submit/);
+});
+
 // AC4: interrupt, steer, resume ------------------------------------
 
 test("Steer renders as unavailable with the exact reason and has no dispatch", async () => {

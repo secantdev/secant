@@ -303,6 +303,8 @@ export interface PendingGateRecord {
   readonly shape: HumanGateShape;
   readonly message: string; // the exact rendered message shown to the human
   readonly outputArtifactName?: string; // present only for a `free-text` gate
+  /** A `free-text` gate's authored quick-choice answers (#213), in authored order. */
+  readonly suggestions?: readonly string[];
   readonly raisedAt: string; // ISO 8601
 }
 
@@ -316,6 +318,7 @@ export interface RecordPendingGateRequest {
   readonly shape: HumanGateShape;
   readonly message: string;
   readonly outputArtifactName?: string;
+  readonly suggestions?: readonly string[];
   readonly at: Date;
 }
 

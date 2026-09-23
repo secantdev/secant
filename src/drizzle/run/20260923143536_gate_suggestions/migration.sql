@@ -1,0 +1,1 @@
+ALTER TABLE `pending_gate` ADD `suggestions` text;

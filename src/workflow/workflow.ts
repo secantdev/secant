@@ -260,6 +260,9 @@ export interface HumanGateStep extends StepCommon {
   readonly shape: HumanGateShape;
   readonly prompt?: Reference;
   readonly message?: string;
+  /** free-text only: quick-choice answers a client offers beside an Other entry
+   *  (#213). A suggestion is only a pre-filled answer — any text is still admitted. */
+  readonly suggestions?: readonly string[];
 }
 export type Step = AgentStep | CommandStep | HumanGateStep;
 

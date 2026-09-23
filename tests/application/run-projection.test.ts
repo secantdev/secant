@@ -1272,3 +1272,151 @@ test("a lost required Session makes resume unavailable with its reason (#194 sto
   if (offer.available) throw new Error("unreachable");
   assert.match(offer.reason, /"s" Session, which is no longer usable/);
 });
+
+/** Install `baseline -> repeat until passing { implement (interactive "impl") ->
+ *  check }`; return its digest. */
+function installInteractiveRepeatBundle(f: Fixture): string {
+  const folder = makeTempDir("secant-interactive-repeat-bundle-");
+  mkdirSync(join(folder, "prompts"), { recursive: true });
+  writeFileSync(join(folder, "prompts", "go.md"), "Pick a ticket.\n");
+  const verdict = [{ name: "passing", type: "verdict" }];
+  const command = { executable: "bash", arguments: ["-c", "exit 1"] };
+  writeFileSync(
+    join(folder, "manifest.json"),
+    JSON.stringify({
+      formatVersion: 1,
+      bundle: {
+        id: "dev.secant.interactive-repeat",
+        version: "1.0.0",
+        name: "Interactive Repeat",
+        description: "An interactive Step inside a Verdict-driven Repeat.",
+      },
+      platforms: ["windows", "macos", "linux"],
+      inputs: {},
+      assets: [{ path: "prompts/go.md", kind: "prompt" }],
+      routing: [
+        { id: "baseline", kind: "command", produces: verdict, command },
+        {
+          repeat: {
+            until: "passing",
+            reviewCheckpoint: { interval: 5, message: "review" },
+            steps: [
+              {
+                id: "implement",
+                kind: "interactive-agent",
+                session: "impl",
+                prompt: { asset: "prompts/go.md" },
+              },
+              { id: "check", kind: "command", produces: verdict, command },
+            ],
+          },
+        },
+      ],
+    }),
+  );
+  const built = f.app.bundleManagement.build(folder, { noInstall: false });
+  assert.ok(built.ok, JSON.stringify(built));
+  const entry = f.catalog
+    .listEntries()
+    .find((e) => e.id === "dev.secant.interactive-repeat");
+  assert.ok(entry);
+  return entry.digest;
+}
+
+/** A Run halted at iteration 1's interactive Step: iteration 0's Session went
+ *  unusable and the human ended it anyway, then check failed. With
+ *  `currentUnusable`, iteration 1's own Session went unusable too. */
+function haltedAtSecondIteration(
+  f: Fixture,
+  digest: string,
+  currentUnusable: boolean,
+): string {
+  const created = f.runGroup.createRun({
+    operationId: `op-repeat-session-${currentUnusable}`,
+    bundleSnapshotDigest: digest,
+    launch: {},
+    at: new Date("2026-09-22T10:00:00.000Z"),
+  });
+  assert.ok(created.outcome === "created");
+  if (created.outcome !== "created") throw new Error("unreachable");
+  const owner = f.runGroup.acquireRun(created.runId);
+  assert.ok(owner);
+  let second = 0;
+  const at = () => new Date(Date.UTC(2026, 8, 22, 10, 0, ++second));
+  const unusableTurn = (turnId: string, attemptId: string, session: string) => {
+    assert.ok(
+      owner.admitTurn({
+        turnId,
+        attemptId,
+        session,
+        origin: "human",
+        kind: "interactive-agent",
+        input: "go",
+        recoveryCoordinate: "native-1",
+        harness: "codex",
+        at: at(),
+      }).ok,
+    );
+    owner.settleTurn({
+      turnId,
+      session,
+      resultKind: "lost",
+      resultDetail: "{}",
+      availability: "unusable",
+      at: at(),
+    });
+  };
+  const settle = (attemptId: string) =>
+    assert.ok(
+      owner.publishAttempt({
+        attemptId,
+        outcome: "succeeded",
+        required: [],
+        outputs: [],
+        at: at(),
+      }).ok,
+    );
+  settle("0.0:baseline");
+  unusableTurn("turn-0", "0.0:implement", "impl-0.0:implement");
+  settle("0.0:implement");
+  settle("0.0:check");
+  if (currentUnusable) {
+    unusableTurn("turn-1", "1.0:implement", "impl-1.0:implement");
+  }
+  assert.ok(owner.writeState("halted").ok);
+  owner.close();
+  return created.runId;
+}
+
+function resumeOfferAtImplement(f: Fixture, runId: string): ResumeRunOffer {
+  const result = runResult(f.app, runId);
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  // The log ends at the iteration boundary; the halted Run rests at iteration 1's
+  // opening interactive Step, not the last span Step.
+  assert.equal(
+    result.run.progress[result.run.position]?.id,
+    "implement",
+    JSON.stringify(result.run.progress),
+  );
+  const offer = result.run.actionOffers.find(
+    (candidate): candidate is ResumeRunOffer =>
+      candidate.action === "resume-run",
+  );
+  assert.ok(offer);
+  return offer;
+}
+
+test("an earlier iteration's unusable Session leaves resume available; the current iteration's refuses it (#216)", (t) => {
+  const f = fixture(t);
+  const digest = installInteractiveRepeatBundle(f);
+
+  const earlier = haltedAtSecondIteration(f, digest, false);
+  assert.equal(resumeOfferAtImplement(f, earlier).available, true);
+
+  const current = haltedAtSecondIteration(f, digest, true);
+  const refused = resumeOfferAtImplement(f, current);
+  assert.equal(refused.available, false);
+  if (refused.available) throw new Error("unreachable");
+  assert.match(refused.reason, /"impl-1\.0:implement" Session/);
+});

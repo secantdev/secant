@@ -9,9 +9,11 @@ import {
   type Platform,
   type ProducedArtifact,
   type RoutingNode,
+  flattenSteps,
 } from "../../../src/workflow/workflow.js";
 import {
   executeRouting,
+  interactiveStepTarget,
   MAX_CAPTURE_BYTES,
   RunCancelledError,
   TRUNCATION_MARKER,
@@ -1035,3 +1037,211 @@ function readBound(owner: RunOwner, name: string): Uint8Array | undefined {
     ? undefined
     : owner.readArtifact(versionId, name);
 }
+
+// --- Interactive Step inside a Repeat group (#216) -------------------------
+
+/** An interactive-agent Step naming `session`. */
+function interactiveStep(id: string, session: string): RoutingNode {
+  return {
+    id,
+    kind: "interactive-agent",
+    prompt: { asset: "prompt.md" },
+    session,
+  } as unknown as RoutingNode;
+}
+
+/** A Repeat group over `steps` looping on `passing` with a roomy cadence. */
+function repeatOf(...steps: RoutingNode[]): RoutingNode {
+  return {
+    repeat: {
+      until: "passing",
+      reviewCheckpoint: { interval: 5, message: "please review the loop" },
+      steps,
+    },
+  } as unknown as RoutingNode;
+}
+
+const verdictOut = { produces: produces({ name: "passing", type: "verdict" }) };
+
+/** End an interactive Step the way `end-interactive-step` does: publish its pending
+ *  Attempt succeeded, then drive the Routing to its next rest. */
+async function endInteractive(
+  routing: RoutingNode[],
+  owner: RunOwner,
+  stepId: string,
+  spawnCommand: SpawnCommand,
+) {
+  const step = flattenSteps(routing).find((s) => s.id === stepId);
+  assert.ok(step?.kind === "interactive-agent");
+  const { attemptId } = interactiveStepTarget(
+    routing,
+    step,
+    owner.attemptLog(),
+  );
+  assert.ok(
+    owner.publishAttempt({
+      attemptId,
+      outcome: "succeeded",
+      required: [],
+      outputs: [],
+      at: AT,
+      advanceState: "running",
+    }).ok,
+  );
+  return run(routing, owner, { spawnCommand });
+}
+
+function targetOf(routing: RoutingNode[], owner: RunOwner, stepId: string) {
+  const step = flattenSteps(routing).find((s) => s.id === stepId);
+  assert.ok(step?.kind === "interactive-agent");
+  return interactiveStepTarget(routing, step, owner.attemptLog());
+}
+
+test("an interactive-agent Step in a Repeat pauses once per iteration with its own Attempt and Session (#216)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const fake = fakeExecutor();
+  const routing: RoutingNode[] = [
+    fakeStep("baseline", { exit: 1 }, verdictOut),
+    repeatOf(
+      interactiveStep("implement", "impl"),
+      fakeStep("check", { passAt: 2 }, verdictOut),
+    ),
+  ];
+
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "blocked",
+  });
+  assert.equal(state(), "blocked");
+  assert.deepEqual(targetOf(routing, owner, "implement"), {
+    attemptId: "0.0:implement",
+    session: "impl-0.0:implement",
+  });
+  // A blocked re-walk (a resume at the same boundary) stays in the same iteration.
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "blocked",
+  });
+  assert.equal(fake.calls("check"), 0);
+  assert.equal(
+    targetOf(routing, owner, "implement").attemptId,
+    "0.0:implement",
+  );
+
+  // End advances exactly that iteration: check fails, the next iteration pauses
+  // at the interactive Step with a distinct Attempt and Session.
+  assert.deepEqual(
+    await endInteractive(routing, owner, "implement", fake.spawn),
+    { outcome: "blocked" },
+  );
+  assert.equal(fake.calls("check"), 1);
+  assert.deepEqual(targetOf(routing, owner, "implement"), {
+    attemptId: "1.0:implement",
+    session: "impl-1.0:implement",
+  });
+
+  // The second End lets check pass, ending the group and the Run.
+  assert.deepEqual(
+    await endInteractive(routing, owner, "implement", fake.spawn),
+    { outcome: "succeeded" },
+  );
+  assert.equal(state(), "succeeded");
+  assert.equal(fake.calls("check"), 2);
+});
+
+test("a top-level interactive Step keeps its named Session; `fresh` scopes it to the Attempt (#216)", async (t) => {
+  const { owner } = ownerForFreshRun(t);
+  const routing = [
+    interactiveStep("grill", "planning"),
+    interactiveStep("aside", "fresh"),
+  ];
+  assert.deepEqual(targetOf(routing, owner, "grill"), {
+    attemptId: "0.0:grill",
+    session: "planning",
+  });
+  assert.deepEqual(targetOf(routing, owner, "aside"), {
+    attemptId: "0.0:aside",
+    session: "fresh-0.0:aside",
+  });
+});
+
+test("End runs the rest of its iteration even when an earlier span Step already passed the Verdict (#216)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const fake = fakeExecutor();
+  const routing: RoutingNode[] = [
+    fakeStep("baseline", { exit: 1 }, verdictOut),
+    repeatOf(
+      fakeStep("check", { exit: 0 }, verdictOut),
+      interactiveStep("implement", "impl"),
+      fakeStep(
+        "after",
+        { exit: 0, out: "after ran\n" },
+        { produces: produces({ name: "done", type: "text" }) },
+      ),
+    ),
+  ];
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "blocked",
+  });
+  assert.deepEqual(
+    await endInteractive(routing, owner, "implement", fake.spawn),
+    { outcome: "succeeded" },
+  );
+  assert.equal(state(), "succeeded");
+  assert.equal(fake.calls("check"), 1);
+  assert.equal(fake.calls("after"), 1);
+  assert.equal(dec(readBound(owner, "done")), "after ran\n");
+});
+
+test("End of a trailing group's last interactive Step rests the Run succeeded once the Verdict passes (#216)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const fake = fakeExecutor();
+  const routing: RoutingNode[] = [
+    fakeStep("baseline", { exit: 1 }, verdictOut),
+    repeatOf(
+      fakeStep("check", { exit: 0 }, verdictOut),
+      interactiveStep("implement", "impl"),
+    ),
+  ];
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "blocked",
+  });
+  assert.deepEqual(
+    await endInteractive(routing, owner, "implement", fake.spawn),
+    { outcome: "succeeded" },
+  );
+  assert.equal(state(), "succeeded");
+  assert.equal(fake.calls("check"), 1);
+});
+
+test("End in a later iteration replays earlier iterations without reading the mid-iteration Verdict (#216)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const fake = fakeExecutor();
+  const routing: RoutingNode[] = [
+    fakeStep("baseline", { exit: 1 }, verdictOut),
+    repeatOf(
+      fakeStep("check", { passAt: 2 }, verdictOut),
+      interactiveStep("implement", "impl"),
+      fakeStep("after", { exit: 0 }),
+    ),
+  ];
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "blocked",
+  });
+  // Iteration 0: check fails, End runs `after`, iteration 1 passes check and pauses.
+  assert.deepEqual(
+    await endInteractive(routing, owner, "implement", fake.spawn),
+    { outcome: "blocked" },
+  );
+  assert.equal(
+    targetOf(routing, owner, "implement").attemptId,
+    "1.0:implement",
+  );
+  // Iteration 1's End replays iteration 0 (the bound Verdict already reads pass)
+  // and still runs iteration 1's `after` before the group ends.
+  assert.deepEqual(
+    await endInteractive(routing, owner, "implement", fake.spawn),
+    { outcome: "succeeded" },
+  );
+  assert.equal(state(), "succeeded");
+  assert.equal(fake.calls("check"), 2);
+  assert.equal(fake.calls("after"), 2);
+});

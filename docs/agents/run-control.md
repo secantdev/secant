@@ -49,8 +49,9 @@ write, launch, and read invariants; the abort-reason vocabulary and the resting 
 - `beginInteractive` reuses the held owner (a blocked Run keeps it) or resumes+acquires a reopened one, then re-derives to confirm the Run is blocked at the named Step.
 - `send` drives one human Turn (origin `human`, verbatim text as the transcript input) through the opaque Step driver against that owner and stays `blocked` between
   Turns (owner held, no execution promise, ADR 0031); the Turn's writes bypass `observedOwner`, so it `pushRunUpdate`s the new transcript itself.
-- `end` publishes the Step's derived Attempt (`interactiveStepAttemptId`, an empty succeeded Attempt that stages no commit) with `advanceState: "running"` and re-drives
-  execution, which skips the settled Step and reuses its Session.
+- `interactiveStepTarget` derives the resting iteration's Attempt id and Session from the attempt log (a Step inside a Repeat group, or `fresh`, gets a
+  per-Attempt Session). `end` publishes that Attempt (empty, succeeded, stages no commit) with `advanceState: "running"` and re-drives execution, which
+  re-walks from the top, replays settled iterations, and skips the settled Step (#216).
 - Both set `tracking.promise` (via a `start*` helper) so cancel-run/interrupt-turn find and abort a live human Turn; the abort reason decides the rest as the answer path
   does. `send` is refused blank at admission (before any stdin); `end` mid-Turn (a live Turn) is refused as a value.
 

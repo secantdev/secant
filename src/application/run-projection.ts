@@ -4,6 +4,7 @@ import { selectInstalledEntry } from "./entry-selection.js";
 import {
   flattenSteps,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
+  type AgentStep,
   type Platform,
   type RepeatGroup,
   type RoutingNode,
@@ -22,7 +23,10 @@ import type {
   TurnEventRecord,
   TurnRecord,
 } from "../run/store/store.js";
-import { interactiveStepAttemptId } from "../run/execution/execution.js";
+import {
+  attemptStepId,
+  interactiveStepTarget,
+} from "../run/execution/execution.js";
 import type {
   ActionOffer,
   Problem,
@@ -205,14 +209,30 @@ function runResult(
     // #194 stories 39/40: the evidence that shapes a resting resume offer. The
     // Attempt log carries no Step kind, so the resting Step's kind is read from the
     // derived progress at `position` (the Step the walk stalled at).
-    const resumeEvidence = (): ResumeEvidence =>
-      resumeEvidenceOf({
+    // An interactive Step's Session is per Attempt inside a Repeat group, so an
+    // earlier iteration's unusable Session must not refuse this one's resume (#216).
+    const resumeEvidence = (): ResumeEvidence => {
+      const currentInteractive = flattenSteps(facts.routing).find(
+        (step): step is AgentStep =>
+          step.id === current?.id && step.kind === "interactive-agent",
+      );
+      return resumeEvidenceOf({
         state: derivedRun.state,
-        currentStepKind: derivedRun.statuses[derivedRun.position]?.kind,
+        currentStepKind: current?.kind,
         lastAttemptOutcome: log[log.length - 1]?.outcome,
         hasConflict: active !== undefined,
         sessions,
+        ...(currentInteractive !== undefined
+          ? {
+              currentSession: interactiveStepTarget(
+                facts.routing,
+                currentInteractive,
+                log,
+              ).session,
+            }
+          : {}),
       });
+    };
     return {
       found: true,
       run: {
@@ -478,16 +498,23 @@ function resumeEvidenceOf(params: {
     readonly availability: string;
     readonly session: string;
   }[];
+  /** The exact Session the current Step resumes into, when known. */
+  readonly currentSession?: string;
 }): { readonly acknowledgement?: string; readonly unavailable?: string } {
-  const unusable = params.sessions.find((s) => s.availability === "unusable");
+  const unusable = params.sessions.find(
+    (s) =>
+      s.availability === "unusable" &&
+      (params.currentSession === undefined ||
+        s.session === params.currentSession),
+  );
   if (
     unusable !== undefined &&
     (params.currentStepKind === "agent" ||
       params.currentStepKind === "interactive-agent")
   ) {
-    // ponytail: any unusable Session, not the exact one the Step names — a
-    // single-Harness Run has one Session, so this is precise in practice;
-    // per-Session matching arrives only if a Step ever needs two Sessions.
+    // ponytail: an autonomous Agent Step still matches any unusable Session — its
+    // next Attempt's `fresh` name is not minted yet; an interactive Step matches its
+    // exact Session.
     return {
       unavailable: `resume needs the "${unusable.session}" Session, which is no longer usable — start a new Run instead.`,
     };
@@ -1025,6 +1052,21 @@ function finishTerminalGroup(
     };
   }
 
+  // Short of the cadence but resting `blocked` or `halted` with an interactive
+  // first span Step: the next iteration opened on it and it awaits Turns without
+  // an Attempt (#216), so the log ends exactly at the iteration boundary.
+  if (
+    (state === "blocked" || state === "halted") &&
+    span[0]!.kind === "interactive-agent"
+  ) {
+    mark(span[0]!, "blocked");
+    return {
+      state: toRunState(state),
+      statuses,
+      position: flatIndex.get(span[0]!)!,
+      iterationEvents,
+    };
+  }
   // Not blocked: the loop is still short of its cadence (a live mid-loop snapshot),
   // or the Run failed on the last span Step.
   mark(current, state === "failed" ? "failed" : "running");
@@ -1246,17 +1288,20 @@ function buildTimeline(
       });
     }
   }
-  const interactiveEndAttempts = new Set(
+  // Only End Step publishes an interactive-agent Attempt, in any iteration (#216).
+  const interactiveSteps = new Set(
     flattenSteps(routing)
       .filter((step) => step.kind === "interactive-agent")
-      .map((step) => interactiveStepAttemptId(step.id)),
+      .map((step) => step.id),
   );
   for (const attempt of log) {
+    const stepId = attemptStepId(attempt.attemptId);
     events.push({
       at: attempt.at,
-      event: interactiveEndAttempts.has(attempt.attemptId)
-        ? "interactive-step-ended"
-        : "attempt-settled",
+      event:
+        stepId !== undefined && interactiveSteps.has(stepId)
+          ? "interactive-step-ended"
+          : "attempt-settled",
       detail: attempt.outcome,
     });
   }

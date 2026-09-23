@@ -14,7 +14,7 @@ import {
   type RoutingNode,
 } from "../workflow/workflow.js";
 import {
-  interactiveStepAttemptId,
+  interactiveStepTarget,
   type RequestChannel,
   type RunReport,
   RUN_CANCEL_ABORT as CANCEL_ABORT,
@@ -2248,7 +2248,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
     begun: InteractiveContext,
   ): Promise<OperationOutcome> {
     const { tracking, owner, step } = begun;
-    const attemptId = interactiveStepAttemptId(step.id);
+    const { attemptId, session } = interactiveStepTarget(
+      begun.facts.routing,
+      step,
+      owner.attemptLog(),
+    );
     const turnId = `${attemptId}#human:${operationId}`;
     const observed = observedOwner(owner, input.runId);
     // The Run stays `blocked` between Turns, so the claim is retained on the normal
@@ -2285,7 +2289,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         const report = await tracking.interactiveStep.turn({
           runId: input.runId,
           owner,
-          session: step.session,
+          session,
           attemptId,
           turnId,
           text: input.text,
@@ -2383,7 +2387,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
   ): Promise<OperationOutcome> {
     const { tracking, owner, record, facts, step } = begun;
     const observed = observedOwner(owner, input.runId);
-    const attemptId = interactiveStepAttemptId(step.id);
+    const { attemptId } = interactiveStepTarget(
+      facts.routing,
+      step,
+      owner.attemptLog(),
+    );
     let leaveClaimLive = false;
     return driveWithAbortProtocol({
       runId: input.runId,

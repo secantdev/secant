@@ -17,6 +17,7 @@ import { runHeadless, type HeadlessIO } from "../../src/headless/headless.js";
 import { createFake, type FakeScript } from "../harness/fake-adapter.js";
 import { createFakeBundleProcess } from "../helpers/fakeBundleProcess.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+import { RUNTIME_NAME } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 
 // The first Interactive agent Step end to end (#122): a synthesized Bundle
@@ -67,8 +68,27 @@ const COMPLETED_DETACHED: FakeScript["turns"][number] = {
   },
 };
 
-/** Author an `interactive-agent (session "s") -> agent (session "s")` Bundle. */
-function writeInteractiveBundle(): { folder: string; id: string } {
+/** The default `interactive-agent (session "s") -> agent (session "s")` Routing. */
+const DEFAULT_ROUTING: readonly unknown[] = [
+  {
+    id: "discuss",
+    kind: "interactive-agent",
+    session: "s",
+    prompt: { asset: "prompts/discuss.md" },
+  },
+  {
+    id: "apply",
+    kind: "agent",
+    session: "s",
+    prompt: { asset: "prompts/apply.md" },
+  },
+];
+
+/** Author a Bundle over `routing` (the interactive -> agent pair by default). */
+function writeInteractiveBundle(routing = DEFAULT_ROUTING): {
+  folder: string;
+  id: string;
+} {
   const folder = makeTempDir("secant-interactive-bundle-");
   mkdirSync(join(folder, "prompts"), { recursive: true });
   writeFileSync(join(folder, "prompts", "discuss.md"), "Discuss the plan.\n");
@@ -87,20 +107,7 @@ function writeInteractiveBundle(): { folder: string; id: string } {
       { path: "prompts/discuss.md", kind: "prompt" },
       { path: "prompts/apply.md", kind: "prompt" },
     ],
-    routing: [
-      {
-        id: "discuss",
-        kind: "interactive-agent",
-        session: "s",
-        prompt: { asset: "prompts/discuss.md" },
-      },
-      {
-        id: "apply",
-        kind: "agent",
-        session: "s",
-        prompt: { asset: "prompts/apply.md" },
-      },
-    ],
+    routing,
   };
   writeFileSync(
     join(folder, "manifest.json"),
@@ -114,7 +121,7 @@ function writeInteractiveBundle(): { folder: string; id: string } {
  *  the Run to its first `blocked` rest at the interactive Step. */
 async function launchInteractive(
   t: TestContext,
-  script: FakeScript,
+  script: FakeScript | HarnessAdapter,
   counts?: {
     prepares: number;
     readonly closes: number[];
@@ -125,6 +132,7 @@ async function launchInteractive(
      *  otherwise replays the launch script from its first Turn). */
     readonly laterScript?: FakeScript;
   },
+  routing?: readonly unknown[],
 ): Promise<{ wired: Wiring; runId: string; run: RunView }> {
   const savedExecutable = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
   // A resolvable executable so Preflight's Harness discovery passes; the fake
@@ -137,7 +145,7 @@ async function launchInteractive(
   });
 
   const workspace = makeTempDir("secant-interactive-ws-");
-  const fake = createFake(script)();
+  const fake = "prepare" in script ? script : createFake(script)();
   const adapter: HarnessAdapter =
     counts === undefined
       ? fake
@@ -186,7 +194,7 @@ async function launchInteractive(
     wired.catalog.close();
   });
 
-  const bundle = writeInteractiveBundle();
+  const bundle = writeInteractiveBundle(routing);
   assert.ok(
     wired.bundleManagement.build(bundle.folder, { noInstall: false }).ok,
   );
@@ -702,4 +710,277 @@ test("end-interactive-step mid-Turn is rejected with a precise Problem (#122)", 
   assert.equal(readRun(wired, runId).state, "cancelled");
   assert.equal(counts.prepares, 1);
   assert.deepEqual(counts.closes, [1]);
+});
+
+// --- An Interactive Step in a Verdict-driven Repeat (#216) ------------------
+
+/** `baseline (fail) -> repeat until passing { implement (interactive, "impl") ->
+ *  check (passes on its second run) }`: two iterations, each its own Attempt and
+ *  Session, advanced only by End Step. */
+function repeatRouting(): readonly unknown[] {
+  const counter = join(makeTempDir("secant-interactive-counter-"), "counter");
+  const verdict = [{ name: "passing", type: "verdict" }];
+  return [
+    {
+      id: "baseline",
+      kind: "command",
+      produces: verdict,
+      command: {
+        executable: RUNTIME_NAME,
+        arguments: ["-e", "process.exit(1)"],
+      },
+    },
+    {
+      repeat: {
+        until: "passing",
+        reviewCheckpoint: { interval: 5, message: "review the loop" },
+        steps: [
+          {
+            id: "implement",
+            kind: "interactive-agent",
+            session: "impl",
+            prompt: { asset: "prompts/discuss.md" },
+          },
+          {
+            id: "check",
+            kind: "command",
+            produces: verdict,
+            command: {
+              executable: RUNTIME_NAME,
+              arguments: [
+                "-e",
+                `const fs=require('node:fs');const p=${JSON.stringify(counter)};` +
+                  `let n=0;try{n=Number(fs.readFileSync(p,'utf8'))||0;}catch{}` +
+                  `n++;fs.writeFileSync(p,String(n));` +
+                  `console.log('iteration '+n);process.exit(n>=2?0:1);`,
+              ],
+            },
+          },
+          {
+            id: "apply",
+            kind: "agent",
+            session: "impl",
+            prompt: { asset: "prompts/apply.md" },
+          },
+        ],
+      },
+    },
+  ];
+}
+
+/** A Turn that blocks until it is interrupted. */
+const BLOCKING: FakeScript["turns"][number] = {
+  block: true,
+  result: COMPLETED_DETACHED.result,
+};
+
+/** A fake Adapter whose n-th prepared Harness serves the n-th script's Turns, so
+ *  each Step-scoped Harness (launch, each End, each resume) is scripted apart. */
+function perPrepareAdapter(
+  turnsPerPrepare: readonly FakeScript["turns"][],
+): HarnessAdapter {
+  let prepares = 0;
+  return {
+    prepare(options) {
+      const turns = turnsPerPrepare[prepares++] ?? [];
+      return createFake({ profile: profile(), turns })().prepare(options);
+    },
+  };
+}
+
+async function endStep(
+  wired: Wiring,
+  runId: string,
+  operationId: string,
+  stepId: string,
+): Promise<void> {
+  const admission = wired.projectionPort.submit({
+    operationId,
+    operation: "end-interactive-step",
+    input: { runId, stepId },
+  });
+  assert.ok(admission.admitted, JSON.stringify(admission));
+  const outcome = await awaitSettled(wired.projectionPort, operationId);
+  assert.equal(outcome.status, "applied", JSON.stringify(outcome));
+}
+
+function sessionsOf(run: RunView): string[] {
+  return (run.sessions ?? []).map((session) => session.session).sort();
+}
+
+test("an Interactive Step in a Verdict-driven Repeat gives each iteration its own Attempt and Session; End advances one iteration; halt and resume keep it (#216)", async (t) => {
+  const { wired, runId, run } = await launchInteractive(
+    t,
+    perPrepareAdapter([
+      // Launch: iteration 0 at the interactive Step, two human Turns.
+      [COMPLETED_DETACHED, COMPLETED_DETACHED],
+      // End #1: the span's Agent Step runs in its own Run-wide "impl" Session, then
+      // iteration 1 rests at the interactive Step; its first Turn is interrupted.
+      [COMPLETED_DETACHED, BLOCKING],
+      // resume-run: iteration 1 again, the same Session takes the next Turn.
+      [COMPLETED_DETACHED],
+      // End #2: the Agent Step, then check passes and the Run succeeds.
+      [COMPLETED_DETACHED],
+    ]),
+    undefined,
+    repeatRouting(),
+  );
+  assert.equal(run.state, "blocked");
+  assert.equal(run.progress[run.position]?.id, "implement");
+  assert.ok(offer(run, "end-interactive-step"));
+
+  // Two Turns in iteration 0: completion never advances; one conversation.
+  await send(wired, runId, "op-i0-t1", "implement", "pick a ticket");
+  await send(wired, runId, "op-i0-t2", "implement", "a follow-up question");
+  const iteration0 = readRun(wired, runId);
+  assert.equal(iteration0.state, "blocked");
+  assert.equal(iteration0.progress[iteration0.position]?.id, "implement");
+  assert.deepEqual(sessionsOf(iteration0), ["impl-0.0:implement"]);
+
+  // End advances exactly this iteration: check fails, the autonomous Agent Step
+  // keeps its Run-wide named Session, and iteration 1 rests at the interactive Step.
+  await endStep(wired, runId, "op-end-0", "implement");
+  const iteration1 = readRun(wired, runId);
+  assert.equal(iteration1.state, "blocked");
+  assert.equal(iteration1.progress[iteration1.position]?.id, "implement");
+  assert.ok(offer(iteration1, "send-interactive-turn"));
+
+  // Interrupt iteration 1's first Turn: the Run halts, resumable.
+  const sent = wired.projectionPort.submit({
+    operationId: "op-i1-t1",
+    operation: "send-interactive-turn",
+    input: { runId, stepId: "implement", text: "pick the next ticket" },
+  });
+  assert.ok(sent.admitted);
+  const interruptOffer = await awaitInterruptOffer(wired, runId);
+  const interrupted = wired.projectionPort.submit({
+    operationId: "op-i1-interrupt",
+    operation: "interrupt-turn",
+    input: { runId, turnId: interruptOffer.turnId },
+  });
+  assert.ok(interrupted.admitted);
+  await awaitSettled(wired.projectionPort, interrupted.operationId);
+  await awaitSettled(wired.projectionPort, sent.operationId);
+  const halted = readRun(wired, runId);
+  assert.equal(halted.state, "halted");
+  assert.deepEqual(sessionsOf(halted), [
+    "impl",
+    "impl-0.0:implement",
+    "impl-1.0:implement",
+  ]);
+
+  // Resume lands back in iteration 1, not a fresh iteration or iteration 0.
+  const resumed = wired.projectionPort.submit({
+    operationId: "op-resume",
+    operation: "resume-run",
+    input: { runId },
+  });
+  assert.ok(resumed.admitted, JSON.stringify(resumed));
+  assert.equal(
+    (await awaitSettled(wired.projectionPort, "op-resume")).status,
+    "applied",
+  );
+  const afterResume = readRun(wired, runId);
+  assert.equal(afterResume.state, "blocked");
+  assert.equal(afterResume.progress[afterResume.position]?.id, "implement");
+  await send(wired, runId, "op-i1-t2", "implement", "carry on");
+
+  await endStep(wired, runId, "op-end-1", "implement");
+  const done = readRun(wired, runId);
+  assert.equal(done.state, "succeeded");
+  assert.equal(
+    done.timeline.filter((event) => event.event === "interactive-step-ended")
+      .length,
+    2,
+  );
+
+  const owner = wired.runGroup.acquireRun(runId);
+  assert.ok(owner);
+  try {
+    assert.deepEqual(
+      owner
+        .turns()
+        .map((turn) => [turn.kind, turn.attemptId, turn.session, turn.input]),
+      [
+        [
+          "interactive-agent",
+          "0.0:implement",
+          "impl-0.0:implement",
+          "pick a ticket",
+        ],
+        [
+          "interactive-agent",
+          "0.0:implement",
+          "impl-0.0:implement",
+          "a follow-up question",
+        ],
+        ["agent", "0.0:apply", "impl", "Apply the plan.\n"],
+        [
+          "interactive-agent",
+          "1.0:implement",
+          "impl-1.0:implement",
+          "pick the next ticket",
+        ],
+        [
+          "interactive-agent",
+          "1.0:implement",
+          "impl-1.0:implement",
+          "carry on",
+        ],
+        ["agent", "1.0:apply", "impl", "Apply the plan.\n"],
+      ],
+    );
+  } finally {
+    owner.close();
+  }
+});
+
+test("an entry Turn inside a Repeat opens each iteration's own Session (#212, #216)", async (t) => {
+  const routing = repeatRouting().map((node) => {
+    const repeat = (node as { repeat?: { steps: Record<string, unknown>[] } })
+      .repeat;
+    if (repeat === undefined) return node;
+    // The interactive Step opts into its entry Turn; drop the span's Agent Step.
+    return {
+      repeat: {
+        ...repeat,
+        steps: repeat.steps
+          .filter((step) => step.kind !== "agent")
+          .map((step) =>
+            step.kind === "interactive-agent"
+              ? { ...step, entryTurn: true }
+              : step,
+          ),
+      },
+    };
+  });
+  const { wired, runId, run } = await launchInteractive(
+    t,
+    perPrepareAdapter([
+      [COMPLETED_DETACHED],
+      [COMPLETED_DETACHED],
+      [COMPLETED_DETACHED],
+    ]),
+    undefined,
+    routing,
+  );
+  assert.equal(run.state, "blocked");
+  await endStep(wired, runId, "op-end-0", "implement");
+  assert.equal(readRun(wired, runId).state, "blocked");
+  await endStep(wired, runId, "op-end-1", "implement");
+  assert.equal(readRun(wired, runId).state, "succeeded");
+
+  const owner = wired.runGroup.acquireRun(runId);
+  assert.ok(owner);
+  try {
+    assert.deepEqual(
+      owner.turns().map((turn) => [turn.turnId, turn.session, turn.origin]),
+      [
+        ["0.0:implement#entry", "impl-0.0:implement", "managed"],
+        ["1.0:implement#entry", "impl-1.0:implement", "managed"],
+      ],
+    );
+  } finally {
+    owner.close();
+  }
 });

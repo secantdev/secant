@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import {
   flattenSteps,
+  FRESH_SESSION,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
+  type AgentStep,
   type AttemptOutcome,
   type CommandInvocation,
   type CommandParams,
-  type AgentStep,
   type CommandStep,
   type HumanGateShape,
   type HumanGateStep,
@@ -193,6 +194,8 @@ interface StepContext {
   readonly harness?: HarnessExecutionDeps;
   /** The live request-answer channel an Agent Turn reaches a client through (#117). */
   readonly requestChannel?: RequestChannel;
+  /** The Routing, so an interactive Step's Session follows its Repeat scope (#216). */
+  readonly routing: readonly RoutingNode[];
 }
 
 type StepExecutor = (
@@ -255,7 +258,12 @@ async function runInteractiveAgent(
   context: StepContext,
   attemptId: string,
 ): Promise<StepPause> {
-  const entry = await runInteractiveEntryTurn(step, context, attemptId);
+  const entry = await runInteractiveEntryTurn(
+    step,
+    context,
+    attemptId,
+    interactiveSession(context.routing, step, attemptId),
+  );
   const halted = entry?.kind === "interrupted" || entry?.kind === "lost";
   return {
     pause: true,
@@ -313,6 +321,7 @@ export async function executeRouting(
       ...(deps.requestChannel !== undefined
         ? { requestChannel: deps.requestChannel }
         : {}),
+      routing,
     },
     budget: deps.defaultRetryBudget ?? DEFAULT_RETRY_BUDGET,
     now: deps.now ?? (() => new Date()),
@@ -411,14 +420,28 @@ async function runRepeatGroup(
     MAX_REVIEW_CHECKPOINT_INTERVAL,
   );
   const owner = context.step.owner;
+  // Whether a prior walk already recorded an Attempt in this iteration: the group
+  // (or that iteration) started before this walk, so it replays rather than re-reads
+  // a Verdict an earlier span Step bound mid-iteration (an interactive End re-walks
+  // from the top every iteration, #216).
+  const started = (iteration: number): boolean =>
+    repeat.steps.some((step) =>
+      context.resume.attempts.has(instanceKey(step.id, iteration)),
+    );
   // The Verdict is already bound `pass` before entry — zero iterations. On resume
   // this also covers a group a prior granted interval already passed.
-  if (verdictPasses(owner, repeat.until)) return "succeeded-open";
+  if (!started(0) && verdictPasses(owner, repeat.until)) {
+    return "succeeded-open";
+  }
 
   // Iterations count from absolute zero so each Attempt id is unique across
   // resumes; a resume replays the completed iterations (every Step skipped by
   // identity) without re-running them, then runs fresh ones. Only a newly-run
   // iteration counts toward the review cadence, so one grant buys one interval.
+  // ponytail: an interactive span Step re-walks after every End, so the cadence
+  // counts only iterations run since that End — the End is already the human's
+  // per-iteration checkpoint (#216). Count from the log if a Verdict-driven group
+  // with an interactive Step ever needs the authored cadence to span Ends.
   let freshIterations = 0;
   for (let iteration = 0; ; iteration++) {
     const result = await runIteration(repeat, context, isLastNode, iteration);
@@ -426,6 +449,10 @@ async function runRepeatGroup(
     if (result.outcome === "halted") return "halted";
     if (result.outcome === "blocked") return "blocked";
     if (result.ran) freshIterations++;
+    // A later iteration already started: this one was replayed, so keep replaying.
+    if (result.outcome !== "succeeded-rested" && started(iteration + 1)) {
+      continue;
+    }
     // Re-evaluate the condition after the iteration. A pass ends the group;
     // `succeeded-rested` means the iteration's deciding Attempt already rested the
     // Run when this is the last node.
@@ -454,6 +481,9 @@ async function runIteration(
 ): Promise<{ outcome: NodeOutcome; ran: boolean }> {
   const { steps, until } = repeat;
   let ran = false;
+  // Only a last span Step that ran this walk can have rested the Run `succeeded`; a
+  // replayed one (an interactive Step settled by End) rested nothing (#216).
+  let lastRan = false;
   for (let s = 0; s < steps.length; s++) {
     const step = steps[s]!;
     const isLastSpanStep = s === steps.length - 1;
@@ -479,10 +509,11 @@ async function runIteration(
     // Run rests `blocked`; unwind the group so executeRouting writes `blocked` (#108).
     if (outcome === "blocked") return { outcome: "blocked", ran };
     if (outcome !== "skipped") ran = true;
+    if (isLastSpanStep) lastRan = outcome !== "skipped";
   }
   return {
     outcome:
-      isLastNode && verdictPasses(context.step.owner, until)
+      isLastNode && lastRan && verdictPasses(context.step.owner, until)
         ? "succeeded-rested"
         : "succeeded-open",
     ran,
@@ -795,12 +826,49 @@ function renderGateMessage(step: HumanGateStep, context: StepContext): string {
   return new TextDecoder().decode(bytes);
 }
 
-/** The Attempt id an interactive-agent Step's pause carries (#122): a top-level
- *  Step runs at Iteration 0, Attempt 0, so `end-interactive-step` settles exactly
- *  this id and a resume skips the settled Step. The Composition check keeps an
- *  interactive-agent Step top-level, so the Iteration is always zero. */
-export function interactiveStepAttemptId(stepId: string): string {
-  return encodeAttemptId(stepId, 0, 0);
+/** Where an interactive-agent Step's human Turns go (#122, #216): the pending
+ *  Attempt id of the iteration the Run rests at, and that Attempt's Session. The
+ *  scheduler runs iterations in order and skips a settled instance, so the resting
+ *  iteration is the first whose instance has not succeeded; only End Step publishes
+ *  an interactive Attempt, so the id is stable across halt and resume, and End
+ *  settles exactly it. */
+export function interactiveStepTarget(
+  routing: readonly RoutingNode[],
+  step: AgentStep,
+  log: readonly AttemptLogEntry[],
+): { readonly attemptId: string; readonly session: string } {
+  const resume = buildResumeState(log);
+  let iteration = 0;
+  while (resume.succeeded.has(instanceKey(step.id, iteration))) iteration++;
+  const attemptId = encodeAttemptId(
+    step.id,
+    iteration,
+    resume.attempts.get(instanceKey(step.id, iteration)) ?? 0,
+  );
+  return { attemptId, session: interactiveSession(routing, step, attemptId) };
+}
+
+/** An interactive Step's Session for one Attempt: a top-level named Session is
+ *  shared with later Steps; inside a Repeat group, or when `fresh`, it is scoped to
+ *  the Attempt, so each iteration opens its own conversation (#216). */
+function interactiveSession(
+  routing: readonly RoutingNode[],
+  step: AgentStep,
+  attemptId: string,
+): string {
+  const inRepeat = routing.some(
+    (node) =>
+      "repeat" in node && node.repeat.steps.some((s) => s.id === step.id),
+  );
+  return inRepeat || step.session === FRESH_SESSION
+    ? `${step.session}-${attemptId}`
+    : step.session;
+}
+
+/** The Step id an Attempt id names, or undefined for an id this Module did not
+ *  mint (a reconciliation marker). */
+export function attemptStepId(attemptId: string): string | undefined {
+  return decodeAttemptId(attemptId)?.stepId;
 }
 
 // --- Command step (an executable dispatch entry) ---------------------------

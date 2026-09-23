@@ -359,40 +359,6 @@ const cases: ReadonlyArray<{
     target: "routing[1].repeat.steps",
   },
   {
-    title: "an interactive-agent Step inside a Repeat span (#122)",
-    manifest: manifest({
-      routing: routing({
-        group: {
-          repeat: {
-            until: "v",
-            reviewCheckpoint: { interval: 5, message: "continue?" },
-            steps: [
-              {
-                id: "run",
-                kind: "command",
-                requires: ["doc"],
-                produces: [{ name: "v", type: "verdict" }],
-                command: {
-                  executable: "bash",
-                  arguments: [{ asset: "run.sh" }],
-                },
-              },
-              {
-                id: "grill",
-                kind: "interactive-agent",
-                session: "s",
-                requires: ["doc"],
-                prompt: { asset: "p.md" },
-              },
-            ],
-          },
-        },
-      }),
-    }),
-    code: "interactive-agent-in-repeat",
-    target: "routing[1].repeat.steps",
-  },
-  {
     // An agent-authored Verdict would let assistant output choose the Routing
     // (ADR 0020); an Agent Step produces only validated `text` receipts (#215).
     title: "an agent Step that declares a non-text output",
@@ -498,9 +464,43 @@ test("every composition rule owns a distinct stable code", () => {
   const codes = new Set(cases.map((testCase) => testCase.code));
   // Eleven rules; the missing/wrong-kind asset rule carries two codes (twelve),
   // plus the Agent-produces rule (#116) makes thirteen, plus the
-  // interactive-agent-in-repeat rule (#122) makes fourteen, plus the
-  // gate-suggestions rule (#213) makes fifteen.
-  assert.equal(codes.size, 15);
+  // gate-suggestions rule (#213) makes fourteen.
+  assert.equal(codes.size, 14);
+});
+
+test("accepts an interactive-agent Step inside a Verdict-driven Repeat span (#216)", () => {
+  const findings = run(
+    manifest({
+      routing: routing({
+        group: {
+          repeat: {
+            until: "v",
+            reviewCheckpoint: { interval: 5, message: "continue?" },
+            steps: [
+              {
+                id: "run",
+                kind: "command",
+                requires: ["doc"],
+                produces: [{ name: "v", type: "verdict" }],
+                command: {
+                  executable: "bash",
+                  arguments: [{ asset: "run.sh" }],
+                },
+              },
+              {
+                id: "grill",
+                kind: "interactive-agent",
+                session: "s",
+                requires: ["doc"],
+                prompt: { asset: "p.md" },
+              },
+            ],
+          },
+        },
+      }),
+    }),
+  );
+  assert.deepEqual(findings, []);
 });
 
 test("flags a duplicate Step id", () => {

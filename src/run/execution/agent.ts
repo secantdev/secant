@@ -541,6 +541,8 @@ export async function runInteractiveEntryTurn(
   step: AgentStep,
   context: StepContext,
   attemptId: string,
+  /** The Attempt's Session — scoped per iteration inside a Repeat group (#216). */
+  session: string,
 ): Promise<TurnResult | undefined> {
   if (step.entryTurn !== true) return undefined;
   const owner = context.owner;
@@ -555,10 +557,10 @@ export async function runInteractiveEntryTurn(
   }
   const rendered = renderAgentPrompt(step, context, harness);
   if (!rendered.ok) return rendered.result;
-  const recovery = sessionRecovery(owner, step.session);
-  if (recovery.unusable) return unusableTurnResult(step.session);
+  const recovery = sessionRecovery(owner, session);
+  if (recovery.unusable) return unusableTurnResult(session);
   return driveHarnessTurn(owner, harness.prepared, {
-    session: step.session,
+    session,
     origin: "managed",
     kind: "interactive-agent",
     attemptId,

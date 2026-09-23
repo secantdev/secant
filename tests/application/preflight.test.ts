@@ -649,8 +649,19 @@ test("the Proof Bundle's Agent Step is dispatchable and refused at Preflight whe
   });
   assert.equal(admission.admitted, false);
   if (admission.admitted) throw new Error("unreachable");
-  assert.equal(admission.problem.code, "harness-not-found");
-  assert.match(admission.problem.remediation, /claude code/i);
+  assert.deepEqual(admission.problem, {
+    code: "harness-not-found",
+    explanation:
+      "This Bundle runs an agent through Claude Code, which could not be found. Searched: PATH name 'claude': \"claude\".",
+    remediation:
+      "Install Claude Code and make sure it is on PATH, or set SECANT_CLAUDE_CODE to its executable, then launch again.",
+    possibleEffects: "none",
+    correction: "harness",
+    details: {
+      harness: "claude-code",
+      searched: "PATH name 'claude': \"claude\"",
+    },
+  });
   assert.deepEqual(f.runGroup.listRuns(), []);
 });
 

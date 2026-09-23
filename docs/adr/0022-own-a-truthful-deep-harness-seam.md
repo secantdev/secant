@@ -79,7 +79,10 @@ rather than a Preflight requirement, because plain-path is a real delivery and n
 protocol is unversioned (Codex app-server) runs the pinned conformance probe against whatever is installed: pass means usable, fail means the
 Harness is `unavailable` with a typed reason, never best-effort parsing. A Workflow Bundle never selects or constrains a model in v1; the Adapter
 profile supplies the model list when the Harness exposes one and declares free-text entry otherwise. A non-binding recommended model authored in
-the Bundle is deferred to a later version.
+the Bundle is deferred to a later version. (Edited 2026-09-23: M5 shipped this as two profile fields. `modelSelection` declares where a model can be
+selected and carries a `list` or `free-text` model declaration, or declares selection `unavailable`; `modelObservation` declares whether the Adapter
+reads the effective model from native evidence, independent of selection. A caller's requested model outside a declared list is a typed
+`model-unavailable` prepare failure, never a substitution.)
 
 ## Amendment (2026-09-18): delivery mode is the Adapter's, substitution is the caller's
 

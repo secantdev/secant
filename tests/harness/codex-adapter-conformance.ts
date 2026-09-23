@@ -62,6 +62,8 @@ export function registerCodexAdapterConformance(
 // runtime-conformance runner (#184): see tests/harness/replayer-conformance.ts
 // (`codex-replayer-conformance`). The Codex-specific cases below stay here.
 
+// --- Approval requests -------------------------------------------------------
+
 test("Codex approval allow and deny map only to native accept and decline", async () => {
   const installed = installCodexReplayer("codex-approval-contract");
   const prepared = await prepareCodex(installed.path);
@@ -470,6 +472,8 @@ test("experimental request-user-input remains disabled and fails closed", async 
   await prepared.close();
 });
 
+// --- Turns: admission, framing, and terminal truth ---------------------------
+
 test("refused durable admission sends no prompt content", async () => {
   const installed = installSyntheticCodexReplayer();
   const prepared = await prepareCodex(installed.path);
@@ -688,6 +692,8 @@ test("later fresh Turns reuse one private thread and continue RPC ids", async ()
   );
   await prepared.close();
 });
+
+// --- Steer and interrupt -----------------------------------------------------
 
 test("codex-live-controls steers the exact active native Turn", async () => {
   const installed = installSyntheticCodexReplayer();
@@ -1242,6 +1248,8 @@ test("cleanup failure cannot rewrite an already-settled Codex Turn", async () =>
   assert.strictEqual(await turn.result(), settled);
 });
 
+// --- Recovery ----------------------------------------------------------------
+
 test("codex-exact-thread-recovery acknowledges the same thread before admission and prompt", async () => {
   const installed = installSyntheticCodexReplayer();
   installed.configureTurn({ stallFirstTurn: true });
@@ -1484,6 +1492,8 @@ async function prepareDetachedCodex(
   return { prepared, coordinate: first.detail.session.coordinate };
 }
 
+// --- Shared helpers (hoisted; used by every group) ---------------------------
+
 async function prepareCodex(path: string): Promise<PreparedHarness> {
   const result = await createCodexAdapter({ path, env: {} }).prepare({
     workspace: process.cwd(),
@@ -1562,6 +1572,8 @@ async function waitForEventCount(
     });
   });
 }
+
+// --- Replay: recorded conformance --------------------------------------------
 
 test("[codex-recorded-conformance] qualification initializes once without creating a conversation", async () => {
   const installed = installCodexReplayer("codex-qualification");
@@ -1950,6 +1962,8 @@ async function waitForToolOrRequest(
   });
 }
 
+// --- Discovery ---------------------------------------------------------------
+
 test("configured Codex wins over PATH and Claude Code is never a fallback", async () => {
   const configured = installSyntheticCodexReplayer();
   const onPath = installSyntheticCodexReplayer();
@@ -1999,6 +2013,8 @@ test("an unsupported host platform is a typed Codex outcome", async () => {
   if (result.ok) throw new Error("unreachable");
   assert.equal(result.failure.category, "unsupported-platform");
 });
+
+// --- Qualification: profile, requested model, schema, handshake, and cache ---
 
 test("Codex profile is truthful and user-compatible", async () => {
   const installed = installSyntheticCodexReplayer();

@@ -19,11 +19,12 @@ Previous Runs join the closed families as an eighth, Workspace-scoped `run-list`
 The "three conceptual entry points" above become **four**: [#124](https://github.com/secantdev/secant/issues/124) adds transcript reading (`readTranscript`), which
 resolves a transcript `page` or `export` Resource Reference — validating Run, Session, and cursor — with no native Session id, database identity, or path crossing.
 
-The family arithmetic is reconciled against what the closed `ProjectionSelector` actually declares. **Five** families are built: `workspace`, `operation`,
-`bundle-catalog`, `run`, and `run-list`. The original six of [#19](https://github.com/secantdev/secant/issues/19) were `bundle-catalog`, `harness-catalog`,
-`launch-preparation`, `run-list`, `run`, and `operation`; of those, **`harness-catalog` and `launch-preparation` remain unbuilt**. `workspace` was the genuine
-addition (2026-09-09 amendment). `run-list` was already the fourth of the original six, so the 2026-09-13 amendment calling it an "eighth" family overcounted:
-seven families are envisioned, five declared.
+The family arithmetic is reconciled against what the closed `ProjectionSelector` actually declares. All **seven** families are built: `workspace`, `operation`,
+`bundle-catalog`, `harness-catalog`, `launch-preparation`, `run`, and `run-list` (edited 2026-09-23: M3 built five, and M5 built `harness-catalog` and
+`launch-preparation`). The original six of [#19](https://github.com/secantdev/secant/issues/19) were `bundle-catalog`, `harness-catalog`, `launch-preparation`,
+`run-list`, `run`, and `operation`. `workspace` was the genuine addition (2026-09-09 amendment). `run-list` was already the fourth of the original six, so the
+2026-09-13 amendment calling it an "eighth" family overcounted. The two catalog families are read-only and carry no Action Offers; `workspace`,
+`launch-preparation`, and `run` carry them.
 
 M3 adds **five Operations** to the closed set, as the `approve-workspace` (2026-09-09) and `cancel-run`/`delete-run` (2026-09-13) extensions each recorded theirs:
 `answer-harness-request` (#117), `interrupt-turn` and `steer-turn` (#118), and `send-interactive-turn` and `end-interactive-step` (#122). This extends the #19

@@ -96,8 +96,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   seam that re-opens its Projection to grow a page); a write goes through a per-screen submit seam (`run-actions-view.tsx` — resume/cancel/delete, mirroring
   `run-launch-view.tsx`). The Renderer Port (`renderer/renderer.ts`) carries lifecycle plus the Workbench's `size`/`onKey`/`onResize`, and declares its key
   value (`{ name?, ctrl? }`, A16) so the Workbench needs no cast.
-- `catalog-navigation.tsx` (A4) owns both catalogs' search, pane focus, selection, bindings, and row/empty shells; filters, focus, and inspectors stay per
-  screen. `bundle-catalog.tsx` renders `bundle-view.tsx` via pure `bundle-catalog-inspector.tsx`; neither adds an Action Offer or Projection selector.
+- `catalog-navigation.tsx` (A4) owns both catalogs' search, pane focus, selection, bindings, and row/empty shells, on the vendored two-pane
+  `vendor/panels.tsx` and bounded `vendor/scroll.ts` primitives (see `UPSTREAM`); filters, focus, and inspectors stay per screen.
+  `bundle-catalog.tsx` renders `bundle-view.tsx` via pure `bundle-catalog-inspector.tsx`; neither adds an Action Offer or Projection selector.
 - `harness-catalog.tsx` opens exact focus for the selected row and rehydrates only rows the list already marks checked, retaining those accessors for search;
   `harness-view.tsx` keeps list opening spawn-free, `harness-format.ts` owns shared wording, and the inspector renders normalized facts with no Actions.
 - Two private helpers back those seams: `follow.ts` (`followProjection`) owns the read seams' follow, health, and reconnect loop (A22); `submit-and-settle.ts`
@@ -105,8 +106,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   reference-inspection overlay — its state, key loop, and view — split out of `run-workbench.tsx` (A26). `run-workbench-views.tsx` holds the Workbench's
   four pure presentational leaves; state, focus, modal precedence, and the key dispatcher stay in `run-workbench.tsx` (A12).
 - `start-run-views.tsx` holds Start a Run's step components and leaves; the draft signal, step transitions, refusal routing, and key dispatcher stay in `start-run.tsx` (A3).
-- `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; its single-active-index selection model descends from the historical
-  `bundle-list.tsx`, now replaced by `bundle-catalog.tsx`).
+- `previous-runs.tsx` is the Previous Runs screen reached from Home; its single-active-index selection descends from the historical `bundle-list.tsx`.
 - `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-catalog status wording — keep it matching `headless/render.ts` so
   the TUI and headless surfaces say the same thing about the same fact.
 - The Harness/model facts (#125/#147), recovery evidence, the story-38 resting reason, and cancel/delete moved off the header/rail into the details panel (#194).

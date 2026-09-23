@@ -9,7 +9,8 @@ runs the compiled-binary smoke, archive, platform-package, npm-launcher, PowerSh
 independent `continue-on-error` steps, then always aggregates their outcomes so every result stays visible and any non-success fails the job. The artifacts
 are assembled once on the Linux `build` job from the just-built candidate bytes through the one target manifest (`scripts/targets.ts`). Release-channel
 pure logic is unit-tested under `bun test` in `tests/release/` with no subprocess (the Bun 1.4.2 child-lifecycle defect, #149); real round-trips on real
-binaries remain in the consumer job, the way the compiled-binary smoke ([testing](./testing.md)) lives outside `bun test`.
+binaries remain in the consumer job, the way the compiled-binary smoke ([testing](./testing.md)) lives outside `bun test`. The per-OS `check` job's
+`Process runtime conformance` step is the sibling layer for real child processes below the binary; it is not a consumer scenario ([testing](./testing.md)).
 
 ## Release Archive Consumer
 

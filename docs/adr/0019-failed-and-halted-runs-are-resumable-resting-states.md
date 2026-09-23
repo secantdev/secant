@@ -45,13 +45,16 @@ Two sentences of the decision above drifted from what M3 shipped, and are correc
   count from absolute zero across resumes (`runRepeatGroup`): a resume replays the completed iterations by Step identity without re-running them, then
   runs fresh ones. What resume actually resets is the failed Step's **retry budget** (the Step re-attempts with its full budget) and, for a Repeat group,
   the **Review-checkpoint cadence** — a human grant buys one interval of newly-run iterations, and only newly-run iterations count toward it.
-- **Neither the model nor the Harness is a Run-level pin.** The effective model and the normalized Harness identity are both **per-Attempt** facts, each
-  Agent-step Attempt recording its own (#125). "The Run pins only a default model … the Harness itself stays pinned" is superseded: the Run pins neither.
+- **Neither the effective model nor the observed Harness is a Run-level pin.** The effective model and the normalized Harness identity are both
+  **per-Attempt** facts, each Agent-step Attempt recording its own (#125). "The Run pins only a default model … the Harness itself stays pinned" is
+  superseded for what an Attempt observes. (Edited 2026-09-23: the M4 amendment below makes the semantic Harness selection Run truth, and M5 makes the
+  **requested** model Run truth too, recorded in ADR 0023; neither is ever inferred from or rewritten by an Attempt's observation.)
 
 ## Amendment — semantic Harness selection is Run truth; observed identity remains Attempt evidence (M4)
 
 M4's selectable second Adapter supersedes only the Harness half of the M3 amendment above. Every new Agent-bearing Run durably pins one semantic
 Harness id atomically with creation, before its first Attempt, and never changes it; a Command-only Run has no selection. The nullable stored field is
 reserved for Command-only and pre-M4 Runs. The selected id is recovery and routing truth, not observed evidence: each Agent-step Attempt still records
-the Harness name, resolved executable, executable version, Adapter evidence, and effective model it actually observed. A Run therefore pins no model,
-and its semantic Harness selection must not be inferred from an Attempt or rewritten from later observations.
+the Harness name, resolved executable, executable version, Adapter evidence, and effective model it actually observed. A Run therefore pins no effective
+model (edited 2026-09-23: it may pin the launch's requested model, ADR 0023), and its semantic Harness selection must not be inferred from an Attempt
+or rewritten from later observations.

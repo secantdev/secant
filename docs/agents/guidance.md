@@ -48,5 +48,6 @@ The guidance-structure suite under `tests/architecture/` enforces:
   representative task and confirm it reaches every required rule without loading unrelated branches.
 - At each refactoring gate the sequencing decision defines, walk the full tree once for relevance and run the representative tasks named by that gate,
   checking each transcript for whether the pointed-at documents were read. No automated pointer eval.
+- An ADR amendment edits the paragraph it corrects, dated inline, rather than only appending below it; a new dated section records only a new decision.
 - Every rule has one authoritative home. Unresolved topology-, runtime-, and domain-specific decisions stay in their wayfinding issues. When a
   decision establishes a real Seam, add the smallest focused guidance and a narrow check before implementation crosses it.

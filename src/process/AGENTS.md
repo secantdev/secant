@@ -4,6 +4,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Invariants
 
+- The `ProcessAdapter` Interface and `createProcessAdapter` are the Module's only runtime exports (#202). The Interface is opaque: callers get normalized
+  resolution, command, and owned-process outcomes and never a platform child. Composition builds the one real instance and injects it into execution,
+  storage, Preflight, and the Harness registry, which passes it to both Adapters and discovery; no other Module constructs or imports an implementation.
 - Windows has no graceful stage (#127 A6, amended 2026-09-18): Windows' polite close (`taskkill` without `/F`) reaches only a window, and every child this
   Module spawns is `windowsHide: true` and so has none — verified on a desktop, where the same executable closed politely only when launched visible. So
   `killGroup` runs `taskkill /T /F` for both signals there, `interrupt` force-kills a live child at once and reports `escalated: true` (a child already
@@ -14,3 +17,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   spawn sites (the Preflight worktree probe and the two Artifact-repo spawns) that pass the bare name `"git"` and let the OS resolve it through PATH.
 - Because the primary PATH walk cannot see a Windows App Execution Alias, a miss falls back to the first `where.exe` match (#165). The `.cmd`/`.bat` shim
   rule still applies to that path; Secant passes an alias path to the OS at spawn and never reads or resolves its AppExecLink target itself.
+
+## Tests
+
+- `tests/process/fake-adapter.ts` is the scripted Process for the semantic suite. It refuses to emit output after its terminal result, so a test cannot
+  script a child the real Interface would never produce; keep that throw when extending it.

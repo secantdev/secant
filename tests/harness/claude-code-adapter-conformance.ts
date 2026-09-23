@@ -370,6 +370,8 @@ test(
   },
 );
 
+// --- Turn failures: authentication and protocol corruption -------------------
+
 // The shared interrupt, lost, recovery, and cleanup cases over the real replayer
 // moved to the standalone runtime-conformance runner (#184); see
 // tests/harness/replayer-conformance.ts. The Claude-Code-specific interrupt,
@@ -746,7 +748,7 @@ function tokenOf(scripted: ScriptedProcess): string {
   return scripted.token();
 }
 
-// --- Real recorded Turns (#115) ----------------------------------------------
+// --- Replay: real recorded Turns (#115) --------------------------------------
 
 test("the recorded plain Turn completes with its assistant text, model, and usage", async () => {
   // The real recording of a no-tools Turn: byte-faithful init, partial stream,
@@ -837,6 +839,8 @@ test("the recorded Test Repair Turn approves an Edit and its patch makes the fai
   execFileSync(process.execPath, ["sum.test.mjs"], { cwd: workspace });
 });
 
+// --- Steer and interrupt (steer is declared unavailable; see the profile) ----
+
 test("interrupting a live Turn spawns no resume and settles interrupted with a detached Session", async () => {
   const replayer = installReplayer(VERSION, protocolCase("interrupt"));
   const prepared = await createClaudeCodeAdapter({
@@ -895,6 +899,8 @@ test("interrupting a live Turn spawns no resume and settles interrupted with a d
     1,
   );
 });
+
+// --- Recovery ----------------------------------------------------------------
 
 test("a resumed Turn spawns with --resume and not --session-id", async () => {
   const replayer = installReplayer(VERSION, protocolCase("resume"));
@@ -1011,6 +1017,8 @@ test("resuming a coordinate on an untracked Session passes that coordinate, not 
   assert.equal(resumeInvocation.args[flag + 1], coordinate.opaque);
   assert.equal(resumeInvocation.args.includes("--session-id"), false);
 });
+
+// --- Turn lifecycle and Session reuse ----------------------------------------
 
 test("one stream-json Turn yields normalized events and an authoritative completed result", async () => {
   const replayer = installReplayer(VERSION, COMPLETED_CASE);
@@ -1477,7 +1485,7 @@ test("a Windows shim the resolver cannot parse is an unsupported-shim failure", 
   );
 });
 
-// --- The M3 profile ----------------------------------------------------------
+// --- Qualification: the profile ----------------------------------------------
 
 test("the profile carries every M3 fact with its evidence and a user-compatible posture", async () => {
   const replayer = installReplayer(VERSION);
@@ -1554,7 +1562,7 @@ test("prepare builds only `--version`, no forbidden flag, and writes nothing to 
   }
 });
 
-// --- Qualification cache -----------------------------------------------------
+// --- Qualification: cache ----------------------------------------------------
 
 test("a second prepare reuses the cache; drift requalifies", async () => {
   const replayer = installReplayer(VERSION);
@@ -1577,7 +1585,7 @@ test("a second prepare reuses the cache; drift requalifies", async () => {
   assert.equal(third.harness.profile.executableVersion, "9.9.9 (Claude Code)");
 });
 
-// --- Version-probe failure (POSIX; the mapping itself is OS-agnostic) --------
+// --- Qualification: version-probe failure (POSIX; mapping is OS-agnostic) ---
 
 test(
   "a non-zero `--version` exit is a typed version-probe failure",

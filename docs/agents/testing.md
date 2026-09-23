@@ -11,8 +11,11 @@ test runner (`bun test`), not `bun:test`; `bunfig.toml` records why the per-test
 
 The gate separates three independently attributable, blocking layers (ADR 0027's 2026-09-21 amendment):
 
-- The **process-free semantic suite** runs under the test runner with injected Process and Harness doubles.
-- **Standalone runtime conformance** runs real Process, Git, and recorded-Harness behavior in an ordinary Bun process outside the test runner.
+- The **process-free semantic suite** runs under the test runner with injected Process and Harness doubles; the scripted Process is
+  `tests/process/fake-adapter.ts`.
+- **Standalone runtime conformance** runs real Process, Git, and recorded-Harness behavior in an ordinary Bun process outside the test runner: the
+  `tests/process/runtime-conformance.ts` program, run by `bun run test:runtime-conformance` and CI's `Process runtime conformance` step. It and the
+  terminal-lifecycle program share their runner helpers (timeouts, exit, temp-dir cleanup) in `tests/helpers/standalone.ts`.
 - **Compiled-binary acceptance** exercises Command, Harness, interruption, recovery, and Git through the copied binary in the consumer job.
 
 The checked-in [subprocess migration ledger](../subprocess-test-migration-ledger.md) maps every legacy spawning test assertion to its replacement layer.

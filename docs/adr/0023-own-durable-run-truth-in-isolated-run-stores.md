@@ -69,3 +69,12 @@ permanent. The owning process id and monotonic epoch now live beside the Run's c
 write in the same immediate transaction; takeover needs that same write lock. Resume consults coordination only to distinguish an unknown registration,
 then claims ownership in the Run Store. Listing, startup reconciliation, and coordinator rebuild also read each Run Store's owner record, so rebuilding
 registration no longer silently un-owns a live Run. The coordinator remains authoritative for registration and create/delete admission.
+
+## Amendment — the requested model is immutable Run truth (2026-09-23, M5)
+
+An Agent-bearing launch may request a model. The request is written into the Run record in the same creation transaction that pins the semantic
+Harness selection ([ADR 0019](./0019-failed-and-halted-runs-are-resumable-resting-states.md)'s M4 amendment), before the first Attempt, and is never
+changed. Launch and resume hand that one stored value to the Adapter's prepare, so a resumed Run asks for exactly what its launch asked for; an absent
+value means the Harness default, never a substitute. The requested model is free text in the store, checked against the Adapter's declared model list
+at launch-preparation and at prepare ([ADR 0022](./0022-own-a-truthful-deep-harness-seam.md)); a Command-only Run carries none. It is not evidence:
+the effective model each Attempt observes stays a per-Attempt fact and never overwrites the request.

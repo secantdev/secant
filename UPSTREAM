@@ -263,6 +263,46 @@ was missing here. No OpenCode source crosses; `scripts/pack.ts` is authored fres
              publication to the protected release state machine.
 
 
+Added 2026-09-23 for the M5 TUI completion (#180), recorded by #206 after the
+#199 audit found the spec's studied-only commitment unledgered. The patterns
+were studied against OpenCode at 1ead9e3d7f; no OpenCode source crosses.
+
+  src/tui/start-run-views.tsx   Harness and model picker studied
+                                packages/tui/src/component/dialog-provider.tsx,
+                                packages/tui/src/component/dialog-model.tsx, and
+                                packages/tui/src/ui/dialog-select.tsx
+  src/tui/run-workbench.tsx     view-freshness line studied
+                                packages/tui/src/component/workspace-label.tsx
+  src/tui/harness-format.ts     worded status studied
+                                packages/tui/src/component/dialog-mcp.tsx
+  src/tui/catalog-navigation.tsx
+                                two-pane focus glyph studied the leading-marker
+                                active row of packages/tui/src/ui/dialog-select.tsx
+  src/tui/harness-catalog.tsx   adapted from src/tui/bundle-catalog.tsx (internal
+                                reuse, #197), not extracted from OpenCode; it
+                                inherits that screen's provenance above
+
+What was taken and changed:
+
+  picker (from dialog-provider.tsx then dialog-model.tsx):
+    Taken:   the two-level choose-then-choose shape -- pick the provider, then
+             its model from a filterable list.
+    Changed: the first level is the semantic Harness choice and the second
+             follows its declared model list or free-text entry, with `Harness
+             default` first; the choices come from the launch-preparation
+             Projection, and there are no favourites or recents.
+  freshness (from workspace-label.tsx):
+    Taken:   a worded connection status beside the label (connected,
+             connecting, disconnected, error).
+    Changed: the Workbench words view freshness -- loading, catching up, or
+             disconnected with its last-confirmed time -- labelled as not Run
+             state; it gates the Run controls and `r` reconnects.
+  status glyph (from dialog-mcp.tsx and dialog-select.tsx):
+    Taken:   a glyph paired with a word so colour is never the only signal, and
+             a leading marker on the active row.
+    Changed: the marker is the `› ` focus glyph, shown only while its pane is
+             focused; Harness status is a word shared with headless rendering.
+
 THEME ASSETS (25 vendored, unmodified palettes)
 -----------------------------------------------
 

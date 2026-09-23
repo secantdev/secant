@@ -22,6 +22,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   Runs.) Preflight runs before the Trust gate, so a Run whose preconditions fail is refused before trust is ever asked for.
 - New Agent/Interactive-agent Runs require one known, available registry id and pin it in `createRun`; Command-only Runs reject a selection as irrelevant.
   The launch replay key includes the choice, and resume automatically reuses the immutable stored id without deriving it from Attempt evidence (#138, #146).
+- A launch's requested model is written into the Run record by `createRun` beside the Harness selection, before the first Attempt, and never changes
+  (ADR 0023). Launch and resume hand that stored value to `prepare`; the observed `effectiveModel` never overwrites it (#187).
+- Preflight takes the injected `ProcessAdapter` for command resolution and the Git worktree probe; it never constructs one, so tests drive it spawn-free.
 - A pre-M4 Run with no selection upgrades only after its still-installed pinned Snapshot proves the routing needs a Harness. Reopen and direct resume
   write `claude-code` once through `observedOwner.selectHarness`; Command-only Runs and missing/corrupt Snapshot Problems remain unselected (#139).
 - Never `acquireRun` a Run merely to read it when it is live in another process: acquiring bumps the owner-fencing epoch and would abort the process
@@ -103,3 +106,13 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `deriveRun`'s walk assumes `attempt_log` holds only per-Step Attempts, but the Run Store already appends the reconciliation `indeterminate` marker row
   there (see `store/AGENTS.md`). The marker is harmless only because its outcome is not `succeeded`, not because the walk excludes it — keep that true if
   you add marker rows.
+
+## Structure
+
+- `createApplication` stays one closure on purpose: its regions share the mutable `runs` map, operations map, and observer sets, it has one caller
+  (composition), and no second adapter exists, so extracting a block would only pass a wide context object across a shallow Seam (#199 A1). In order:
+  1. State, observers, `observedOwner`, and the execution drivers (`runAndSettle`, `startRun`).
+  2. Projection dispatch (`openProjection`, `openRunProjection`); the catalog and launch-preparation families live in their own files.
+  3. Launch and resume (`submitLaunch`, `resumePreconditions`, `submitResume`).
+  4. Gate and Harness-request answering, then Turn interrupt and steer (`submitAnswer` through `steerTurnAndSettle`).
+  5. Interactive turns (`beginInteractive` through `runInteractiveEnd`), then cancel, delete, read-acquire, and `shutdown`.

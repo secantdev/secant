@@ -13,10 +13,11 @@ import type {
   RunGateReference,
 } from "./projection-port.js";
 
-// Every Problem the Application produces, one factory per Problem code (A17). The
-// Application entry, the Run Projection, and the Bundle-catalog Projection all
-// build their Problems here, so a code has exactly one explanation, remediation,
-// and details shape — never two divergent copies of the same code.
+// The Application's shared Problems, one factory per Problem code (A17). The
+// Application entry, the Run Projection, the catalog Projections, and Preflight
+// build every code they share here, so a code has one explanation, remediation, and
+// details shape — never two divergent copies of the same code. A code only one
+// module raises (Preflight's shim and prerequisite refusals) stays beside it.
 
 export function pathNotFound(rawPath: string, error: unknown): Problem {
   const code = (error as NodeJS.ErrnoException).code;
@@ -125,7 +126,31 @@ export function runSupportUnavailable(): Problem {
   };
 }
 
-export function harnessNotFound(harnessId: string): Problem {
+/** What discovery searched for a registered Harness that is not on this system. */
+export interface HarnessSearch {
+  readonly name: string;
+  readonly searched: readonly string[];
+  readonly executableEnvironmentVariable: string;
+}
+
+// One code, two causes: without `search` the id names no registered Harness (the
+// catalog selection); with it, Preflight's discovery could not find the selected
+// Harness's executable and names exactly what was searched.
+export function harnessNotFound(
+  harnessId: string,
+  search?: HarnessSearch,
+): Problem {
+  if (search !== undefined) {
+    const { name, searched, executableEnvironmentVariable } = search;
+    return {
+      code: "harness-not-found",
+      explanation: `This Bundle runs an agent through ${name}, which could not be found. Searched: ${searched.join("; ")}.`,
+      remediation: `Install ${name} and make sure it is on PATH, or set ${executableEnvironmentVariable} to its executable, then launch again.`,
+      possibleEffects: "none",
+      correction: "harness",
+      details: { harness: harnessId, searched: searched.join("; ") },
+    };
+  }
   return {
     code: "harness-not-found",
     explanation: `Harness '${harnessId}' is not registered in this Secant build.`,

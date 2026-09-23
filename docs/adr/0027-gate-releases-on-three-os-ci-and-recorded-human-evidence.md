@@ -8,14 +8,16 @@ are free, Windows is the first-priority platform, and the OpenTUI prototype show
 
 ## What CI proves
 
-- The deterministic suite runs the Proof Bundle end to end through the headless client against fake Harness programs that replay the recorded
-  protocol fixtures over stdio, so real process spawning, Windows `.cmd` shim resolution, `bun:sqlite` (superseded `node:sqlite`, ADR 0030), and per-Run Git are exercised on each OS
-  without credentials. The replayer proves nothing about compatibility with a real Harness; only the recordings' provenance and the per-release
-  real-Harness run make that claim.
+- Three blocking layers prove the product on each OS without credentials (edited 2026-09-23 to match the 2026-09-21 amendment below). The canonical
+  check's **process-free semantic suite** proves orchestration through injected Process and Harness doubles and spawns no child. **Standalone
+  runtime conformance**, the `Process runtime conformance` step in an ordinary Bun process, exercises real process spawning, `bun:sqlite`
+  (superseded `node:sqlite`, ADR 0030), Git, and fake Harness programs replaying the recorded protocol fixtures over stdio. **Compiled-binary
+  acceptance** runs the installed-artifact paths in the consumer job. The replayer proves nothing about compatibility with a real Harness; only
+  the recordings' provenance and the per-release real-Harness run make that claim.
 - The package smoke installs the packed archive under a temporary global prefix and runs one headless Proof Bundle Run from the installed command,
   because missing `files` entries, ESM resolution, and OpenTUI's per-platform native binary only fail from the installed package.
-- A small real-terminal lifecycle suite runs under a throwaway pseudo-terminal as its own blocking CI job on all three operating systems, outside
-  `bun run check`. `node-pty` is a devDependency for that suite only; the import-boundary check keeps it out of `src/`. The
+- A small real-terminal lifecycle suite runs under a throwaway pseudo-terminal as a blocking consumer-job step on all three operating systems,
+  outside `bun run check`. `node-pty` is a devDependency for that suite only; the import-boundary check keeps it out of `src/`. The
   [runtime decision](https://github.com/DevFlow-HQ/devflow-cli/issues/21) retired PTY as a Harness transport, not as test instrumentation.
 - No CI retries. A flaky test is fixed or moved to the opt-in suite, and the implementing issue records which.
 

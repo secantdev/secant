@@ -16,6 +16,7 @@ import type {
   HarnessChoice,
   Problem,
 } from "./projection-port.js";
+import { harnessNotFound } from "./problems.js";
 import { selectPlatform } from "./select-platform.js";
 
 // Preflight: the Application-owned precondition gate that refuses to create a Run
@@ -249,8 +250,8 @@ function checkHarness(
   if (discovery.kind === "not-found") {
     return {
       problems: [
-        harnessNotFound({
-          harness: selected.registration.choice,
+        harnessNotFound(selected.registration.choice.id, {
+          name: selected.registration.choice.name,
           searched: discovery.searched,
           executableEnvironmentVariable:
             discovery.executableEnvironmentVariable,
@@ -541,26 +542,6 @@ function harnessSelectionUnavailable(choice: HarnessChoice): Problem {
     possibleEffects: "none",
     correction: "harness",
     details: { harness: choice.id },
-  };
-}
-
-interface THarnessNotFoundParams {
-  readonly harness: HarnessChoice;
-  readonly searched: readonly string[];
-  readonly executableEnvironmentVariable: string;
-}
-
-// A Bundle carrying an Agent Step needs the selected Harness on this system.
-// Names exactly what was searched so the user can fix their environment.
-function harnessNotFound(params: THarnessNotFoundParams): Problem {
-  const { harness, searched, executableEnvironmentVariable } = params;
-  return {
-    code: "harness-not-found",
-    explanation: `This Bundle runs an agent through ${harness.name}, which could not be found. Searched: ${searched.join("; ")}.`,
-    remediation: `Install ${harness.name} and make sure it is on PATH, or set ${executableEnvironmentVariable} to its executable, then launch again.`,
-    possibleEffects: "none",
-    correction: "harness",
-    details: { harness: harness.id, searched: searched.join("; ") },
   };
 }
 

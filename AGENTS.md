@@ -18,6 +18,7 @@ Read the line that matches your task, then the file it names. The canonical gate
 - Before creating or moving target source, changing a public entrypoint, or crossing a Module, read `docs/agents/topology.md`.
 - Before changing dependencies, composition, or allowed import direction, read `docs/agents/dependencies.md`.
 - Before changing tests or fixtures, read `docs/agents/testing.md`.
+- Before changing the private internals of the Claude Code or Codex Harness Adapter, read `docs/agents/harness-adapters.md`.
 - Before changing a release-channel consumer scenario (archive, platform package, npm launcher, or installer) or its CI job, read `docs/agents/release-consumers.md`.
 - Before changing the release workflow's shape or policy (candidate validation, tag admission, protected promotion) or its CI jobs, read `docs/agents/release-workflow.md`.
 - Before handling external or persisted input or translating external failures, read `docs/agents/validation.md`.
@@ -36,7 +37,7 @@ Before editing under a Module root that carries its own `AGENTS.md`, read that f
 - `src/bundle/AGENTS.md` — Bundle Module: digest, validator, and budget invariants for slice authors.
 - `src/run/store/AGENTS.md` — Run Store Module: coordination/run.db split, crash-safety ordering, and fencing invariants for slice authors.
 - `src/harness/AGENTS.md` — Harness Module: Interface opacity, terminal ordering, typed-failure/throw split, and durable-admission invariants.
-- `src/process/AGENTS.md` — process Module: the always-false Windows escalation flag, the two-stage shared-bound shutdown, and the bare-name git spawns.
+- `src/process/AGENTS.md` — process Module: the Process Interface, Windows `escalated` (true for a live child, false once gone), the shared-bound shutdown, git spawns.
 - `src/composition/AGENTS.md` — composition Module: Adapter opacity above the root and sole Harness-registry ownership.
 - `src/run/execution/AGENTS.md` — Run execution Module: the abort-reason to resting-state mapping and the three admitted Turn writes.
 - `src/catalog/AGENTS.md` — Catalog Module: first-install-wins, generation-keyed Trust grants, lock-free re-extraction, and the asset-root Interface crossing.

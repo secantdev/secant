@@ -26,8 +26,8 @@ const NON_MIRRORING_TEST_FOLDERS = new Set([
 /** Mechanise the prose rule "tests mirror their source domain" (S1): a test under
  *  `tests/<prefix>/` that imports any owned Module must import at least one whose
  *  root starts with `src/<prefix>/`. A test importing no target source at all (a
- *  pure-helper suite such as `tests/headless/resume.test.ts` when it touches only
- *  helpers) is skipped; the non-mirroring folders above are skipped wholesale.
+ *  pure-helper suite such as `tests/harness/redact.test.ts`, which imports only its
+ *  sibling test helper) is skipped; the non-mirroring folders above are skipped wholesale.
  *  This catches a suite filed by ticket rather than by the Interface it crosses. */
 export function checkTestDomainMirror(root: string): BoundaryIssue[] {
   const issues: BoundaryIssue[] = [];

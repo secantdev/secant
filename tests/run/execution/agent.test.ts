@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import test, { type TestContext } from "node:test";
 import type {
   HarnessProfile,
@@ -401,4 +401,243 @@ test("plain-path delivery keeps the rendered prompt byte-identical", async (t) =
     f.owner.transcript()[0]?.content,
     `Review ${join(f.workspace, "reports", "input.md")} before acting.\n\n\nRead the skill instructions at ${join(assets.skillDirectory, "SKILL.md")} before you begin.`,
   );
+});
+
+// --- Required text output receipts (#215) ----------------------------------
+
+const RECEIPT_LINE =
+  /Write the required output "([^"]+)" as UTF-8 text to (.+) before you finish;/g;
+
+/** The receipt paths execution appended to a rendered prompt, by output name. */
+function receiptPaths(input: string): ReadonlyMap<string, string> {
+  return new Map(
+    [...input.matchAll(RECEIPT_LINE)].map((match) => [match[1]!, match[2]!]),
+  );
+}
+
+/** Wrap a prepared fake so each Turn plays the agent: `write` decides, per Turn,
+ *  what to leave at the receipt paths the prompt named (nothing when undefined). */
+function receiptWriting(
+  prepared: PreparedHarness,
+  write: (paths: ReadonlyMap<string, string>, turn: number) => void | undefined,
+): { harness: PreparedHarness; inputs: string[] } {
+  const inputs: string[] = [];
+  return {
+    inputs,
+    harness: {
+      profile: prepared.profile,
+      startTurn(request) {
+        inputs.push(request.input.text);
+        write(receiptPaths(request.input.text), inputs.length - 1);
+        return prepared.startTurn(request);
+      },
+      close: () => prepared.close(),
+    },
+  };
+}
+
+const COMPLETED: TurnResult = RESULT_CASES.completed.result;
+
+function producingStep(overrides: Partial<AgentStep> = {}): AgentStep {
+  return agentStep({
+    produces: [{ name: "spec-ref", type: "text" }],
+    ...overrides,
+  });
+}
+
+function executeWith(
+  f: Fixture,
+  step: AgentStep,
+  harness: PreparedHarness,
+): ReturnType<typeof executeRouting> {
+  const assets = promptAssets(f.workspace, "Publish the spec.\n");
+  return executeRouting([step], {
+    owner: f.owner,
+    platform: HOST,
+    resolveAsset: assets.resolveAsset,
+    now: () => AT,
+    process: executionProcess,
+    harness: {
+      prepared: harness,
+      inputTypes: {},
+      assetKinds: { "prompt.md": "prompt" },
+    },
+  });
+}
+
+function boundText(owner: RunOwner, name: string): string | undefined {
+  const versionId = owner.currentVersion(name);
+  if (versionId === undefined) return undefined;
+  const bytes = owner.readArtifact(versionId, name);
+  return bytes === undefined ? undefined : new TextDecoder().decode(bytes);
+}
+
+/** Bind an earlier version of `spec-ref`, as a previous Step would have. */
+function bindEarlier(owner: RunOwner, text: string): string {
+  const published = owner.publishAttempt({
+    attemptId: "earlier",
+    outcome: "succeeded",
+    required: [{ name: "spec-ref", type: "text" }],
+    outputs: [
+      {
+        name: "spec-ref",
+        type: "text",
+        content: new TextEncoder().encode(text),
+      },
+    ],
+    at: AT,
+  });
+  assert.ok(published.ok && published.versionId);
+  return published.versionId;
+}
+
+test("a completed Turn's validated receipt is published as the declared text output", async (t) => {
+  const f = fixture(t);
+  const prepared = await preparedHarness(profile(), [{ result: COMPLETED }]);
+  t.after(() => prepared.close());
+  const agent = receiptWriting(prepared, (paths) => {
+    const path = paths.get("spec-ref");
+    assert.ok(path, "the prompt names the receipt path");
+    writeFileSync(path, "  https://github.com/example/repo/issues/12\n");
+  });
+
+  const report = await executeWith(f, producingStep(), agent.harness);
+
+  assert.deepEqual(report, { outcome: "succeeded" });
+  assert.deepEqual(
+    f.owner.attemptLog().map((attempt) => attempt.outcome),
+    ["succeeded"],
+  );
+  // The reference is bound verbatim, trimmed of the surrounding whitespace a file
+  // write leaves, so a later prompt slot substitutes it cleanly.
+  assert.equal(
+    boundText(f.owner, "spec-ref"),
+    "https://github.com/example/repo/issues/12",
+  );
+  // The receipt path is an absolute, Run-owned location outside the Workspace.
+  const path = receiptPaths(agent.inputs[0]!).get("spec-ref")!;
+  assert.ok(isAbsolute(path));
+  assert.ok(relative(f.workspace, path).startsWith(".."));
+  // The instruction is appended after the authored prompt; the prompt stays first.
+  assert.ok(agent.inputs[0]!.startsWith("Publish the spec.\n"));
+});
+
+test("a completed Turn with no receipt fails the Step and leaves the earlier binding intact", async (t) => {
+  const f = fixture(t);
+  const earlier = bindEarlier(f.owner, "LOCAL:spec.md");
+  const prepared = await preparedHarness(profile(), [{ result: COMPLETED }]);
+  t.after(() => prepared.close());
+  // The agent's prose may claim publication; only the receipt file counts.
+  const agent = receiptWriting(prepared, () => undefined);
+
+  const report = await executeWith(f, producingStep(), agent.harness);
+
+  assert.deepEqual(report, { outcome: "failed" });
+  assert.deepEqual(
+    f.owner.attemptLog().map((attempt) => attempt.outcome),
+    ["succeeded", "failed"],
+  );
+  assert.equal(f.owner.currentVersion("spec-ref"), earlier);
+  assert.equal(boundText(f.owner, "spec-ref"), "LOCAL:spec.md");
+  // The Turn itself completed: its durable record says so, distinct from the Step.
+  assert.equal(f.owner.turns()[0]?.resultKind, "completed");
+});
+
+const INVALID_RECEIPTS: Readonly<Record<string, (path: string) => void>> = {
+  "an empty receipt": (path) => writeFileSync(path, ""),
+  "a whitespace-only receipt": (path) => writeFileSync(path, " \n\t\n"),
+  "a receipt that is not UTF-8": (path) =>
+    writeFileSync(path, Uint8Array.from([0x68, 0xff, 0xfe, 0x69])),
+  "an oversized receipt": (path) =>
+    writeFileSync(path, "x".repeat(64 * 1024 + 1)),
+  "a directory in place of the receipt file": (path) => mkdirSync(path),
+};
+
+for (const [title, write] of Object.entries(INVALID_RECEIPTS)) {
+  test(`${title} fails the Step and moves no binding`, async (t) => {
+    const f = fixture(t);
+    const earlier = bindEarlier(f.owner, "LOCAL:spec.md");
+    const prepared = await preparedHarness(profile(), [{ result: COMPLETED }]);
+    t.after(() => prepared.close());
+    const agent = receiptWriting(prepared, (paths) =>
+      write(paths.get("spec-ref")!),
+    );
+
+    const report = await executeWith(f, producingStep(), agent.harness);
+
+    assert.deepEqual(report, { outcome: "failed" });
+    assert.equal(f.owner.currentVersion("spec-ref"), earlier);
+  });
+}
+
+test("a receipt of exactly the size limit is accepted", async (t) => {
+  const f = fixture(t);
+  const prepared = await preparedHarness(profile(), [{ result: COMPLETED }]);
+  t.after(() => prepared.close());
+  const agent = receiptWriting(prepared, (paths) =>
+    writeFileSync(paths.get("spec-ref")!, "x".repeat(64 * 1024)),
+  );
+
+  const report = await executeWith(f, producingStep(), agent.harness);
+
+  assert.deepEqual(report, { outcome: "succeeded" });
+  assert.equal(boundText(f.owner, "spec-ref")?.length, 64 * 1024);
+});
+
+test("a retried Attempt names a fresh receipt path, so an earlier receipt never satisfies it", async (t) => {
+  const f = fixture(t);
+  const prepared = await preparedHarness(profile(), [
+    { result: COMPLETED },
+    { result: COMPLETED },
+  ]);
+  t.after(() => prepared.close());
+  const agent = receiptWriting(prepared, (paths, turn) => {
+    // The first Turn writes nothing; the retry writes its own receipt.
+    if (turn === 1) writeFileSync(paths.get("spec-ref")!, "gh#12");
+  });
+
+  const report = await executeWith(
+    f,
+    producingStep({ retry: 1 }),
+    agent.harness,
+  );
+
+  assert.deepEqual(report, { outcome: "succeeded" });
+  assert.deepEqual(
+    f.owner.attemptLog().map((attempt) => attempt.outcome),
+    ["failed", "succeeded"],
+  );
+  const [first, second] = agent.inputs.map((input) =>
+    receiptPaths(input).get("spec-ref")!,
+  );
+  assert.notEqual(first, second);
+  assert.equal(boundText(f.owner, "spec-ref"), "gh#12");
+});
+
+test("a receipt left by a Turn that did not complete is never published", async (t) => {
+  const f = fixture(t);
+  const prepared = await preparedHarness(profile(), [
+    { result: RESULT_CASES.failed.result },
+  ]);
+  t.after(() => prepared.close());
+  const agent = receiptWriting(prepared, (paths) =>
+    writeFileSync(paths.get("spec-ref")!, "gh#12"),
+  );
+
+  const report = await executeWith(f, producingStep(), agent.harness);
+
+  assert.deepEqual(report, { outcome: "failed" });
+  assert.equal(f.owner.currentVersion("spec-ref"), undefined);
+});
+
+test("an Agent Step with no declared output gets no receipt instruction", async (t) => {
+  const f = fixture(t);
+  const prepared = await preparedHarness(profile(), [{ result: COMPLETED }]);
+  t.after(() => prepared.close());
+  const agent = receiptWriting(prepared, () => undefined);
+
+  const report = await executeWith(f, agentStep(), agent.harness);
+
+  assert.deepEqual(report, { outcome: "succeeded" });
+  assert.equal(agent.inputs[0], "Publish the spec.\n");
 });

@@ -37,6 +37,9 @@ This cluster defines the target Crucible terms for a **Run** and everything that
   versioned: the name binds to the latest good version and superseded versions stay reachable.
 - **Candidate output** — a value, file, or file set a producer has written for a declared output but Crucible has not yet validated and published.
   It is not a **Run Artifact** and cannot move a binding.
+- **Output receipt** — the file an autonomous Agent **Step** writes at a per-Attempt, Run-owned path its prompt names, holding one declared `text`
+  output as **Candidate output**. A completed Turn without a valid receipt fails the Step; a remote reference in it is the agent's observation,
+  never proof the remote system accepted anything. _Avoid_: parsing assistant prose.
 - **Artifact publication** — the all-or-nothing Run fact that one successful **Step Attempt** produced a validated set of immutable **Run
   Artifact** versions and moved their current bindings. _Avoid_: File copy, Agent publication.
 - **Workspace materialization** — an optional usable copy of one canonical **Run Artifact** version at a declared Workspace-relative path. The

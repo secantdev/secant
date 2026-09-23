@@ -11,6 +11,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   other durable Run fact surfaces on the Attempt's later `publishAttempt`, never from executing a Turn.
 - Every autonomous Agent Attempt publishes one co-sourced evidence value: qualified Harness identity plus its optional observed model. `attemptEvidence`
   fails fast if an Agent result lacks identity; Command/Gate and synthetic interactive Attempts publish neither (#147).
+- An Agent Step's declared `text` outputs come only from Output receipts (#215): after a `completed` Turn each receipt must be a regular UTF-8 file of at most
+  64 KiB, non-empty once trimmed, or the Attempt fails (retryable) and moves no binding. Assistant prose is never read as an output or as Routing control.
 - Every Command-step spawn passes its resolved authored environment through the Run Store entry's `isolatedGitEnvironment`; the helper appends
   non-interactive signing, hook, credential, and editor overrides after authored Git config entries, without changing user files or hiding ordinary
   system/global config (#166). `GIT_CONFIG_PARAMETERS` is removed because Git applies it after the counted entries and could undo the hardening.

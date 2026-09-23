@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 import test from "node:test";
 import { Database } from "bun:sqlite";
 import type { ProducedArtifact } from "../../../src/workflow/workflow.js";
@@ -617,4 +617,42 @@ test("a partial persisted steer capability is rejected at the Harness-identity r
   const corrupted = group.acquireRun(created.runId)!;
   t.after(() => corrupted.close());
   assert.throws(() => corrupted.harnessEvidence());
+});
+
+test("an Attempt's output receipt directory is a fresh, Run-owned directory per Attempt (#215)", async (t) => {
+  const home = makeTempDir("secant-store-");
+  const group = openRunGroup(home, WORKSPACE);
+  t.after(() => group.close());
+  const created = create(group, "op-1");
+  assert.ok(created.outcome === "created");
+  const owner = group.acquireRun(created.runId);
+  assert.ok(owner);
+  t.after(() => owner.close());
+
+  // Execution's Attempt ids carry a `:` that is not a legal Windows file name, so
+  // the directory must still be created on every OS.
+  const first = owner.outputReceiptDirectory("0.0:publish");
+  const runDir = join(groupDirOf(home), created.runId);
+  assert.ok(isAbsolute(first));
+  const inside = relative(runDir, first);
+  assert.ok(inside !== "" && !inside.startsWith(".."), first);
+  assert.deepEqual(readdirSync(first), []);
+
+  // Each Attempt receives its own directory, so a retry never reads the receipt a
+  // previous Attempt left behind.
+  const second = owner.outputReceiptDirectory("0.1:publish");
+  assert.notEqual(second, first);
+
+  // Preparing the same Attempt again empties it: a stale receipt cannot satisfy it.
+  writeFileSync(join(first, "spec-ref"), "stale");
+  assert.equal(owner.outputReceiptDirectory("0.0:publish"), first);
+  assert.deepEqual(readdirSync(first), []);
+
+  // The receipts share the Run's lifecycle: deleting the Run removes them.
+  owner.close();
+  assert.equal(
+    group.deleteRun({ operationId: "op-del", runId: created.runId }).outcome,
+    "deleted",
+  );
+  assert.ok(!existsSync(first));
 });

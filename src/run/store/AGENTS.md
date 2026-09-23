@@ -72,8 +72,10 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `free-text` publishes the `text` answer as the declared output and advances `running`; approve settles succeeded with no output; reject settles failed and rests
   `failed`.
 - `publishAttempt` for a **succeeded Attempt with no outputs and no required outputs** stages no commit (an empty tree is not valid `git mktree` input) and settles with
-  no version — the approve-reject authored-gate answer (#108) and every Agent-step Attempt (#116, which produces no Artifacts). Every other succeeded Attempt produces at
-  least one output and stages a commit as before.
+  no version — the approve-reject authored-gate answer (#108), the interactive End Step, and an Agent-step Attempt declaring no output. Every other succeeded Attempt
+  produces at least one output and stages a commit as before.
+- `outputReceiptDirectory` (#215) hands execution one emptied `receipts/<sha256(attemptId)>` directory under the Run directory, hashed because Attempt ids carry `:`.
+  It is candidate storage, never canonical and never fenced; only `publishAttempt` binds validated receipt bytes, and Run deletion removes it with the directory.
 - Harness Turn records (#116): `admitTurn` writes the `turn` row **before** the stdin frame is sent (the durable admission the Adapter awaits) — it upserts the named Session
   `open` and the rendered input as a `user` transcript entry in one transaction, and a fenced owner refuses it, proving the Turn `not-started` so no stdin is sent.
 - `settleTurn` is immutable: it no-ops once the `turn` row's `result_kind` is set, so a second settle rewrites neither the result nor the Session availability. `turn_event`s

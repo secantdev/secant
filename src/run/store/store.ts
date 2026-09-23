@@ -483,6 +483,15 @@ export interface RunOwner {
   /** The bytes of a recorded diagnostic by id, or undefined if it is absent. */
   readDiagnostic(diagnosticId: string): Uint8Array | undefined;
   /**
+   * Prepare the empty directory an Agent Attempt's output receipts are written to
+   * (#215) and return its absolute path. One directory per Attempt id under the
+   * Run's own directory — never the Workspace, the database, or the Artifact
+   * repository — emptied on every call so a stale receipt cannot satisfy a later
+   * Attempt, and removed with the Run. Receipt files are candidate input only;
+   * nothing is canonical until `publishAttempt` binds the validated bytes.
+   */
+  outputReceiptDirectory(attemptId: string): string;
+  /**
    * Record a durable Human Gate answer as a bound Artifact (#85): stage its bytes
    * as one commit, then a single `run.db` transaction records the version, moves
    * the binding, appends the answer, and optionally advances the Run — all or

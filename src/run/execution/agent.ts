@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import {
   FRESH_SESSION,
@@ -174,8 +174,9 @@ interface StepContext {
  * write failure proves the Turn `not-started`), events drain into the Store as they
  * arrive, and the settled result maps: `completed` → `succeeded`; `failed` and
  * `not-started` → `failed` (retryable within budget); `interrupted` → `cancelled`
- * (Run `halted`); `lost` → `indeterminate` (Run `halted`). The Agent Step produces
- * no Artifacts in M3, so a succeeded Attempt publishes an empty output set.
+ * (Run `halted`); `lost` → `indeterminate` (Run `halted`). A Step declaring
+ * `text` outputs succeeds only when each validated receipt file is present after a
+ * completed Turn (#215); a Step declaring none publishes an empty output set.
  */
 export async function runAgent(
   step: AgentStep,
@@ -193,7 +194,6 @@ export async function runAgent(
   if (!rendered.ok) {
     return mapTurnResult(rendered.result, harness.prepared.profile);
   }
-  const prompt = rendered.prompt;
   // `fresh` isolates a new Session per Attempt (per Iteration inside a Repeat
   // group, since the Attempt id encodes both); any other name is reused, so
   // successive Agent Steps naming it share one live process.
@@ -217,6 +217,14 @@ export async function runAgent(
     };
   }
 
+  // Each declared output is captured only from a receipt file at a fresh per-Attempt
+  // path the prompt names (#215) — never parsed from assistant prose.
+  const receipts = prepareReceipts(step, owner, attemptId);
+  const prompt =
+    receipts.length === 0
+      ? rendered.prompt
+      : `${rendered.prompt}\n\n${receipts.map(receiptInstruction).join("\n")}`;
+
   const result = await driveHarnessTurn(owner, harness.prepared, {
     session,
     origin: "managed",
@@ -232,7 +240,74 @@ export async function runAgent(
       ? { cancelSignal: context.cancelSignal }
       : {}),
   });
-  return mapTurnResult(result, harness.prepared.profile);
+  const attempt = mapTurnResult(result, harness.prepared.profile);
+  if (attempt.outcome !== "succeeded" || receipts.length === 0) return attempt;
+  // A completed Turn is only a Harness boundary: the Step succeeds only when every
+  // required receipt validates. A missing or invalid one fails the Attempt, which
+  // moves no binding (retryable within budget, like any failed Agent Attempt).
+  // ponytail: which receipt failed and why is not recorded — a failed Attempt has
+  // no diagnostic channel yet (the Command-step spawn cause shares this gap).
+  const outputs: CandidateOutput[] = [];
+  for (const receipt of receipts) {
+    const content = readReceipt(receipt.path);
+    if (content === undefined) return { ...attempt, outcome: "failed" };
+    outputs.push({ name: receipt.name, type: "text", content });
+  }
+  return { ...attempt, outputs };
+}
+
+// --- Required text output receipts (#215) ----------------------------------
+
+/** The byte cap on one receipt: a reference, not a document. */
+const MAX_RECEIPT_BYTES = 64 * 1024;
+
+interface Receipt {
+  readonly name: string;
+  readonly path: string;
+}
+
+/** One receipt path per declared output, in a fresh per-Attempt directory the Run
+ *  Store owns. Composition admits only `text` outputs on an Agent Step. */
+function prepareReceipts(
+  step: AgentStep,
+  owner: RunOwner,
+  attemptId: string,
+): readonly Receipt[] {
+  const produces = step.produces ?? [];
+  if (produces.length === 0) return [];
+  const dir = owner.outputReceiptDirectory(attemptId);
+  return produces.map((produced) => ({
+    name: produced.name,
+    path: join(dir, produced.name),
+  }));
+}
+
+function receiptInstruction(receipt: Receipt): string {
+  return `Write the required output "${receipt.name}" as UTF-8 text to ${receipt.path} before you finish; Secant completes this Step only from that file.`;
+}
+
+/** Validate one receipt at this ingress: a regular file (not a link or directory)
+ *  within the byte cap, valid UTF-8, and non-empty once trimmed. Returns the trimmed
+ *  text's bytes, or undefined when the receipt is missing or invalid. The value is
+ *  kept opaque — a remote reference is the agent's observation, never checked
+ *  against the tracker it names. */
+function readReceipt(path: string): Uint8Array | undefined {
+  let bytes: Uint8Array;
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.size > MAX_RECEIPT_BYTES) return undefined;
+    bytes = readFileSync(path);
+  } catch {
+    return undefined;
+  }
+  if (bytes.byteLength > MAX_RECEIPT_BYTES) return undefined;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
+  } catch {
+    return undefined;
+  }
+  return text === "" ? undefined : new TextEncoder().encode(text);
 }
 
 /** What the named Session's last recorded availability says about how the next Turn

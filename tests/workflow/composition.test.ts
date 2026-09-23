@@ -393,19 +393,31 @@ const cases: ReadonlyArray<{
     target: "routing[1].repeat.steps",
   },
   {
-    title: "an agent Step that declares produces",
+    // An agent-authored Verdict would let assistant output choose the Routing
+    // (ADR 0020); an Agent Step produces only validated `text` receipts (#215).
+    title: "an agent Step that declares a non-text output",
     manifest: manifest({
       routing: [
         {
-          id: "seed",
-          kind: "command",
-          requires: ["doc"],
-          produces: [{ name: "v", type: "verdict" }],
-          command: { executable: "bash", arguments: [{ asset: "run.sh" }] },
-        },
-        {
           id: "write",
           kind: "agent",
+          session: "s",
+          requires: ["doc"],
+          prompt: { asset: "p.md" },
+          produces: [{ name: "out", type: "verdict" }],
+        },
+      ],
+    }),
+    code: "agent-produces-unsupported",
+    target: "write",
+  },
+  {
+    title: "an interactive-agent Step that declares produces",
+    manifest: manifest({
+      routing: [
+        {
+          id: "grill",
+          kind: "interactive-agent",
           session: "s",
           requires: ["doc"],
           prompt: { asset: "p.md" },
@@ -414,9 +426,42 @@ const cases: ReadonlyArray<{
       ],
     }),
     code: "agent-produces-unsupported",
-    target: "write",
+    target: "grill",
   },
 ];
+
+test("an agent Step's declared text output composes and binds for a later prompt (#215)", () => {
+  const findings = run(
+    manifest({
+      routing: [
+        {
+          id: "publish",
+          kind: "agent",
+          session: "s",
+          requires: ["doc"],
+          prompt: { asset: "p.md" },
+          produces: [{ name: "spec-ref", type: "text" }],
+        },
+        {
+          id: "tickets",
+          kind: "agent",
+          session: "s",
+          requires: ["spec-ref"],
+          prompt: { asset: "t.md" },
+        },
+      ],
+      assets: [
+        { path: "p.md", kind: "prompt" },
+        { path: "t.md", kind: "prompt" },
+      ],
+    }),
+    new Map([
+      ["p.md", "use {{artifact:doc}}"],
+      ["t.md", "slice {{artifact:spec-ref}}"],
+    ]),
+  );
+  assert.deepEqual(findings, []);
+});
 
 for (const testCase of cases) {
   test(`flags ${testCase.title} with a distinct code`, () => {
@@ -475,3 +520,39 @@ test("flags a prompt asset that is not valid UTF-8", () => {
   );
   assert.equal(findings[0].target, "a");
 });
+
+// A declared Agent output name becomes a receipt file name (#215), so it must be one
+// safe path segment, and one Step may not declare the same name twice.
+for (const [title, produces] of [
+  ["a traversal name", [{ name: "../../catalog", type: "text" as const }]],
+  ["a dot-dot name", [{ name: "..", type: "text" as const }]],
+  ["a name with a separator", [{ name: "a/b", type: "text" as const }]],
+  [
+    "a duplicated name",
+    [
+      { name: "spec-ref", type: "text" as const },
+      { name: "spec-ref", type: "text" as const },
+    ],
+  ],
+] as const) {
+  test(`flags an agent Step output with ${title}`, () => {
+    const findings = run(
+      manifest({
+        routing: [
+          {
+            id: "publish",
+            kind: "agent",
+            session: "s",
+            requires: ["doc"],
+            prompt: { asset: "p.md" },
+            produces,
+          },
+        ],
+      }),
+    );
+    assert.deepEqual(
+      findings.map((finding) => [finding.code, finding.target]),
+      [["agent-produces-unsupported", "publish"]],
+    );
+  });
+}

@@ -2391,9 +2391,10 @@ export function createApplication(deps: ApplicationDependencies): Application {
       owner,
       drive: async () => {
         await closeInteractiveStep(tracking);
-        // Settle the interactive Step's Attempt succeeded (no outputs — an Agent Step
-        // produces no Artifacts in M3), then drive the Run to its next rest. The empty
-        // succeeded Attempt stages no commit (store/AGENTS), and a resume skips the Step.
+        // Settle the interactive Step's Attempt succeeded (no outputs — an
+        // interactive-agent Step produces no Artifacts, #215), then drive the Run to
+        // its next rest. The empty succeeded Attempt stages no commit (store/AGENTS),
+        // and a resume skips the Step.
         publishGateAttemptOrThrow(
           observed.publishAttempt({
             attemptId,

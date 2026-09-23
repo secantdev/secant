@@ -1,5 +1,11 @@
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { asc, desc, eq, isNotNull, notInArray, or } from "drizzle-orm";
 import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite";
@@ -826,6 +832,18 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
             at: parsed.at,
           };
         });
+    },
+    outputReceiptDirectory(attemptId) {
+      // Hashed, because an Attempt id carries characters (`:`) Windows forbids in
+      // a file name; the digest is a stable, portable name for the same Attempt.
+      const name = createHash("sha256")
+        .update(attemptId)
+        .digest("hex")
+        .slice(0, 32);
+      const dir = join(params.runDir, "receipts", name);
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(dir, { recursive: true });
+      return dir;
     },
     readDiagnostic(diagnosticId) {
       if (!/^[A-Za-z0-9-]+$/.test(diagnosticId)) return undefined;

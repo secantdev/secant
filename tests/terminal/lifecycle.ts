@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TARGETS, hostTargetKey } from "../../scripts/targets.js";
+import { removeTempDir, runMain, withTimeout } from "../helpers/standalone.js";
 
 // The real-terminal lifecycle suite (#56). It runs the compiled shell under a
 // throwaway pseudo-terminal driven by `Bun.Terminal` (ConPTY on Windows) and
@@ -80,44 +81,6 @@ function assertRestoredModes(label: string, output: string): void {
     modesEntered > 0,
     `${label}: the shell entered no terminal modes, so restoration cannot be proven`,
   );
-}
-
-function withTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-  message: string,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<T>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-// Best-effort temp-dir removal. Windows can briefly hold a lock on a just-closed
-// file under the temp home (the bun:sqlite catalog is the usual culprit), so
-// retry the transient lock codes rather than let a red cleanup abort the suite
-// and skip later scenarios — the same lingering-lock class #64 fixed for the
-// shared helper. This standalone script cannot use that helper (it registers a
-// `node:test` hook), so it mirrors the retry here.
-async function removeTempDir(directory: string): Promise<void> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      rmSync(directory, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      const transient =
-        code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY";
-      if (!transient || attempt >= 20) {
-        console.error(
-          `warning: could not remove temp dir ${directory}: ${String(error)}`,
-        );
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-  }
 }
 
 // After the child exits, the last teardown bytes it wrote may still be draining
@@ -313,9 +276,4 @@ async function main(): Promise<void> {
   console.log("Real-terminal lifecycle suite passed.");
 }
 
-main().catch((error: unknown) => {
-  console.error(
-    error instanceof Error ? (error.stack ?? error.message) : String(error),
-  );
-  process.exit(1);
-});
+runMain(main);

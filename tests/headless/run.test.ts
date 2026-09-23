@@ -659,6 +659,7 @@ test("two invocations: block under one instance, continue under a fresh instance
     launchWorkspacePath: workspace,
     runGroup: groupA,
     runExecution: mkExecution,
+    process: executionProcess,
   });
   const a = sink();
   assert.equal(
@@ -691,6 +692,7 @@ test("two invocations: block under one instance, continue under a fresh instance
     launchWorkspacePath: workspace,
     runGroup: groupB,
     runExecution: mkExecution,
+    process: executionProcess,
   });
   t.after(() => catB.close());
   const b = sink();
@@ -713,6 +715,7 @@ test("run resume reports a live foreign owner and --takeover continues while fen
     catalog,
     launchWorkspacePath: workspace,
     runGroup: first,
+    process: executionProcess,
     runExecution: ({ routing, owner }) =>
       executeRouting(routing, {
         owner,
@@ -758,6 +761,7 @@ test("run resume reports a live foreign owner and --takeover continues while fen
     catalog,
     launchWorkspacePath: workspace,
     runGroup: second,
+    process: executionProcess,
     runExecution: ({ routing, owner }) =>
       executeRouting(routing, {
         owner,

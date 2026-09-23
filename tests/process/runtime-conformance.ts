@@ -53,6 +53,7 @@ import { writeCommandBundle } from "../helpers/commandBundle.js";
 import { awaitSettled } from "../helpers/settleOperation.js";
 import { checkEntryDeclarations } from "../architecture/check-vendor-provenance.js";
 import { installReplayer } from "../harness/replayer.js";
+import { runMain, withTimeout } from "../helpers/standalone.js";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -1459,7 +1460,11 @@ function entryDeclarationSurface(): void {
 async function main(): Promise<void> {
   for (const scenario of cases) {
     try {
-      await withinScenarioBound(scenario.body(), scenario.name);
+      await withTimeout(
+        Promise.resolve(scenario.body()),
+        SCENARIO_TIMEOUT_MS,
+        `${scenario.name} did not settle within 20 seconds`,
+      );
       console.log(`  ok  ${scenario.name}`);
     } catch (error) {
       console.error(`FAILED ${scenario.name}`);
@@ -1469,25 +1474,4 @@ async function main(): Promise<void> {
   console.log("Process runtime conformance passed.");
 }
 
-function withinScenarioBound(
-  result: void | Promise<void>,
-  name: string,
-): Promise<void> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const elapsed = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(
-      () => reject(new Error(`${name} did not settle within 20 seconds`)),
-      SCENARIO_TIMEOUT_MS,
-    );
-  });
-  return Promise.race([Promise.resolve(result), elapsed]).finally(() => {
-    if (timeout !== undefined) clearTimeout(timeout);
-  });
-}
-
-main().catch((error: unknown) => {
-  console.error(
-    error instanceof Error ? (error.stack ?? error.message) : String(error),
-  );
-  process.exit(1);
-});
+runMain(main);

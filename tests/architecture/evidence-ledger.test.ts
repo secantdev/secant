@@ -19,6 +19,14 @@ const PROCESS_FREE_MARKER_EXCEPTIONS = new Set([
   // one launch submitted is refused before creation, so the wired runExecution and
   // fake Run Group never reach a Command, Git probe, or Harness child.
   "tests/application/launch-preparation.test.ts",
+  // Construct an Application through the compatibility helper but reach no Command,
+  // Git probe, or Harness child: catalog and projection behavior only, and the helper
+  // now injects a throwing Process stub (#200 A21), so none can silently reach the
+  // real Process without an explicit injection.
+  "tests/application/bundle-catalog.test.ts",
+  "tests/application/bundle-install.test.ts",
+  "tests/application/harness-catalog.test.ts",
+  "tests/application/projection-port.test.ts",
 ]);
 
 const SUBPROCESS_SOURCE_PATTERNS = [
@@ -29,6 +37,7 @@ const SUBPROCESS_SOURCE_PATTERNS = [
   /\binstallReplayer\(/,
   /\bwrite(?:Command|Repeat|Materialization)Bundle\(/,
   /\bopen(?:RunGroup|ArtifactRepo|HeadlessHarness)\(/,
+  /(?<!\.)\bcreateApplication\(/,
   /\bwireApplication\(/,
   /\bexecuteRouting\(/,
   /\bcheckEntryDeclarations\(/,
@@ -105,6 +114,7 @@ test("[evidence-ledger] discovery finds direct and indirect children without mat
     "writeRepeatBundle(options);",
     "writeMaterializationBundle(options);",
     "openRunGroup(home, workspace);",
+    "createApplication({ catalog });",
     "openArtifactRepo(runDir);",
     "openHeadlessHarness(t);",
     "wireApplication(options);",

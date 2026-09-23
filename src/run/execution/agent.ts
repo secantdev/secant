@@ -17,6 +17,7 @@ import type {
   HarnessIdentityRecord,
   RunOwner,
   TurnKind,
+  WorkingAreaResult,
 } from "../store/store.js";
 import type {
   DurableTurnRecorder,
@@ -220,6 +221,13 @@ export async function runAgent(
 
   // Each declared output is captured only from a receipt file at a fresh per-Attempt
   // path the prompt names (#215) — never parsed from assistant prose.
+  // Receipts live in the working area (#220); an unusable one is typed, not thrown.
+  if ((step.produces ?? []).length > 0) {
+    const area = owner.workingArea();
+    if (!area.ok) {
+      return mapTurnResult(workingAreaFailure(area), harness.prepared.profile);
+    }
+  }
   const receipts = prepareReceipts(step, owner, attemptId);
   const prompt =
     receipts.length === 0
@@ -659,23 +667,7 @@ function renderAgentPrompt(
   if (base.includes(WORKING_AREA_SLOT)) {
     // The exact directory composition granted the Harness at prepare (#214).
     const area = context.owner.workingArea();
-    if (!area.ok) {
-      return {
-        ok: false,
-        result: {
-          kind: "not-started",
-          detail: {
-            failure: {
-              phase: "launch",
-              category: "working-area-unavailable",
-              possibleEffects: "none",
-              diagnostics: `The Run working area '${area.problem.path}' is not a usable directory.`,
-              cause: area.problem.cause,
-            },
-          },
-        },
-      };
-    }
+    if (!area.ok) return { ok: false, result: workingAreaFailure(area) };
     base = base.replaceAll(WORKING_AREA_SLOT, area.path);
   }
   const filled = base.replace(promptSlotPattern(), (_match, name: string) =>
@@ -701,6 +693,24 @@ function renderAgentPrompt(
       skillLines.length === 0
         ? filled
         : `${filled}\n\n${skillLines.join("\n")}`,
+  };
+}
+
+/** The not-started result for an unusable Run working area (#214): no Turn ran. */
+function workingAreaFailure(
+  area: Extract<WorkingAreaResult, { ok: false }>,
+): TurnResult {
+  return {
+    kind: "not-started",
+    detail: {
+      failure: {
+        phase: "launch",
+        category: "working-area-unavailable",
+        possibleEffects: "none",
+        diagnostics: `The Run working area '${area.problem.path}' is not a usable directory.`,
+        cause: area.problem.cause,
+      },
+    },
   };
 }
 

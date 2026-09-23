@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "bundle": {
     "id": "dev.secant.matt-front",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "name": "Matt Front Spec",
     "description": "Grill the human about their launch idea, let them choose the tracker, then write the spec in the same Session."
   },

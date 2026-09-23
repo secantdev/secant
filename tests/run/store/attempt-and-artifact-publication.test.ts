@@ -632,9 +632,12 @@ test("an Attempt's output receipt directory is a fresh, Run-owned directory per 
   // Execution's Attempt ids carry a `:` that is not a legal Windows file name, so
   // the directory must still be created on every OS.
   const first = owner.outputReceiptDirectory("0.0:publish");
-  const runDir = join(groupDirOf(home), created.runId);
   assert.ok(isAbsolute(first));
-  const inside = relative(runDir, first);
+  // Inside the working area, the one directory a Harness is granted (#220), so
+  // the agent can write its receipt under a sandbox.
+  const area = owner.workingArea();
+  assert.ok(area.ok);
+  const inside = relative(area.path, first);
   assert.ok(inside !== "" && !inside.startsWith(".."), first);
   assert.deepEqual(readdirSync(first), []);
 

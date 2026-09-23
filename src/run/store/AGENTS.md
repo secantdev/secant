@@ -76,7 +76,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `publishAttempt` for a **succeeded Attempt with no outputs and no required outputs** stages no commit (an empty tree is not valid `git mktree` input) and settles with
   no version — the approve-reject authored-gate answer (#108), the interactive End Step, and an Agent-step Attempt declaring no output. Every other succeeded Attempt
   produces at least one output and stages a commit as before.
-- `outputReceiptDirectory` (#215) hands execution one emptied `receipts/<sha256(attemptId)>` directory under the Run directory, hashed because Attempt ids carry `:`.
+- `outputReceiptDirectory` (#215) hands execution one emptied `.receipts/<sha256(attemptId)>` directory inside the Run working area (#220), so the one Harness grant covers
+  it; hashed because Attempt ids carry `:`.
   It is candidate storage, never canonical and never fenced; only `publishAttempt` binds validated receipt bytes, and Run deletion removes it with the directory.
 - Harness Turn records (#116): `admitTurn` writes the `turn` row **before** the stdin frame is sent (the durable admission the Adapter awaits) — it upserts the named Session
   `open` and the rendered input as a `user` transcript entry in one transaction, and a fenced owner refuses it, proving the Turn `not-started` so no stdin is sent.
@@ -103,6 +104,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Run delete drops the registration and reclaims the directory as one lifecycle unit; with no foreign keys there is nothing to cascade — the directory holds the whole Run.
 - `workingArea()` (#214) lazily creates `working/` inside the published Run directory (so no `.creating` staging and pre-M6 Runs gain one on resume), returns its
   `realpath` so a sandbox comparing canonical roots matches the prompt, and is deliberately not a fenced write. Never nest private files under it: it is granted whole.
+  Agent-written Output receipts are its one Store-named subdirectory.
 - Resume reads registration only to answer `unknown-run`, then claims ownership in `run.db`. Listing and startup reconciliation open each registered Run
   Store to read ownership and close every handle before returning; a damaged store lists unowned, matching its exact-read Problem. A coordinator rebuild
   reads each readable Run's owner before restoring registration, so a live owner survives corruption and the following reconciliation decides its fate.

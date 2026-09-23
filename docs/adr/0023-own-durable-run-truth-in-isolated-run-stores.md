@@ -88,3 +88,7 @@ exposes only its canonical path, which execution names in prompts (`{{run:workin
 additional writable directory, so no client or Harness reconstructs a private storage path or is granted the database and repository as a group. A
 path that cannot be that directory is a typed failure that halts the Run before any Turn. Writing planning files into the Workspace or a shared
 Store directory was rejected: the first leaks planning state into the user's project, the second would widen a sandbox grant over private Run truth.
+
+Later the same day ([#220](https://github.com/secantdev/secant/issues/220)): per-Attempt Output receipts also live in a Store-named subdirectory of the working
+area, because the one grant must cover every file an agent is told to write. A receipt is Candidate output: only its validated bytes are published, through the
+ordinary Attempt publication, so the working area itself still holds no Run truth.

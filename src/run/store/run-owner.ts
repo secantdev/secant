@@ -34,6 +34,7 @@ import type {
   RunRecord,
   SelectedHarnessId,
   SelectHarnessResult,
+  WorkingAreaResult,
   WriteResult,
 } from "./store.js";
 import {
@@ -683,6 +684,22 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
     return result.kind === "fenced" ? result : { kind: "written" };
   }
 
+  function workingArea(): WorkingAreaResult {
+    const path = join(params.runDir, "working");
+    try {
+      // Throws when anything but a directory occupies the path.
+      mkdirSync(path, { recursive: true });
+      // Canonical, so a Harness sandbox comparing resolved roots (macOS
+      // /var → /private/var) sees the same directory the prompt names.
+      return { ok: true, path: realpathSync(path) };
+    } catch (cause) {
+      return {
+        ok: false,
+        problem: { kind: "working-area-unavailable", path, cause },
+      };
+    }
+  }
+
   return {
     runId: params.runId,
     record: params.record,
@@ -853,26 +870,16 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
         .update(attemptId)
         .digest("hex")
         .slice(0, 32);
-      const dir = join(params.runDir, "receipts", name);
+      // Inside the working area, so the one writable directory the Harness was
+      // granted (#214) covers the receipt the agent must write (#220).
+      const area = workingArea();
+      if (!area.ok) throw area.problem.cause;
+      const dir = join(area.path, ".receipts", name);
       rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true });
       return dir;
     },
-    workingArea() {
-      const path = join(params.runDir, "working");
-      try {
-        // Throws when anything but a directory occupies the path.
-        mkdirSync(path, { recursive: true });
-        // Canonical, so a Harness sandbox comparing resolved roots (macOS
-        // /var → /private/var) sees the same directory the prompt names.
-        return { ok: true, path: realpathSync(path) };
-      } catch (cause) {
-        return {
-          ok: false,
-          problem: { kind: "working-area-unavailable", path, cause },
-        };
-      }
-    },
+    workingArea,
     readDiagnostic(diagnosticId) {
       if (!/^[A-Za-z0-9-]+$/.test(diagnosticId)) return undefined;
       const path = join(diagnosticsDir, diagnosticId);

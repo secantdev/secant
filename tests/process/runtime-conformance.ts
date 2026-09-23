@@ -594,6 +594,13 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
       .at(-1)?.content;
     assert.equal(specPrompt?.split("the tracker I chose: Local.").length, 2);
     assert.match(specPrompt ?? "", /[\\/]to-spec[\\/]SKILL\.md/);
+    // The Local destination is the Run working area, never the Workspace (#220).
+    // This recording predates it, so its replayed file write still lands above.
+    const area = /Local tracker is the directory `([^`]+)`/.exec(
+      specPrompt ?? "",
+    )?.[1];
+    assert.ok(area !== undefined && !area.startsWith(workspace), specPrompt);
+    assert.ok(receiptPath.startsWith(area), receiptPath);
     // The reference is kept as a Run output for ticket planning.
     const specRef = done.outputs.find((output) => output.name === "spec-ref");
     assert.ok(specRef, "the spec reference is not a Run output");

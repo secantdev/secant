@@ -14,6 +14,8 @@ Do not write any files during this conversation — this is the interview, not t
 spec. I end the interview myself through Secant's End Step control; nothing
 either of us says in the conversation ends it.
 
-When you believe you understand the idea well enough to specify it, say so
-plainly and stop asking questions. A later step, after I choose where the spec
+Before you finish, sketch the seams at which the feature will be tested and
+confirm them with me, because the spec step cannot ask me questions. When you
+believe you understand the idea well enough to specify it, say so plainly and
+stop asking questions. A later step, after I choose where the spec
 lives, will ask you to write the spec from everything we discussed.

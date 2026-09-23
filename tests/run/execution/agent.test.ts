@@ -641,3 +641,31 @@ test("an Agent Step with no declared output gets no receipt instruction", async 
   assert.deepEqual(report, { outcome: "succeeded" });
   assert.equal(agent.inputs[0], "Publish the spec.\n");
 });
+
+test("a producing Step whose working area is unusable fails typed before any Turn (#220)", async (t) => {
+  const f = fixture(t);
+  const prepared = await preparedHarness(profile(), [{ result: COMPLETED }]);
+  t.after(() => prepared.close());
+  const agent = receiptWriting(prepared, () => undefined);
+  // Receipts live in the working area; a squatted area is typed, never a throw.
+  const owner: RunOwner = {
+    ...f.owner,
+    workingArea: () => ({
+      ok: false,
+      problem: {
+        kind: "working-area-unavailable",
+        path: "/squatted",
+        cause: undefined,
+      },
+    }),
+  };
+
+  const report = await executeWith(
+    { ...f, owner },
+    producingStep(),
+    agent.harness,
+  );
+
+  assert.deepEqual(report, { outcome: "failed" });
+  assert.deepEqual(agent.inputs, []);
+});

@@ -19,8 +19,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Terminal ordering is exact and load-bearing: on terminal an Adapter publishes remaining events, expires every still-outstanding request, closes the
   event producer, then settles the one authoritative result. No event is observable after the result settles. The fake enforces this with an
   `emit after result` guard; a real Adapter must hold the same order.
-- A Turn result may settle before its native child emits `close`. Claude Session reuse tracks which Turn owns the child, lets an already-settled close
-  win before the next send, and never attributes an old child's close to the next Turn; a still-live child may accept the next Turn in place.
+- A Turn result may settle before its native child emits `close`; an Adapter that reuses a child across Turns never attributes an old child's close to the
+  next Turn (the Claude Code mechanics are in [harness-adapters](../../docs/agents/harness-adapters.md)).
 - Operational failures are typed values (`HarnessFailure`, `ControlReceipt` rejections, `RecordingReceipt`, `CleanupReport`). Only caller-contract
   violations throw: a second concurrent Turn on one Prepared Harness, a Turn after `close`, or a Turn beyond what an Adapter can serve. Control races
   (`expired`, `already-settled`, `shape-mismatch`, `unsupported`) are rejected receipts, never throws.
@@ -44,19 +44,13 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Invariants (interrupt, recovery, cleanup)
 
-- Confirmed interruption uses the process Module's `interrupt(gracefulMs)`, which reports whether a forced escalation was needed. A graceful stop ends
-  the Turn `interrupted` (process-only); a force-kill or unconfirmed termination ends it `lost` with `interruption-unknown`. On Windows the process
-  Module has no graceful stage (a hidden console child cannot observe one, #127 A6 amended), so a live Claude Code is force-killed at once and every
-  Windows interrupt of a live Turn truthfully settles `lost`; the profile's interruption evidence says so there, and the conformance `interruptOutcome`
-  option (on both the interrupt/recovery and the approval-request case groups) pins it per OS. `onClosed` yields to an
-  in-flight interrupt so the two never race the result: a confirmed interrupt claims the process before awaiting, and the close path (`onClosed`) returns
-  early when `this.process !== owned`, leaving the interrupt to settle the one authoritative result.
-- Recovery is caller- and history-driven: a relaunch of a Session that already ran, or any Turn carrying `resume`, spawns with `--resume` (never a fresh
-  `--session-id`). Init state is per process. A resumed init that does not echo the coordinate is a `recovery`-phase failure that marks the Session
-  `unusable`; recovery never silently starts a fresh conversation.
-- Authentication is recognized from the stdout result (no typed auth field exists in the print-mode contract) and surfaced as the fixed
-  `AUTHENTICATION_REQUIRED` message only — the raw result never crosses the Seam, since it may quote a key. #115's recording pinned the signal: a
-  not-logged-in run returns `subtype:"success"` with `result:"Not logged in · Please run /login"`, so the auth check runs before the success branch.
+- A Turn settles `interrupted` only on confirmed interruption; a force-kill, lost connection, or unconfirmed termination settles it `lost` with
+  `interruption-unknown`. On Windows the process Module has no graceful stage (a hidden console child cannot observe one, #127 A6 amended), so a
+  process-signal interrupt of a live child there is a force-kill and truthfully settles `lost`. The profile's interruption evidence states what each
+  Harness delivers per OS, and the conformance `interruptOutcome` option (on both the interrupt/recovery and the approval-request case groups) pins it.
+- Recovery is caller- and history-driven: a relaunch of a Session that already ran, or any Turn carrying `resume`, resumes that exact native conversation.
+  A resume the native side does not acknowledge is a `recovery`-phase failure that marks the Session `unusable`; recovery never silently starts a fresh
+  conversation. Each Adapter's resume mechanics are in [harness-adapters](../../docs/agents/harness-adapters.md).
 
 ## Tests
 
@@ -66,16 +60,15 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   Structured clarifications, after-acceptance checkpoint, load-with-replay, and caller-contract violations remain fake-only. The fake performs load-with-replay:
   resumed Turn re-emits the Session's transcript history (`assistant-content`, `tool-activity`), drops a scripted entry that repeats a replayed one, then
   emits `REPLAY_BARRIER` (an `activity`) before any live event — history is historical by position, inside the closed vocabulary.
-- **`bun test` startup-signal race:** a Bun child's `process.on("SIGTERM")` handler is only honoured once installed — a SIGTERM delivered before the
+- Native Adapter and replayer conformance runs only in the standalone runtime-conformance program (#198), never under `bun test`; the layer rules are in
+  [testing](../../docs/agents/testing.md).
+- **Replayer startup-signal race:** a Bun child's `process.on("SIGTERM")` handler is only honoured once installed — a SIGTERM delivered before the
   child's top-level code runs hits the default disposition and kills it (this is a startup race, not a `bun test` limitation; plain `bun` shows the same
   window). So the replayer installs its SIGTERM handler at startup, and interrupt/close cases wait for the `session` event (init observed) before
   interrupting. Never signal a freshly spawned child before it has announced readiness.
 - The replayer's `case.json` carries the interrupt/recovery vocabulary: `ignoreSigterm` (swallow SIGTERM → force-kill path; moot on Windows, where every
   live child is force-killed regardless), per-turn `exitAfter` (exit without a result → lost/corruption), and a `resume` section replayed when the launch
   has `--resume`.
-- **Codex timeout split:** `handshakeTimeoutMs` bounds only the one-off `prepare` qualification (spawn → `initialize`/`account`/`model`); `controlTimeoutMs`
-  (defaults to it) bounds post-qualification live exchanges (session start/resume, Turn start/interrupt/steer acks). A stall-then-timeout case squeezes
-  `controlTimeoutMs`, never `handshakeTimeoutMs` — throttling the spawn+handshake there flakes `prepare` on a loaded Windows runner (the #148 CI flake).
 
 ## Read next
 

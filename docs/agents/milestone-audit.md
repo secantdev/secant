@@ -33,7 +33,7 @@ for the same question. ADR 0030 is a runtime-neutrality rule, not a zero-depende
 3. Every `package.json` dependency still earned by a live consumer.
 4. Every entry in the Bun-API allowlist under `tests/architecture/` still needed, and none added without an ADR 0030 reason.
 
-Licence checks stay with the M4 release gate.
+Licence coverage is the release legal-closure check ([release-consumers.md](./release-consumers.md)), not an audit row.
 
 ## Architecture checklist
 
@@ -62,18 +62,3 @@ The local OpenCode checkout is the comparison.
 - A finding whose fix needs an ADR or policy change becomes a wayfinder ticket on the map, stamped hand-over, and never blocks the milestone.
 - Implementation tickets outside the audit keep the obvious calls: adopt a dependency when the policy and OpenCode make it obvious, otherwise
   hand-roll the smallest thing and mark it `ponytail:`. [Change review](./change-review.md) keeps "purpose of each new dependency".
-
-## Pre-graded rows for `Audit: M1`
-
-M1 is the pilot. These rows enter the Dependency report table with the proposed verdict below and status _confirm_; the audit session fills
-the remaining columns, and the grilling may still overturn any row. Rejected at the decision: Effect Schema (a paradigm import, not a validation
-library), `yargs` (transitive weight; OpenCode is migrating off it), `cac` (small community).
-
-| Location                | Proposed verdict                                                                                                                |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Engine-range comparison | Adopt `semver`.                                                                                                                 |
-| Manifest validator      | Adopt `zod` v4; confirm per-field error paths against the existing manifest tests.                                              |
-| CLI parsing             | Adopt `commander` (zero transitive dependencies). `node:util.parseArgs` rejected: subcommands and help grow with every command. |
-| JSON canonicalization   | Keep hand-rolled: frozen, OpenCode hand-rolls it too.                                                                           |
-| Update stream           | Keep until a second consumer appears.                                                                                           |
-| ZIP codec               | Keep hand-rolled: frozen format, reproducible digest. Optionally reject Zip64 markers explicitly.                               |

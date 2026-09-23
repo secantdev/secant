@@ -8,8 +8,9 @@ Each shipped release channel is verified on the Windows x64, macOS arm64, and Li
 runs the compiled-binary smoke, archive, platform-package, npm-launcher, PowerShell installer, POSIX installer, and terminal-lifecycle scenarios as seven
 independent `continue-on-error` steps, then always aggregates their outcomes so every result stays visible and any non-success fails the job. The artifacts
 are assembled once on the Linux `build` job from the just-built candidate bytes through the one target manifest (`scripts/targets.ts`). Release-channel
-pure logic is unit-tested under `bun test` in `tests/release/` with no subprocess (the Bun 1.4.2 child-lifecycle defect, #149); real round-trips on real
-binaries remain in the consumer job, the way the compiled-binary smoke ([testing](./testing.md)) lives outside `bun test`. The per-OS `check` job's
+pure logic is unit-tested under `bun test` in `tests/release/` with no subprocess, because the semantic suite never reaches a real child (the
+evidence layers in [testing](./testing.md)); every real round-trip on real binaries below therefore lives only in the consumer job, like the
+compiled-binary smoke. The per-OS `check` job's
 `Process runtime conformance` step is the sibling layer for real child processes below the binary; it is not a consumer scenario ([testing](./testing.md)).
 
 ## Release Archive Consumer
@@ -21,9 +22,7 @@ and fails closed on any identity/version/digest disagreement. On the Windows x64
 extracts the matching archive and proves layout, executable mode, inner-binary digest, bundled `LICENSE`/`THIRD-PARTY-NOTICES.md`, native execution and
 version, and — on macOS — the strict ad-hoc signature. `tests/release/assemble.test.ts` unit-tests the pure logic — manifest facts and digests
 (`computeCandidate`), the immutability/identity/version/digest checks (`assertAgrees`), and the consumer's pre-extraction refusals — and spawns no
-subprocess: creating or extracting real archives there would add a concurrent first-spawn worker that tips over the Bun 1.4.2 child-lifecycle defect on
-the constrained Linux runner (#149). The archive create → extract → run round-trip on real binaries is therefore proven only by this CI job, the way
-the compiled-binary smoke lives outside `bun test`.
+subprocess. The archive create → extract → run round-trip on real binaries is proven only by this CI job.
 
 ## Platform Package Consumer
 
@@ -38,7 +37,7 @@ execution and version, and — on macOS — the strict ad-hoc signature. `tests/
 (`platformPackageJson`), the byte-identity anchoring to the archive candidate (`computePackages`), the immutability/identity/version/digest checks
 (`assertPackagesAgree`), the consumer's pre-install refusals (unknown target, wrong host, tampered/missing/malformed manifest), and its installed-contents
 refusals against a hand-staged directory (stale version, lifecycle script, unexpected/missing/tampered files, inner-binary digest, executable mode via
-`verifyInstalledPackage`) — and spawns no subprocess, for the same Bun 1.4.2 child-lifecycle reason (#149). Only the `bun pm pack` → `npm install` → run
+`verifyInstalledPackage`) — and spawns no subprocess. Only the `bun pm pack` → `npm install` → run
 round-trip on real binaries (npm's own os/cpu gating, mode preservation, native execution, macOS signature) is left to this CI job.
 
 ## npm Launcher Consumer
@@ -55,7 +54,7 @@ the before-spawn missing-optional-package diagnostic; and — the acceptance sea
 launched command: build + install the Test Repair Proof Bundle, launch it against the recorded Claude Code replayer to its authored Human Gate, and once
 answered reach `succeeded` and make the authored commit. `tests/release/launcher.test.ts` unit-tests the pure logic — the launcher package.json shape
 (`launcherPackageJson`), the host-key map (`launcherPlatforms`), and the launcher's own target selection and before-spawn diagnostics (`selectTarget`,
-`resolveExecutable`, with an injected resolver) — and spawns no subprocess, for the same Bun 1.4.2 child-lifecycle reason (#149). Only the
+`resolveExecutable`, with an injected resolver) — and spawns no subprocess. Only the
 install → launch → Proof Bundle round-trip on real binaries is left to this CI job. Real-platform unsupported-target detection is not exercised here
 (a real spawn cannot spoof `process.platform`); the `selectTarget` unsupported branch is proven deterministically in `bun test` instead.
 
@@ -66,7 +65,7 @@ The M4 artifact-level legal gate (spec [#137](https://github.com/secantdev/secan
 [tests/architecture/check-vendor-provenance.ts](../../tests/architecture/check-vendor-provenance.ts), which **stays** in `bun run check` — into a
 target-specific release gate. Unlike the channel consumers it is OS-independent (text and digest comparison, no binary to run), so it needs no matrix:
 it runs once, as the final step of the Linux `build` job (`scripts/inventory.ts`), the one place that has cross-compiled every target and installed every
-platform's @opentui native, and it spawns no child process, so it cannot trip the Bun 1.4.2 child-lifecycle defect (#149/#150). It derives the transitive
+platform's @opentui native, and it spawns no child process. It derives the transitive
 runtime closure **actually embedded** per target from the actual compiler inputs (a real `Bun.build` of the shared build input, walked through the
 sourcemap `sources`, each embedded file's version and licence read from the package that owns it on disk — the deepest `node_modules/` segment, so a
 hoisted or nested duplicate reports the bytes actually shipped), adds the one `@opentui/core-<os>-<cpu>` native per target from the one target manifest

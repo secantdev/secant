@@ -15,8 +15,8 @@ implementation-ticket packet are in [issue tracker](./issue-tracker.md); this fi
 ## Opening the next milestone
 
 1. List issues titled `M<n>:`. The next milestone is the lowest `n` without an issue; no issue at all means M0. Open it only when the previous
-   milestone is closed or the human says otherwise. A milestone whose curation the spine says is blocked (M6 by
-   [#41](https://github.com/secantdev/secant/issues/41)) waits for that blocker.
+   milestone is closed or the human says otherwise. A milestone whose curation the spine blocks waits for that blocker; a refactoring gate blocks
+   the milestone after it (for example G3 before M6).
 2. Title `M<n>: <spine title>`. Body sections, in order: **Delivers** (the spine row plus amendments), **Hard constraints** that apply,
    **Gate introduced**, **Done when** (every ticket closed and the gate green on the three-OS matrix). No file paths in the body.
 3. Curate one `## Starting context` comment per the issue-tracker rules. M0 and M1 inputs are listed in the resolution and its amendment; later

@@ -13,8 +13,7 @@ baseline could change production code or start a prototype; that phase is over.
 
 ## Scope
 
-- Establish a green minimum verification gate and align runtime declarations, types, build targets, dependencies, and verification environments before
-  Crucible coding or prototype work begins.
+- Keep the minimum verification gate green and runtime declarations, types, build targets, dependencies, and verification environments aligned.
 - Apply structural standards as a quality ratchet to new production code and to legacy code whose seam a change crosses.
 - Leave untouched legacy code alone unless current work depends on changing it.
 - Unused is not dead. In a project still being built, declared surface (exports, Interface members, vendored helpers, ADR-named contracts) awaits

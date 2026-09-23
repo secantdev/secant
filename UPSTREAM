@@ -100,15 +100,15 @@ copy date. Every path comes from the OpenCode checkout at commit 1ead9e3d7f.
        diff viewer's two-pane shell.
      - Drops diff-specific separators, edge glyphs, border variants, and the
        upstream theme dependency.
-     - Adds a title and leading focus glyph so either Bundle-catalog pane reads
-       as focused without colour, including after the panes stack.
+     - Adds a title and leading focus glyph so either pane of both catalogs
+       reads as focused without colour, including after the panes stack.
 
 7. src/tui/vendor/scroll.ts
    Copied from: packages/tui/src/feature-plugins/system/diff-viewer.tsx
    Date: 2026-09-22
    Local modifications:
      - Reduces the diff viewer's keyboard `scrollBy` paths to one vertical
-       helper for the Bundle inspector.
+       helper for the catalog inspectors.
      - Computes and applies the bounded destination explicitly, retaining
        clamping at the first and last line as a tested catalog invariant.
 
@@ -123,7 +123,7 @@ studied for architecture and behaviour.
 
   src/tui/vendor/theme-context.tsx   rebuilt against packages/tui/src/context/theme.tsx
   src/tui/approval-dialog.tsx        rebuilt against packages/tui/src/ui/dialog-confirm.tsx
-  src/tui/home.tsx                   rebuilt against packages/tui/src/routes/index.tsx (the Home route)
+  src/tui/home.tsx                   rebuilt against packages/tui/src/routes/home.tsx (the Home route)
   src/tui/bundle-catalog.tsx         rebuilt against packages/tui/src/ui/dialog-select.tsx and
                                      packages/tui/src/feature-plugins/system/diff-viewer.tsx
   src/tui/bundle-catalog-inspector.tsx
@@ -206,12 +206,17 @@ Added 2026-09-18 for the M3 Run controls (#99, #117, #120, #121, #122). M3 rebui
 exactly the components OpenCode factors out; no OpenCode source crosses. Each records
 the upstream it studied, in the `packages/tui/src/…` path form.
 
-  src/tui/run-workbench.tsx     approval control studied packages/tui/src/routes/session/permission.tsx;
-                                the bottom-region modal stack and its disabled-prompt rule studied
-                                packages/tui/src/routes/session/index.tsx
+  src/tui/run-workbench.tsx     approval control studied packages/tui/src/routes/session/permission.tsx
+                                (now in run-request-control.tsx); the bottom-region modal stack and
+                                its disabled-prompt rule studied packages/tui/src/routes/session/index.tsx
   src/tui/run-inspection.tsx    split out of run-workbench.tsx (#99); inherits its
                                 packages/tui/src/routes/session/index.tsx provenance
   src/tui/run-timeline-rows.ts  split out of run-workbench.tsx (#120); inherits its
+                                packages/tui/src/routes/session/index.tsx provenance
+  src/tui/run-request-control.tsx
+                                split out of run-workbench.tsx (#135, A33); inherits its
+                                packages/tui/src/routes/session/permission.tsx provenance
+  src/tui/run-gate-control.tsx  split out of run-workbench.tsx (#135, A33); inherits its
                                 packages/tui/src/routes/session/index.tsx provenance
 
 What was taken and changed:
@@ -281,6 +286,9 @@ were studied against OpenCode at 1ead9e3d7f; no OpenCode source crosses.
   src/tui/harness-catalog.tsx   adapted from src/tui/bundle-catalog.tsx (internal
                                 reuse, #197), not extracted from OpenCode; it
                                 inherits that screen's provenance above
+  src/tui/harness-catalog-inspector.tsx
+                                inspector submodule of harness-catalog.tsx (#197);
+                                inherits its provenance
 
 What was taken and changed:
 
@@ -292,11 +300,12 @@ What was taken and changed:
              default` first; the choices come from the launch-preparation
              Projection, and there are no favourites or recents.
   freshness (from workspace-label.tsx):
-    Taken:   a worded connection status beside the label (connected,
-             connecting, disconnected, error).
-    Changed: the Workbench words view freshness -- loading, catching up, or
-             disconnected with its last-confirmed time -- labelled as not Run
-             state; it gates the Run controls and `r` reconnects.
+    Taken:   a status-coloured marker beside the label over four states
+             (connected, connecting, disconnected, error).
+    Changed: Secant words the state, and it is view freshness -- loading,
+             catching up, or disconnected with its last-confirmed time --
+             labelled as not Run state; it gates the Run controls and `r`
+             reconnects.
   status glyph (from dialog-mcp.tsx and dialog-select.tsx):
     Taken:   a glyph paired with a word so colour is never the only signal, and
              a leading marker on the active row.

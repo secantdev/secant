@@ -52,8 +52,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   home stand in for two processes. Previous-release databases migrate through the embedded Drizzle journals at open. The marker lands in `attempt_log`
   (not an `attempt` row); the resume skip cursor reads that log, so it is the marker's
   `indeterminate` outcome — not any absence from the log — that keeps the succeeded-attempt cursor unchanged and re-runs the interrupted Step.
-- Reconciliation splits by stored state, so execution stores `blocked` before returning a checkpoint pause. A dead-owner open then keeps the pending checkpoint
-  `blocked` and releases only its ownership; it never invents an interrupted Attempt.
 - An acquired owner releases through its fencing epoch. A stale owner whose Run was taken over cannot clear the new owner during its own cleanup.
 - Diagnostics retention (ADR 0023, #96): `diagnostics/` has had a writer since #88, so the 90-day expiry is a best-effort prune at group open (`pruneDiagnostics`,
   driven by an injectable clock) — files with an mtime at or before `now - 90 days` are deleted, newer ones kept. It walks Run directories on the filesystem, not
@@ -72,7 +70,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   row whose Attempt id is not yet in `attempts` (the Projection derives the authored gate from it, distinct from a derived checkpoint).
   Unlike the derived checkpoint, the authored gate is answered by **settling its Attempt through `publishAttempt`** (into `attempt_log`, so resume skips the gate):
   `free-text` publishes the `text` answer as the declared output and advances `running`; approve settles succeeded with no output; reject settles failed and rests
-  `failed`. The `pending_gate.shape` column is a closed enum validated with `z.enum` at the read ingress (D7), like `attempt_log.outcome` and `gate_answer.answer`.
+  `failed`.
 - `publishAttempt` for a **succeeded Attempt with no outputs and no required outputs** stages no commit (an empty tree is not valid `git mktree` input) and settles with
   no version — the approve-reject authored-gate answer (#108) and every Agent-step Attempt (#116, which produces no Artifacts). Every other succeeded Attempt produces at
   least one output and stages a commit as before.
@@ -82,8 +80,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   append only. The Attempt's `effective_model` is set through `publishAttempt` (the `attempt` row is written after the Turn settles), never through `settleTurn`.
 - Turn `kind` (#126): `admitTurn` records the Crucible Step kind that produced the Turn — `agent` or `interactive-agent` — in the nullable `turn.kind` column, Crucible-owned
   durable truth independent of `origin` (`managed`/`human`). The column is nullable so a row admitted before it existed reads its kind back **null** (undefined in
-  `TurnRecord`) — a legacy row whose kind is genuinely unknown, never fabricated to a guess. Unlike the enum columns domain logic branches on here, the store returns `kind`
-  raw; the Projection narrows it to the client union at its read ingress (D7).
+  `TurnRecord`) — a legacy row whose kind is genuinely unknown, never fabricated to a guess.
 - The `attempt` row also carries the normalized Harness identity and steer evidence of an Agent-step Attempt (#125, #134):
   `harness`/`executable`/`executable_version` plus `steer_available`/`steer_evidence`, written together by `publishAttempt` from the prepared profile (all null for a
   Command/Gate Attempt). The `PublishAttemptRequest` union permits an identity plus optional model or neither, never a new model-only row. `harnessEvidence()` reads both
@@ -106,5 +103,5 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 ## Tests
 
-- Store Interface tests are split by concern into `ownership-and-recovery.test.ts`, `attempt-and-artifact-publication.test.ts`, and
-  `session-and-transcript-evidence.test.ts`; keep every file independently runnable with explicit fixtures.
+- Store Interface tests are split by concern into `ownership-and-recovery.test.ts`, `attempt-and-artifact-publication.test.ts`,
+  `session-and-transcript-evidence.test.ts`, `materialization.test.ts`, and `reconcile-turn.test.ts`; keep every file independently runnable with explicit fixtures.

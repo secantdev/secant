@@ -22,7 +22,7 @@ import { useTheme } from "./vendor/theme-context.js";
 // The Previous Runs list (#92): the Workspace's earlier Runs, newest durable
 // activity first, grouped Today / Yesterday / Older, each row carrying only the
 // Run id, activity time, live marker, and Bundle human name (the Bundle name truncates last on
-// a small width). Selection mirrors bundle-list.tsx — a clamped active index moved
+// a small width). Selection is a clamped active index moved
 // by up/down, Enter opens the selected Run's Workbench, Escape returns to Home,
 // the leading "› " glyph reads focus without colour. `f` toggles the Resumable
 // filter (halted+failed). Older Runs load automatically as the selection nears the

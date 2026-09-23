@@ -18,28 +18,17 @@ The gate separates three independently attributable, blocking layers (ADR 0027's
   terminal-lifecycle program share their runner helpers (timeouts, exit, temp-dir cleanup) in `tests/helpers/standalone.ts`.
 - **Compiled-binary acceptance** exercises Command, Harness, interruption, recovery, and Git through the copied binary in the consumer job.
 
-The checked-in [subprocess migration ledger](../subprocess-test-migration-ledger.md) maps every legacy spawning test assertion to its replacement layer.
-Its row must exist before an assertion is migrated. Migrate each row independently: after its named replacement has passed on Windows, macOS, and Linux,
-remove the old subprocess assertion and mark that row `done` in the deletion change. Delete a whole old file only when all of its rows are `done`. Do not
-mask a failure with a retry, sleep, timeout increase, or silent assertion removal in any layer. The issue #177 stress prototype is branch-only
-investigation evidence and stays out of this tree.
+The checked-in [subprocess migration ledger](../subprocess-test-migration-ledger.md) is complete: every row is `done` and stays as a historical coverage
+record. A new real-spawn assertion goes straight to standalone runtime conformance or compiled-binary acceptance, never into the semantic suite. Do not
+mask a failure with a retry, sleep, timeout increase, or silent assertion removal in any layer.
 
-The canonical test script (`scripts/test.ts`) runs three isolated file workers on every OS (`--parallel=3`). The enabler is a spawn-free semantic suite, not an
-upstream Bun fix: every suite that reached a real child under the runner has moved to standalone runtime conformance — the last two, the Claude Code and Codex
-Harness suites, in [#198](https://github.com/secantdev/secant/issues/198) — so no worker spawns a child at startup and the Bun 1.4.2 defect can no longer fire.
-That defect was real, not a preference: on a CPU-constrained CI runner, workers each spawning a child at startup occasionally made Bun drop a child's
-`exit`/`close`/stdio events entirely (the child exits, but the spawn never settles and the test times out at 30s). It first appeared on the macOS arm64 runner
-([#149](https://github.com/secantdev/secant/issues/149)) and later on the ubuntu-latest runner ([#150](https://github.com/secantdev/secant/issues/150)), which
-forced one worker there, and the issue #172 calibration then rejected three workers on the public `windows-latest` runner (4 logical processors and
-17,174,360,064 physical-memory bytes in [run 35507654564](https://github.com/secantdev/secant/actions/runs/35507654564)) with the same spawn-lifecycle
-symptoms — scattered 30 s child-process timeouts, an indeterminate Command attempt, a failed Harness schema probe. With every real-child spawn out of the suite
-that cause is gone, so the count is tuned by the split-out per-step CI timing in `check.yml` and held at three, where it stops paying off. The `bun test` step is
-slow only on the Windows runner (~190 s versus ~20 s on Linux and macOS) and is I/O-bound, not CPU-bound: the tests each open a temp dir and a per-test SQLite
-database, and the workers contend on the runner's disk rather than overlapping, so effective parallelism plateaus near three (raising to four moved the Windows
-`Test` step by ~0 s). The remaining Windows cost is the tests' own disk I/O, which no worker count reduces. Isolation stays load-bearing: each file runs in its
-own worker, so module-level helpers and environment changes never leak across files.
-Tests within each file remain sequential; do not replace file parallelism with `--concurrent`, which would race their shared fixtures. Should child-lifecycle
-flakiness return, keep the spawn out of the semantic suite — never a retry, sleep, or timeout increase.
+The canonical test script (`scripts/test.ts`) runs three isolated file workers on every OS (`--parallel=3`). Three is safe only because no worker spawns a
+child: under the Bun 1.4.2 child-lifecycle defect ([#149](https://github.com/secantdev/secant/issues/149)), workers each spawning a child at startup on a
+CPU-constrained runner occasionally lost the child's `exit`/`close`/stdio events, and the spawn never settled. The count is tuned by the per-step CI timing
+in `check.yml`: the Windows `bun test` step is disk-I/O-bound, so parallelism plateaus near three and more workers buy nothing. Isolation stays
+load-bearing: each file runs in its own worker, so module-level helpers and environment changes never leak across files. Tests within each file remain
+sequential; do not replace file parallelism with `--concurrent`, which would race their shared fixtures. Should child-lifecycle flakiness return, keep
+the spawn out of the semantic suite — never a retry, sleep, or timeout increase.
 
 Package smoke tests copy the produced Bun compiled single-file executable out of `dist/` into an isolated temporary location and exercise it there. They
 are the CI acceptance seam for headless work and do not invoke a real Harness. This is the one home for the package-smoke enumeration — the support matrix

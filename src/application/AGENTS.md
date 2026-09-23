@@ -36,33 +36,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   so a later Attempt never moves an earlier event. ISO 8601 sorts lexicographically, so the string compare is the time compare.
 - When the Attempt log ends on a passing Repeat Verdict, projection advances beyond the group before inspecting the next node. An authored Human Gate already has a
   durable `pending_gate` then but deliberately has no Attempt-log entry until answered; parking on the deciding Command would hide the gate and its answer Offer.
-- Run settlement is deferred (#98 S1): `runAndSettle`/the answer-continue branch start the execution promise and `submit` returns `admitted` synchronously; the
-  `finally` releases the owner only after a resting outcome and settlement publishes after it. A `blocked` Run keeps its owner with no execution promise until answered.
-  One `AbortController` per live Run lives in the `runs` map. The Application never imports the
-  execution `RunCancelledError`: it aborts its own controller, so `tracking.abort.signal.aborted` in the catch is exactly "our cancel/signal fired", and the reason
-  (`CANCEL_ABORT` vs `SIGNAL_ABORT`) decides the rest — a cancel writes `cancelled` through the held owner, a signal leaves the claim live for the next open to reconcile.
-- `cancel-run` is cancel-as-abort for active work in this process; a held blocked Run is rested directly, a non-live blocked Run is acquired and rested, and a Run live
-  elsewhere takes the fresh-owner epoch-bump path. `shutdown()` has two phases: close and release blocked Runs without changing their state, then abort and await running
-  work with `SIGNAL_ABORT`, leaving those ownership records live for startup reconciliation.
-- `interrupt-turn`/`steer-turn` (#118) reach a live Agent Turn through the same one `AbortController`: `interrupt-turn` aborts it with `INTERRUPT_TURN_ABORT`, which the
-  execution Module (owner of the reason strings, imported from there) translates into `turn.interrupt()` at the Harness Seam. All three reasons stop the live Turn; the reason
-  decides the rest — `INTERRUPT_TURN_ABORT` and `SIGNAL_ABORT` map the interrupted/lost Turn to a `cancelled`/`indeterminate` Attempt that rests the Run `halted` in-process
-  (no `RunCancelledError` thrown, so `runAndSettle` returns through its normal path), while `RUN_CANCEL_ABORT` throws `RunCancelledError` so cancel-run writes `cancelled`.
-  Both `interrupt-turn` and `steer-turn` are offered only while a live (unsettled) Turn exists in this process; a control naming a settled Turn is rejected as a value. The
-  steer Offer is discriminated on the prepared profile's steer evidence (live first, then persisted with the Attempt), never Adapter prose above the Seam: a Harness with
-  native steer (Codex) offers it `available` with the live turnId, one without (Claude Code) offers it `available:false` with the evidence as `reason` (#148). Unlike
-  interrupt, steer does **not** use the AbortController — it keeps the Turn working. `submitSteerTurn` refuses an unavailable profile with `steer-unavailable` before any
-  native call, else reaches the live Turn's `tracking.live.steer` (bound by `driveHarnessTurn` over `turn.steer` via the `RequestChannel.bindSteer` hook, unbound at Turn end
-  alongside `bindAnswer`); a native control race settles `steer-rejected`, a stale/settled turnId `turn-control-rejected`, an accepted steer `applied`, Run still running.
-  `resume-run` continues a `detached` Session in the same Claude Code Session because the executor reads
-  the stored Session availability and passes its coordinate as `resume`; a Session recorded `unusable` fails the Attempt without ever opening a fresh Session (ADR 0022).
-  The one `AbortController` per Run means the three reasons race: a `cancel-run` and an `interrupt-turn` submitted concurrently for the same live Run both `abort()` it, and
-  whichever fires first sets the reason the executor reads, so the loser's Operation still settles `applied` while the Run rests in the winner's state. This is the accepted
-  extension of the pre-existing two-way (`CANCEL_ABORT` vs `SIGNAL_ABORT`) race — both callers intend to stop the Run, and the append-only Attempt log records what actually
-  happened — not a new class of bug.
-- A takeover that only re-owns a Run resting `blocked` settles synchronously in `runAndSettle` (it re-fences the owner, leaves the Run blocked, runs no execution). `startRun`
-  must NOT set `tracking.promise` for it — the `promise === undefined` predicate is exactly what makes cancel/shutdown write the rest and release the owner rather than abort a
-  dead signal and leave the Run stuck blocked with a leaked owner. The gate is `tracking.takeover === true && tracking.state === "blocked"`, captured before `runAndSettle`.
 - `liveElsewhere` (a Run live in another process, owner pid alive) is refused before resume/answer claim anything (`run-live-elsewhere`, owner named), and `readResource`
   refuses it too; `listRuns` throwing on a malformed row is caught in cancel/delete so nothing throws out of `submit` (A4).
 - The client `RunStateName` has no `created` and gains `cancelled` (A7); the Run Store still records `created` internally, and `toRunState` maps it to `running` for the
@@ -80,39 +53,21 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   draft is otherwise ready and a model is requested; a direct `submitLaunch` skips it, so a bad model surfaces at `prepare`, not as a pre-create refusal.
 - The Agent executor's Turn writes (`admitTurn`/`appendTurnEvent`/`settleTurn`) go through the raw owner (not intercepted by `observedOwner`), so they push no **durable**
   snapshot; the Turn's durable timeline, Session availability, and effective model surface on the next intercepted write (the Attempt's `publishAttempt`). The live lane is
-  separate — Turn activity reaches an open client through the live overlay below (#117), not through this durable write.
-- The private `live-overlay.ts` channel carries a `generation` that a raised or settled request bumps, each pushing a fresh overlay, so an answer formed against a
-  superseded generation is refused as stale. A `preview`-only observation is a coalesced update that deliberately does **not** bump the generation, so an in-flight answer
-  stays valid across it (#117).
-- At Turn end `bindAnswer(undefined)` clears any still-outstanding request, bumps the generation, and sets the live phase to `settling` before announcing the overlay, so a
-  resumed Run starts clean. The durable `request-expired` timeline row is execution's write, not the live lane's.
-- A **durable** push (`pushRunUpdate`) fans out to this Run's observers **and** every Run-list observer (`pushRunListUpdates`); a **live overlay** channel push
-  reaches this Run's observers only. A late-joining observer catches up on the current overlay at open, so a follower connecting after a request was raised still sees it.
-- An approval Request's answer names its own source — `human` or `client-policy` (`HarnessAnswerSource`); the client declaring provenance is what lets the durable timeline
-  render "answered by client policy" (`run-projection`) without the Adapter knowing a client policy exists.
-- By design a client can receive live and preview updates for a Turn whose durable start it never saw: the late-join catch-up replays the current overlay at open, so a
-  headless follower opening mid-Turn observes the live request even though its durable Turn-start snapshot predates the connection.
+  separate — Turn activity reaches an open client through the live overlay (#117, [run-control](../../docs/agents/run-control.md)), not through this durable write.
 - The `run` Projection exposes the immutable stored semantic id as `run.selectedHarness` before any Attempt and
   independently exposes the latest Agent-step Attempt's normalized name/executable/version as `run.harness` plus its sibling `effectiveModel` (#125, #147).
   Resume may replace only the observed fields; Command-only Runs omit both selection and observations.
-- `send-interactive-turn`/`end-interactive-step` (#122) drive an interactive-agent Step the Run rests `blocked` at. The executor records **no** durable gate — the block is
-  derived from the current Step being `interactive-agent` (the same signal the TUI blocked-basis reads), and no Attempt settles until End. `beginInteractive` reuses the held
-  owner (a blocked Run keeps it) or resumes+acquires a reopened one, then re-derives to confirm the Run is blocked at the named Step. `send` drives one human Turn (origin
-  `human`, verbatim text as the transcript input) through the opaque Step driver against that owner and stays `blocked` between Turns (owner held, no execution promise,
-  ADR 0031); the Turn's writes bypass `observedOwner`, so it `pushRunUpdate`s the new transcript itself. `end` publishes the Step's derived Attempt
-  (`interactiveStepAttemptId`, an empty succeeded Attempt that stages no commit) with `advanceState: "running"` and re-drives execution, which skips the settled Step and
-  reuses its Session. Both set `tracking.promise` (via a `start*` helper) so cancel-run/interrupt-turn find and abort a live human Turn; the abort reason decides the rest as
-  the answer path does. `send` is refused blank at admission (before any stdin); `end` mid-Turn (a live Turn) is refused as a value.
 - `deriveRun`'s walk assumes `attempt_log` holds only per-Step Attempts, but the Run Store already appends the reconciliation `indeterminate` marker row
   there (see `store/AGENTS.md`). The marker is harmless only because its outcome is not `succeeded`, not because the walk excludes it — keep that true if
   you add marker rows.
-
-## Structure
-
 - `createApplication` stays one closure on purpose: its regions share the mutable `runs` map, operations map, and observer sets, it has one caller
-  (composition), and no second adapter exists, so extracting a block would only pass a wide context object across a shallow Seam (#199 A1). In order:
-  1. State, observers, `observedOwner`, and the execution drivers (`runAndSettle`, `startRun`).
-  2. Projection dispatch (`openProjection`, `openRunProjection`); the catalog and launch-preparation families live in their own files.
-  3. Launch and resume (`submitLaunch`, `resumePreconditions`, `submitResume`).
-  4. Gate and Harness-request answering, then Turn interrupt and steer (`submitAnswer` through `steerTurnAndSettle`).
-  5. Interactive turns (`beginInteractive` through `runInteractiveEnd`), then cancel, delete, read-acquire, and `shutdown`.
+  (composition), and no second adapter exists, so extracting a block would only pass a wide context object across a shallow Seam (#199 A1).
+
+## Read next
+
+- Read [run-control](../../docs/agents/run-control.md) before changing deferred settlement, cancel or shutdown, Turn interrupt or steer, takeover, the
+  interactive-Step drive, or the live overlay; the abort-reason mapping is [execution's](../run/execution/AGENTS.md).
+- `createApplication`'s regions, in order: (1) state, observers, `observedOwner`, and the execution drivers (`runAndSettle`, `startRun`); (2) Projection dispatch
+  (`openProjection`, `openRunProjection`), with the catalog and launch-preparation families in their own files; (3) launch and resume (`submitLaunch`,
+  `resumePreconditions`, `submitResume`); (4) gate and Harness-request answering, then Turn interrupt and steer (`submitAnswer` through `steerTurnAndSettle`);
+  (5) interactive turns (`beginInteractive` through `runInteractiveEnd`), then cancel, delete, read-acquire, and `shutdown`.

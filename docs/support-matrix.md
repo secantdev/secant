@@ -12,11 +12,11 @@ Each cross-compiled single-file binary is built and then smoked on its own opera
 request. The `build` job cross-compiles all three targets; the `consumer` job's `Compiled-binary smoke` step runs against the matching binary on the
 matching runner. The scenarios it covers are enumerated once in [testing guidance](./agents/testing.md) — this row does not restate them.
 
-| OS      | Architecture | Binary                   | Evidence                                                                                                                                                                                                              |
-| ------- | ------------ | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows | x64          | `secant-windows-x64.exe` | M4 candidate validation, native `Compiled-binary smoke` step on `windows-latest`, pass ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868946))                             |
-| macOS   | arm64        | `secant-darwin-arm64`    | M4 candidate validation, native `Compiled-binary smoke` step on `macos-latest`, pass including `codesign --verify` ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868927)) |
-| Linux   | x64          | `secant-linux-x64`       | M4 candidate validation, native `Compiled-binary smoke` step on `ubuntu-latest`, pass ([run 35456179025](https://github.com/secantdev/secant/actions/runs/35456179025/job/105931868913))                              |
+| OS      | Architecture | Binary                   | Evidence                                                                                                                                                                                                             |
+| ------- | ------------ | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows | x64          | `secant-windows-x64.exe` | M5 baseline (push) run, native `Compiled-binary smoke` step on `windows-latest`, pass ([run 35817425585](https://github.com/secantdev/secant/actions/runs/35817425585/job/107042037068))                             |
+| macOS   | arm64        | `secant-darwin-arm64`    | M5 baseline (push) run, native `Compiled-binary smoke` step on `macos-latest`, pass including `codesign --verify` ([run 35817425585](https://github.com/secantdev/secant/actions/runs/35817425585/job/107042037066)) |
+| Linux   | x64          | `secant-linux-x64`       | M5 baseline (push) run, native `Compiled-binary smoke` step on `ubuntu-latest`, pass ([run 35817425585](https://github.com/secantdev/secant/actions/runs/35817425585/job/107042037037))                              |
 
 ## Terminals
 
@@ -41,6 +41,11 @@ real-Harness or three-OS parity claim.
 The M4 validation recorded both Harness passes on Windows x64 against candidate
 binary SHA-256 `593ee7ae861807c8e0fc79f9fe17e9000246411e8aa0a5ee9df07632e138bc51`.
 These rows make no macOS, Linux, or cross-operating-system real-Harness claim.
+
+Three-OS replay evidence comes from the `check` job's `Process runtime conformance` step (standalone runtime conformance,
+[ADR 0027 amendment 2026-09-21](./adr/0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md);
+`tests/process/runtime-conformance.ts`), which drives the real Adapters against recorded-protocol replayers; it is replay evidence, not
+installed-Harness evidence.
 
 | Harness     | OS/architecture | Installed version | Evidence                                                                                                                              |
 | ----------- | --------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------- |

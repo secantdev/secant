@@ -26,9 +26,18 @@ interrupt, recovery, and test invariants every Adapter shares stay in [the Harne
 - `acceptInit` compares the native `session_id` to the minted coordinate. A mismatch on a **resume** is a `recovery`-phase `recovery-unacknowledged` failure
   that marks the Session unusable (never a silent fresh conversation); a mismatch on a **fresh launch** is `not-started`/`init-session` — the minted id was
   simply never echoed, so the Turn never started.
-- Authentication is recognized before the success branch, but the guard fires only when `isAuthenticationResult(frame)` and (`subtype !== "success"` or
-  `is_error === true`): the pinned not-logged-in signal is `subtype:"success"` with `is_error:true`, so a real answer whose text merely quotes a login
-  phrase settles `is_error:false` and stays a completed Turn. The raw result never crosses the Seam — only `AUTHENTICATION_REQUIRED` does.
+- Authentication is recognized from the stdout `result` frame, since print mode has no typed auth field. #115's recording pinned the not-logged-in signal
+  as `subtype:"success"` with `is_error:true` and `result:"Not logged in · Please run /login"`, so the check runs before the success branch, but the guard
+  fires only when `isAuthenticationResult(frame)` and (`subtype !== "success"` or `is_error === true`): a real answer whose text merely quotes a login phrase
+  settles `is_error:false` and stays a completed Turn. The raw result never crosses the Seam (it may quote a key) — only `AUTHENTICATION_REQUIRED` does.
+- Session child reuse: a Turn result may settle before the child emits `close`. The Session tracks which Turn owns the child, lets an already-settled close
+  win before the next send, and never attributes an old child's close to the next Turn; a still-live child may accept the next Turn in place.
+- Interruption uses the process Module's `interrupt(gracefulMs)`, which reports whether a forced escalation was needed: a graceful stop settles
+  `interrupted`, a force-kill `lost`, so a live Claude Code on Windows is force-killed at once and every Windows interrupt of a live Turn settles `lost`.
+  `onClosed` yields to an in-flight interrupt so the two never race the result: a confirmed interrupt claims the process before awaiting, and `onClosed`
+  returns early when `this.process !== owned`, leaving the interrupt to settle the one authoritative result.
+- Resume spawns with `--resume` (never a fresh `--session-id`) for a relaunch of a Session that already ran or any Turn carrying `resume`. Init state is
+  per process.
 - Session unusability is stored as a private `unusableReason` on the Session, set by `markUnusable` when a resume is not acknowledged; the Turn-start path
   (`submit`) reads it first and fails every further Turn with the same recovery failure, never opening a fresh conversation.
 
@@ -46,4 +55,7 @@ interrupt, recovery, and test invariants every Adapter shares stay in [the Harne
 - `CodexTurn` keeps approval correlation and native control together because both share terminal-ordering state. A third Harness needing the same shapes
   triggers their split; before then, splitting only relocates coupling.
 - Codex close rejects new work, expires requests, attempts bounded native interruption, closes stdin, and reaps the tree; cleanup cannot rewrite Turn truth.
+- Timeout split: `handshakeTimeoutMs` bounds only the one-off `prepare` qualification (spawn → `initialize`/`account`/`model`); `controlTimeoutMs`
+  (defaults to it) bounds post-qualification live exchanges (session start/resume, Turn start/interrupt/steer acks). A stall-then-timeout test squeezes
+  `controlTimeoutMs`, never `handshakeTimeoutMs` — throttling the spawn+handshake there flakes `prepare` on a loaded Windows runner (the #148 CI flake).
 - Codex inherits user environment/home; unauthenticated becomes the fixed separate-login remediation, and no account or credential crosses the Seam.

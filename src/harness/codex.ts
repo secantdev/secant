@@ -2,11 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  spawnCommand,
-  spawnOwnedProcess,
-  type OwnedProcess,
-} from "../process/process.js";
+import type { OwnedProcess, ProcessAdapter } from "../process/process.js";
 import {
   APPROVAL_DECISIONS,
   type CleanupReport,
@@ -96,7 +92,6 @@ export interface CodexAdapterOverrides {
   readonly controlTimeoutMs?: number;
   readonly cleanupTimeoutMs?: number;
   readonly probeRevision?: () => string;
-  readonly spawn?: typeof spawnOwnedProcess;
   /** Recorder-only observation of the exact schema, protocol/stderr bytes, and
    *  shutdown. Production passes none; native data never reaches a caller. */
   readonly recordingObserver?: CodexRecordingObserver;
@@ -122,15 +117,19 @@ type TLiveQualification =
   | { readonly ok: false; readonly failure: HarnessFailure };
 
 export function createCodexAdapter(
-  overrides: CodexAdapterOverrides = {},
+  overrides: CodexAdapterOverrides,
+  processAdapter: ProcessAdapter,
 ): HarnessAdapter {
-  return new CodexAdapter(overrides);
+  return new CodexAdapter(overrides, processAdapter);
 }
 
 class CodexAdapter implements HarnessAdapter {
   private readonly cache = new Set<string>();
 
-  constructor(private readonly overrides: CodexAdapterOverrides) {}
+  constructor(
+    private readonly overrides: CodexAdapterOverrides,
+    private readonly processAdapter: ProcessAdapter,
+  ) {}
 
   async prepare(options: PrepareOptions): Promise<PrepareResult> {
     const nativePlatform = this.overrides.platform ?? process.platform;
@@ -223,7 +222,7 @@ class CodexAdapter implements HarnessAdapter {
     if (this.overrides.resolve !== undefined) {
       discoveryOptions.resolve = this.overrides.resolve;
     }
-    const discovery = discoverCodex(discoveryOptions);
+    const discovery = discoverCodex(this.processAdapter, discoveryOptions);
     if (discovery.kind === "found") {
       const target = discoveredHarnessTarget(discovery);
       return {
@@ -262,6 +261,7 @@ class CodexAdapter implements HarnessAdapter {
     target: TDiscoveredTarget,
   ): Promise<TProbeResult<string>> {
     return runTextProbe({
+      processAdapter: this.processAdapter,
       target,
       args: ["--version"],
       category: "version-probe",
@@ -277,6 +277,7 @@ class CodexAdapter implements HarnessAdapter {
     const directory = mkdtempSync(join(tmpdir(), "secant-codex-schema-"));
     try {
       const generated = await runTextProbe({
+        processAdapter: this.processAdapter,
         target,
         args: ["app-server", "generate-json-schema", "--out", directory],
         category: "schema-probe",
@@ -323,8 +324,7 @@ class CodexAdapter implements HarnessAdapter {
     workspace: string,
     requestedModel: string | undefined,
   ): Promise<TLiveQualification> {
-    const spawn = this.overrides.spawn ?? spawnOwnedProcess;
-    const spawned = await spawn({
+    const spawned = await this.processAdapter.spawnOwnedProcess({
       executable: target.executable,
       args: target.prefixArgs.concat("app-server"),
       cwd: workspace,
@@ -1650,6 +1650,7 @@ function isExpectedTurnMismatch(method: string, message: string): boolean {
 }
 
 interface TRunTextProbe {
+  readonly processAdapter: ProcessAdapter;
   readonly target: TDiscoveredTarget;
   readonly args: readonly string[];
   readonly category: string;
@@ -1661,7 +1662,7 @@ interface TRunTextProbe {
 async function runTextProbe(
   options: TRunTextProbe,
 ): Promise<TProbeResult<string>> {
-  const result = await spawnCommand({
+  const result = await options.processAdapter.spawnCommand({
     executable: options.target.executable,
     args: options.target.prefixArgs.concat(options.args),
     cwd: undefined,

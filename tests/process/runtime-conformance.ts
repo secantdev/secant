@@ -25,7 +25,7 @@ import type {
   AnswerHarnessRequestOffer,
   RunView,
 } from "../../src/application/projection-port.js";
-import { createClaudeCodeAdapter } from "../../src/harness/harness.js";
+import { createClaudeCodeAdapter } from "../harness/test-adapters.js";
 import { wireApplication } from "../../src/composition/main.js";
 import {
   executeRouting,

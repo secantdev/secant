@@ -8,11 +8,11 @@
 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { HarnessAdapterFactory } from "../../src/harness/harness.js";
 import {
   createClaudeCodeAdapter,
   createCodexAdapter,
-  type HarnessAdapterFactory,
-} from "../../src/harness/harness.js";
+} from "./test-adapters.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import {
   runApprovalRequestCases,

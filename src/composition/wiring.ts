@@ -139,6 +139,7 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
     try {
       const harnessRegistry = new HarnessRegistry(
         canonicalLaunchWorkspacePath,
+        processAdapter,
         {
           claudeCodeAdapter: overrides.harnessAdapter,
           codexAdapter: overrides.codexHarnessAdapter,

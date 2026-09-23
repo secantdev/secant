@@ -374,23 +374,6 @@ class NodeProcessAdapter implements ProcessAdapter {
   }
 }
 
-/** Compatibility delegate retained while consumers move to the owned Interface. */
-export function resolveExecutable(
-  name: string,
-  options: ResolveExecutableOptions = {},
-): ExecutableResolution {
-  return resolveExecutableWithNode(name, options);
-}
-
-/** Spawn a long-lived child with pipe backpressure and tree-owned cleanup. On
- * Windows, `overlapped` pipes avoid synchronous handle semantics; elsewhere
- * ordinary pipes are used. */
-export function spawnOwnedProcess(
-  options: OwnedProcessOptions,
-): Promise<SpawnOwnedProcessResult> {
-  return spawnOwnedProcessWithNode(options);
-}
-
 function spawnCommandSyncWithNode(options: SpawnSyncOptions): SpawnSyncResult {
   const result = spawnSync(options.executable, [...options.args], {
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
@@ -411,6 +394,9 @@ function spawnCommandSyncWithNode(options: SpawnSyncOptions): SpawnSyncResult {
   };
 }
 
+/** Spawn a long-lived child with pipe backpressure and tree-owned cleanup. On
+ * Windows, `overlapped` pipes avoid synchronous handle semantics; elsewhere
+ * ordinary pipes are used. */
 function spawnOwnedProcessWithNode(
   options: OwnedProcessOptions,
 ): Promise<SpawnOwnedProcessResult> {
@@ -660,10 +646,6 @@ async function settleWithin<T>(
  * holding stdout open cannot outlive its parent (D2, #21). stdin is closed so a
  * command that reads it gets EOF rather than hanging.
  */
-export function spawnCommand(options: SpawnOptions): Promise<SpawnResult> {
-  return spawnCommandWithNode(options);
-}
-
 function spawnCommandWithNode(options: SpawnOptions): Promise<SpawnResult> {
   return new Promise<SpawnResult>((resolve) => {
     // Unlike boundedCodexExchange (typed rejection) and settleWithin (undefined observation), AbortSignal.timeout actively aborts the command process tree.

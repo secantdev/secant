@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { chmodSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import { resolveExecutable } from "../../src/process/process.js";
+import { createProcessAdapter } from "../../src/process/process.js";
 import { makeTempDir } from "../helpers/tempDir.js";
+
+// The resolver is Module-private; exercise it through the owned Interface.
+const processAdapter = createProcessAdapter();
 
 // The one executable resolver the process Module owns and Preflight shares (D1,
 // A40). Its primary PATH walk is `which`, so the executable bit decides
@@ -50,12 +53,15 @@ test(
     chmodSync(execPath, 0o755);
 
     // Only the non-executable one on PATH: nothing resolves.
-    assert.deepEqual(resolveExecutable("mytool", { path: nonExecDir }), {
-      kind: "not-found",
-    });
+    assert.deepEqual(
+      processAdapter.resolveExecutable("mytool", { path: nonExecDir }),
+      {
+        kind: "not-found",
+      },
+    );
 
     // The executable one, later on PATH, resolves to its absolute path directly.
-    const resolution = resolveExecutable("mytool", {
+    const resolution = processAdapter.resolveExecutable("mytool", {
       path: `${nonExecDir}${delimiter}${execDir}`,
     });
     assert.deepEqual(resolution, {
@@ -68,7 +74,7 @@ test(
 
 test("a name that resolves to no path is not-found", () => {
   assert.deepEqual(
-    resolveExecutable("whatever", { resolve: () => undefined }),
+    processAdapter.resolveExecutable("whatever", { resolve: () => undefined }),
     { kind: "not-found" },
   );
 });
@@ -78,7 +84,7 @@ test("on Windows a missing PATH result falls back to the first where.exe match",
   const aliasPath = String.raw`C:\Users\user\AppData\Local\Microsoft\WindowsApps\pwsh.exe`;
   const laterMatch = String.raw`C:\Program Files\PowerShell\7\pwsh.exe`;
 
-  const resolution = resolveExecutable("pwsh", {
+  const resolution = processAdapter.resolveExecutable("pwsh", {
     platform: "win32",
     resolve: (name) => {
       probes.push(`path:${name}`);
@@ -105,7 +111,7 @@ test("a Windows fallback .cmd result still goes through the shim rule", () => {
   const fakeNode = join(shimDir, "node.exe");
   writeFileSync(fakeNode, "");
 
-  const resolution = resolveExecutable("worker", {
+  const resolution = processAdapter.resolveExecutable("worker", {
     platform: "win32",
     resolve: (name) => {
       if (name === "node") return fakeNode;
@@ -125,7 +131,7 @@ test("a Windows fallback .cmd result still goes through the shim rule", () => {
 test("an empty Windows fallback remains not-found", () => {
   const probes: string[] = [];
 
-  const resolution = resolveExecutable("missing", {
+  const resolution = processAdapter.resolveExecutable("missing", {
     platform: "win32",
     resolve: (name) => {
       probes.push(`path:${name}`);
@@ -144,7 +150,7 @@ test("an empty Windows fallback remains not-found", () => {
 test("POSIX does not consult the Windows fallback after a PATH miss", () => {
   const probes: string[] = [];
 
-  const resolution = resolveExecutable("missing", {
+  const resolution = processAdapter.resolveExecutable("missing", {
     platform: "linux",
     resolve: (name) => {
       probes.push(`path:${name}`);
@@ -167,7 +173,7 @@ test("an npm-style .cmd shim resolves to node plus the wrapped script", () => {
   const fakeNode = join(shimDir, "node.exe");
   writeFileSync(fakeNode, "");
 
-  const resolution = resolveExecutable("worker", {
+  const resolution = processAdapter.resolveExecutable("worker", {
     platform: "win32",
     resolve: (name) =>
       name === "worker" ? shimPath : name === "node" ? fakeNode : undefined,
@@ -184,7 +190,7 @@ test("an npm-style .cmd shim whose node interpreter is unresolvable is not-found
   const shimPath = join(shimDir, "worker.cmd");
   writeFileSync(shimPath, npmNodeShim("worker.js"));
 
-  const resolution = resolveExecutable("worker", {
+  const resolution = processAdapter.resolveExecutable("worker", {
     platform: "win32",
     resolve: (name) => (name === "worker" ? shimPath : undefined),
   });
@@ -196,7 +202,7 @@ test("a plain .bat that is not an npm node shim is refused as an unsupported shi
   const batPath = join(shimDir, "tool.bat");
   writeFileSync(batPath, "@echo off\r\necho not a node shim\r\n");
 
-  const resolution = resolveExecutable("tool", {
+  const resolution = processAdapter.resolveExecutable("tool", {
     platform: "win32",
     resolve: (name) => (name === "tool" ? batPath : undefined),
   });
@@ -208,7 +214,7 @@ test("on POSIX a resolved path is spawned directly with no shim handling", () =>
   const toolPath = join(dir, "tool.cmd"); // extension is irrelevant off Windows
   writeFileSync(toolPath, "irrelevant");
 
-  const resolution = resolveExecutable("tool", {
+  const resolution = processAdapter.resolveExecutable("tool", {
     platform: "linux",
     resolve: (name) => (name === "tool" ? toolPath : undefined),
   });

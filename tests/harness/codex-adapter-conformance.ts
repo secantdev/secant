@@ -18,7 +18,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CODEX_EXECUTABLE_ENV,
-  createCodexAdapter,
   type CodexRecordingObserver,
   type DurableTurnRecorder,
   type HarnessPlatform,
@@ -27,7 +26,9 @@ import {
   type TurnEvent,
   type TurnRequest,
 } from "../../src/harness/harness.js";
+import { createCodexAdapter } from "./test-adapters.js";
 import type { OwnedProcess } from "../../src/process/process.js";
+import { processWithSpawn } from "../process/fake-adapter.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { seedTestRepairWorkspace } from "../helpers/testRepairWorkspace.js";
 import {
@@ -270,11 +271,12 @@ for (const nativeRace of ["resolution", "terminal"] as const) {
   test(`${nativeRace} wins while an approval answer write is in flight`, async () => {
     const installed = installSyntheticCodexReplayer();
     const controlled = approvalRaceProcess();
-    const preparedResult = await createCodexAdapter({
-      path: installed.path,
-      env: {},
-      spawn: () => Promise.resolve({ ok: true, process: controlled.process }),
-    }).prepare({ workspace: process.cwd() });
+    const preparedResult = await createCodexAdapter(
+      { path: installed.path, env: {} },
+      processWithSpawn(() =>
+        Promise.resolve({ ok: true, process: controlled.process }),
+      ),
+    ).prepare({ workspace: process.cwd() });
     assert.equal(preparedResult.ok, true);
     if (!preparedResult.ok) throw new Error("unreachable");
     const prepared = preparedResult.harness;
@@ -319,11 +321,12 @@ for (const nativeRace of ["resolution", "terminal"] as const) {
 test("approval response write failure preserves its cause and expires the request", async () => {
   const installed = installSyntheticCodexReplayer();
   const controlled = approvalRaceProcess();
-  const preparedResult = await createCodexAdapter({
-    path: installed.path,
-    env: {},
-    spawn: () => Promise.resolve({ ok: true, process: controlled.process }),
-  }).prepare({ workspace: process.cwd() });
+  const preparedResult = await createCodexAdapter(
+    { path: installed.path, env: {} },
+    processWithSpawn(() =>
+      Promise.resolve({ ok: true, process: controlled.process }),
+    ),
+  ).prepare({ workspace: process.cwd() });
   assert.equal(preparedResult.ok, true);
   if (!preparedResult.ok) throw new Error("unreachable");
   const prepared = preparedResult.harness;
@@ -2197,12 +2200,10 @@ test("required live response drift fails closed and reaps the child", async () =
 test("a child that stops draining stdin cannot outlive the handshake bound", async () => {
   const installed = installSyntheticCodexReplayer();
   const stalled = stalledProcess();
-  const result = await createCodexAdapter({
-    path: installed.path,
-    env: {},
-    handshakeTimeoutMs: 20,
-    spawn: () => Promise.resolve({ ok: true, process: stalled }),
-  }).prepare({ workspace: process.cwd() });
+  const result = await createCodexAdapter(
+    { path: installed.path, env: {}, handshakeTimeoutMs: 20 },
+    processWithSpawn(() => Promise.resolve({ ok: true, process: stalled })),
+  ).prepare({ workspace: process.cwd() });
   assert.equal(result.ok, false);
   if (result.ok) throw new Error("unreachable");
   assert.equal(result.failure.category, "protocol-incompatible");
@@ -2212,12 +2213,10 @@ test("a child that stops draining stdin cannot outlive the handshake bound", asy
 test("a notification flood cannot extend the whole-RPC deadline", async () => {
   const installed = installSyntheticCodexReplayer();
   const flooding = notificationFloodProcess();
-  const result = await createCodexAdapter({
-    path: installed.path,
-    env: {},
-    handshakeTimeoutMs: 20,
-    spawn: () => Promise.resolve({ ok: true, process: flooding }),
-  }).prepare({ workspace: process.cwd() });
+  const result = await createCodexAdapter(
+    { path: installed.path, env: {}, handshakeTimeoutMs: 20 },
+    processWithSpawn(() => Promise.resolve({ ok: true, process: flooding })),
+  ).prepare({ workspace: process.cwd() });
   assert.equal(result.ok, false);
   if (result.ok) throw new Error("unreachable");
   assert.match(result.failure.diagnostics ?? "", /initialize.*timed out/);
@@ -2226,15 +2225,15 @@ test("a notification flood cannot extend the whole-RPC deadline", async () => {
 test("app-server launch and cleanup failures preserve their own evidence", async () => {
   const launchReplayer = installSyntheticCodexReplayer();
   const launchCause = new Error("scripted app-server launch failure");
-  const launchResult = await createCodexAdapter({
-    path: launchReplayer.path,
-    env: {},
-    spawn: () =>
+  const launchResult = await createCodexAdapter(
+    { path: launchReplayer.path, env: {} },
+    processWithSpawn(() =>
       Promise.resolve({
         ok: false,
         failure: { kind: "spawn-error", cause: launchCause },
       }),
-  }).prepare({ workspace: process.cwd() });
+    ),
+  ).prepare({ workspace: process.cwd() });
   assert.equal(launchResult.ok, false);
   if (launchResult.ok) throw new Error("unreachable");
   assert.equal(launchResult.failure.category, "app-server-launch");
@@ -2257,11 +2256,12 @@ test("app-server launch and cleanup failures preserve their own evidence", async
   const stderrCause = new Error("scripted stderr read failure");
   const cleanupCause = new Error("scripted cleanup failure");
   const evidenceProcess = qualificationProcess({ stderrCause, cleanupCause });
-  const evidencePrepared = await createCodexAdapter({
-    path: evidenceReplayer.path,
-    env: {},
-    spawn: () => Promise.resolve({ ok: true, process: evidenceProcess }),
-  }).prepare({ workspace: process.cwd() });
+  const evidencePrepared = await createCodexAdapter(
+    { path: evidenceReplayer.path, env: {} },
+    processWithSpawn(() =>
+      Promise.resolve({ ok: true, process: evidenceProcess }),
+    ),
+  ).prepare({ workspace: process.cwd() });
   assert.equal(evidencePrepared.ok, true);
   if (!evidencePrepared.ok) throw new Error("unreachable");
   const evidence = await evidencePrepared.harness.close();

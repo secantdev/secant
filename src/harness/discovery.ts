@@ -1,4 +1,4 @@
-import { resolveExecutable } from "../process/process.js";
+import type { ProcessAdapter } from "../process/process.js";
 
 /** The one environment variable naming an explicit Claude Code executable. */
 export const CLAUDE_CODE_EXECUTABLE_ENV = "SECANT_CLAUDE_CODE";
@@ -92,9 +92,10 @@ const discoveredTargets = new WeakMap<
  *  than silently skipped. Callers translate the result into their own failure
  *  vocabulary. */
 export function discoverClaudeCode(
+  processAdapter: ProcessAdapter,
   options: HarnessDiscoveryOptions = {},
 ): HarnessDiscovery {
-  const resolved = discoverExecutable({
+  const resolved = discoverExecutable(processAdapter, {
     options,
     executableEnvironmentVariable: CLAUDE_CODE_EXECUTABLE_ENV,
     pathName: CLAUDE_CODE_PATH_NAME,
@@ -125,9 +126,10 @@ export function discoveredHarnessTarget(
  *  name second. An unsupported configured shim is terminal, never a reason to
  *  substitute another Harness or silently continue to PATH. */
 export function discoverCodex(
+  processAdapter: ProcessAdapter,
   options: HarnessDiscoveryOptions = {},
 ): HarnessDiscovery {
-  const resolved = discoverExecutable({
+  const resolved = discoverExecutable(processAdapter, {
     options,
     executableEnvironmentVariable: CODEX_EXECUTABLE_ENV,
     pathName: CODEX_PATH_NAME,
@@ -142,6 +144,7 @@ export function discoverCodex(
 }
 
 function discoverExecutable(
+  processAdapter: ProcessAdapter,
   options: TDiscoverExecutable,
 ): TExecutableDiscovery {
   const environment = options.options.env ?? process.env;
@@ -179,7 +182,10 @@ function discoverExecutable(
   }
 
   for (const attempt of attempts) {
-    const resolution = resolveExecutable(attempt.name, resolutionOptions);
+    const resolution = processAdapter.resolveExecutable(
+      attempt.name,
+      resolutionOptions,
+    );
     if (resolution.kind === "found") {
       return {
         kind: "found",

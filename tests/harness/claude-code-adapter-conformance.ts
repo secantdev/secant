@@ -25,19 +25,20 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CLAUDE_CODE_EXECUTABLE_ENV,
-  createClaudeCodeAdapter,
   type HarnessRequest,
   type HarnessTurn,
   type TurnAdmission,
   type TurnEvent,
   type TurnRequest,
 } from "../../src/harness/harness.js";
+import { createClaudeCodeAdapter } from "./test-adapters.js";
 import type {
   OwnedProcess,
   OwnedProcessClose,
+  ProcessAdapter,
   ProcessInterruption,
-  spawnOwnedProcess,
 } from "../../src/process/process.js";
+import { processWithSpawn } from "../process/fake-adapter.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import {
   collectAdapterConformanceCases,
@@ -476,7 +477,7 @@ test("exit without a result loses the Turn with completion-unknown, the exit cod
 // the bridge bearer from the launch argv the Adapter passed, so a scripted cause
 // can quote exactly the secret the Seam must scrub.
 interface ScriptedProcess {
-  readonly spawn: typeof spawnOwnedProcess;
+  readonly spawn: ProcessAdapter["spawnOwnedProcess"];
   /** End stdout and settle `closed()` with the scripted close observation. */
   end(): void;
   /** The bearer recovered from the launch argv the Adapter passed. */
@@ -576,12 +577,14 @@ const scriptedInit = {
  *  Session on the scripted process; resolve once the Turn is live (init seen). */
 async function scriptedTurn(scripted: ScriptedProcess) {
   const replayer = installReplayer(VERSION, protocolCase("completed"));
-  const prepared = await createClaudeCodeAdapter({
-    path: replayer.path,
-    env: {},
-    sessionId: () => SCRIPTED_SESSION,
-    spawn: scripted.spawn,
-  }).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
+  const prepared = await createClaudeCodeAdapter(
+    {
+      path: replayer.path,
+      env: {},
+      sessionId: () => SCRIPTED_SESSION,
+    },
+    processWithSpawn(scripted.spawn),
+  ).prepare({ workspace: makeTempDir("secant-claude-workspace-") });
   assert.equal(prepared.ok, true);
   if (!prepared.ok) throw new Error("unreachable");
   const turn = prepared.harness.startTurn(bridgeTurn("scripted"));

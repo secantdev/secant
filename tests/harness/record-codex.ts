@@ -14,7 +14,6 @@ import {
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
-  createCodexAdapter,
   type HarnessRequest,
   type HarnessTurn,
   type RecoveryCoordinate,
@@ -22,6 +21,7 @@ import {
   type TurnRequest,
   type TurnResult,
 } from "../../src/harness/harness.js";
+import { createCodexAdapter } from "./test-adapters.js";
 import {
   assertNoCredentials,
   envSecrets,

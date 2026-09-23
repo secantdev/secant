@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createProcessAdapter } from "../../src/process/process.js";
 import {
   APPROVAL_DECISIONS,
   CLAUDE_CODE_SERVED_CAPABILITIES,
@@ -57,7 +58,7 @@ test("the closed vocabulary sets are exactly what the Interface fixes", () => {
 
 test("Codex discovery shares configured-then-PATH order and served capabilities", () => {
   const resolved: string[] = [];
-  const discovery = discoverCodex({
+  const discovery = discoverCodex(createProcessAdapter(), {
     configuredExecutable: "configured-codex",
     env: { SECANT_CODEX: "ignored-env-codex" },
     platform: "win32",
@@ -79,7 +80,7 @@ test("Codex discovery shares configured-then-PATH order and served capabilities"
 
 test("Claude Code discovery shares configured-then-PATH order and served capabilities", () => {
   const resolved: string[] = [];
-  const discovery = discoverClaudeCode({
+  const discovery = discoverClaudeCode(createProcessAdapter(), {
     configuredExecutable: "configured-claude",
     env: { SECANT_CLAUDE_CODE: "ignored-env-claude" },
     platform: "win32",

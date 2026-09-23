@@ -8,11 +8,10 @@
 
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import {
-  spawnCommand,
-  spawnOwnedProcess,
-  type OwnedProcess,
-  type OwnedProcessClose,
+import type {
+  OwnedProcess,
+  OwnedProcessClose,
+  ProcessAdapter,
 } from "../process/process.js";
 import {
   contentBlocks,
@@ -110,18 +109,17 @@ export interface ClaudeCodeAdapterOverrides {
   readonly probeTimeoutMs?: number;
   /** Override UUID generation for deterministic protocol replay. */
   readonly sessionId?: () => string;
-  /** Replace the Session process spawn, so a scripted process can hand the
-   *  Adapter close observations (a cleanup error, an unconfirmed kill) that a
-   *  real child cannot be made to produce on demand. */
-  readonly spawn?: typeof spawnOwnedProcess;
 }
 
-/** The factory a composition root calls. Satisfies `HarnessAdapterFactory` when
- *  called with no arguments; the overrides exist only for tests. */
+/** The factory a composition root calls. The caller supplies the Process
+ *  Interface: composition injects the one real instance it constructs; tests
+ *  inject a real or scripted Process implementation. The overrides exist only
+ *  for tests. */
 export function createClaudeCodeAdapter(
-  overrides: ClaudeCodeAdapterOverrides = {},
+  overrides: ClaudeCodeAdapterOverrides,
+  processAdapter: ProcessAdapter,
 ): HarnessAdapter {
-  return new ClaudeCodeAdapter(overrides);
+  return new ClaudeCodeAdapter(overrides, processAdapter);
 }
 
 /** A resolved, spawnable Claude Code target. */
@@ -136,7 +134,10 @@ class ClaudeCodeAdapter implements HarnessAdapter {
    *  re-running `--version`; any drift in either requalifies. */
   private readonly cache = new Map<string, HarnessProfile>();
 
-  constructor(private readonly overrides: ClaudeCodeAdapterOverrides) {}
+  constructor(
+    private readonly overrides: ClaudeCodeAdapterOverrides,
+    private readonly processAdapter: ProcessAdapter,
+  ) {}
 
   async prepare(options: PrepareOptions): Promise<PrepareResult> {
     const platform = harnessPlatform(
@@ -155,6 +156,8 @@ class ClaudeCodeAdapter implements HarnessAdapter {
     const discovery = this.discover(options);
     if (!discovery.ok) return { ok: false, failure: discovery.failure };
     const target = discovery.target;
+    const spawn: ProcessAdapter["spawnOwnedProcess"] = (spawnOptions) =>
+      this.processAdapter.spawnOwnedProcess(spawnOptions);
 
     const identity = fileIdentity(target.identityPath);
     // Keyed by the target's path and file identity (the spec's cache key); the
@@ -170,7 +173,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
           target,
           options.workspace,
           this.overrides.sessionId ?? randomUUID,
-          this.overrides.spawn ?? spawnOwnedProcess,
+          spawn,
           requestedModel,
         ),
       };
@@ -188,7 +191,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
         target,
         options.workspace,
         this.overrides.sessionId ?? randomUUID,
-        this.overrides.spawn ?? spawnOwnedProcess,
+        spawn,
         requestedModel,
       ),
     };
@@ -203,7 +206,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
   ):
     | { ok: true; target: DiscoveredTarget }
     | { ok: false; failure: HarnessFailure } {
-    const discovery = discoverClaudeCode({
+    const discovery = discoverClaudeCode(this.processAdapter, {
       ...(options.configuredExecutable !== undefined
         ? { configuredExecutable: options.configuredExecutable }
         : {}),
@@ -254,7 +257,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
   ): Promise<
     { ok: true; version: string } | { ok: false; failure: HarnessFailure }
   > {
-    const result = await spawnCommand({
+    const result = await this.processAdapter.spawnCommand({
       executable: target.executable,
       args: [...target.prefixArgs, "--version"],
       cwd: undefined,
@@ -316,7 +319,7 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
     private readonly target: DiscoveredTarget,
     private readonly workspace: string,
     private readonly createSessionId: () => string,
-    private readonly spawn: typeof spawnOwnedProcess,
+    private readonly spawn: ProcessAdapter["spawnOwnedProcess"],
     /** The caller's requested model, forwarded to every launch as --model and
      *  kept private; the free-text profile admits any value. */
     private readonly requestedModel: string | undefined,
@@ -486,7 +489,7 @@ class ClaudeCodeSession {
     private readonly workspace: string,
     sessionId: string,
     private readonly ensureBridge: () => Promise<PermissionBridge>,
-    private readonly spawn: typeof spawnOwnedProcess,
+    private readonly spawn: ProcessAdapter["spawnOwnedProcess"],
     /** The caller's requested model, forwarded as --model on every launch. */
     private readonly requestedModel: string | undefined,
   ) {

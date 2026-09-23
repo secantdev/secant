@@ -18,6 +18,7 @@ import {
   type HarnessAdapter,
   type HarnessFailure,
 } from "../harness/harness.js";
+import type { ProcessAdapter } from "../process/process.js";
 import type { SelectedHarnessId } from "../run/store/store.js";
 
 export interface HarnessRegistryOverrides {
@@ -43,11 +44,12 @@ export class HarnessRegistry {
 
   constructor(
     qualificationWorkspace: string,
+    process: ProcessAdapter,
     overrides: HarnessRegistryOverrides = {},
   ) {
     const claudeCodeAdapter =
       overrides.claudeCodeAdapter === undefined
-        ? createClaudeCodeAdapter()
+        ? createClaudeCodeAdapter({}, process)
         : overrides.claudeCodeAdapter;
     const claudeCode: THarnessRegistryEntry = {
       application: {
@@ -60,7 +62,7 @@ export class HarnessRegistry {
         discover: () => {
           const discovery =
             overrides.discoverClaudeCode === undefined
-              ? discoverClaudeCode()
+              ? discoverClaudeCode(process)
               : overrides.discoverClaudeCode();
           return normalizeDiscovery(discovery, CLAUDE_CODE_EXECUTABLE_ENV);
         },
@@ -71,7 +73,7 @@ export class HarnessRegistry {
     };
     const codexAdapter =
       overrides.codexAdapter === undefined
-        ? createCodexAdapter()
+        ? createCodexAdapter({}, process)
         : overrides.codexAdapter;
     const codex: THarnessRegistryEntry = {
       application: {
@@ -80,7 +82,7 @@ export class HarnessRegistry {
         discover: () => {
           const discovery =
             overrides.discoverCodex === undefined
-              ? discoverCodex()
+              ? discoverCodex(process)
               : overrides.discoverCodex();
           return normalizeDiscovery(discovery, CODEX_EXECUTABLE_ENV);
         },

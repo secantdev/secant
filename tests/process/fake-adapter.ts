@@ -1,17 +1,35 @@
-import type {
-  ExecutableResolution,
-  OwnedProcess,
-  OwnedProcessClose,
-  ProcessAdapter,
-  ProcessInterruption,
-  ResolveExecutableOptions,
-  SpawnOptions,
-  SpawnSyncOptions,
-  SpawnSyncResult,
-  SpawnOwnedProcessResult,
-  SpawnResult,
-  OwnedProcessOptions,
+import {
+  createProcessAdapter,
+  type ExecutableResolution,
+  type OwnedProcess,
+  type OwnedProcessClose,
+  type ProcessAdapter,
+  type ProcessInterruption,
+  type ResolveExecutableOptions,
+  type SpawnOptions,
+  type SpawnSyncOptions,
+  type SpawnSyncResult,
+  type SpawnOwnedProcessResult,
+  type SpawnResult,
+  type OwnedProcessOptions,
 } from "../../src/process/process.js";
+
+/** A Process Interface that resolves and probes through the real Module, but
+ *  launches owned processes through a scripted spawn. The Adapter conformance
+ *  suites use it to hand a Session process behaviours a real child cannot be made
+ *  to produce on demand, now that the Adapters take a Process Interface rather
+ *  than a private spawn override. */
+export function processWithSpawn(
+  spawnOwnedProcess: ProcessAdapter["spawnOwnedProcess"],
+): ProcessAdapter {
+  const real = createProcessAdapter();
+  return {
+    resolveExecutable: (name, options) => real.resolveExecutable(name, options),
+    spawnCommand: (options) => real.spawnCommand(options),
+    spawnCommandSync: (options) => real.spawnCommandSync(options),
+    spawnOwnedProcess,
+  };
+}
 
 export interface FakeResolutionScript {
   readonly name: string;

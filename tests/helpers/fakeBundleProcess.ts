@@ -1,8 +1,9 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import type {
-  ProcessAdapter,
-  SpawnOptions,
-  SpawnResult,
+import {
+  createProcessAdapter,
+  type ProcessAdapter,
+  type SpawnOptions,
+  type SpawnResult,
 } from "../../src/process/process.js";
 import { createFakeProcess } from "../process/fake-adapter.js";
 import { createFakeGitProcess } from "../run/store/fake-git-process.js";
@@ -108,11 +109,16 @@ function fakeBundleCommand(
 /** The shared Process double for the double-backed headless harness. */
 export function createFakeBundleProcess(): ProcessAdapter {
   const git = createFakeGitProcess();
+  // Harness discovery now resolves through the injected Process Interface (#202),
+  // so a name other than the fake runtime is resolved by the real resolver — the
+  // headless suites drive real Harness discovery through `SECANT_CLAUDE_CODE`
+  // while faking only the Command/Git spawns.
+  const real = createProcessAdapter();
   return createFakeProcess({
     resolutionHandler: (name) =>
       name === RUNTIME_NAME
         ? { kind: "found", executable: name, prefixArgs: [] }
-        : { kind: "not-found" },
+        : real.resolveExecutable(name),
     commandHandler: fakeBundleCommand,
     syncCommandHandler: (options) => git.spawnCommandSync(options),
   });

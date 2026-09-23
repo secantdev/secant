@@ -9,10 +9,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - A flex column with a fixed `height` shrinks overflowing children to fit, corrupting their content rather than clipping. When a screen's content can
   exceed the terminal height, set `overflow="hidden"` on the container and `flexShrink={0}` on the rows/sections so each keeps its full height. A screen
   that owns a bounded `<scrollbox>` still keeps full-height content rows inside it; scroll does not replace the guard.
-- A focused OpenTUI `<input>` and the `@opentui/keymap` layer divide keys by binding: any key the keymap binds fires its command even while an input is
-  focused; only unbound printable keys and backspace reach the input. So never bind a bare letter key (e.g. `q` to quit) on a text-entry screen, and gate
-  `left`/`right` with a reactive `enabled` so choice/verdict fields cycle without stealing a text field's cursor. Native `<input>`/`<select>`/`<textarea>`
-  exist — no need to hand-roll a caret.
+- A focused OpenTUI `<input>` and the `@opentui/keymap` layer divide keys by binding: any key the keymap binds fires its command even while an input is focused; only
+  unbound printable keys and backspace reach the input. So never bind a bare letter key (e.g. `q` to quit) on a text-entry screen, and gate `left`/`right` with a reactive
+  `enabled` so choice/verdict fields cycle without stealing a text field's cursor. Native `<input>`/`<select>`/`<textarea>` exist — no need to hand-roll a caret.
 - The Run Workbench (`run-workbench.tsx`) is the one screen that takes its keys, size, and resize from the injected Renderer Port (`size`/`onKey`/`onResize`,
   A13) instead of `@opentui/keymap` + `useTerminalDimensions`: a single raw-key pipeline drives every control, so its input and layout are driven by a fake
   renderer in tests. Every other screen keeps the keymap/`useTerminalDimensions` path. Drawing still goes through OpenTUI elements — the Port never carries it.
@@ -105,6 +104,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   (`submitAndSettle`) owns submit-then-follow and reopens a lost pending Operation receipt (A23). `run-inspection.tsx` holds the Workbench's
   reference-inspection overlay — its state, key loop, and view — split out of `run-workbench.tsx` (A26). `run-workbench-views.tsx` holds the Workbench's
   four pure presentational leaves; state, focus, modal precedence, and the key dispatcher stay in `run-workbench.tsx` (A12).
+- `start-run-views.tsx` holds Start a Run's step components and leaves; the draft signal, step transitions, refusal routing, and key dispatcher stay in `start-run.tsx` (A3).
 - `previous-runs.tsx` is the Previous Runs screen (the list reached from Home; its single-active-index selection model descends from the historical
   `bundle-list.tsx`, now replaced by `bundle-catalog.tsx`).
 - `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-catalog status wording — keep it matching `headless/render.ts` so

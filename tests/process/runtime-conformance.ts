@@ -540,6 +540,19 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     }
     overlayWatch.close();
     assert.ok(offer, "the spec Turn raised no approval request");
+    // The spec Step requires a `spec-ref` Output receipt (#221) at a per-Attempt
+    // path the recording cannot know, so the scenario writes it on the agent's
+    // behalf from the admitted prompt while the Turn is live.
+    const livePrompt = wired.projectionPort.readTranscript(transcriptReference);
+    assert.ok(livePrompt.found);
+    if (!livePrompt.found) throw new Error("unreachable");
+    const receiptPath =
+      /Write the required output "spec-ref" as UTF-8 text to (.+) before you finish;/.exec(
+        livePrompt.entries.filter((entry) => entry.role === "user").at(-1)
+          ?.content ?? "",
+      )?.[1];
+    assert.ok(receiptPath, "the spec prompt names no spec-ref receipt");
+    writeFileSync(receiptPath, "specs/spec.md\n");
     assert.ok(
       wired.projectionPort.submit({
         operationId: "matt-front-allow-request",
@@ -580,6 +593,13 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
       .filter((entry) => entry.role === "user")
       .at(-1)?.content;
     assert.equal(specPrompt?.split("the tracker I chose: Local.").length, 2);
+    assert.match(specPrompt ?? "", /[\\/]to-spec[\\/]SKILL\.md/);
+    // The reference is kept as a Run output for ticket planning.
+    const specRef = done.outputs.find((output) => output.name === "spec-ref");
+    assert.ok(specRef, "the spec reference is not a Run output");
+    const specRefRead = wired.projectionPort.readResource(specRef.reference);
+    assert.ok(specRefRead.found);
+    assert.equal(specRefRead.found && specRefRead.content, "specs/spec.md");
   } finally {
     wired.runGroup.close();
     wired.catalog.close();

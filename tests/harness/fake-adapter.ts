@@ -18,6 +18,8 @@
 // vocabulary, so history is "visibly historical" by its position before the
 // barrier rather than by a new field.
 
+import { statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
   CleanupReport,
@@ -123,6 +125,20 @@ class FakeAdapter implements HarnessAdapter {
         failure: this.script.prepareFailure,
       });
     }
+    // The additional writable directory is validated as every real Adapter does
+    // (#214): anything but an existing absolute directory is a typed failure.
+    const directory = options.writableDirectory;
+    if (directory !== undefined && !isExistingAbsoluteDirectory(directory)) {
+      return Promise.resolve({
+        ok: false,
+        failure: {
+          phase: "prepare",
+          category: "writable-directory-unavailable",
+          possibleEffects: "none",
+          diagnostics: `The fake Harness cannot grant '${directory}'.`,
+        },
+      });
+    }
     // A requested model the profile's declared list does not admit is a typed
     // unavailable prepare failure, never a substitution (ADR 0022). A free-text
     // declaration admits any value; selection-unavailable profiles ignore it.
@@ -148,6 +164,14 @@ class FakeAdapter implements HarnessAdapter {
       ok: true,
       harness: new FakePreparedHarness(this.script),
     });
+  }
+}
+
+function isExistingAbsoluteDirectory(path: string): boolean {
+  try {
+    return isAbsolute(path) && statSync(path).isDirectory();
+  } catch {
+    return false;
   }
 }
 

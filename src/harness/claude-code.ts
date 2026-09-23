@@ -55,6 +55,7 @@ import type {
   TurnSubscription,
 } from "./harness.js";
 import { JsonlLineReader } from "./jsonl.js";
+import { writableDirectoryFailure } from "./writable-directory.js";
 import {
   EXPIRED_MESSAGE,
   startPermissionBridge,
@@ -152,6 +153,10 @@ class ClaudeCodeAdapter implements HarnessAdapter {
     // An empty requested model means no model was requested, matching Codex; both
     // Adapters read `PrepareOptions.requestedModel` identically.
     const requestedModel = normalizeRequestedModel(options.requestedModel);
+    const writableFailure = writableDirectoryFailure(options.writableDirectory);
+    if (writableFailure !== undefined) {
+      return { ok: false, failure: writableFailure };
+    }
 
     const discovery = this.discover(options);
     if (!discovery.ok) return { ok: false, failure: discovery.failure };
@@ -175,6 +180,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
           this.overrides.sessionId ?? randomUUID,
           spawn,
           requestedModel,
+          options.writableDirectory,
         ),
       };
     }
@@ -193,6 +199,7 @@ class ClaudeCodeAdapter implements HarnessAdapter {
         this.overrides.sessionId ?? randomUUID,
         spawn,
         requestedModel,
+        options.writableDirectory,
       ),
     };
   }
@@ -323,6 +330,8 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
     /** The caller's requested model, forwarded to every launch as --model and
      *  kept private; the free-text profile admits any value. */
     private readonly requestedModel: string | undefined,
+    /** The one additional writable directory, forwarded as --add-dir (#214). */
+    private readonly writableDirectory: string | undefined,
   ) {}
 
   /** Memoized bridge start. Its router raises each permission prompt on whatever
@@ -374,6 +383,7 @@ class ClaudeCodePreparedHarness implements PreparedHarness {
         () => this.ensureBridge(),
         this.spawn,
         this.requestedModel,
+        this.writableDirectory,
       );
       this.sessions.set(request.session, session);
     }
@@ -492,6 +502,9 @@ class ClaudeCodeSession {
     private readonly spawn: ProcessAdapter["spawnOwnedProcess"],
     /** The caller's requested model, forwarded as --model on every launch. */
     private readonly requestedModel: string | undefined,
+    /** The additional writable directory, forwarded as --add-dir on every
+     *  launch, fresh or resumed (#214). */
+    private readonly writableDirectory: string | undefined,
   ) {
     this.coordinate = { opaque: sessionId };
   }
@@ -740,6 +753,12 @@ class ClaudeCodeSession {
     // `requestedModel` is already normalized (empty means none).
     const modelArgs =
       this.requestedModel !== undefined ? ["--model", this.requestedModel] : [];
+    // `--add-dir` extends Claude Code's file-tool access to one more directory and
+    // leaves the user's permission mode and settings untouched (#214).
+    const writableArgs =
+      this.writableDirectory !== undefined
+        ? ["--add-dir", this.writableDirectory]
+        : [];
     const launched = await this.spawn({
       executable: this.target.executable,
       args: [
@@ -752,6 +771,7 @@ class ClaudeCodeSession {
         "--verbose",
         "--include-partial-messages",
         ...modelArgs,
+        ...writableArgs,
         ...sessionArgs,
         // The permission bridge: Claude relays every permission prompt to this
         // loopback tool and waits on it. The inline config carries the per-Run

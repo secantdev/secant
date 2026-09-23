@@ -101,6 +101,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - There are no foreign keys and no `foreign_keys` pragma anywhere in either schema (only `busy_timeout` is set), so referential integrity rests entirely on the write
   transactions that keep related rows consistent; nothing the database enforces stands behind them.
 - Run delete drops the registration and reclaims the directory as one lifecycle unit; with no foreign keys there is nothing to cascade — the directory holds the whole Run.
+- `workingArea()` (#214) lazily creates `working/` inside the published Run directory (so no `.creating` staging and pre-M6 Runs gain one on resume), returns its
+  `realpath` so a sandbox comparing canonical roots matches the prompt, and is deliberately not a fenced write. Never nest private files under it: it is granted whole.
 - Resume reads registration only to answer `unknown-run`, then claims ownership in `run.db`. Listing and startup reconciliation open each registered Run
   Store to read ownership and close every handle before returning; a damaged store lists unowned, matching its exact-read Problem. A coordinator rebuild
   reads each readable Run's owner before restoring registration, so a live owner survives corruption and the following reconciliation decides its fate.
@@ -108,4 +110,5 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 ## Tests
 
 - Store Interface tests are split by concern into `ownership-and-recovery.test.ts`, `attempt-and-artifact-publication.test.ts`,
-  `session-and-transcript-evidence.test.ts`, `materialization.test.ts`, and `reconcile-turn.test.ts`; keep every file independently runnable with explicit fixtures.
+  `session-and-transcript-evidence.test.ts`, `materialization.test.ts`, `reconcile-turn.test.ts`, and `working-area.test.ts`; keep every file independently
+  runnable with explicit fixtures.

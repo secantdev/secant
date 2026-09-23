@@ -51,10 +51,12 @@ import {
   parseRuntimeNotification,
   parseThreadResumeResult,
   parseThreadStartResult,
+  sandboxAdmitsDirectory,
   parseTurnInterruptResult,
   parseTurnSteerResult,
   parseTurnStartResult,
 } from "./codex/runtime-protocol.js";
+import { writableDirectoryFailure } from "./writable-directory.js";
 
 export type { CodexRecordingObserver } from "./codex/qualification.js";
 
@@ -141,6 +143,11 @@ class CodexAdapter implements HarnessAdapter {
       );
     }
 
+    const writableFailure = writableDirectoryFailure(options.writableDirectory);
+    if (writableFailure !== undefined) {
+      return { ok: false, failure: writableFailure };
+    }
+
     const discovery = this.discover(options);
     if (!discovery.ok) return discovery;
     const version = await this.probeVersion(discovery.target);
@@ -194,6 +201,7 @@ class CodexAdapter implements HarnessAdapter {
         this.overrides.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
         this.overrides.recordingObserver,
         requestedModel,
+        options.writableDirectory,
       ),
     };
   }
@@ -443,6 +451,9 @@ class CodexPreparedHarness implements PreparedHarness {
     /** The caller's requested model, applied natively per Turn and kept private;
      *  validated against the observed list at prepare. */
     private readonly requestedModel: string | undefined,
+    /** The one additional writable directory each thread is started or resumed
+     *  with (#214). */
+    private readonly writableDirectory: string | undefined,
   ) {
     this.connection.startRuntime({
       message: (message) => this.acceptMessage(message),
@@ -473,6 +484,7 @@ class CodexPreparedHarness implements PreparedHarness {
         this.workspace,
         this.controlTimeoutMs,
         this.requestedModel,
+        this.writableDirectory,
       );
       this.sessions.set(request.session, session);
     }
@@ -590,7 +602,38 @@ class CodexSession {
     private readonly controlTimeoutMs: number,
     /** The caller's requested model, applied on turn/start and kept private. */
     private readonly requestedModel: string | undefined,
+    /** The additional writable directory (#214), sent as a per-thread config
+     *  override and checked against the acknowledged sandbox. */
+    private readonly writableDirectory: string | undefined,
   ) {}
+
+  /** The per-thread config override adding the writable directory (#214). It
+   *  extends `workspace-write` roots only, so the user's sandbox mode and approval
+   *  policy stay theirs; under read-only the user's approvals govern its writes. */
+  private threadConfig(): { config?: Record<string, unknown> } {
+    return this.writableDirectory === undefined
+      ? {}
+      : {
+          // ponytail: replaces any user-configured extra writable_roots for this
+          // thread; merge them via config/read if a user relies on both.
+          config: {
+            "sandbox_workspace_write.writable_roots": [this.writableDirectory],
+          },
+        };
+  }
+
+  /** Refuse the Turn when the acknowledged sandbox cannot write the directory. */
+  private refusesWritableDirectory(turn: CodexTurn, result: unknown): boolean {
+    const directory = this.writableDirectory;
+    if (directory === undefined || sandboxAdmitsDirectory(result, directory)) {
+      return false;
+    }
+    turn.settleNotStarted(
+      "writable-directory-refused",
+      `Codex acknowledged a workspace-write sandbox without the writable root '${directory}'; check the Codex sandbox configuration and retry.`,
+    );
+    return true;
+  }
 
   start(turn: CodexTurn): void {
     queueMicrotask(() => void this.submit(turn));
@@ -644,6 +687,7 @@ class CodexSession {
           operation: () =>
             this.connection.request("thread/resume", {
               threadId: recoveryCoordinate.opaque,
+              ...this.threadConfig(),
             }),
           timeoutMs: this.controlTimeoutMs,
           label: "thread/resume runtime exchange",
@@ -654,6 +698,7 @@ class CodexSession {
             "thread/resume acknowledged a different Codex thread",
           );
         }
+        if (this.refusesWritableDirectory(turn, result)) return;
         this.coordinate = recoveryCoordinate;
         this.model = { known: true, model: resumed.model };
         this.detached = false;
@@ -667,11 +712,15 @@ class CodexSession {
       try {
         const result = await boundedCodexExchange({
           operation: () =>
-            this.connection.request("thread/start", { cwd: this.workspace }),
+            this.connection.request("thread/start", {
+              cwd: this.workspace,
+              ...this.threadConfig(),
+            }),
           timeoutMs: this.controlTimeoutMs,
           label: "thread/start runtime exchange",
         });
         const started = parseThreadStartResult(result);
+        if (this.refusesWritableDirectory(turn, result)) return;
         this.coordinate = { opaque: started.threadId };
         this.model = { known: true, model: started.model };
       } catch (cause) {

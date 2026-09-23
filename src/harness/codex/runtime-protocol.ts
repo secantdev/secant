@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { z } from "zod";
 import type { OwnedProcess } from "../../process/process.js";
 import type { TurnEvent } from "../harness.js";
@@ -226,7 +227,41 @@ function responseResult(method: string, message: CodexRpcEnvelope): unknown {
 const threadResultSchema = z.looseObject({
   model: z.string().min(1),
   thread: z.looseObject({ id: z.string().min(1) }),
+  sandbox: z
+    .looseObject({
+      type: z.string(),
+      writableRoots: z.array(z.string()).optional(),
+    })
+    .optional()
+    .catch(undefined),
 });
+
+/** Whether the thread's acknowledged native sandbox admits writes to `directory`
+ *  (#214). Only positive evidence refuses: a `workspaceWrite` sandbox whose
+ *  writable roots omit it, i.e. the override was not applied. Every other posture
+ *  stays the user's: `readOnly` routes writes through their approval policy (the
+ *  recorded default is read-only with on-request approvals), and full access or an
+ *  external sandbox needs no root. Roots compare canonically, since Codex may
+ *  report a resolved path. */
+export function sandboxAdmitsDirectory(
+  value: unknown,
+  directory: string,
+): boolean {
+  const sandbox = threadResultSchema.safeParse(value).data?.sandbox;
+  if (sandbox?.type !== "workspaceWrite") return true;
+  const wanted = canonicalPath(directory);
+  return (sandbox.writableRoots ?? []).some(
+    (root) => canonicalPath(root) === wanted,
+  );
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
 
 const turnStartResultSchema = z.looseObject({
   turn: z.looseObject({ id: z.string().min(1) }),

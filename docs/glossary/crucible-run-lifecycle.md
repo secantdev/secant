@@ -48,7 +48,11 @@ This cluster defines the target Crucible terms for a **Run** and everything that
 - **Materialization conflict** — the condition in which a required **Workspace materialization** is missing or differs from its canonical Artifact
   version. Crucible preserves both truths and halts rather than silently restoring or adopting either one.
 - **Run Store** — the durable collection owned by exactly one **Run**, containing its structured truth, immutable Artifact history, publication
-  staging, and separately retained diagnostics. Explicit Run deletion removes it as one lifecycle unit.
+  staging, separately retained diagnostics, and its **Run working area**. Explicit Run deletion removes it as one lifecycle unit.
+- **Run working area** — the one editable directory a **Run** owns for working files, such as Local planning spec and ticket files. It is isolated
+  from the private database and Artifact repository, so a **Harness** may be granted it alone; it survives halt and resume and is deleted with the
+  Run. Its files are the agent's and human's working state, never canonical Run truth or a **Run Artifact**. Prompts name it through the
+  `{{run:working-area}}` slot. _Avoid_: Workspace, Run Store root.
 - **Run owner** — the one Crucible runtime process or task currently fenced and authorized to advance a **Run**, recorded as the owning process id
   plus a fencing epoch and held until the Run rests, through `running` and `blocked` alike. It is not the Harness process. _Avoid_: Workspace claim.
 - **Workspace change** — any change inside the **Workspace** that is not a declared **Run Artifact**. Owned by the world and by Git, never by

@@ -6,8 +6,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 - The public entry (`harness.ts`) is the whole Interface surface: the Adapter Interface, the evidence-bearing profile, and the factory a
   composition root calls. No native frame, protocol type, or conversation-id value crosses it; the declared exceptions are the Workspace path
-  (`PrepareOptions.workspace`, the directory every Session runs against), the named native-Adapter test seams on their override types (including Codex's
-  recorder-only schema, stdio, stderr, and shutdown observer), and the executable env constants (`CLAUDE_CODE_EXECUTABLE_ENV` / `SECANT_CLAUDE_CODE` and
+  (`PrepareOptions.workspace`, the directory every Session runs against) and the one additional writable directory (`writableDirectory`), the named
+  native-Adapter test seams on their override types (including Codex's recorder-only schema, stdio, stderr, and shutdown observer), and the
+  executable env constants (`CLAUDE_CODE_EXECUTABLE_ENV` / `SECANT_CLAUDE_CODE` and
   `CODEX_EXECUTABLE_ENV` / `SECANT_CODEX`) — the synchronous discovery outcome and static served-capability table that Preflight shares
   with the Adapter (the resolved spawn target stays private), and the permission-bridge factory (`startPermissionBridge`), exported so the fixture
   recorder composes the production bridge instead of a copy (#127 D3); its surface is launch flags, the bearer, a redactor and a teardown, never an MCP type.
@@ -38,6 +39,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `ModelDeclaration`: a `list` of admitted models or `free-text`. `modelObservation` separately declares whether the effective model is read from native
   evidence. Codex declares `launch-and-per-turn` with the `model/list` result observed at qualification; Claude Code declares `launch` with free text
   (`--model`). Both observe the effective model.
+- `PrepareOptions.writableDirectory` (#214) is validated identically before anything native runs (not an existing absolute directory ⇒ typed
+  `writable-directory-unavailable`). Claude Code forwards it as `--add-dir` on every launch; Codex sends a per-thread `sandbox_workspace_write.writable_roots`
+  config override and refuses the Turn `writable-directory-refused` only when an acknowledged `workspaceWrite` sandbox omits it (read-only defers to approvals).
 - `PrepareOptions.requestedModel` is the caller's durable request, normalized identically by both Adapters (empty means none). A request outside a declared
   list, including an empty one, is a typed `model-unavailable` prepare failure, never a substitution; free text forwards any value. The effective model a
   Turn reports is observed and never copies the request.

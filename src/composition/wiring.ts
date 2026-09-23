@@ -22,11 +22,16 @@ import {
   type AssetResolver,
   type HarnessExecutionDeps,
 } from "../run/execution/execution.js";
-import { openRunGroup, type RunGroup } from "../run/store/store.js";
+import {
+  openRunGroup,
+  type RunGroup,
+  type RunOwner,
+} from "../run/store/store.js";
 import {
   type HarnessAdapter,
   type HarnessDiscovery,
   type PreparedHarness,
+  type PrepareResult,
 } from "../harness/harness.js";
 import {
   type ArtifactType,
@@ -229,14 +234,7 @@ function makeRunExecution(params: TMakeRunExecutionParams): RunExecution {
     }
     const adapter = harnessRegistry.adapter(selectedHarness);
     const facts = harnessFacts(catalog, digest);
-    const prepared = await adapter.prepare({
-      workspace: owner.record.workspacePath,
-      // The immutable requested model reaches prepare identically on launch and on
-      // resume; absent means the Harness default, never a substitute (#187, ADR 0022).
-      ...(owner.record.requestedModel !== undefined
-        ? { requestedModel: owner.record.requestedModel }
-        : {}),
-    });
+    const prepared = await prepareRunHarness(adapter, owner);
     if (!prepared.ok) {
       const harnessFailure = harnessRegistry.preparationFailure(
         selectedHarness,
@@ -282,13 +280,7 @@ function makePrepareRunInteractiveStep(
       );
     }
     const adapter = harnessRegistry.adapter(selectedHarness);
-    const prepared = await adapter.prepare({
-      workspace: owner.record.workspacePath,
-      // Resume reuses the durable requested model with no fallback (#187).
-      ...(owner.record.requestedModel !== undefined
-        ? { requestedModel: owner.record.requestedModel }
-        : {}),
-    });
+    const prepared = await prepareRunHarness(adapter, owner);
     if (!prepared.ok) {
       return {
         ok: false,
@@ -303,6 +295,37 @@ function makePrepareRunInteractiveStep(
       interactiveStep: interactiveStepDriver(prepared.harness),
     };
   };
+}
+
+// Prepare a Run's Harness identically on launch, resume, and interactive reopen:
+// the immutable requested model with no fallback (#187, ADR 0022), and the Run's
+// working area as the one additional writable directory (#214). An unusable area is
+// a typed prepare failure, so the Run halts before any Turn rather than writing
+// planning files anywhere else.
+async function prepareRunHarness(
+  adapter: HarnessAdapter,
+  owner: RunOwner,
+): Promise<PrepareResult> {
+  const area = owner.workingArea();
+  if (!area.ok) {
+    return {
+      ok: false,
+      failure: {
+        phase: "prepare",
+        category: "working-area-unavailable",
+        possibleEffects: "none",
+        diagnostics: `The Run working area '${area.problem.path}' is not a usable directory.`,
+        cause: area.problem.cause,
+      },
+    };
+  }
+  return adapter.prepare({
+    workspace: owner.record.workspacePath,
+    writableDirectory: area.path,
+    ...(owner.record.requestedModel !== undefined
+      ? { requestedModel: owner.record.requestedModel }
+      : {}),
+  });
 }
 
 function interactiveStepDriver(prepared: PreparedHarness): RunInteractiveStep {

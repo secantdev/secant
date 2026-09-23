@@ -77,26 +77,48 @@ function expectedStdinLine(recordedLine, actualLine) {
   return replayLine(recordedLine);
 }
 
-/** Strict stdin match, tolerating the one build-varying field. The Secant client
+/** Strict stdin match, tolerating the two run-varying fields. The Secant client
  *  version differs by build (the `0.0.0-dev` dev sentinel under `bun test`, the
- *  embedded release version from a compiled binary), so the same byte-faithful
- *  recording must replay under any build. Every other field of `initialize` — and
- *  every byte of every other frame — stays strictly matched. */
+ *  embedded release version from a compiled binary), and a thread start or resume
+ *  carries the replaying Run's own working area as its sole writable-roots config
+ *  override (#214), so the same byte-faithful recording must replay under any build
+ *  and Run. Every other field of those frames — and every byte of every other
+ *  frame — stays strictly matched. */
 function stdinFrameMatches(recordedLine, actualLine) {
   const expected = expectedStdinLine(recordedLine, actualLine);
   if (expected === `${actualLine}\n`) return true;
   try {
     const recorded = JSON.parse(expected);
     const actual = JSON.parse(actualLine);
-    if (recorded.method !== "initialize" || actual.method !== "initialize") {
+    if (recorded.method !== actual.method) return false;
+    if (actual.method === "initialize") {
+      if (recorded.params?.clientInfo) {
+        delete recorded.params.clientInfo.version;
+      }
+      if (actual.params?.clientInfo) delete actual.params.clientInfo.version;
+    } else if (
+      (actual.method === "thread/start" || actual.method === "thread/resume") &&
+      recorded.params?.config === undefined &&
+      isWorkingAreaOverride(actual.params?.config)
+    ) {
+      delete actual.params.config;
+    } else {
       return false;
     }
-    if (recorded.params?.clientInfo) delete recorded.params.clientInfo.version;
-    if (actual.params?.clientInfo) delete actual.params.clientInfo.version;
     return JSON.stringify(recorded) === JSON.stringify(actual);
   } catch {
     return false;
   }
+}
+
+function isWorkingAreaOverride(config) {
+  const keys = Object.keys(config ?? {});
+  return (
+    keys.length === 1 &&
+    keys[0] === "sandbox_workspace_write.writable_roots" &&
+    Array.isArray(config[keys[0]]) &&
+    config[keys[0]].length === 1
+  );
 }
 
 function applyWorkspacePatch(path) {
@@ -183,7 +205,7 @@ for await (const line of lines) {
   if (request.method === "initialized") continue;
   if (request.method === "thread/start") {
     process.stdout.write(
-      `${JSON.stringify({ id: request.id, result: threadStartResponse() })}\n`,
+      `${JSON.stringify({ id: request.id, result: threadStartResponse("thread-1", request.params) })}\n`,
     );
     continue;
   }
@@ -197,7 +219,7 @@ for await (const line of lines) {
         ? "thread-1"
         : scenario.recovery.threadId;
     process.stdout.write(
-      `${JSON.stringify({ id: request.id, result: threadStartResponse(threadId) })}\n`,
+      `${JSON.stringify({ id: request.id, result: threadStartResponse(threadId, request.params) })}\n`,
     );
     continue;
   }
@@ -437,19 +459,29 @@ if (scenario.replay === "strict" && trafficAt < scenario.traffic.length) {
 }
 process.exit(scenario.exitCode ?? 0);
 
-function threadStartResponse(threadId = "thread-1") {
+function threadStartResponse(threadId = "thread-1", params = {}) {
   return {
     approvalPolicy: "on-request",
     approvalsReviewer: "user",
     cwd: process.cwd(),
     model: "recorded-model",
     modelProvider: "openai",
-    sandbox: { type: "workspaceWrite" },
+    sandbox: sandboxFor(params),
     thread: {
       ...(threadId === null ? {} : { id: threadId }),
       turns: [],
     },
   };
+}
+
+// The acknowledged sandbox (#214): a `sandbox_workspace_write.writable_roots`
+// config override becomes the thread's workspace-write roots, as Codex applies
+// it; the `ignoreWritableRoots` scenario acknowledges workspace-write without it.
+function sandboxFor(params) {
+  const roots = params?.config?.["sandbox_workspace_write.writable_roots"];
+  return Array.isArray(roots) && scenario.turn?.ignoreWritableRoots !== true
+    ? { type: "workspaceWrite", writableRoots: roots }
+    : { type: "workspaceWrite" };
 }
 
 function emitActivityItems() {

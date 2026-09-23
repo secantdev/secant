@@ -156,6 +156,20 @@ export type ResumeRunResult =
 export type WriteResult =
   { readonly ok: true } | { readonly ok: false; readonly reason: "fenced" };
 
+/** The Run's one editable working area (#214): a Run-owned directory for working
+ *  files (Local planning), isolated from the private database and Artifact
+ *  repository, or a typed Problem when its path cannot be that directory. */
+export type WorkingAreaResult =
+  | { readonly ok: true; readonly path: string }
+  | {
+      readonly ok: false;
+      readonly problem: {
+        readonly kind: "working-area-unavailable";
+        readonly path: string;
+        readonly cause: unknown;
+      };
+    };
+
 /** A legacy Run's one-time semantic Harness upgrade. `already-selected` proves an
  *  idempotent retry observed the same immutable value and performed no write. */
 export type SelectHarnessResult =
@@ -485,6 +499,12 @@ export interface RunOwner {
   materializationConflicts(): readonly MaterializationConflict[];
   /** The bytes of a recorded diagnostic by id, or undefined if it is absent. */
   readDiagnostic(diagnosticId: string): Uint8Array | undefined;
+  /** The Run's editable working area (#214) as a canonical absolute directory,
+   *  created on first use. It is a lifecycle child of the Run: it survives release
+   *  and resume, is removed with the Run, and contains no private Store file, so a
+   *  Harness may be granted it alone. Not a fenced write: its files are the
+   *  agent's and human's, never canonical Run truth. */
+  workingArea(): WorkingAreaResult;
   /**
    * Prepare the empty directory an Agent Attempt's output receipts are written to
    * (#215) and return its absolute path. One directory per Attempt id under the

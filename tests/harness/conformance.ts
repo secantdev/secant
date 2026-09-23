@@ -8,6 +8,7 @@
 // interrupt and every `lost` path, recovery by resume, and idempotent close.
 
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   LOST_UNKNOWNS,
@@ -602,6 +603,148 @@ export function runPrepareProfileCases(
     assert.ok(result.failure.category.length > 0);
     assert.equal(result.failure.phase, "prepare");
   });
+
+  // #214: the one additional writable directory is validated identically by every
+  // Adapter before anything native runs; an existing absolute directory prepares.
+  register(
+    name("an existing absolute writable directory prepares"),
+    async () => {
+      const result = await scenarios.baseline()().prepare({
+        workspace: process.cwd(),
+        writableDirectory: process.cwd(),
+      });
+      assert.equal(result.ok, true);
+      if (result.ok) await result.harness.close();
+    },
+  );
+  for (const [label, directory] of [
+    ["a relative path", "relative/working"],
+    ["a missing directory", join(process.cwd(), "secant-no-such-directory")],
+    ["a file", process.execPath],
+  ] as const) {
+    register(
+      name(`a writable directory that is ${label} fails prepare typed`),
+      async () => {
+        const result = await scenarios.baseline()().prepare({
+          workspace: process.cwd(),
+          writableDirectory: directory,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) throw new Error("unreachable");
+        assert.equal(result.failure.phase, "prepare");
+        assert.equal(result.failure.category, "writable-directory-unavailable");
+        assert.equal(result.failure.possibleEffects, "none");
+        assert.ok(result.failure.diagnostics?.includes(directory));
+      },
+    );
+  }
+}
+
+/** A granting Adapter and the directories its native side was handed: one list
+ *  per native launch (Claude Code) or thread start/resume (Codex). */
+export interface WritableDirectoryGrant {
+  readonly factory: HarnessAdapterFactory;
+  readonly grants: () => readonly (readonly string[])[];
+}
+
+export interface WritableDirectoryGrantScenarios {
+  readonly label: string;
+  readonly inputText?: string;
+  /** A fresh existing absolute directory to grant. */
+  readonly directory: () => string;
+  readonly granting: () => WritableDirectoryGrant;
+  /** An Adapter whose acknowledged native policy cannot admit the directory. */
+  readonly refusing?: () => HarnessAdapterFactory;
+  /** The coordinate a fresh prepared Harness resumes, proving recovery re-grants. */
+  readonly resumeCoordinate?: RecoveryCoordinate;
+}
+
+/** The native writable-directory grant (#214): the directory reaches every native
+ *  launch or thread exactly and alone, recovery re-grants it, and a native policy
+ *  that cannot admit it fails the Turn typed before any content is admitted. */
+export function runWritableDirectoryGrantCases(
+  scenarios: WritableDirectoryGrantScenarios,
+  register: RegisterConformanceCase,
+): void {
+  const name = (behaviour: string) => `[${scenarios.label}] ${behaviour}`;
+  const text = scenarios.inputText;
+
+  register(
+    name("the writable directory is granted natively and alone"),
+    async () => {
+      const directory = scenarios.directory();
+      const granting = scenarios.granting();
+      const prepared = await prepareGranting(granting.factory, directory);
+      const result = await prepared
+        .startTurn(request(recorder().recorder, { text }))
+        .result();
+      assert.equal(result.kind, "completed", JSON.stringify(result));
+      await prepared.close();
+      const grants = granting.grants();
+      assert.ok(grants.length > 0, "a native launch or thread was observed");
+      for (const grant of grants) assert.deepEqual(grant, [directory]);
+    },
+  );
+
+  const resumeCoordinate = scenarios.resumeCoordinate;
+  if (resumeCoordinate !== undefined) {
+    register(
+      name("a recovered Session is granted the writable directory again"),
+      async () => {
+        const directory = scenarios.directory();
+        const granting = scenarios.granting();
+        const prepared = await prepareGranting(granting.factory, directory);
+        const result = await prepared
+          .startTurn(
+            request(recorder().recorder, { text, resume: resumeCoordinate }),
+          )
+          .result();
+        assert.equal(result.kind, "completed", JSON.stringify(result));
+        await prepared.close();
+        assert.deepEqual(granting.grants(), [[directory]]);
+      },
+    );
+  }
+
+  const refusing = scenarios.refusing;
+  if (refusing !== undefined) {
+    register(
+      name(
+        "a native policy that cannot admit the directory fails the Turn typed",
+      ),
+      async () => {
+        const directory = scenarios.directory();
+        const prepared = await prepareGranting(refusing(), directory);
+        const probe = recorder();
+        const result = await prepared
+          .startTurn(request(probe.recorder, { text }))
+          .result();
+        await prepared.close();
+        assert.equal(result.kind, "not-started", JSON.stringify(result));
+        if (result.kind !== "not-started") throw new Error("unreachable");
+        assert.equal(
+          result.detail.failure.category,
+          "writable-directory-refused",
+        );
+        assert.equal(result.detail.failure.possibleEffects, "none");
+        assert.ok(result.detail.failure.diagnostics?.includes(directory));
+        assert.deepEqual(probe.admissions, [], "no content was admitted");
+      },
+    );
+  }
+}
+
+async function prepareGranting(
+  factory: HarnessAdapterFactory,
+  writableDirectory: string,
+) {
+  const result = await factory().prepare({
+    workspace: process.cwd(),
+    writableDirectory,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  if (!result.ok) throw new Error("unreachable");
+  return result.harness;
 }
 
 /**

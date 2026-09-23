@@ -23,6 +23,7 @@ import {
   runPrepareProfileCases,
   runRequestedModelCases,
   runTurnLifecycleCases,
+  runWritableDirectoryGrantCases,
   type ApprovalRequestScenarios,
   type InterruptRecoveryScenarios,
   type PrepareProfileScenarios,
@@ -92,6 +93,31 @@ export function registerClaudeCodeReplayerConformance(
             env: {},
             sessionId: () => "77777777-7777-4777-8777-777777777777",
           });
+      },
+    },
+    register,
+  );
+
+  // #214: the Run working area reaches every launch as one `--add-dir`.
+  runWritableDirectoryGrantCases(
+    {
+      label: "claude-code",
+      directory: () => makeTempDir("secant-claude-writable-"),
+      granting: () => {
+        const replayer = installReplayer(VERSION, COMPLETED_CASE);
+        return {
+          factory: () =>
+            createClaudeCodeAdapter({
+              path: replayer.path,
+              env: {},
+              sessionId: () => "88888888-8888-4888-8888-888888888888",
+            }),
+          grants: () =>
+            replayer
+              .invocations()
+              .filter((invocation) => invocation.args.includes("-p"))
+              .map((invocation) => flagValues(invocation.args, "--add-dir")),
+        };
       },
     },
     register,
@@ -237,6 +263,62 @@ export function registerCodexReplayerConformance(
     register,
   );
 
+  // #214: the Run working area reaches every thread start and resume as the
+  // workspace-write roots override, and a sandbox that drops it refuses typed.
+  const codexGrant = (
+    installed = installSyntheticCodexReplayer(),
+  ): {
+    factory: HarnessAdapterFactory;
+    grants: () => string[][];
+  } => {
+    return {
+      factory: () => createCodexAdapter({ path: installed.path, env: {} }),
+      grants: () =>
+        installed
+          .invocations()
+          .flatMap((invocation) => invocation.stdinLines)
+          .map((line) => JSON.parse(line))
+          .filter(
+            (frame) =>
+              frame.method === "thread/start" ||
+              frame.method === "thread/resume",
+          )
+          .map(
+            (frame) =>
+              frame.params?.config?.[
+                "sandbox_workspace_write.writable_roots"
+              ] ?? [],
+          ),
+    };
+  };
+  runWritableDirectoryGrantCases(
+    {
+      label: "codex",
+      inputText: CODEX_RECORDING_INPUT.completion,
+      directory: () => makeTempDir("secant-codex-writable-"),
+      granting: () => codexGrant(),
+      resumeCoordinate: { opaque: "thread-1" },
+      refusing: () => {
+        const installed = installSyntheticCodexReplayer();
+        installed.configureTurn({ ignoreWritableRoots: true });
+        return () => createCodexAdapter({ path: installed.path, env: {} });
+      },
+    },
+    register,
+  );
+
+  // The strict recording acknowledges a read-only sandbox with on-request
+  // approvals: the grant still reaches the thread and the Turn is not refused.
+  runWritableDirectoryGrantCases(
+    {
+      label: "codex-recorded-read-only",
+      inputText: CODEX_RECORDING_INPUT.completion,
+      directory: () => makeTempDir("secant-codex-writable-"),
+      granting: () => codexGrant(installCodexReplayer("completion")),
+    },
+    register,
+  );
+
   runTurnLifecycleCases(
     {
       label: "codex-turn-lifecycle",
@@ -371,6 +453,13 @@ export function registerCodexReplayerConformance(
     },
   };
   runApprovalRequestCases(codexApprovalScenarios, register);
+}
+
+/** Every value following `flag` in an argv. */
+function flagValues(args: readonly string[], flag: string): string[] {
+  return args.flatMap((arg, index) =>
+    arg === flag && index + 1 < args.length ? [args[index + 1]] : [],
+  );
 }
 
 function failedTurnReplayer() {

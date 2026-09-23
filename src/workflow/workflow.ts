@@ -156,13 +156,23 @@ export function promptSlotReferences(text: string): string[] {
 }
 
 /**
+ * The one generic Run-owned reference slot (#214): the executor substitutes the
+ * Run's editable working area as an exact absolute directory, the only place an
+ * agent is granted extra write access. It names no artifact, so it adds no
+ * required binding.
+ */
+export const WORKING_AREA_SLOT = "{{run:working-area}}";
+
+/**
  * A `{{...}}` sequence is a valid Prompt slot only if it is exactly
- * `{{artifact:name}}`. Any other `{{...}}` (an expression, an unknown scheme, a
- * malformed name) is rejected so authored prompts cannot smuggle in logic.
+ * `{{artifact:name}}` or {@link WORKING_AREA_SLOT}. Any other `{{...}}` (an
+ * expression, an unknown scheme, a malformed name) is rejected so authored
+ * prompts cannot smuggle in logic.
  */
 export function hasOnlyValidPromptSlots(text: string): boolean {
   const anySlot = /\{\{([^}]*)\}\}/g;
   for (const match of text.matchAll(anySlot)) {
+    if (match[0] === WORKING_AREA_SLOT) continue;
     if (!/^artifact:[a-zA-Z0-9._-]+$/.test(match[1])) return false;
   }
   return true;

@@ -4,7 +4,8 @@
 // Seam. This file is the whole public surface: the Interface, the evidence-
 // bearing profile, factories, and normalized discovery/profile facts. It names no
 // native conversation-id value, raw protocol frame, or protocol type. The declared
-// crossings are the Workspace path, named native-Adapter test seams, and opaque
+// crossings are the Workspace path, the one additional writable directory, named
+// native-Adapter test seams, and opaque
 // permission-bridge factory used by the recorder; the resolved spawn target stays
 // private. It knows nothing of Routing, Step kind, retry budget, or Run policy,
 // all of which live above the Seam.
@@ -603,6 +604,12 @@ export interface PrepareOptions {
    *  free-text profile admits any value. The effective model reported on a Turn
    *  stays a separate observed fact and never copies this request. */
   readonly requestedModel?: string;
+  /** One additional absolute directory every Session may write (#214), granted
+   *  natively only where the Harness's sandbox rules would otherwise refuse it and
+   *  without changing the user's broader permission posture. A path that is not an
+   *  existing absolute directory is a typed `writable-directory-unavailable`
+   *  prepare failure; a native policy that does not admit it fails the Turn. */
+  readonly writableDirectory?: string;
 }
 
 /** The value `prepare` returns: a prepared Harness or a typed failure. */

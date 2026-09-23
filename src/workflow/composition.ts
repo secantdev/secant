@@ -173,7 +173,7 @@ export function checkComposition(
           error(
             "malformed-prompt-slot",
             step.id,
-            `Step "${step.id}" prompt "${prompt.asset}" has a {{...}} slot that is not the {{artifact:name}} form.`,
+            `Step "${step.id}" prompt "${prompt.asset}" has a {{...}} slot that is not the {{artifact:name}} or {{run:working-area}} form.`,
           );
         }
         for (const name of promptSlotReferences(text)) {

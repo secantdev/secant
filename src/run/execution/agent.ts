@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import {
   FRESH_SESSION,
   promptSlotPattern,
+  WORKING_AREA_SLOT,
   type AgentStep,
   type ArtifactType,
   type AssetKind,
@@ -639,7 +640,7 @@ function notifyChannel(channel: RequestChannel, event: TurnEvent): void {
   }
 }
 
-/** Render the Agent prompt (#116): fill each `{{artifact:name}}` slot from the
+/** Render the Agent prompt (#116): substitute the Run working area (#214), fill each `{{artifact:name}}` slot from the
  *  Run's bindings and Launch inputs, then append one line per `skill` in `uses`
  *  telling the agent to read its `SKILL.md`. No `@` or other Harness syntax is
  *  baked in — the file path is a plain absolute path. */
@@ -654,7 +655,29 @@ function renderAgentPrompt(
   if (deliveryFailure !== undefined) {
     return { ok: false, result: deliveryFailure };
   }
-  const base = readPromptText(step.prompt, context);
+  let base = readPromptText(step.prompt, context);
+  if (base.includes(WORKING_AREA_SLOT)) {
+    // The exact directory composition granted the Harness at prepare (#214).
+    const area = context.owner.workingArea();
+    if (!area.ok) {
+      return {
+        ok: false,
+        result: {
+          kind: "not-started",
+          detail: {
+            failure: {
+              phase: "launch",
+              category: "working-area-unavailable",
+              possibleEffects: "none",
+              diagnostics: `The Run working area '${area.problem.path}' is not a usable directory.`,
+              cause: area.problem.cause,
+            },
+          },
+        },
+      };
+    }
+    base = base.replaceAll(WORKING_AREA_SLOT, area.path);
+  }
   const filled = base.replace(promptSlotPattern(), (_match, name: string) =>
     resolvePromptSlot(name, context, harness),
   );

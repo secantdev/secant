@@ -8,6 +8,7 @@ import {
   WORKSPACE_PREREQUISITES,
   hasOnlyValidPromptSlots,
   promptSlotReferences,
+  WORKING_AREA_SLOT,
 } from "../../src/workflow/workflow.js";
 
 test("the closed vocabulary sets are exactly what the spec fixes", () => {
@@ -49,4 +50,13 @@ test("prompt slots read only {{artifact:name}} and reject expressions", () => {
   assert.equal(hasOnlyValidPromptSlots("use {{artifact:x}}"), true);
   assert.equal(hasOnlyValidPromptSlots("no {{if x}} logic"), false);
   assert.equal(hasOnlyValidPromptSlots("no {{asset:x}} either"), false);
+});
+
+test("the one Run-owned reference slot names the Run working area (#214)", () => {
+  assert.equal(WORKING_AREA_SLOT, "{{run:working-area}}");
+  assert.equal(hasOnlyValidPromptSlots(`write in ${WORKING_AREA_SLOT}`), true);
+  // It is not an artifact reference, so it adds no required binding.
+  assert.deepEqual(promptSlotReferences(WORKING_AREA_SLOT), []);
+  assert.equal(hasOnlyValidPromptSlots("no {{run:store-root}}"), false);
+  assert.equal(hasOnlyValidPromptSlots("no {{run:}}"), false);
 });

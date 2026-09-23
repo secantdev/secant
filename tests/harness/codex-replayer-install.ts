@@ -88,6 +88,8 @@ export interface InstalledCodexReplayer {
 }
 
 export interface CodexTurnReplayOptions {
+  /** Acknowledge workspace-write without the requested writable root (#214). */
+  readonly ignoreWritableRoots?: boolean;
   readonly stopAfter?: "accepted" | "item-completed";
   readonly terminalLineEnding?: "crlf";
   readonly truncatedFrame?: boolean;

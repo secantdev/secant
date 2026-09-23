@@ -10,8 +10,8 @@ Human Gates remain durable Workflow state, and expired Harness Requests or ordin
 Physical persistence follows the same ownership. Runs sharing one resolved absolute **Workspace** value are organized beneath a readable
 `<path-slug>--<short-path-digest>` directory. Its `coordination.db` owns Run registration and create/delete operation admission. Each Run owns one
 **Run Store** with `run.db` for structured truth and **Run owner** fencing, a
-private bare Git repository for immutable Artifact content and history, temporary creation/publication/deletion staging, and separately retained
-diagnostics. A global Run index is a replaceable projection, not authority. Workspace is still a path value rather than an entity; the grouping and
+private bare Git repository for immutable Artifact content and history, temporary creation/publication/deletion staging, separately retained
+diagnostics, and (2026-09-23, #214) one editable **Run working area**. A global Run index is a replaceable projection, not authority. Workspace is still a path value rather than an entity; the grouping and
 coordinator are storage organization and coordination, not a new domain identity.
 
 A producer writes **Candidate output** once. Crucible validates every required output of the Step Attempt, captures portable regular-file content,
@@ -78,3 +78,13 @@ changed. Launch and resume hand that one stored value to the Adapter's prepare, 
 value means the Harness default, never a substitute. The requested model is free text in the store, checked against the Adapter's declared model list
 at launch-preparation and at prepare ([ADR 0022](./0022-own-a-truthful-deep-harness-seam.md)); a Command-only Run carries none. It is not evidence:
 the effective model each Attempt observes stays a per-Attempt fact and never overwrites the request.
+
+## Amendment — a Run owns one editable working area (2026-09-23, [#214](https://github.com/secantdev/secant/issues/214))
+
+Local planning needs editable spec and ticket files that belong to the Run but are not immutable Artifacts. Each Run Store therefore owns one
+**Run working area**: a directory beside, never above, `run.db` and the Artifact repository, created on first use and removed by the same Run
+deletion. It is working state, not truth: nothing is published, versioned, fenced, or reconciled from it, and resume never rewrites it. The Store
+exposes only its canonical path, which execution names in prompts (`{{run:working-area}}`) and composition hands to Harness preparation as the one
+additional writable directory, so no client or Harness reconstructs a private storage path or is granted the database and repository as a group. A
+path that cannot be that directory is a typed failure that halts the Run before any Turn. Writing planning files into the Workspace or a shared
+Store directory was rejected: the first leaks planning state into the user's project, the second would widen a sandbox grant over private Run truth.

@@ -90,6 +90,8 @@ It preserves the installed bytes across missing input, malformed manifest/versio
 inner-binary, legal-material, and executable-version failures. The scenario invokes native PowerShell and the standalone
 candidate only; it requires no Git Bash, Node, Bun, credentials, or network. A directory-swap failure is deliberately not
 induced: doing so deterministically would require a private installer hook or an inherently racy Windows file lock.
+The installer runs its `--version` probe on a digest-checked copy outside the stage, never the staged executable: Windows can hold a
+just-executed image briefly, which failed the stage rename (a sharing violation in CI, #216).
 
 ## POSIX Installer Consumer
 

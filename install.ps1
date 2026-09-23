@@ -186,7 +186,8 @@ function Assert-StagedCandidate {
   param(
     [string]$StageDirectory,
     [object]$Manifest,
-    [object]$Target
+    [object]$Target,
+    [string]$ProbeDirectory
   )
 
   $ExpectedNames = @($ExecutableName, $LicenseName, $NoticesName) | Sort-Object
@@ -207,7 +208,12 @@ function Assert-StagedCandidate {
   Assert-Digest (Join-Path $StageDirectory $LicenseName) ([string]$Manifest.licenseSha256) $LicenseName
   Assert-Digest (Join-Path $StageDirectory $NoticesName) ([string]$Manifest.noticesSha256) $NoticesName
 
-  $ObservedVersion = (& $ExecutablePath --version 2>&1 | Out-String).Trim()
+  # Run the version probe from a verified copy outside the stage: Windows can keep a
+  # just-executed image locked briefly, which would make the stage rename fail.
+  $ProbePath = Join-Path $ProbeDirectory $ExecutableName
+  Copy-Item -LiteralPath $ExecutablePath -Destination $ProbePath
+  Assert-Digest $ProbePath ([string]$Target.binarySha256) $ExecutableName
+  $ObservedVersion = (& $ProbePath --version 2>&1 | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) {
     throw "$ExecutableName --version exited $LASTEXITCODE."
   }
@@ -302,7 +308,7 @@ try {
 
   New-Item -ItemType Directory -Path $SecantDirectory, $StageDirectory -Force | Out-Null
   Expand-Archive -LiteralPath $ArchivePath -DestinationPath $StageDirectory
-  Assert-StagedCandidate $StageDirectory $Manifest $Target
+  Assert-StagedCandidate $StageDirectory $Manifest $Target $DownloadDirectory
   Install-StagedCandidate $StageDirectory $InstallDirectory $BackupDirectory
 }
 finally {

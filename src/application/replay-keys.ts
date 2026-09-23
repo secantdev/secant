@@ -2,6 +2,7 @@ import { realpathSync } from "node:fs";
 import type {
   AnswerHarnessRequestInput,
   AnswerHumanGateInput,
+  ContinueRepeatInput,
   EndInteractiveStepInput,
   LaunchRunInput,
   ResumeRunInput,
@@ -85,6 +86,10 @@ export function endInteractiveStepReplayKey(
   input: EndInteractiveStepInput,
 ): string {
   return JSON.stringify(["end-interactive-step", input.runId, input.stepId]);
+}
+
+export function continueRepeatReplayKey(input: ContinueRepeatInput): string {
+  return JSON.stringify(["continue-repeat", input.runId, input.stepId]);
 }
 
 export function cancelReplayKey(runId: string): string {

@@ -91,6 +91,10 @@ export interface RunWorkbenchView {
   /** Ends the interactive-agent Step the Run is blocked at (#122): settles the Step
    *  succeeded and advances the Run. Offered only at a Turn boundary. */
   endInteractiveStep(runId: string, stepId: string): Accessor<AnswerOutcome>;
+  /** Continues a human-controlled Repeat (#217): settles the iteration's interactive
+   *  Step and opens the next iteration in a fresh Session. Offered only at a Turn
+   *  boundary, in place of End Step. */
+  continueRepeat(runId: string, stepId: string): Accessor<AnswerOutcome>;
   /** Steers the live Turn with same-Turn guidance (#148): the verbatim text reaches
    *  the running agent without ending the Turn. Offered only when the prepared
    *  Harness declares native steer. The accessor starts `pending` and settles once
@@ -166,6 +170,12 @@ export function createLiveRunWorkbenchView(
       submitAndSettle(port, {
         operationId: randomUUID(),
         operation: "end-interactive-step",
+        input: { runId, stepId },
+      }),
+    continueRepeat: (runId, stepId) =>
+      submitAndSettle(port, {
+        operationId: randomUUID(),
+        operation: "continue-repeat",
         input: { runId, stepId },
       }),
     // Same-Turn guidance (#148): Turn-scoped like an approval answer, so it must

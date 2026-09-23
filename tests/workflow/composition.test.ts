@@ -359,6 +359,31 @@ const cases: ReadonlyArray<{
     target: "routing[1].repeat.steps",
   },
   {
+    // Continue is the only thing that moves a human-controlled Repeat, so each
+    // iteration must pause at exactly one interactive-agent Step (#217).
+    title: "a human-controlled Repeat without exactly one interactive Step",
+    manifest: manifest({
+      routing: routing({
+        group: {
+          repeat: {
+            control: "human",
+            steps: [
+              {
+                id: "a",
+                kind: "agent",
+                session: "s",
+                requires: ["doc"],
+                prompt: { asset: "p.md" },
+              },
+            ],
+          },
+        },
+      }),
+    }),
+    code: "human-repeat-interactive-step",
+    target: "routing[1].repeat.steps",
+  },
+  {
     // An agent-authored Verdict would let assistant output choose the Routing
     // (ADR 0020); an Agent Step produces only validated `text` receipts (#215).
     title: "an agent Step that declares a non-text output",
@@ -464,8 +489,9 @@ test("every composition rule owns a distinct stable code", () => {
   const codes = new Set(cases.map((testCase) => testCase.code));
   // Eleven rules; the missing/wrong-kind asset rule carries two codes (twelve),
   // plus the Agent-produces rule (#116) makes thirteen, plus the
-  // gate-suggestions rule (#213) makes fourteen.
-  assert.equal(codes.size, 14);
+  // gate-suggestions rule (#213) makes fourteen, plus the human-controlled
+  // Repeat rule (#217) makes fifteen.
+  assert.equal(codes.size, 15);
 });
 
 test("accepts an interactive-agent Step inside a Verdict-driven Repeat span (#216)", () => {
@@ -501,6 +527,40 @@ test("accepts an interactive-agent Step inside a Verdict-driven Repeat span (#21
     }),
   );
   assert.deepEqual(findings, []);
+});
+
+test("accepts a human-controlled Repeat around one interactive Step, with no Verdict or checkpoint (#217)", () => {
+  const interactive = (id: string) => ({
+    id,
+    kind: "interactive-agent" as const,
+    session: "s",
+    requires: ["doc"],
+    prompt: { asset: "p.md" as const },
+  });
+  const human = (steps: RoutingNode[]) =>
+    run(
+      manifest({
+        routing: routing({
+          group: { repeat: { control: "human", steps } } as RoutingNode,
+        }),
+      }),
+    ).map((finding) => finding.code);
+  assert.deepEqual(
+    human([
+      interactive("implement"),
+      {
+        id: "run",
+        kind: "command",
+        requires: ["doc"],
+        command: { executable: "bash", arguments: [{ asset: "run.sh" }] },
+      },
+    ]),
+    [],
+  );
+  // Two interactive Steps would leave which one Continues ambiguous.
+  assert.deepEqual(human([interactive("one"), interactive("two")]), [
+    "human-repeat-interactive-step",
+  ]);
 });
 
 test("flags a duplicate Step id", () => {

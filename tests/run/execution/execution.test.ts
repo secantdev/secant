@@ -1147,6 +1147,41 @@ test("an interactive-agent Step in a Repeat pauses once per iteration with its o
   assert.equal(fake.calls("check"), 2);
 });
 
+test("a human-controlled Repeat never reads a Verdict or blocks at a checkpoint; each settled iteration opens the next at its interactive Step (#217)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const fake = fakeExecutor();
+  // A span Command that always writes `fail`: a Verdict-driven group would block at
+  // its cadence of one, but a human-controlled group has neither.
+  const routing = [
+    {
+      repeat: {
+        control: "human",
+        steps: [
+          interactiveStep("implement", "impl"),
+          fakeStep("check", { exit: 1 }, verdictOut),
+        ],
+      },
+    },
+  ] as unknown as RoutingNode[];
+
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "blocked",
+  });
+  assert.equal(fake.calls("check"), 0);
+  for (let iteration = 1; iteration <= 3; iteration++) {
+    assert.deepEqual(
+      await endInteractive(routing, owner, "implement", fake.spawn),
+      { outcome: "blocked" },
+    );
+    assert.equal(state(), "blocked");
+    assert.equal(fake.calls("check"), iteration);
+    assert.deepEqual(targetOf(routing, owner, "implement"), {
+      attemptId: `${iteration}.0:implement`,
+      session: `impl-${iteration}.0:implement`,
+    });
+  }
+});
+
 test("a top-level interactive Step keeps its named Session; `fresh` scopes it to the Attempt (#216)", async (t) => {
   const { owner } = ownerForFreshRun(t);
   const routing = [

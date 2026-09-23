@@ -283,14 +283,38 @@ export interface ReviewCheckpoint {
   readonly interval: number;
   readonly message: string;
 }
+/** Repeats until the named Verdict reads `pass`, with a periodic Review checkpoint
+ *  (ADR 0020). */
+export interface VerdictRepeat {
+  readonly until: string;
+  readonly reviewCheckpoint: ReviewCheckpoint;
+  readonly steps: readonly Step[];
+}
+/** Repeats until a human ends the stage (#217, #218): each iteration pauses at its one
+ *  interactive-agent Step, and the human's Continue is that iteration's review
+ *  decision, so no Verdict is read and no periodic Review checkpoint is raised. */
+export interface HumanRepeat {
+  readonly control: "human";
+  readonly steps: readonly Step[];
+}
 export interface RepeatGroup {
-  readonly repeat: {
-    readonly until: string;
-    readonly reviewCheckpoint: ReviewCheckpoint;
-    readonly steps: readonly Step[];
-  };
+  readonly repeat: VerdictRepeat | HumanRepeat;
 }
 export type RoutingNode = Step | RepeatGroup;
+
+/** Whether the named Step sits inside a human-controlled Repeat group (#217): its
+ *  iteration advances only by the human's Continue, never by End Step. */
+export function inHumanRepeat(
+  routing: readonly RoutingNode[],
+  stepId: string,
+): boolean {
+  return routing.some(
+    (node) =>
+      "repeat" in node &&
+      "control" in node.repeat &&
+      node.repeat.steps.some((step) => step.id === stepId),
+  );
+}
 
 export interface AuthoredManifest {
   readonly formatVersion: 1;

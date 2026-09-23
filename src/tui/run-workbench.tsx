@@ -15,6 +15,7 @@ import type {
   ApprovalDecisionName,
   CancelRunOffer,
   DeleteRunOffer,
+  ContinueRepeatOffer,
   EndInteractiveStepOffer,
   InterruptTurnOffer,
   Problem,
@@ -289,7 +290,13 @@ export function RunWorkbench(props: {
   });
   const [actionRefusal, setActionRefusal] = createSignal<Problem | undefined>();
   const [pending, setPending] = createSignal<
-    "takeover" | "acknowledge" | "cancel" | "delete" | "end-step" | undefined
+    | "takeover"
+    | "acknowledge"
+    | "cancel"
+    | "delete"
+    | "end-step"
+    | "continue"
+    | undefined
   >();
   // A dispatched Run Action followed to settlement: resume drives execution and a
   // cancel-as-abort aborts a live Run, both asynchronous now (#98), so the outcome
@@ -422,6 +429,11 @@ export function RunWorkbench(props: {
         (offer): offer is EndInteractiveStepOffer =>
           offer.action === "end-interactive-step",
       ),
+      // A human-controlled Repeat offers Continue in End Step's place (#217).
+      continue: list.find(
+        (offer): offer is ContinueRepeatOffer =>
+          offer.action === "continue-repeat",
+      ),
     };
   });
   // A Turn is live (working) when the Step is active but the boundary offers are gone.
@@ -461,6 +473,12 @@ export function RunWorkbench(props: {
     setInteractiveOutcome(() =>
       view.endInteractiveStep(offer.runId, offer.stepId),
     );
+  };
+  const confirmContinue = () => {
+    const offer = interactiveOffers().continue;
+    if (offer === undefined || interactivePending()) return;
+    setInteractiveRefusal(undefined);
+    setInteractiveOutcome(() => view.continueRepeat(offer.runId, offer.stepId));
   };
 
   // Native Steer (#148, spec story 19): while an agent Turn is live under a Harness
@@ -892,7 +910,8 @@ export function RunWorkbench(props: {
   // focused widget on the same key event (verified routing order, tui/AGENTS.md), so
   // it claims the command keys here and lets every other key reach the field. The
   // field's `draft` value comes from its `onInput`; this only reads it. Ctrl+E arms
-  // End Step (only at a boundary), Enter sends, Escape leaves.
+  // End Step and Ctrl+N arms Continue (#217) — each only at a boundary and only when
+  // offered — Enter sends, Escape leaves.
   const handleInteractiveKey = (key: RendererKeyEvent) => {
     const name = key.name ?? "";
     // During a live human Turn Esc is the two-press Interrupt (#219), shown in the
@@ -911,6 +930,13 @@ export function RunWorkbench(props: {
       if (interactiveOffers().end !== undefined) {
         setInteractiveRefusal(undefined);
         setPending("end-step");
+      }
+      return;
+    }
+    if (name === "n" && key.ctrl) {
+      if (interactiveOffers().continue !== undefined) {
+        setInteractiveRefusal(undefined);
+        setPending("continue");
       }
       return;
     }
@@ -973,6 +999,7 @@ export function RunWorkbench(props: {
         if (action === "takeover" || action === "acknowledge") dispatchResume();
         else if (action === "cancel") confirmCancel();
         else if (action === "delete") confirmDelete();
+        else if (action === "continue") confirmContinue();
         else confirmEndStep();
       } else if (name === "escape") {
         setPending(undefined);
@@ -1212,6 +1239,8 @@ export function RunWorkbench(props: {
               draft={draft}
               onDraftInput={(value) => setDraft(value)}
               endStepArmed={() => pending() === "end-step"}
+              interactiveContinue={() => interactiveOffers().continue}
+              continueArmed={() => pending() === "continue"}
               interactivePending={interactivePending}
               interactiveRefusal={interactiveRefusal}
               steerActive={steerActive}
@@ -1318,6 +1347,8 @@ function Workbench(props: {
   interactiveTurnLive: Accessor<boolean>;
   interactiveInterrupt: Accessor<InterruptTurnOffer | undefined>;
   interactiveEndOffered: Accessor<boolean>;
+  interactiveContinue: Accessor<ContinueRepeatOffer | undefined>;
+  continueArmed: Accessor<boolean>;
   interactiveSendOffered: Accessor<boolean>;
   draft: Accessor<string>;
   onDraftInput: (value: string) => void;
@@ -1697,6 +1728,8 @@ function Workbench(props: {
               endOffered={props.interactiveEndOffered}
               sendOffered={props.interactiveSendOffered}
               endArmed={props.endStepArmed}
+              continueOffer={props.interactiveContinue}
+              continueArmed={props.continueArmed}
               pending={props.interactivePending}
               refusal={props.interactiveRefusal}
               focused={() => props.focus() === "interactive"}

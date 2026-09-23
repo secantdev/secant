@@ -20,9 +20,10 @@ alone takes its keys, size, and resize from the Renderer Port; the Application s
 - The interactive-agent input (`run-workbench.tsx`, #122) is a native OpenTUI `<input>` (D9): while `focus` is `interactive` the field owns text, so `q`/`r`/`c`/`x`/`t`
   type into it rather than fire their bare-letter commands (only Ctrl+C still exits, and the dispatcher gates those commands on not typing). The field carries capitals,
   punctuation, paste and word delete verbatim. Enter dispatches `send-interactive-turn` (blank/whitespace refused before dispatch, and a refused send keeps the draft, A9);
-  Ctrl+E arms `end-interactive-step`, offered — and so armable — only at a Turn boundary (no live Turn), reusing the same `pending` arm-and-confirm. The Step is "active"
-  whenever the Run is blocked at an `interactive-agent` Step (independent of a live Turn), so focus stays on the input across the whole Step and returns to the timeline when
-  it ends.
+  Ctrl+E arms `end-interactive-step`, offered — and so armable — only at a Turn boundary (no live Turn), reusing the same `pending` arm-and-confirm;
+  in a human-controlled Repeat Ctrl+N arms `continue-repeat` the same way instead (#217), its confirm leading with `y`/`esc` before the Offer's consequence.
+  The Step is "active" whenever the Run is blocked at an `interactive-agent` Step (independent of a live Turn), so focus stays on the input across the whole
+  Step and returns to the timeline when it ends.
 - Typed-but-unsent interactive text (the `draft` signal) clears only on a **fresh** interactive Step (the focus effect keyed on the Step id), so it survives a
   Turn settle and a tab away within the same Step; a send clears it optimistically before dispatch, so a refused send loses the text (the refusal re-surfaces,
   the draft does not).

@@ -268,6 +268,13 @@ function routingViews(
 ): readonly RoutingNodeView[] {
   return routing.map((node) => {
     if ("repeat" in node) {
+      if ("control" in node.repeat) {
+        return {
+          node: "repeat",
+          control: node.repeat.control,
+          steps: node.repeat.steps.map(stepView),
+        };
+      }
       return {
         node: "repeat",
         until: node.repeat.until,

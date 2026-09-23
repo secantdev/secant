@@ -828,6 +828,13 @@ test("an Interactive Step in a Verdict-driven Repeat gives each iteration its ow
   assert.equal(run.state, "blocked");
   assert.equal(run.progress[run.position]?.id, "implement");
   assert.ok(offer(run, "end-interactive-step"));
+  // A Verdict-driven Repeat has no Continue (#217): refused, changing nothing.
+  assert.equal(offer(run, "continue-repeat"), undefined);
+  const refusedContinue = await submitContinue(wired, runId, "op-continue");
+  assert.equal(refusedContinue.status, "not-applied");
+  if (refusedContinue.status === "not-applied") {
+    assert.equal(refusedContinue.problem.code, "continue-outside-human-repeat");
+  }
 
   // Two Turns in iteration 0: completion never advances; one conversation.
   await send(wired, runId, "op-i0-t1", "implement", "pick a ticket");
@@ -978,6 +985,183 @@ test("an entry Turn inside a Repeat opens each iteration's own Session (#212, #2
       [
         ["0.0:implement#entry", "impl-0.0:implement", "managed"],
         ["1.0:implement#entry", "impl-1.0:implement", "managed"],
+      ],
+    );
+  } finally {
+    owner.close();
+  }
+});
+
+/** A human-controlled Repeat (#217): `repeat { control: human } [interactive
+ *  implement]`. No Verdict, no Review checkpoint — only Continue opens the next
+ *  iteration (confirmed End Stage, #218, exits). */
+function humanRepeatRouting(): readonly unknown[] {
+  return [
+    {
+      repeat: {
+        control: "human",
+        steps: [
+          {
+            id: "implement",
+            kind: "interactive-agent",
+            session: "impl",
+            prompt: { asset: "prompts/discuss.md" },
+          },
+        ],
+      },
+    },
+  ];
+}
+
+async function submitContinue(
+  wired: Wiring,
+  runId: string,
+  operationId: string,
+  stepId = "implement",
+) {
+  const admission = wired.projectionPort.submit({
+    operationId,
+    operation: "continue-repeat",
+    input: { runId, stepId },
+  });
+  assert.ok(admission.admitted, JSON.stringify(admission));
+  return awaitSettled(wired.projectionPort, operationId);
+}
+
+test("a human-controlled Repeat offers Continue only at a Turn boundary; one Continue settles one iteration into a fresh Session, idempotent by Operation id, with no Review checkpoint (#217)", async (t) => {
+  const { wired, runId, run } = await launchInteractive(
+    t,
+    perPrepareAdapter([
+      // Launch: iteration 0, one completed Turn, then one that blocks until interrupt.
+      [COMPLETED_DETACHED, BLOCKING],
+      // resume-run: iteration 0 again.
+      [],
+      // Continue #1..#3: each opens the next iteration; iteration 1 takes one Turn.
+      [COMPLETED_DETACHED],
+      [],
+      [],
+    ]),
+    undefined,
+    humanRepeatRouting(),
+  );
+  // At the boundary: send + Continue, never End Step (Continue is this mode's control).
+  assert.equal(run.state, "blocked");
+  assert.equal(run.progress[run.position]?.id, "implement");
+  assert.ok(offer(run, "send-interactive-turn"));
+  const continueOffer = offer(run, "continue-repeat");
+  assert.ok(continueOffer, JSON.stringify(run.actionOffers));
+  assert.equal(continueOffer.stepId, "implement");
+  assert.match(continueOffer.consequence, /fresh/);
+  assert.equal(offer(run, "end-interactive-step"), undefined);
+  // End Step is refused in this mode, changing nothing.
+  const end = wired.projectionPort.submit({
+    operationId: "op-end",
+    operation: "end-interactive-step",
+    input: { runId, stepId: "implement" },
+  });
+  assert.ok(end.admitted);
+  const endOutcome = await awaitSettled(wired.projectionPort, "op-end");
+  assert.equal(endOutcome.status, "not-applied");
+
+  // A completed Turn never advances the iteration.
+  await send(wired, runId, "op-i0-t1", "implement", "pick a ticket");
+  assert.equal(readRun(wired, runId).state, "blocked");
+
+  // A live Turn: no Continue Offer, and a Continue submission cannot race it.
+  const sent = wired.projectionPort.submit({
+    operationId: "op-i0-t2",
+    operation: "send-interactive-turn",
+    input: { runId, stepId: "implement", text: "a long question" },
+  });
+  assert.ok(sent.admitted);
+  const interruptOffer = await awaitInterruptOffer(wired, runId);
+  assert.equal(offer(readRun(wired, runId), "continue-repeat"), undefined);
+  const raced = await submitContinue(wired, runId, "op-race");
+  assert.equal(raced.status, "not-applied");
+  if (raced.status === "not-applied") {
+    assert.equal(raced.problem.code, "interactive-step-mid-turn");
+  }
+  const interrupted = wired.projectionPort.submit({
+    operationId: "op-interrupt",
+    operation: "interrupt-turn",
+    input: { runId, turnId: interruptOffer.turnId },
+  });
+  assert.ok(interrupted.admitted);
+  await awaitSettled(wired.projectionPort, "op-interrupt");
+  await awaitSettled(wired.projectionPort, "op-i0-t2");
+  assert.equal(readRun(wired, runId).state, "halted");
+  const resumed = wired.projectionPort.submit({
+    operationId: "op-resume",
+    operation: "resume-run",
+    input: { runId },
+  });
+  assert.ok(resumed.admitted);
+  await awaitSettled(wired.projectionPort, "op-resume");
+  assert.equal(readRun(wired, runId).state, "blocked");
+
+  // One Continue settles exactly iteration 0 and rests at iteration 1.
+  assert.equal(
+    (await submitContinue(wired, runId, "op-continue-0")).status,
+    "applied",
+  );
+  const iteration1 = readRun(wired, runId);
+  assert.equal(iteration1.state, "blocked");
+  assert.equal(iteration1.progress[iteration1.position]?.id, "implement");
+  assert.ok(offer(iteration1, "continue-repeat"));
+  // The same Operation id again replays its admission and settles nothing new.
+  assert.equal(
+    (await submitContinue(wired, runId, "op-continue-0")).status,
+    "applied",
+  );
+  await send(wired, runId, "op-i1-t1", "implement", "next ticket");
+  assert.deepEqual(sessionsOf(readRun(wired, runId)), [
+    "impl-0.0:implement",
+    "impl-1.0:implement",
+  ]);
+
+  // Two more Continues: never a Review checkpoint, only Continue moves the loop.
+  await submitContinue(wired, runId, "op-continue-1");
+  await submitContinue(wired, runId, "op-continue-2");
+  const later = readRun(wired, runId);
+  assert.equal(later.state, "blocked");
+  assert.equal(later.checkpoint, undefined);
+  assert.equal(offer(later, "answer-human-gate"), undefined);
+  assert.equal(
+    later.timeline.filter((event) => event.event === "repeat-continued").length,
+    3,
+  );
+  assert.equal(
+    later.timeline.filter((event) => event.event === "interactive-step-ended")
+      .length,
+    0,
+  );
+
+  // Cancel releases the held blocked owner so the store can be read directly.
+  assert.ok(
+    wired.projectionPort.submit({
+      operationId: "op-cancel",
+      operation: "cancel-run",
+      input: { runId },
+    }).admitted,
+  );
+  await awaitSettled(wired.projectionPort, "op-cancel");
+  const owner = wired.runGroup.acquireRun(runId);
+  assert.ok(owner);
+  try {
+    assert.deepEqual(
+      owner.attemptLog().map((entry) => [entry.attemptId, entry.outcome]),
+      [
+        ["0.0:implement", "succeeded"],
+        ["1.0:implement", "succeeded"],
+        ["2.0:implement", "succeeded"],
+      ],
+    );
+    assert.deepEqual(
+      owner.turns().map((turn) => [turn.attemptId, turn.session, turn.input]),
+      [
+        ["0.0:implement", "impl-0.0:implement", "pick a ticket"],
+        ["0.0:implement", "impl-0.0:implement", "a long question"],
+        ["1.0:implement", "impl-1.0:implement", "next ticket"],
       ],
     );
   } finally {

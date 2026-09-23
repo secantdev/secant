@@ -493,6 +493,30 @@ export function interactiveStepMidTurn(runId: string, stepId: string): Problem {
   };
 }
 
+/** The interactive Step's control does not match its Routing (#217): inside a
+ *  human-controlled Repeat only Continue settles it; elsewhere only End Step does. */
+export function interactiveControlMismatch(
+  runId: string,
+  stepId: string,
+  humanRepeat: boolean,
+): Problem {
+  return humanRepeat
+    ? {
+        code: "end-step-in-human-repeat",
+        explanation: `Interactive Step "${stepId}" of Run ${runId} is inside a human-controlled Repeat; it is settled by Continue, not End Step.`,
+        remediation: "Take the Run's Continue Offer instead.",
+        possibleEffects: "none",
+        details: { runId, stepId },
+      }
+    : {
+        code: "continue-outside-human-repeat",
+        explanation: `Interactive Step "${stepId}" of Run ${runId} is not inside a human-controlled Repeat; there is no iteration to Continue.`,
+        remediation: "Take the Run's End Step Offer instead.",
+        possibleEffects: "none",
+        details: { runId, stepId },
+      };
+}
+
 /** A live Run cannot be deleted: its store is in use (#87). */
 export function runIsLive(runId: string): Problem {
   return {

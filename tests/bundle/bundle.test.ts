@@ -296,6 +296,33 @@ const rejections: ReadonlyArray<{
     code: "invalid-field",
     path: "routing[0].entryTurn",
   },
+  {
+    // A human-controlled Repeat (#217) is exactly `control: "human"` plus steps: it
+    // names no Verdict, so an authored `until` is refused rather than silently read.
+    title: "a human-controlled Repeat that also names a Verdict",
+    folder: () =>
+      authoringFolder({
+        ...base(),
+        routing: [
+          {
+            repeat: {
+              control: "human",
+              until: "v",
+              steps: [
+                {
+                  id: "i",
+                  kind: "interactive-agent",
+                  session: "s",
+                  prompt: { asset: "p.md" },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    code: "unknown-field",
+    path: "routing[0].repeat.until",
+  },
 ];
 
 for (const rejection of rejections) {
@@ -340,6 +367,34 @@ test("a shape-valid but non-composing folder fails the build with its findings",
     outcome.composition.map((finding) => finding.code),
     ["verdict-unbound-before-entry"],
   );
+});
+
+test("a human-controlled Repeat around one interactive Step builds (#217)", () => {
+  const outcome = buildBundle(
+    authoringFolder(
+      {
+        ...base(),
+        assets: [{ path: "p.md", kind: "prompt" }],
+        routing: [
+          {
+            repeat: {
+              control: "human",
+              steps: [
+                {
+                  id: "implement",
+                  kind: "interactive-agent",
+                  session: "impl",
+                  prompt: { asset: "p.md" },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      { "p.md": "implement one ticket" },
+    ),
+  );
+  assert.ok(outcome.ok, JSON.stringify(outcome));
 });
 
 // --- constrained reader and install validation (readBundle) -----------------

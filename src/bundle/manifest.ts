@@ -343,24 +343,31 @@ const step = z.discriminatedUnion("kind", [
 // A Repeat group's steps are Steps only, so a group nested in a group is rejected
 // (groups cannot nest). Repeat group is tried first, so a repeat node's own field
 // issue wins the tie over the step branch's "no discriminator".
-const repeatGroup = z.strictObject({
-  repeat: z.strictObject({
-    until: nonEmptyString,
-    reviewCheckpoint: z.strictObject({
-      // `z.unknown()` base so a non-number `interval` still fails with
-      // `invalid-review-checkpoint`, not a generic type error (the hand-rolled
-      // validator folded the type and value checks under one code).
-      interval: checked(
-        z.unknown(),
-        (value) =>
-          typeof value === "number" && Number.isInteger(value) && value >= 1,
-        "must be a positive integer.",
-        "invalid-review-checkpoint",
-      ),
-      message: nonEmptyString,
-    }),
-    steps: z.array(step),
+const verdictRepeat = z.strictObject({
+  until: nonEmptyString,
+  reviewCheckpoint: z.strictObject({
+    // `z.unknown()` base so a non-number `interval` still fails with
+    // `invalid-review-checkpoint`, not a generic type error (the hand-rolled
+    // validator folded the type and value checks under one code).
+    interval: checked(
+      z.unknown(),
+      (value) =>
+        typeof value === "number" && Number.isInteger(value) && value >= 1,
+      "must be a positive integer.",
+      "invalid-review-checkpoint",
+    ),
+    message: nonEmptyString,
   }),
+  steps: z.array(step),
+});
+// A human-controlled Repeat (#217) names no Verdict and no Review checkpoint: the
+// human's Continue at its interactive Step's Turn boundary is each iteration's review.
+const humanRepeat = z.strictObject({
+  control: z.literal("human"),
+  steps: z.array(step),
+});
+const repeatGroup = z.strictObject({
+  repeat: z.union([verdictRepeat, humanRepeat]),
 });
 
 const routingNode = z.union([repeatGroup, step]);

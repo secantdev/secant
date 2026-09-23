@@ -63,6 +63,7 @@ export type Submission =
   | SteerTurnSubmission
   | SendInteractiveTurnSubmission
   | EndInteractiveStepSubmission
+  | ContinueRepeatSubmission
   | CancelRunSubmission
   | DeleteRunSubmission;
 
@@ -252,6 +253,25 @@ export interface EndInteractiveStepSubmission {
 export interface EndInteractiveStepInput {
   readonly runId: string;
   /** The interactive-agent Step to end, read from the offer; a Run that moved past
+   *  it is rejected as stale. */
+  readonly stepId: string;
+}
+
+/** Continue a human-controlled Repeat group (spec #210 stories 47, 53, 58; #217):
+ *  settle the iteration's interactive-agent Step the Run is `blocked` at and open the
+ *  next iteration in a fresh Session. It is that iteration's review decision, so no
+ *  Review checkpoint follows. Admitted only at a Turn boundary — a submission while a
+ *  Turn is live is rejected with a precise Problem — and only for a Step inside a
+ *  human-controlled Repeat (End Step is refused there). It does not read or change any
+ *  tracker. Idempotent per operation id. */
+export interface ContinueRepeatSubmission {
+  readonly operationId: string;
+  readonly operation: "continue-repeat";
+  readonly input: ContinueRepeatInput;
+}
+export interface ContinueRepeatInput {
+  readonly runId: string;
+  /** The interactive-agent Step to settle, read from the offer; a Run that moved past
    *  it is rejected as stale. */
   readonly stepId: string;
 }
@@ -565,6 +585,12 @@ export type RoutingNodeView =
         readonly message: string;
       };
       readonly steps: readonly RoutingStepView[];
+    }
+  /** A human-controlled Repeat group (#217): no Verdict and no checkpoint. */
+  | {
+      readonly node: "repeat";
+      readonly control: "human";
+      readonly steps: readonly RoutingStepView[];
     };
 
 export interface ProducedArtifactView {
@@ -666,6 +692,7 @@ export type RunTimelineKind =
   | "checkpoint-blocked"
   | "gate-answered"
   | "interactive-step-ended"
+  | "repeat-continued"
   | "materialization-conflict"
   // Harness Turn events (#116): a Turn admitted, its authoritative assistant
   // content and tool activity, and its settled result.
@@ -706,7 +733,8 @@ export interface RunTimelineEvent {
    *  frozen `--json`. Present when the durable Turn recorded its kind; absent on
    *  every other event and on a legacy Turn row whose kind is unknown. The recorded
    *  Turn kind supersedes the earlier `interactive-turn-sent` timeline kind;
-   *  `interactive-step-ended` records the distinct End Step action. */
+   *  `interactive-step-ended` records the distinct End Step action, and
+   *  `repeat-continued` a human-controlled Repeat's Continue (#217). */
   readonly turnKind?: RunTurnKind;
 }
 
@@ -972,6 +1000,7 @@ export type ActionOffer =
   | SteerTurnOffer
   | SendInteractiveTurnOffer
   | EndInteractiveStepOffer
+  | ContinueRepeatOffer
   | CancelRunOffer
   | DeleteRunOffer;
 
@@ -1111,6 +1140,17 @@ export interface SendInteractiveTurnOffer {
  *  stale submission is rejected. */
 export interface EndInteractiveStepOffer {
   readonly action: "end-interactive-step";
+  readonly runId: string;
+  readonly stepId: string;
+  readonly consequence: string;
+}
+
+/** Continue a human-controlled Repeat (#217). Offered on the `run` Projection in
+ *  place of End Step, only while the Run is `blocked` at the group's interactive Step
+ *  and no Turn is live (a Turn boundary); it carries the Step id so a stale
+ *  submission is rejected. */
+export interface ContinueRepeatOffer {
+  readonly action: "continue-repeat";
   readonly runId: string;
   readonly stepId: string;
   readonly consequence: string;

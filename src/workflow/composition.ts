@@ -303,38 +303,56 @@ export function checkComposition(
   manifest.routing.forEach((node, index) => {
     if ("repeat" in node) {
       const path = `routing[${index}].repeat`;
-      const { until, reviewCheckpoint, steps } = node.repeat;
-      const boundType = bound.get(until);
-      if (boundType === undefined) {
-        error(
-          "verdict-unbound-before-entry",
-          `${path}.until`,
-          `Repeat group repeats until "${until}", which is not bound before the group is entered.`,
-        );
-      } else if (boundType !== "verdict") {
-        error(
-          "artifact-type-mismatch",
-          `${path}.until`,
-          `Repeat group repeats until "${until}", which is bound as ${boundType}, not a verdict.`,
-        );
-      }
-      if (
-        !Number.isInteger(reviewCheckpoint.interval) ||
-        reviewCheckpoint.interval < 1 ||
-        reviewCheckpoint.interval > MAX_REVIEW_CHECKPOINT_INTERVAL
-      ) {
-        error(
-          "review-checkpoint-out-of-range",
-          `${path}.reviewCheckpoint.interval`,
-          `reviewCheckpoint.interval ${reviewCheckpoint.interval} must be a positive integer no greater than ${MAX_REVIEW_CHECKPOINT_INTERVAL}.`,
-        );
-      }
-      if (reviewCheckpoint.message.trim() === "") {
-        error(
-          "review-checkpoint-out-of-range",
-          `${path}.reviewCheckpoint.message`,
-          "reviewCheckpoint.message must be non-empty plain text.",
-        );
+      const { steps } = node.repeat;
+      if ("control" in node.repeat) {
+        // Continue is the only thing that moves a human-controlled Repeat (#217):
+        // each iteration pauses at its one interactive-agent Step, whose Turn
+        // boundary offers Continue. None would loop unattended with no checkpoint;
+        // two would leave which one Continues ambiguous.
+        const interactive = steps.filter(
+          (step) => step.kind === "interactive-agent",
+        ).length;
+        if (interactive !== 1) {
+          error(
+            "human-repeat-interactive-step",
+            `${path}.steps`,
+            `A human-controlled Repeat group needs exactly one interactive-agent Step to offer Continue; it has ${interactive}.`,
+          );
+        }
+      } else {
+        const { until, reviewCheckpoint } = node.repeat;
+        const boundType = bound.get(until);
+        if (boundType === undefined) {
+          error(
+            "verdict-unbound-before-entry",
+            `${path}.until`,
+            `Repeat group repeats until "${until}", which is not bound before the group is entered.`,
+          );
+        } else if (boundType !== "verdict") {
+          error(
+            "artifact-type-mismatch",
+            `${path}.until`,
+            `Repeat group repeats until "${until}", which is bound as ${boundType}, not a verdict.`,
+          );
+        }
+        if (
+          !Number.isInteger(reviewCheckpoint.interval) ||
+          reviewCheckpoint.interval < 1 ||
+          reviewCheckpoint.interval > MAX_REVIEW_CHECKPOINT_INTERVAL
+        ) {
+          error(
+            "review-checkpoint-out-of-range",
+            `${path}.reviewCheckpoint.interval`,
+            `reviewCheckpoint.interval ${reviewCheckpoint.interval} must be a positive integer no greater than ${MAX_REVIEW_CHECKPOINT_INTERVAL}.`,
+          );
+        }
+        if (reviewCheckpoint.message.trim() === "") {
+          error(
+            "review-checkpoint-out-of-range",
+            `${path}.reviewCheckpoint.message`,
+            "reviewCheckpoint.message must be non-empty plain text.",
+          );
+        }
       }
       // An authored Human Gate is a top-level Step only (#108): a Repeat group's
       // in-loop pause is its Review checkpoint, and the engine does not drive an

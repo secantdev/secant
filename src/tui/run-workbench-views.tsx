@@ -3,6 +3,7 @@ import { For, Show, type Accessor } from "solid-js";
 import type {
   AnswerHumanGateOffer,
   CancelRunOffer,
+  ContinueRepeatOffer,
   DeleteRunOffer,
   InterruptTurnOffer,
   Problem,
@@ -33,6 +34,8 @@ export function InteractiveInput(props: {
   endOffered: Accessor<boolean>;
   sendOffered: Accessor<boolean>;
   endArmed: Accessor<boolean>;
+  continueOffer: Accessor<ContinueRepeatOffer | undefined>;
+  continueArmed: Accessor<boolean>;
   pending: Accessor<boolean>;
   refusal: Accessor<Problem | undefined>;
   focused: Accessor<boolean>;
@@ -44,10 +47,17 @@ export function InteractiveInput(props: {
   // Blur the field while an answer is in flight or a confirming keypress is armed, so
   // the submit/`y` never types (D9). The region can still read as focused (its label).
   const fieldFocused = () =>
-    props.focused() && !props.pending() && !props.endArmed();
+    props.focused() &&
+    !props.pending() &&
+    !props.endArmed() &&
+    !props.continueArmed();
   const hint = () => {
     if (props.endArmed())
       return "  ⚠ End this interactive Step? Press y to confirm · esc to keep";
+    // The confirm leads with its keys so a narrow clip keeps them (#217).
+    const continueOffer = props.continueOffer();
+    if (props.continueArmed() && continueOffer !== undefined)
+      return `  ⚠ y continue · esc keep — ${continueOffer.consequence}`;
     if (props.pending()) return "  … sending…";
     if (props.turnLive()) {
       // The live Turn's Interrupt (#219) leads with its key so a narrow clip keeps it.
@@ -58,7 +68,9 @@ export function InteractiveInput(props: {
         : `  esc esc interrupt — ${interrupt.consequence}`;
     }
     if (props.sendOffered())
-      return "  enter send Turn · ^E end step · esc back";
+      return continueOffer !== undefined
+        ? "  enter send Turn · ^N continue · esc back"
+        : "  enter send Turn · ^E end step · esc back";
     return "  esc back";
   };
   return (

@@ -3,6 +3,7 @@ import { inspectBundle, type Budgets } from "../bundle/bundle.js";
 import { selectInstalledEntry } from "./entry-selection.js";
 import {
   flattenSteps,
+  inHumanRepeat,
   MAX_REVIEW_CHECKPOINT_INTERVAL,
   type AgentStep,
   type Platform,
@@ -313,10 +314,13 @@ function runResult(
           // interactive-agent Step at a Turn boundary (no gate, no live Turn), the
           // human can send the next Turn or end the Step. End Step is offered only at
           // a boundary — a live Turn suppresses both, exactly when interrupt is offered.
+          // Inside a human-controlled Repeat, Continue takes End Step's place (#217).
           ...(interactiveStep !== undefined
             ? [
                 sendInteractiveTurnOffer(runId, interactiveStep.id),
-                endInteractiveStepOffer(runId, interactiveStep.id),
+                inHumanRepeat(facts.routing, interactiveStep.id)
+                  ? continueRepeatOffer(runId, interactiveStep.id)
+                  : endInteractiveStepOffer(runId, interactiveStep.id),
               ]
             : []),
           isLive || derivedRun.state === "blocked"
@@ -646,6 +650,18 @@ function endInteractiveStepOffer(runId: string, stepId: string): ActionOffer {
   };
 }
 
+/** The `continue-repeat` offer for a Run blocked at a human-controlled Repeat's
+ *  interactive-agent Step at a Turn boundary (#217). */
+function continueRepeatOffer(runId: string, stepId: string): ActionOffer {
+  return {
+    action: "continue-repeat",
+    runId,
+    stepId,
+    consequence:
+      "next iteration, fresh Session; no ticket is checked or closed.",
+  };
+}
+
 /** The `cancel-run` offer for a live Run (#87). */
 function cancelRunOffer(runId: string): ActionOffer {
   return {
@@ -884,11 +900,14 @@ export function deriveRun(
         // Human Gate: its durable pending-gate record exists, but it deliberately
         // has no attempt-log entry until answered. Advance so the next node can
         // project that gate instead of misreporting the deciding Command as live.
-        const versionId = owner?.currentVersion(node.repeat.until);
+        const until = "until" in node.repeat ? node.repeat.until : undefined;
+        const versionId =
+          until !== undefined ? owner?.currentVersion(until) : undefined;
         if (
           owner !== undefined &&
+          until !== undefined &&
           versionId !== undefined &&
-          readVerdict(owner, versionId, node.repeat.until) === "pass"
+          readVerdict(owner, versionId, until) === "pass"
         ) {
           break;
         }
@@ -994,62 +1013,66 @@ function finishTerminalGroup(
 ): DerivedRun {
   const current = span[span.length - 1]!;
   const position = flatIndex.get(current)!;
-  const interval = Math.min(
-    repeat.reviewCheckpoint.interval,
-    MAX_REVIEW_CHECKPOINT_INTERVAL,
-  );
-  // Iterations since the last grant: a `continue` grant resets the count, so one
-  // grant buys exactly one more interval (ADR 0020, #85). Before any grant the
-  // offset is zero, so this is the full iteration count.
-  const sinceGrant = iterations - grantOffset;
-  const versionId = owner?.currentVersion(repeat.until);
-  const verdict =
-    owner !== undefined && versionId !== undefined
-      ? readVerdict(owner, versionId, repeat.until)
-      : undefined;
-  const passes = verdict === "pass";
+  // A human-controlled Repeat (#217) never raises a Review checkpoint: Continue is
+  // each iteration's review, so only the interactive pause below can rest it.
+  if ("until" in repeat) {
+    const interval = Math.min(
+      repeat.reviewCheckpoint.interval,
+      MAX_REVIEW_CHECKPOINT_INTERVAL,
+    );
+    // Iterations since the last grant: a `continue` grant resets the count, so one
+    // grant buys exactly one more interval (ADR 0020, #85). Before any grant the
+    // offset is zero, so this is the full iteration count.
+    const sinceGrant = iterations - grantOffset;
+    const versionId = owner?.currentVersion(repeat.until);
+    const verdict =
+      owner !== undefined && versionId !== undefined
+        ? readVerdict(owner, versionId, repeat.until)
+        : undefined;
+    const passes = verdict === "pass";
 
-  // Blocked: the cadence is reached *since the last grant*, the Verdict still does
-  // not pass, and the Run has not failed. The block is derived from the current
-  // Step Attempt.
-  if (
-    state !== "failed" &&
-    !passes &&
-    versionId !== undefined &&
-    sinceGrant >= interval
-  ) {
-    mark(current, "blocked");
-    const lastAttempt = log[log.length - 1]!;
-    const checkpoint: RunCheckpointView = {
-      message: repeat.reviewCheckpoint.message,
-      interval,
-      completedIterations: sinceGrant,
-      latestVerdict: {
-        name: repeat.until,
-        // Normalize the value actually read (M2 Verdicts are pass/fail); this
-        // branch already established it is not `pass`.
-        value: verdict === "pass" ? "pass" : "fail",
-        reference: {
-          runId,
-          artifactName: repeat.until,
-          versionId,
-          type: "verdict",
+    // Blocked: the cadence is reached *since the last grant*, the Verdict still does
+    // not pass, and the Run has not failed. The block is derived from the current
+    // Step Attempt.
+    if (
+      state !== "failed" &&
+      !passes &&
+      versionId !== undefined &&
+      sinceGrant >= interval
+    ) {
+      mark(current, "blocked");
+      const lastAttempt = log[log.length - 1]!;
+      const checkpoint: RunCheckpointView = {
+        message: repeat.reviewCheckpoint.message,
+        interval,
+        completedIterations: sinceGrant,
+        latestVerdict: {
+          name: repeat.until,
+          // Normalize the value actually read (M2 Verdicts are pass/fail); this
+          // branch already established it is not `pass`.
+          value: verdict === "pass" ? "pass" : "fail",
+          reference: {
+            runId,
+            artifactName: repeat.until,
+            versionId,
+            type: "verdict",
+          },
         },
-      },
-      gate: {
-        runId,
-        stepId: current.id,
-        attemptId: lastAttempt.attemptId,
-        shape: "approve-reject",
-      },
-    };
-    return {
-      state: "blocked",
-      statuses,
-      position,
-      iterationEvents,
-      checkpoint,
-    };
+        gate: {
+          runId,
+          stepId: current.id,
+          attemptId: lastAttempt.attemptId,
+          shape: "approve-reject",
+        },
+      };
+      return {
+        state: "blocked",
+        statuses,
+        position,
+        iterationEvents,
+        checkpoint,
+      };
+    }
   }
 
   // Short of the cadence but resting `blocked` or `halted` with an interactive
@@ -1288,7 +1311,8 @@ function buildTimeline(
       });
     }
   }
-  // Only End Step publishes an interactive-agent Attempt, in any iteration (#216).
+  // Only End Step publishes an interactive-agent Attempt, in any iteration (#216);
+  // inside a human-controlled Repeat only Continue does (#217).
   const interactiveSteps = new Set(
     flattenSteps(routing)
       .filter((step) => step.kind === "interactive-agent")
@@ -1299,9 +1323,11 @@ function buildTimeline(
     events.push({
       at: attempt.at,
       event:
-        stepId !== undefined && interactiveSteps.has(stepId)
-          ? "interactive-step-ended"
-          : "attempt-settled",
+        stepId === undefined || !interactiveSteps.has(stepId)
+          ? "attempt-settled"
+          : inHumanRepeat(routing, stepId)
+            ? "repeat-continued"
+            : "interactive-step-ended",
       detail: attempt.outcome,
     });
   }
@@ -1393,6 +1419,7 @@ const TIMELINE_CATEGORY_RANK: Record<RunTimelineKind, number> = {
   "request-expired": 7,
   "turn-settled": 8,
   "interactive-step-ended": 9,
+  "repeat-continued": 9,
   "attempt-settled": 10,
   iteration: 11,
   "checkpoint-blocked": 12,

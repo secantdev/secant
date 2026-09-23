@@ -112,7 +112,9 @@ function RoutingNode(props: {
   return (
     <box flexDirection="column" flexShrink={0}>
       <text fg={theme.text}>
-        {`${props.number}. Repeat until ${props.node.until} · review every ${props.node.reviewCheckpoint.interval}: ${props.node.reviewCheckpoint.message}`}
+        {"control" in props.node
+          ? `${props.number}. Repeat until a human ends the stage · Continue opens each next iteration`
+          : `${props.number}. Repeat until ${props.node.until} · review every ${props.node.reviewCheckpoint.interval}: ${props.node.reviewCheckpoint.message}`}
       </text>
       <For each={props.node.steps}>
         {(step, index) => (

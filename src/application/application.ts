@@ -7,6 +7,7 @@ import {
 import type { Catalog } from "../catalog/catalog.js";
 import {
   flattenSteps,
+  inHumanRepeat,
   routingNeedsHarness,
   type AgentStep,
   type AuthoredManifest,
@@ -55,6 +56,7 @@ import {
   harnessRequestIndeterminate,
   harnessRequestRejected,
   harnessRequestStale,
+  interactiveControlMismatch,
   interactiveStepMidTurn,
   interactiveStepNotActive,
   interactiveTurnBlank,
@@ -92,6 +94,7 @@ import {
   cancelReplayKey,
   canonicalizeWorkspacePath,
   deleteReplayKey,
+  continueRepeatReplayKey,
   endInteractiveStepReplayKey,
   interruptTurnReplayKey,
   launchReplayKey,
@@ -106,6 +109,7 @@ import type {
   BundleCatalogSnapshot,
   BundleFocusSelector,
   BundleFocusSnapshot,
+  ContinueRepeatInput,
   EndInteractiveStepInput,
   InterruptTurnInput,
   HarnessCatalogSnapshot,
@@ -2319,13 +2323,21 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // End the interactive-agent Step the Run is blocked at (#122). Admitted at once;
   // at settle time it is refused mid-Turn, else it settles the Step's Attempt
   // succeeded and drives the Run to its next rest. Idempotent per operation id.
+  // `continue-repeat` (#217) is the same settle for a Step inside a human-controlled
+  // Repeat, where it opens the next iteration; each control is refused on the other's
+  // Step, so the two never both settle one iteration.
   function submitEndInteractiveStep(
     operationId: string,
-    input: EndInteractiveStepInput,
+    input: EndInteractiveStepInput | ContinueRepeatInput,
+    control: "end-interactive-step" | "continue-repeat",
   ): SubmissionAdmission {
+    const replayKey =
+      control === "continue-repeat"
+        ? continueRepeatReplayKey(input)
+        : endInteractiveStepReplayKey(input);
     const existing = operations.get(operationId);
     if (existing !== undefined) {
-      if (existing.replayKey === endInteractiveStepReplayKey(input)) {
+      if (existing.replayKey === replayKey) {
         return { admitted: true, operationId, runId: input.runId };
       }
       return { admitted: false, problem: operationIdReused(operationId) };
@@ -2338,11 +2350,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
       return { admitted: false, problem: runSupportUnavailable() };
     }
     operations.set(operationId, {
-      replayKey: endInteractiveStepReplayKey(input),
+      replayKey,
       outcome: { status: "pending" },
       observers: new Set<UpdateStream>(),
       runId: input.runId,
-      settle: () => startEndInteractiveStep(input),
+      settle: () => startEndInteractiveStep(input, control),
     });
     scheduleSettlement(() => settleOperation(operationId));
     return { admitted: true, operationId, runId: input.runId };
@@ -2352,6 +2364,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // at the Step, or mid-Turn — never overwrites a live Turn's `tracking.promise`.
   function startEndInteractiveStep(
     input: EndInteractiveStepInput,
+    control: "end-interactive-step" | "continue-repeat",
   ): Promise<OperationOutcome> {
     if (
       runGroup === undefined ||
@@ -2374,6 +2387,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
       return Promise.resolve({
         status: "not-applied",
         problem: interactiveStepMidTurn(input.runId, begun.step.id),
+      });
+    }
+    const humanRepeat = inHumanRepeat(begun.facts.routing, begun.step.id);
+    if (humanRepeat !== (control === "continue-repeat")) {
+      return Promise.resolve({
+        status: "not-applied",
+        problem: interactiveControlMismatch(
+          input.runId,
+          begun.step.id,
+          humanRepeat,
+        ),
       });
     }
     const promise = runInteractiveEnd(input, begun);
@@ -2713,9 +2737,11 @@ export function createApplication(deps: ApplicationDependencies): Application {
             submission.input,
           );
         case "end-interactive-step":
+        case "continue-repeat":
           return submitEndInteractiveStep(
             submission.operationId,
             submission.input,
+            submission.operation,
           );
         case "cancel-run":
           return submitCancel(submission.operationId, submission.input.runId);

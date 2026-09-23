@@ -54,6 +54,8 @@ write, launch, and read invariants; the abort-reason vocabulary and the resting 
   re-walks from the top, replays settled iterations, and skips the settled Step (#216).
 - Both set `tracking.promise` (via a `start*` helper) so cancel-run/interrupt-turn find and abort a live human Turn; the abort reason decides the rest as the answer path
   does. `send` is refused blank at admission (before any stdin); `end` mid-Turn (a live Turn) is refused as a value.
+- `continue-repeat` (#217) is `end` for a Step inside a human-controlled Repeat, which the scheduler re-walks into the next iteration; the Projection offers it
+  in End Step's place. Each control is refused as a value on the other's Step (`inHumanRepeat`), so one iteration is never settled by both.
 
 ## Live overlay
 

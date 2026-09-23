@@ -226,7 +226,7 @@ test("the exact focus carries every fact including the Execution summary and zer
     },
   ]);
   const repeat = bundle.routing.find((node) => node.node === "repeat");
-  assert.ok(repeat && repeat.node === "repeat");
+  assert.ok(repeat && repeat.node === "repeat" && "until" in repeat);
   assert.equal(repeat.until, "test-verdict");
   assert.equal(repeat.reviewCheckpoint.interval, 5);
   assert.deepEqual(bundle.workspacePrerequisites, ["git-worktree-root"]);

@@ -49,7 +49,9 @@ function formatRouting(routing: readonly RoutingNodeView[]): string {
     .map((node) =>
       node.node === "step"
         ? `${node.step.id} (${node.step.kind})`
-        : `repeat until ${node.until}`,
+        : "control" in node
+          ? "repeat until a human ends the stage"
+          : `repeat until ${node.until}`,
     )
     .join(" → ");
 }

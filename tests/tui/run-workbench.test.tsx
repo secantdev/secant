@@ -25,6 +25,7 @@ import type {
   BundleCatalogSnapshot,
   BundleFocusSnapshot,
   DiagnosticReference,
+  ContinueRepeatOffer,
   EndInteractiveStepOffer,
   InstalledBundleFocus,
   ResourceRead,
@@ -177,6 +178,7 @@ function makeRunView(initial: RunSnapshot) {
     createSignal<AnswerOutcome>({ kind: "pending" });
   const sends: { runId: string; stepId: string; text: string }[] = [];
   const ends: { runId: string; stepId: string }[] = [];
+  const continues: { runId: string; stepId: string }[] = [];
   // The steer seam (#148) is hand-driven the same way: it records each dispatch and
   // returns the shared outcome accessor a test advances (pending → applied/refused),
   // so tests exercise the blank guard, the applied close, and the refusal-keeps-draft.
@@ -218,6 +220,10 @@ function makeRunView(initial: RunSnapshot) {
     },
     endInteractiveStep: (runId, stepId) => {
       ends.push({ runId, stepId });
+      return interactiveOutcome;
+    },
+    continueRepeat: (runId, stepId) => {
+      continues.push({ runId, stepId });
       return interactiveOutcome;
     },
     steer: (runId, turnId, text) => {
@@ -276,6 +282,7 @@ function makeRunView(initial: RunSnapshot) {
     setAnswerOutcome,
     sends,
     ends,
+    continues,
     steers,
     setInteractiveOutcome,
     setSteerOutcome,
@@ -583,10 +590,17 @@ test("reopened history renders End Step distinctly from a settled Command Attemp
           event: "interactive-step-ended",
           detail: "succeeded",
         },
+        {
+          at: "2026-09-18T00:01:00.000Z",
+          event: "repeat-continued",
+          detail: "succeeded",
+        },
       ],
     }),
   );
   assert.match(t.captureCharFrame(), /interactive-step-ended succeeded/);
+  // A human-controlled Repeat's Continue reads as its own history row (#217).
+  assert.match(t.captureCharFrame(), /repeat-continued succeeded/);
 });
 
 test("the details panel shows the observed Harness, executable, version, and model, and the header no longer does (#194 story 35)", async () => {
@@ -2589,6 +2603,54 @@ test("End Step is not offered mid-Turn (#122)", async () => {
   await press(wb.t, wb.renderer, "a");
   await press(wb.t, wb.renderer, "return");
   assert.equal(wb.control.sends.length, 0);
+});
+
+// --- human-controlled Repeat Continue (#217) -------------------------------
+
+const CONTINUE_OFFER: ContinueRepeatOffer = {
+  action: "continue-repeat",
+  runId: "run-1",
+  stepId: "discuss",
+  consequence: "next iteration, fresh Session; no ticket is checked or closed.",
+};
+
+test("Continue replaces End Step in a human-controlled Repeat: ^N arms a confirmation that says no ticket is closed, and y dispatches (#217)", async () => {
+  const wb = await mountWorkbench(
+    interactiveRunOf({ actionOffers: [SEND_OFFER, CONTINUE_OFFER] }),
+  );
+  assert.match(wb.t.captureCharFrame(), /enter send Turn · \^N continue/);
+  // End Step is not offered here, so ^E arms nothing.
+  await press(wb.t, wb.renderer, "e", { ctrl: true });
+  assert.doesNotMatch(wb.t.captureCharFrame(), /End this interactive Step\?/);
+  await type(wb.t, "draft");
+  await press(wb.t, wb.renderer, "n", { ctrl: true });
+  const armed = wb.t.captureCharFrame();
+  assert.match(armed, /y continue · esc keep/);
+  assert.match(armed, /no ticket is checked or closed/);
+  // The arm blurs the field, so the confirming y is never text.
+  await type(wb.t, "y");
+  assert.doesNotMatch(wb.t.captureCharFrame(), /> drafty/);
+  await press(wb.t, wb.renderer, "y");
+  assert.deepEqual(wb.control.continues, [
+    { runId: "run-1", stepId: "discuss" },
+  ]);
+  assert.equal(wb.control.ends.length, 0);
+});
+
+test("Escape backs out of an armed Continue, and Continue cannot arm mid-Turn (#217)", async () => {
+  const wb = await mountWorkbench(
+    interactiveRunOf({ actionOffers: [SEND_OFFER, CONTINUE_OFFER] }),
+  );
+  await press(wb.t, wb.renderer, "n", { ctrl: true });
+  await press(wb.t, wb.renderer, "escape");
+  assert.doesNotMatch(wb.t.captureCharFrame(), /y continue/);
+  assert.equal(wb.control.continues.length, 0);
+
+  const live = await mountWorkbench(interactiveRunOf({ actionOffers: [] }));
+  await press(live.t, live.renderer, "n", { ctrl: true });
+  assert.doesNotMatch(live.t.captureCharFrame(), /y continue/);
+  await press(live.t, live.renderer, "y");
+  assert.equal(live.control.continues.length, 0);
 });
 
 // --- live interactive Turn interrupt (#219) --------------------------------

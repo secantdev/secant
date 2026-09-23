@@ -45,3 +45,13 @@ command could not execute at all") is narrowed to match what M3 shipped:
 - **A signal death is `indeterminate`, not `failed`.** A command killed by an external signal with no exit — Ctrl+C, an outside SIGTERM, the terminal
   closing mid-Run — settles the Attempt **`indeterminate`**: never retried, resting the Run `halted` for human resume ([ADR 0019](./0019-failed-and-halted-runs-are-resumable-resting-states.md)).
   That is distinct from the retryable **`failed`** of a spawn error (a missing binary) or a timeout, which the original sentence collapsed together.
+
+## Amendment — a human-controlled Repeat group (M6, #217)
+
+Spec #210 needs a loop whose stop is a human decision, not a Verdict: implement one ticket per fresh Interactive Session until the human says the
+stage is done. The rule that every Repeat group names a Verdict and declares a Review checkpoint is narrowed to the Verdict-driven form. A group
+may instead declare `control: "human"` with only `steps`, which must hold exactly one Interactive agent step. Each iteration pauses there;
+at a Turn boundary the human's **Continue** settles that iteration and opens the next in a fresh Session, and confirmed End Stage (#218) exits
+the group. Continue is the iteration's review decision, so no periodic Review checkpoint is raised; the guarantee this ADR protects — unattended
+repetition always stops for a human — holds, because every iteration already stops for one. The engine still reads nothing from the agent to
+choose the exit.

@@ -415,6 +415,16 @@ async function runRepeatGroup(
   context: WalkContext,
   isLastNode: boolean,
 ): Promise<NodeOutcome> {
+  // A human-controlled Repeat (#217) reads no Verdict and raises no Review
+  // checkpoint: each iteration pauses at its interactive Step (`blocked`), and only
+  // the human's Continue settles that Step, so the walk replays settled iterations
+  // and rests at the first unsettled one.
+  if ("control" in repeat) {
+    for (let iteration = 0; ; iteration++) {
+      const result = await runIteration(repeat, context, isLastNode, iteration);
+      if (result.outcome !== "succeeded-open") return result.outcome;
+    }
+  }
   const interval = Math.min(
     repeat.reviewCheckpoint.interval,
     MAX_REVIEW_CHECKPOINT_INTERVAL,
@@ -479,7 +489,9 @@ async function runIteration(
   isLastNode: boolean,
   iteration: number,
 ): Promise<{ outcome: NodeOutcome; ran: boolean }> {
-  const { steps, until } = repeat;
+  const { steps } = repeat;
+  // A human-controlled group has no Verdict, so no iteration decides the Run.
+  const until = "until" in repeat ? repeat.until : undefined;
   let ran = false;
   // Only a last span Step that ran this walk can have rested the Run `succeeded`; a
   // replayed one (an interactive Step settled by End) rested nothing (#216).
@@ -490,15 +502,15 @@ async function runIteration(
     // The deciding-`succeeded` Attempt is the last span Step of the last node when
     // it leaves the `until` Verdict reading `pass`. Compute that intent from the
     // Attempt's own outputs (a Step producing the Verdict) or the current binding.
-    const decideOnPass = isLastNode && isLastSpanStep;
+    const decideOn = isLastNode && isLastSpanStep ? until : undefined;
     const outcome = await runStepAttempts(
       step,
       context,
       iteration,
       undefined,
-      decideOnPass
+      decideOn !== undefined
         ? (result) =>
-            iterationPasses(result, until, context.step.owner)
+            iterationPasses(result, decideOn, context.step.owner)
               ? "succeeded"
               : undefined
         : undefined,
@@ -513,7 +525,10 @@ async function runIteration(
   }
   return {
     outcome:
-      isLastNode && lastRan && verdictPasses(context.step.owner, until)
+      isLastNode &&
+      lastRan &&
+      until !== undefined &&
+      verdictPasses(context.step.owner, until)
         ? "succeeded-rested"
         : "succeeded-open",
     ran,

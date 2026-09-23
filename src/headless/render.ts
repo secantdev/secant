@@ -468,7 +468,9 @@ function renderRoutingNode(node: RoutingNodeView): string[] {
     return [`  ${node.step.id} (${node.step.kind})`];
   }
   const lines = [
-    `  repeat until ${node.until} (review every ${node.reviewCheckpoint.interval}: ${node.reviewCheckpoint.message})`,
+    "control" in node
+      ? "  repeat until a human ends the stage (Continue opens each next iteration)"
+      : `  repeat until ${node.until} (review every ${node.reviewCheckpoint.interval}: ${node.reviewCheckpoint.message})`,
   ];
   for (const step of node.steps) lines.push(`    ${step.id} (${step.kind})`);
   return lines;

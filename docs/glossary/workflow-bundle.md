@@ -62,7 +62,8 @@ what integrity and trust mean before execution.
   parameters, plus optional members of Crucible's closed **Workspace prerequisite** set. It never repeats the kind's intrinsic capabilities,
   preconditions, outcomes, reconciliation, or other fixed contract.
 - Every Repeat group declares a required `reviewCheckpoint` with a positive-integer `interval` and plain-text `message`. The interval is a review
-  cadence rather than a maximum or launch input; Crucible enforces an engine-owned safety ceiling.
+  cadence rather than a maximum or launch input; Crucible enforces an engine-owned safety ceiling. The one exception is `control: "human"`
+  with only `steps`: it names no `until` or checkpoint and must hold exactly one interactive-agent Step, whose **Continue** is each review.
 - The Composition check also proves that every non-manifest archive entry belongs to exactly one declared asset in non-overlapping asset trees,
   every asset and artifact reference resolves with the right kind or type, every Prompt slot names a required artifact, every schema use is valid,
   and every supported platform resolves one valid command invocation.

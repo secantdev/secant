@@ -70,7 +70,9 @@ cluster that matches the task, followed by its related ADRs when the task needs 
 
 - [Workflow Bundle](./docs/glossary/workflow-bundle.md) — Bundle identity, packaging, manifests, assets, installation, trust, and removal.
 - [Crucible Run lifecycle](./docs/glossary/crucible-run-lifecycle.md) — Runs, Steps, Step Attempts, Turns, Run Artifacts, Harness Sessions, Human
-  Gates, Harness Requests, and the Run states.
+  Gates, Harness Requests, the Run states, and the requested versus effective model pair.
+- [Projection Views](./docs/glossary/projection-views.md) — the launch draft, the `launch-preparation` and `harness-catalog` Projection families,
+  the qualification and capability states, the correction-target fields, and view freshness.
 
 ## Architecture decisions
 

@@ -60,6 +60,14 @@ This cluster defines the target Crucible terms for a **Run** and everything that
   one Turn per attempt; an **Interactive agent step** may have many.
 - **Session availability** — whether a **Harness Session** is `open` (a next Turn can be sent now), `detached` (not live, but holding a native
   recovery coordinate worth reattaching), or `unusable` (native evidence authoritatively says recovery cannot continue).
+- **Requested model** — the optional model a **Launch draft** requests, threaded through prepare to the selected **Harness** at its native point and
+  stored durably on the **Run** beside the selected Harness before the first **Step Attempt**. It is Run-level and immutable: reopen and resume reuse
+  it and never change it, per-**Turn** selection is not built, and `Harness default` means no requested model, so the Harness's own configuration stays
+  authoritative. A Command-only Run and a Run launched without a model carry none. _Avoid_: Selected model, model override.
+- **Effective model** — the model one Agent-step **Step Attempt** actually ran under, observed from the prepared **Harness** and recorded per Attempt;
+  the **Run** view surfaces the latest Attempt's value. It is kept as a separate fact from the **Requested model** so a Harness substitution stays
+  visible: the requested model is the one durable Run-level choice, while the effective model is the per-Attempt observation of what actually served.
+  _Avoid_: Requested model, served model.
 - **Human Gate** — a Crucible-owned pause carrying a Bundle-authored question in one of its shapes: approve/reject, whose rejection ends the
   **Run** `failed`, or free text. Its answer is a durable **Run Artifact**, so a Run can wait on one indefinitely.
 - **Harness Request** — an ephemeral **Harness**-originated request raised during a **Turn**: either a tool approval with exact offered decisions
@@ -81,9 +89,10 @@ This cluster defines the target Crucible terms for a **Run** and everything that
 
 ## Run states
 
-An Agent-bearing **Run** pins its semantic **Harness** selection with its **Workspace**, **Bundle Snapshot**, and **Launch inputs** at launch; a
-Command-only Run has no Harness selection. A Run pins no model. The selected Harness is immutable recovery and routing truth, while each Agent-step
-Attempt separately records the Harness executable, version, Adapter evidence, and effective model it actually observed.
+An Agent-bearing **Run** pins its semantic **Harness** selection with its **Workspace**, **Bundle Snapshot**, and **Launch inputs** at launch, plus an
+optional **Requested model** beside that selection; a Command-only Run has no Harness selection and no model. The selected Harness is immutable recovery
+and routing truth, while each Agent-step Attempt separately records the Harness executable, version, Adapter evidence, and the **Effective model** it
+actually observed.
 
 | State       | Meaning                                                         | Terminal |
 | ----------- | --------------------------------------------------------------- | -------- |
@@ -128,6 +137,8 @@ row and the `blocked` state are written in one transaction, and execution also s
 ## Related decisions
 
 - [Workflow Bundle](./workflow-bundle.md) owns the package, installation, trust, and removal contract that a Bundle Snapshot refers to.
+- [Projection Views](./projection-views.md) owns the **Launch draft** that requests a model and the client Projection families and view freshness
+  that read this Run.
 - [ADR 0019](../adr/0019-failed-and-halted-runs-are-resumable-resting-states.md) owns Run resumability and the reset-on-resume rule.
 - [ADR 0020](../adr/0020-deterministic-verdicts-and-human-checkpoints-terminate-repetition.md) owns how repetition terminates and why the legacy
   agent-emitted marker is retired.

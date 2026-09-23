@@ -4,6 +4,7 @@ import type {
   AnswerHumanGateOffer,
   CancelRunOffer,
   DeleteRunOffer,
+  InterruptTurnOffer,
   Problem,
   RunCheckpointView,
   RunStateName,
@@ -27,6 +28,8 @@ export function InteractiveInput(props: {
   draft: Accessor<string>;
   onInput: (value: string) => void;
   turnLive: Accessor<boolean>;
+  interrupt: Accessor<InterruptTurnOffer | undefined>;
+  interruptArmed: Accessor<boolean>;
   endOffered: Accessor<boolean>;
   sendOffered: Accessor<boolean>;
   endArmed: Accessor<boolean>;
@@ -46,7 +49,14 @@ export function InteractiveInput(props: {
     if (props.endArmed())
       return "  ⚠ End this interactive Step? Press y to confirm · esc to keep";
     if (props.pending()) return "  … sending…";
-    if (props.turnLive()) return "  … a Turn is running — interrupt it to stop";
+    if (props.turnLive()) {
+      // The live Turn's Interrupt (#219) leads with its key so a narrow clip keeps it.
+      const interrupt = props.interrupt();
+      if (interrupt === undefined) return "  … a Turn is running";
+      return props.interruptArmed()
+        ? "  ⚠ Press esc again to interrupt · any other key cancels"
+        : `  esc esc interrupt — ${interrupt.consequence}`;
+    }
     if (props.sendOffered())
       return "  enter send Turn · ^E end step · esc back";
     return "  esc back";

@@ -312,6 +312,25 @@ What was taken and changed:
     Changed: the marker is the `› ` focus glyph, shown only while its pane is
              focused; Harness status is a word shared with headless rendering.
 
+Added 2026-09-23 for the M6 live Interactive interrupt (#219). Studied against
+OpenCode at 1ead9e3d7f; no OpenCode source crosses.
+
+  src/tui/run-workbench-views.tsx
+                                interactive-input interrupt cue studied
+                                packages/tui/src/component/prompt/index.tsx
+
+What was taken and changed:
+
+  interrupt cue (from component/prompt/index.tsx):
+    Taken:   a busy prompt keeps its input and shows `esc interrupt` under it;
+             the first Esc turns the cue to "again to interrupt" and the second
+             aborts.
+    Changed: the cue names the Interrupt Offer's consequence and dispatches that
+             Offer's `interrupt-turn` Operation; any other key disarms instead of
+             a 5-second timeout; the armed cue is worded (`⚠ Press esc again`),
+             not only recoloured; an approval request or free-text gate owns Esc
+             first; at a Turn boundary Esc still leaves the Workbench.
+
 THEME ASSETS (25 vendored, unmodified palettes)
 -----------------------------------------------
 

@@ -119,6 +119,11 @@ async function launchInteractive(
     prepares: number;
     readonly closes: number[];
     readonly failureAfterLaunch?: HarnessFailure;
+    /** Each Turn's `resume` coordinate, in start order (undefined = fresh). */
+    readonly resumes?: (string | undefined)[];
+    /** The script every prepare after the first serves (a fresh prepared fake
+     *  otherwise replays the launch script from its first Turn). */
+    readonly laterScript?: FakeScript;
   },
 ): Promise<{ wired: Wiring; runId: string; run: RunView }> {
   const savedExecutable = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
@@ -146,14 +151,21 @@ async function launchInteractive(
               return { ok: false, failure: counts.failureAfterLaunch };
             }
             const index = counts.closes.push(0) - 1;
-            const prepared = await fake.prepare(options);
+            const prepared = await (
+              counts.prepares > 1 && counts.laterScript !== undefined
+                ? createFake(counts.laterScript)()
+                : fake
+            ).prepare(options);
             if (!prepared.ok) return prepared;
             const harness = prepared.harness;
             return {
               ok: true,
               harness: {
                 profile: harness.profile,
-                startTurn: (request) => harness.startTurn(request),
+                startTurn: (request) => {
+                  counts.resumes?.push(request.resume?.opaque);
+                  return harness.startTurn(request);
+                },
                 async close() {
                   counts.closes[index] = counts.closes[index]! + 1;
                   return harness.close();
@@ -532,6 +544,95 @@ test("interrupt closes the Step-scoped Harness after one qualification (#134 A17
   assert.equal(readRun(wired, runId).state, "halted");
   assert.equal(counts.prepares, 1);
   assert.deepEqual(counts.closes, [1]);
+});
+
+test("an interrupted interactive Turn halts without advancing and resume returns to the same Session (#219)", async (t) => {
+  const counts = {
+    prepares: 0,
+    closes: [] as number[],
+    resumes: [] as (string | undefined)[],
+    laterScript: { profile: profile(), turns: [COMPLETED_DETACHED] },
+  };
+  const { wired, runId } = await launchInteractive(
+    t,
+    {
+      profile: profile(),
+      turns: [
+        {
+          block: true,
+          interruptResult: {
+            kind: "interrupted",
+            detail: {
+              interruption: profile().interruption,
+              session: {
+                state: "detached",
+                coordinate: { opaque: "coord-interrupted" },
+              },
+            },
+          },
+          result: COMPLETED_DETACHED.result,
+        },
+      ],
+    },
+    counts,
+  );
+  const sent = wired.projectionPort.submit({
+    operationId: "op-send-long",
+    operation: "send-interactive-turn",
+    input: { runId, stepId: "discuss", text: "work on this for a while" },
+  });
+  assert.ok(sent.admitted);
+  const interruptOffer = await awaitInterruptOffer(wired, runId);
+  const interrupted = wired.projectionPort.submit({
+    operationId: "op-interrupt-long",
+    operation: "interrupt-turn",
+    input: { runId, turnId: interruptOffer.turnId },
+  });
+  assert.ok(interrupted.admitted);
+  assert.equal(
+    (await awaitSettled(wired.projectionPort, "op-interrupt-long")).status,
+    "applied",
+  );
+  await awaitSettled(wired.projectionPort, "op-send-long");
+
+  // Rested `halted` at the same interactive Step: nothing settled, nothing advanced,
+  // and the Session is kept recoverable rather than replaced.
+  const halted = readRun(wired, runId);
+  assert.equal(halted.state, "halted");
+  assert.equal(halted.progress[halted.position]?.id, "discuss");
+  assert.deepEqual(
+    halted.progress.map((s) => s.status === "succeeded"),
+    [false, false],
+  );
+  assert.equal(halted.sessions?.length, 1);
+  assert.equal(halted.sessions?.[0]?.availability, "detached");
+  assert.equal(offer(halted, "end-interactive-step"), undefined);
+  const resumeOffer = offer(halted, "resume-run");
+  assert.ok(resumeOffer?.available, JSON.stringify(halted.actionOffers));
+
+  // Resume returns to the interactive boundary of the same Step.
+  const resumed = wired.projectionPort.submit({
+    operationId: "op-resume",
+    operation: "resume-run",
+    input: { runId },
+  });
+  assert.ok(resumed.admitted, JSON.stringify(resumed));
+  assert.equal(
+    (await awaitSettled(wired.projectionPort, "op-resume")).status,
+    "applied",
+  );
+  const boundary = readRun(wired, runId);
+  assert.equal(boundary.state, "blocked");
+  assert.equal(boundary.progress[boundary.position]?.id, "discuss");
+  assert.ok(offer(boundary, "send-interactive-turn"));
+
+  // The next human Turn continues the interrupted native Session.
+  await send(wired, runId, "op-send-after", "discuss", "pick up where we were");
+  assert.deepEqual(counts.resumes, [undefined, "coord-interrupted"]);
+  const after = readRun(wired, runId);
+  assert.equal(after.state, "blocked");
+  assert.equal(after.sessions?.length, 1);
+  assert.equal(after.sessions?.[0]?.session, "s");
 });
 
 test("end-interactive-step mid-Turn is rejected with a precise Problem (#122)", async (t) => {

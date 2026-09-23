@@ -32,8 +32,10 @@ alone takes its keys, size, and resize from the Renderer Port; the Application s
 - The Workbench bottom region is a modal stack (#121): an outstanding approval Harness Request or a free-text Human Gate owns Esc and every printable key, so
   while either is up the Run Actions rail (r/c/x) and the two-press Esc interrupt are suppressed (`modalControl()` gates `anyActionOffer`/`actionLines` and the
   interrupt disarm). `interrupt-turn`/`steer-turn` offers stay present through an `awaiting-approval` Turn (run-projection derives them from liveness, not
-  `TurnPhase`), so without this guard the request control and the "esc esc interrupt" hint collide over Esc. The interrupt/steer rows and the Esc arm are also
-  hidden while an interactive Step owns the input (#122): its Esc leaves, so surfacing an Esc-driven interrupt there would collide too.
+  `TurnPhase`), so without this guard the request control and the "esc esc interrupt" hint collide over Esc. The rail's interrupt/steer rows are also hidden while an
+  interactive Step owns the input (#122); during a live human Turn the input's hint line carries the Interrupt instead (#219) and `handleInteractiveKey` runs the shared
+  two-press `armOrDispatchInterrupt` (disarming on any other key first), so Esc leaves only at a Turn boundary. `anyActionOffer` and `actionLines` must agree on this, or
+  an empty `Actions:` heading steals the hint row.
 - Native Steer (#148) is an on-demand compose, not a blocked-state modal like the gate/interactive inputs: while an agent Turn is live under a Harness that declares native
   steer (Codex offers `steer-turn` `available`, Claude Code `available:false`), the Actions rail names the `s` key; `s` opens a native `<input>` (`SteerInput`) in the bottom
   region with `focus === "steer"`, Enter dispatches `steer-turn` (blank refused, a refused steer keeps the draft), Escape backs out — the Turn keeps working either way. It is

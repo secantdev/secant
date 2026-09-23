@@ -325,6 +325,16 @@ export function RunWorkbench(props: {
     setActionReceipt({ kind: "pending", operation: "interrupt" });
     setActionFlight({ op: "interrupt", outcome: actions.interrupt(offer) });
   };
+  // The two-press Esc Interrupt, shared by the rail and the interactive input: the
+  // first press arms, the second dispatches.
+  const armOrDispatchInterrupt = () => {
+    if (!interruptArmed()) {
+      setInterruptArmed(true);
+      return;
+    }
+    setInterruptArmed(false);
+    dispatchInterrupt();
+  };
   // Called on the confirming keypress. Cancel keeps the Run's history; delete
   // removes it and leaves the Workbench for the list once it settles, since the
   // Run is then gone.
@@ -354,6 +364,8 @@ export function RunWorkbench(props: {
   const anyActionOffer = () => {
     if (modalControl()) return false; // a request/gate modal hides the Actions rail
     const current = offers();
+    // Mirrors actionLines: the interactive input carries its own Interrupt (#219).
+    if (interactiveStepActive()) return current.resume !== undefined;
     return (
       current.resume !== undefined ||
       current.interrupt !== undefined ||
@@ -363,8 +375,8 @@ export function RunWorkbench(props: {
   const actionLines = () => {
     if (modalControl()) return 0;
     const current = offers();
-    // Interrupt/steer are agent-Turn controls hidden while the interactive input owns
-    // the interaction (its Esc leaves, not interrupts), so they must not be counted.
+    // Interrupt/steer leave the rail while the interactive input owns the interaction
+    // (its hint line carries the Interrupt, #219), so they must not be counted.
     const liveTurn = interactiveStepActive()
       ? 0
       : (current.interrupt ? 1 : 0) + (current.steer ? 1 : 0);
@@ -415,6 +427,9 @@ export function RunWorkbench(props: {
   // A Turn is live (working) when the Step is active but the boundary offers are gone.
   const interactiveTurnLive = () =>
     interactiveStepActive() && interactiveOffers().send === undefined;
+  // The live-Turn interrupt Offer while a human Turn runs in the interactive Step.
+  const interactiveInterrupt = () =>
+    interactiveTurnLive() ? offers().interrupt : undefined;
   const [draft, setDraft] = createSignal("");
   const [interactiveOutcome, setInteractiveOutcome] =
     createSignal<Accessor<AnswerOutcome>>();
@@ -880,6 +895,14 @@ export function RunWorkbench(props: {
   // End Step (only at a boundary), Enter sends, Escape leaves.
   const handleInteractiveKey = (key: RendererKeyEvent) => {
     const name = key.name ?? "";
+    // During a live human Turn Esc is the two-press Interrupt (#219), shown in the
+    // input's hint as OpenCode's prompt shows it; at a boundary it leaves. Any other
+    // key — Ctrl+E included — disarms first and still reaches the field as text.
+    if (name === "escape" && interactiveInterrupt() !== undefined) {
+      armOrDispatchInterrupt();
+      return;
+    }
+    if (interruptArmed()) setInterruptArmed(false);
     if (name === "e" && key.ctrl) {
       // End Step is offered only at a Turn boundary; arm the confirming keypress.
       // ponytail: the same Ctrl+E also reaches the focused field's built-in Ctrl+E→
@@ -975,7 +998,7 @@ export function RunWorkbench(props: {
     }
     // Interrupt is a two-press Esc while an agent Turn is live (spec story 18): it
     // takes Esc over "leave the Workbench" only while the live-Turn Offer is present,
-    // no interactive Step owns the interaction (its Esc leaves, #122), and the timeline
+    // no interactive Step owns the interaction (it arms its own, #219), and the timeline
     // holds focus. Gating on timeline focus keeps the arm from shadowing the Details and
     // checkpoint regions' own Esc — where Esc means "back", not "arm interrupt" (A7). First
     // press arms and shows the hint; second dispatches `interrupt-turn`. Any other key
@@ -986,12 +1009,7 @@ export function RunWorkbench(props: {
       !interactiveStepActive() &&
       focus() === "timeline"
     ) {
-      if (interruptArmed()) {
-        setInterruptArmed(false);
-        dispatchInterrupt();
-      } else {
-        setInterruptArmed(true);
-      }
+      armOrDispatchInterrupt();
       return;
     }
     if (interruptArmed()) setInterruptArmed(false);
@@ -1184,6 +1202,7 @@ export function RunWorkbench(props: {
               actionPending={railPending}
               interactiveActive={interactiveStepActive}
               interactiveTurnLive={interactiveTurnLive}
+              interactiveInterrupt={interactiveInterrupt}
               interactiveEndOffered={() =>
                 interactiveOffers().end !== undefined
               }
@@ -1296,6 +1315,7 @@ function Workbench(props: {
   actionPending: Accessor<"takeover" | "acknowledge" | undefined>;
   interactiveActive: Accessor<boolean>;
   interactiveTurnLive: Accessor<boolean>;
+  interactiveInterrupt: Accessor<InterruptTurnOffer | undefined>;
   interactiveEndOffered: Accessor<boolean>;
   interactiveSendOffered: Accessor<boolean>;
   draft: Accessor<string>;
@@ -1495,7 +1515,8 @@ function Workbench(props: {
             }}
           </Show>
           {/* Interrupt (Esc twice) and Steer, shown only while an agent Turn is live
-              and no interactive Step owns the interaction (its Esc leaves, #122).
+              and no interactive Step owns the interaction (its input hint carries the
+              Interrupt instead, #219).
               A Harness with native steer (Codex) names the `s` key; one without
               (Claude Code) names its unavailable reason and never opens (story 19). */}
           <Show
@@ -1669,6 +1690,8 @@ function Workbench(props: {
               draft={props.draft}
               onInput={props.onDraftInput}
               turnLive={props.interactiveTurnLive}
+              interrupt={props.interactiveInterrupt}
+              interruptArmed={props.interruptArmed}
               endOffered={props.interactiveEndOffered}
               sendOffered={props.interactiveSendOffered}
               endArmed={props.endStepArmed}

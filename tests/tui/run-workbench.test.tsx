@@ -2591,6 +2591,150 @@ test("End Step is not offered mid-Turn (#122)", async () => {
   assert.equal(wb.control.sends.length, 0);
 });
 
+// --- live interactive Turn interrupt (#219) --------------------------------
+
+/** A human Turn is live in the interactive Step: the Run reads `running`, the
+ *  boundary offers are gone, and the live-Turn interrupt (and steer) are offered. */
+function liveInteractiveRunOf(over: Partial<RunView> = {}): RunView {
+  return interactiveRunOf({
+    state: "running",
+    actionOffers: [INTERRUPT_OFFER, STEER_OFFER, CANCEL_OFFER],
+    ...over,
+  });
+}
+
+test("a live interactive Turn shows its Interrupt and two Esc presses dispatch it (#219)", async () => {
+  let interrupted: typeof INTERRUPT_OFFER | undefined;
+  const actions = okActions({
+    interrupt: (offer) => {
+      interrupted = offer;
+      return () => ({ kind: "ok" });
+    },
+  });
+  const wb = await mountWorkbench(liveInteractiveRunOf(), 100, 40, actions);
+  await type(wb.t, "next");
+  const frame = wb.t.captureCharFrame();
+  assert.match(frame, /Your Turn/);
+  assert.match(frame, /esc esc interrupt/);
+  assert.doesNotMatch(frame, /a Turn is running — interrupt it to stop/);
+
+  await press(wb.t, wb.renderer, "escape"); // arm, never leave
+  assert.equal(interrupted, undefined);
+  const armed = wb.t.captureCharFrame();
+  assert.match(armed, /Press esc again to interrupt/);
+  assert.match(armed, /Timeline/);
+  assert.match(armed, /> next/); // the draft survives the arm
+
+  await press(wb.t, wb.renderer, "escape"); // dispatch
+  assert.deepEqual(interrupted, INTERRUPT_OFFER);
+  assert.match(wb.t.captureCharFrame(), /Timeline/);
+  assert.equal(wb.control.sends.length, 0);
+});
+
+test("any other key cancels an armed interactive Interrupt and still types (#219)", async () => {
+  let interrupted = 0;
+  const actions = okActions({
+    interrupt: () => {
+      interrupted += 1;
+      return () => ({ kind: "ok" });
+    },
+  });
+  const wb = await mountWorkbench(liveInteractiveRunOf(), 100, 40, actions);
+  await press(wb.t, wb.renderer, "escape");
+  assert.match(wb.t.captureCharFrame(), /Press esc again/);
+  // One real keypress reaches both the Port dispatcher (which disarms) and the
+  // focused field (which types it); the test drives each path.
+  wb.renderer.key("a");
+  await type(wb.t, "a");
+  const frame = wb.t.captureCharFrame();
+  assert.doesNotMatch(frame, /Press esc again/);
+  assert.match(frame, /> a/);
+  assert.equal(interrupted, 0);
+  // Disarmed, the next Esc arms again rather than dispatching.
+  await press(wb.t, wb.renderer, "escape");
+  assert.equal(interrupted, 0);
+});
+
+test("Ctrl+E disarms an armed interactive Interrupt, so one more Esc only re-arms (#219)", async () => {
+  let interrupted = 0;
+  const actions = okActions({
+    interrupt: () => {
+      interrupted += 1;
+      return () => ({ kind: "ok" });
+    },
+  });
+  const wb = await mountWorkbench(liveInteractiveRunOf(), 100, 40, actions);
+  await press(wb.t, wb.renderer, "escape");
+  await press(wb.t, wb.renderer, "e", { ctrl: true });
+  assert.doesNotMatch(wb.t.captureCharFrame(), /Press esc again/);
+  await press(wb.t, wb.renderer, "escape");
+  assert.equal(interrupted, 0);
+  assert.match(wb.t.captureCharFrame(), /Press esc again/);
+});
+
+test("a request during a live interactive Turn owns Esc before the Interrupt (#219)", async () => {
+  const wb = await mountWorkbench(liveInteractiveRunOf(), 100, 40, okActions());
+  wb.control.setLive(requestOverlay());
+  await wb.t.renderOnce();
+  assert.doesNotMatch(wb.t.captureCharFrame(), /esc esc interrupt/);
+  await press(wb.t, wb.renderer, "escape");
+  assert.equal(wb.control.requests[0]?.decision, "deny");
+  assert.doesNotMatch(wb.t.captureCharFrame(), /Press esc again to interrupt/);
+});
+
+test("an interrupted interactive Turn rests halted and resume returns to the same Step's input (#219)", async () => {
+  const control = makeRunView(snapshotOf(liveInteractiveRunOf()));
+  const renderer = makeFakeRenderer(100, 40);
+  const actions = okActions({
+    interrupt: () => {
+      control.setRun(
+        interactiveRunOf({
+          state: "halted",
+          timeline: [
+            { at: "T1", event: "turn-settled", detail: "interrupted" },
+          ],
+          actionOffers: [RESUME_OFFER],
+        }),
+      );
+      return () => ({ kind: "ok" });
+    },
+    resume: () => {
+      control.setRun(interactiveRunOf());
+      return () => ({ kind: "ok" });
+    },
+  });
+  const { t } = await mountApp(control, renderer, "run-1", 100, 40, actions);
+  await t.waitForFrame((f) => f.includes("Timeline"));
+  await press(t, renderer, "escape");
+  await press(t, renderer, "escape");
+  const halted = t.captureCharFrame();
+  assert.match(halted, /HALTED/);
+  assert.match(halted, /r resume/);
+  assert.doesNotMatch(halted, /Your Turn/);
+  await press(t, renderer, "r");
+  const back = t.captureCharFrame();
+  assert.match(back, /BLOCKED · interactive Turn/);
+  assert.match(back, /Your Turn/);
+  assert.match(back, /enter send Turn/);
+});
+
+test("the live interactive Interrupt reads without colour and fits a small terminal (#219)", async () => {
+  const wb = await mountWorkbench(liveInteractiveRunOf(), 40, 16, okActions());
+  let frame = wb.t.captureCharFrame();
+  assert.match(frame, /esc esc interrupt/);
+  noOverflow(frame, 40);
+  await press(wb.t, wb.renderer, "escape");
+  frame = wb.t.captureCharFrame();
+  assert.match(frame, /⚠ Press esc again/);
+  noOverflow(frame, 40);
+});
+
+test("at a Turn boundary the interactive Esc still leaves the Workbench (#219)", async () => {
+  const wb = await mountWorkbench(interactiveRunOf());
+  await press(wb.t, wb.renderer, "escape");
+  assert.match(wb.t.captureCharFrame(), /Secant/);
+});
+
 test("a refused send surfaces the refusal and keeps the typed draft (#122, A9)", async () => {
   const wb = await mountWorkbench(interactiveRunOf());
   await type(wb.t, "hi");

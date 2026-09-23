@@ -258,6 +258,44 @@ const rejections: ReadonlyArray<{
     code: "invalid-field",
     path: "routing[0].suggestions[0]",
   },
+  {
+    // An authored entry Turn is an interactive-agent option only (#212): an
+    // autonomous Agent Step already sends its prompt as its one Turn.
+    title: "an entryTurn on an autonomous Agent Step",
+    folder: () =>
+      authoringFolder({
+        ...base(),
+        routing: [
+          {
+            id: "a",
+            kind: "agent",
+            session: "s",
+            entryTurn: true,
+            prompt: { asset: "p.md" },
+          },
+        ],
+      }),
+    code: "unknown-field",
+    path: "routing[0].entryTurn",
+  },
+  {
+    title: "a non-boolean interactive entryTurn",
+    folder: () =>
+      authoringFolder({
+        ...base(),
+        routing: [
+          {
+            id: "i",
+            kind: "interactive-agent",
+            session: "s",
+            entryTurn: "yes",
+            prompt: { asset: "p.md" },
+          },
+        ],
+      }),
+    code: "invalid-field",
+    path: "routing[0].entryTurn",
+  },
 ];
 
 for (const rejection of rejections) {

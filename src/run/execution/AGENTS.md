@@ -16,3 +16,5 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Every Command-step spawn passes its resolved authored environment through the Run Store entry's `isolatedGitEnvironment`; the helper appends
   non-interactive signing, hook, credential, and editor overrides after authored Git config entries, without changing user files or hiding ordinary
   system/global config (#166). `GIT_CONFIG_PARAMETERS` is removed because Git applies it after the counted entries and could undo the hardening.
+- An interactive-agent Step's Entry Turn (`entryTurn`) is due only while no Turn of its Attempt was admitted, so resume never re-sends it; an interrupted or
+  lost Entry Turn rests the Run `halted` without publishing an Attempt, and only `end-interactive-step` publishes one (#212).

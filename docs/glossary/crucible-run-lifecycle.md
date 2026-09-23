@@ -78,7 +78,11 @@ This cluster defines the target Crucible terms for a **Run** and everything that
   answered in the next Turn instead.
 - **Interactive agent step** — a **Step kind** whose **Harness Session** is handed to the human for turn-taking; unlike an **Agent step** it cannot
   complete without the human. Crucible relays turns and authors nothing, and the step ends when the human explicitly ends it through a
-  Crucible-owned control — never on an agent-emitted marker or a recognised phrase. The legacy grill is this shape.
+  Crucible-owned control — never on an agent-emitted marker or a recognised phrase. The legacy grill is this shape. A step may opt into an
+  **Entry Turn**.
+- **Entry Turn** — an **Interactive agent step**'s optional first **Turn**: its Bundle-authored prompt, rendered with **Launch inputs** and bundled
+  skill paths, sent once on entry so the human need not retype what the launch already carries. It is never re-sent: after a halt the human
+  continues the same **Harness Session**.
 - **Steer** — sending native same-Turn guidance while a **Turn** is live. It is not a new Turn, and unsupported Harnesses do not emulate it.
 - **Interrupt** — asking the **Harness** to stop the current live **Turn**, including its native tool work. Confirmation ends the **Step Attempt**
   `cancelled` and leaves the **Run** `halted` and re-attemptable; it does not close the Harness or cancel the Run.

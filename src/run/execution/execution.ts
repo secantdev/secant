@@ -5,6 +5,7 @@ import {
   type AttemptOutcome,
   type CommandInvocation,
   type CommandParams,
+  type AgentStep,
   type CommandStep,
   type HumanGateShape,
   type HumanGateStep,
@@ -27,6 +28,7 @@ import {
   launchInputs,
   RunCancelledError,
   runAgent,
+  runInteractiveEntryTurn,
   type HarnessExecutionDeps,
   type RequestChannel,
   type StepAttempt,
@@ -175,6 +177,9 @@ interface GatePause {
 interface InteractivePause {
   readonly pause: true;
   readonly interactive: true;
+  /** The authored entry Turn was interrupted or lost (#212): rest `halted` for a
+   *  human resume instead of `blocked`, with no Attempt published. */
+  readonly halted?: true;
 }
 
 interface StepContext {
@@ -227,18 +232,36 @@ const STEP_EXECUTORS: Readonly<Partial<Record<StepKindName, StepExecutor>>> = {
     }
     return runAgent(step, context, attemptId);
   },
-  "interactive-agent": () => runInteractiveAgent(),
+  "interactive-agent": (step, context, attemptId) => {
+    if (step.kind !== "interactive-agent") {
+      throw new Error(
+        "execution: interactive-agent executor received another Step kind.",
+      );
+    }
+    return runInteractiveAgent(step, context, attemptId);
+  },
 };
 
-/** An interactive-agent Step runs no Turn itself: it rests the Run `blocked` and
- *  hands its named Session to the human, who drives each Turn through the
- *  Application's `send-interactive-turn` and settles the Step through
- *  `end-interactive-step` (#122). Like a Human Gate it is a durable pause the
- *  scheduler rests `blocked` at, but it records no gate — the block is derived from
+/** An interactive-agent Step rests the Run `blocked` and hands its named Session to
+ *  the human, who drives each Turn through the Application's `send-interactive-turn`
+ *  and settles the Step through `end-interactive-step` (#122). A Step opting into
+ *  `entryTurn` first sends its authored prompt as the Session's first Turn (#212);
+ *  an interrupted or lost entry Turn rests the Run `halted` instead. Like a Human
+ *  Gate it is a durable pause, but it records no gate — the block is derived from
  *  the current Step being interactive-agent, and no Attempt is published until the
  *  human ends the Step. */
-function runInteractiveAgent(): Promise<StepPause> {
-  return Promise.resolve({ pause: true, interactive: true });
+async function runInteractiveAgent(
+  step: AgentStep,
+  context: StepContext,
+  attemptId: string,
+): Promise<StepPause> {
+  const entry = await runInteractiveEntryTurn(step, context, attemptId);
+  const halted = entry?.kind === "interrupted" || entry?.kind === "lost";
+  return {
+    pause: true,
+    interactive: true,
+    ...(halted ? { halted: true } : {}),
+  };
 }
 
 /** The Step kinds this release can dispatch — the keys of the closed executable
@@ -536,7 +559,11 @@ async function runStepAttempts(
       // An interactive-agent pause: a durable block with no gate record (#122). The
       // Run rests `blocked` (executeRouting writes it) and the human drives Turns;
       // `end-interactive-step` publishes this Step's Attempt. No Attempt here, no retry.
-      if ("interactive" in result) return "blocked";
+      if ("interactive" in result) {
+        if (result.halted !== true) return "blocked";
+        writeStateOrThrow(context.step.owner, "halted");
+        return "halted";
+      }
       const recorded = context.step.owner.recordPendingGate({
         attemptId,
         stepId: step.id,

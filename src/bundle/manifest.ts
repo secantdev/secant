@@ -328,6 +328,7 @@ const agentStep = z.strictObject({ ...agentFields, kind: z.literal("agent") });
 const interactiveAgentStep = z.strictObject({
   ...agentFields,
   kind: z.literal("interactive-agent"),
+  entryTurn: z.boolean().optional(),
 });
 
 // Discriminated on `kind`, so a bad field surfaces under the matched Step alone

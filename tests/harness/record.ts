@@ -775,9 +775,9 @@ async function recordMattFront(): Promise<void> {
     () => stdoutLen,
   );
   try {
-    // Grill Turn 1 mints the Session. Bounded replies keep the fixture small; the
-    // grill prompt itself is not sent for an interactive Step in v1 (the human
-    // drives every Turn), so the frame text sets up the interview.
+    // Grill Turn 1 mints the Session. Bounded replies keep the fixture small; this
+    // frame stands in for the grill's Entry Turn (#212), which carries the launch
+    // idea. The replayer does not match input, so the bounded frame is kept.
     const grill1 = await runTurn({
       args: launchArgs(["--session-id", sid], bridge),
       cwd: ws,

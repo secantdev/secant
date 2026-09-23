@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
@@ -27,6 +28,7 @@ import {
 } from "../../src/tui/tui.js";
 import { makeFakeRenderer } from "./renderer-fixture.js";
 import { createFake } from "../harness/fake-adapter.js";
+import { createFakeBundleProcess } from "../helpers/fakeBundleProcess.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import { inertRunActionsView, inertRunListView } from "./inert.js";
 
@@ -287,4 +289,137 @@ test("a scripted fake Harness streams through the Port into the Run Workbench", 
     rendered.captureCharFrame(),
     /Observed Harness · Claude Code · fake-claude · 0\.0\.0-fake · model fake-sonnet/,
   );
+});
+
+test("the Matt grill takes its idea on the inputs screen and opens on the first Turn built from it (#212)", async (t) => {
+  const savedExecutable = process.env[CLAUDE_CODE_EXECUTABLE_ENV];
+  process.env[CLAUDE_CODE_EXECUTABLE_ENV] = process.execPath;
+  t.after(() => {
+    if (savedExecutable === undefined)
+      delete process.env[CLAUDE_CODE_EXECUTABLE_ENV];
+    else process.env[CLAUDE_CODE_EXECUTABLE_ENV] = savedExecutable;
+  });
+  const idea = "Add a dark-mode toggle";
+  const question = "Q1 - Who can toggle it? Recommended: every user.";
+  const workspace = makeTempDir("secant-tui-matt-ws-");
+  const wired = wireApplication({
+    secantHome: makeTempDir("secant-tui-matt-home-"),
+    launchCwd: workspace,
+    supportsInteractiveTurns: true,
+    process: createFakeBundleProcess(),
+    harnessAdapter: createFake({
+      profile: profile(),
+      turns: [
+        {
+          events: [{ kind: "assistant-content", content: question }],
+          result: {
+            kind: "completed",
+            detail: {
+              finalContent: question,
+              effectiveModel: { known: true, model: "fake-sonnet" },
+              session: { state: "detached", coordinate: { opaque: "c" } },
+            },
+          },
+        },
+      ],
+    })(),
+  });
+  t.after(() => {
+    wired.runGroup.close();
+    wired.catalog.close();
+  });
+  const mattFolder = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "bundles",
+    "matt-front-spec",
+  );
+  assert.ok(wired.bundleManagement.build(mattFolder, { noInstall: false }).ok);
+  const bundleId = "dev.secant.matt-front";
+  assert.ok(
+    wired.projectionPort.submit({
+      operationId: "approve-workspace",
+      operation: "approve-workspace",
+      input: { path: workspace },
+    }).admitted,
+  );
+  const workspaceProjection = wired.projectionPort.openProjection({
+    family: "workspace",
+  });
+  const listProjection = wired.projectionPort.openProjection({
+    family: "bundle-catalog",
+  });
+  const focusProjection = wired.projectionPort.openProjection({
+    family: "bundle-catalog",
+    focus: { id: bundleId },
+  });
+  t.after(() => {
+    workspaceProjection.close();
+    listProjection.close();
+    focusProjection.close();
+  });
+
+  const fakeRenderer = makeFakeRenderer(120, 36);
+  const rendered = await testRender(
+    () => (
+      <App
+        view={workspaceView(workspaceProjection.snapshot)}
+        bundles={catalogView(listProjection.snapshot, focusProjection.snapshot)}
+        harnesses={createLiveHarnessCatalogView(wired.projectionPort)}
+        preparation={createLiveLaunchPreparationView(wired.projectionPort)}
+        launch={createLiveRunLaunchView(wired.projectionPort)}
+        run={createLiveRunWorkbenchView(wired.projectionPort)}
+        runList={inertRunListView()}
+        actions={inertRunActionsView()}
+        renderer={fakeRenderer.port}
+        exit={() => {}}
+      />
+    ),
+    { width: 120, height: 36 },
+  );
+  await rendered.waitForFrame((frame) => frame.includes("Secant"));
+  rendered.mockInput.pressEnter();
+  await rendered.waitForFrame((frame) => frame.includes("acknowledge"));
+  rendered.mockInput.pressKey("a");
+  await rendered.waitForFrame((frame) => frame.includes("Trust acknowledged"));
+  rendered.mockInput.pressEnter();
+  await rendered.waitForFrame((frame) => frame.includes("Choose a Harness"));
+  rendered.mockInput.pressEnter();
+  await rendered.waitForFrame((frame) => frame.includes("Model"));
+  await rendered.renderOnce();
+  rendered.mockInput.pressEnter();
+  // The Bundle's required idea is collected on the inputs screen.
+  await rendered.waitForFrame((frame) => frame.includes("Launch inputs"));
+  assert.match(rendered.captureCharFrame(), /idea \(text\)/);
+  await rendered.mockInput.typeText(idea);
+  await rendered.waitForFrame((frame) => frame.includes(idea));
+  rendered.mockInput.pressEnter();
+  await rendered.waitForFrame((frame) => frame.includes("Review"));
+  assert.match(rendered.captureCharFrame(), new RegExp(`idea: ${idea}`));
+  rendered.mockInput.pressEnter();
+
+  // The Workbench opens on the grill's Turn boundary with the agent's first answer
+  // already shown: the idea went out in the entry Turn, not a second paste.
+  await rendered.waitForFrame((frame) => frame.includes(question));
+  await rendered.waitForFrame((frame) =>
+    frame.includes("BLOCKED · interactive Turn"),
+  );
+  const [listed] = wired.runGroup.listRuns();
+  assert.ok(listed);
+  const runProjection = wired.projectionPort.openProjection({
+    family: "run",
+    runId: listed.runId,
+  });
+  const result = runProjection.snapshot.result;
+  runProjection.close();
+  assert.ok(result.found);
+  if (!result.found) throw new Error("unreachable");
+  const page = result.run.sessions?.[0]?.transcriptPage;
+  assert.ok(page);
+  const transcript = wired.projectionPort.readTranscript(page);
+  assert.ok(transcript.found);
+  if (!transcript.found) throw new Error("unreachable");
+  const [entry] = transcript.entries.filter((e) => e.role === "user");
+  assert.ok(entry?.content.includes(idea), entry?.content);
 });

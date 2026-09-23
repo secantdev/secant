@@ -250,6 +250,9 @@ export interface AgentStep extends StepCommon {
   readonly prompt: Reference;
   readonly session: string;
   readonly uses?: readonly Reference[];
+  /** interactive-agent only: send the rendered `prompt` as the Step's first Turn
+   *  on entry, instead of waiting for the human to write it (#212). */
+  readonly entryTurn?: boolean;
 }
 export interface CommandStep extends StepCommon {
   readonly kind: "command";

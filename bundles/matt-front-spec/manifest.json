@@ -2,12 +2,17 @@
   "formatVersion": 1,
   "bundle": {
     "id": "dev.secant.matt-front",
-    "version": "1.1.0",
+    "version": "2.0.0",
     "name": "Matt Front Spec",
-    "description": "Interview the human to shape a feature, let them choose the tracker, then write the spec in the same Session."
+    "description": "Grill the human about their launch idea, let them choose the tracker, then write the spec in the same Session."
   },
   "platforms": ["windows", "macos", "linux"],
-  "inputs": {},
+  "inputs": {
+    "idea": {
+      "type": "text",
+      "description": "Your initial idea: what you want to build or change. The grill starts from it."
+    }
+  },
   "assets": [
     {
       "path": "prompts/grill.md",
@@ -16,6 +21,10 @@
     {
       "path": "prompts/spec.md",
       "kind": "prompt"
+    },
+    {
+      "path": "skills/grill-me",
+      "kind": "skill"
     },
     {
       "path": "skills/grilling",
@@ -31,10 +40,15 @@
       "id": "grill",
       "kind": "interactive-agent",
       "session": "spec",
+      "requires": ["idea"],
+      "entryTurn": true,
       "prompt": {
         "asset": "prompts/grill.md"
       },
       "uses": [
+        {
+          "asset": "skills/grill-me"
+        },
         {
           "asset": "skills/grilling"
         }

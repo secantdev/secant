@@ -72,6 +72,7 @@ const LOCKED_COORDINATION_WORKER = fileURLToPath(
 // id the Adapter mints, so the recording's own id gives a verbatim transcript.
 const MATT_FRONT_SESSION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const MATT_FRONT_REPLAYER_VERSION = "2.1.274 (Claude Code)";
+const MATT_FRONT_IDEA = "Add a dark-mode toggle to the settings page.";
 
 function commandOptions(
   source: string,
@@ -350,10 +351,13 @@ async function applicationOnDoubles(): Promise<void> {
 // [Allow] keypress. The TUI-rendering coverage stays in live-run-workbench.test.tsx;
 // this case's job is the recorded-replayer traversal. Nothing is faked in place of a
 // spawn: the real Adapter discovers and spawns the PATH-installed replayer, which
-// replays the recorded grill and spec Turns. Two human grill Turns are sent, the Step
-// is ended, the suggested tracker gate is answered with its `Local` suggestion (#213),
-// and the spec Turn's file-write approval is allowed; the Run reaches `succeeded` with
-// the spec written and the chosen tracker rendered into the spec Turn exactly once.
+// replays the recorded grill and spec Turns. The launch idea is sent as the grill's
+// authored entry Turn (#212) and replays the first recorded grill Turn; one human
+// grill Turn follows, the Step is ended, the suggested tracker gate is answered with
+// its `Local` suggestion (#213), and the spec Turn's file-write approval is allowed;
+// the Run reaches `succeeded` with the spec written and the chosen tracker rendered
+// into the spec Turn exactly once. The replayer does not match Turn input, so the
+// recording taken before the entry Turn existed still serves the same grill Turns.
 async function mattFrontReplayerWorkbench(): Promise<void> {
   const replayer = installReplayer(
     MATT_FRONT_REPLAYER_VERSION,
@@ -397,17 +401,17 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     );
 
     // The launch seam builds this exact LaunchRunInput — the acknowledged installed
-    // digest, the interactive Harness selection, no launch inputs. The launch rests
-    // the Run `blocked` at the interactive grill Step and only then clears its
-    // execution claim, so awaiting this Operation is the correct gate before a human
-    // Turn is sent (a Turn before it settles is refused `interactive-turn-busy`).
+    // digest, the interactive Harness selection, the required idea. The launch runs
+    // the grill's entry Turn, rests the Run `blocked` at the grill Step, and only then
+    // clears its execution claim, so awaiting this Operation is the correct gate
+    // before a human Turn is sent (earlier, it is refused `interactive-turn-busy`).
     const LAUNCH_OP = "matt-front-launch";
     const admission = wired.projectionPort.submit({
       operationId: LAUNCH_OP,
       operation: "launch-run",
       input: {
         bundle: { id: entry.id },
-        launchInputs: {},
+        launchInputs: { idea: MATT_FRONT_IDEA },
         trustDigest: entry.digest,
         harness: "claude-code",
       },
@@ -454,7 +458,6 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
       assert.equal(outcome.status, "applied", JSON.stringify(outcome));
     };
 
-    await sendGrillTurn("Interview me about a feature.");
     await sendGrillTurn("That is enough context.");
 
     const afterGrill = readRun();
@@ -464,18 +467,19 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     const transcript = wired.projectionPort.readTranscript(transcriptReference);
     assert.ok(transcript.found);
     if (!transcript.found) throw new Error("unreachable");
-    const humanTurns = transcript.entries
+    const [entryTurn, ...humanTurns] = transcript.entries
       .filter((entry) => entry.role === "user")
       .map((entry) => entry.content);
-    assert.deepEqual(humanTurns, [
-      "Interview me about a feature.",
-      "That is enough context.",
-    ]);
+    // The entry Turn carries the idea and the bundled grill-me path; the human Turn
+    // is verbatim.
+    assert.ok(entryTurn?.includes(MATT_FRONT_IDEA), entryTurn);
+    assert.match(entryTurn, /[\\/]grill-me[\\/]SKILL\.md/);
+    assert.deepEqual(humanTurns, ["That is enough context."]);
     const assistantText = transcript.entries
       .filter((entry) => entry.role === "assistant")
       .map((entry) => entry.content)
       .join("\n");
-    // The recorded grill: a question on the first Turn, a confirmation on the second.
+    // The recorded grill: a question on the entry Turn, a confirmation on the second.
     assert.match(assistantText, /persist per-device|sync across/);
     assert.match(assistantText, /enough to design|Ready when you are/);
     // A detached Session that recorded human Turns still advertises its transcript

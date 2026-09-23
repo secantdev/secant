@@ -530,6 +530,52 @@ export async function driveInteractiveTurn(
   });
 }
 
+/** Drive an interactive-agent Step's authored entry Turn (#212) when it opts in with
+ *  `entryTurn` and no Turn of this Attempt was admitted yet: the rendered prompt —
+ *  slots filled, bundled skill paths appended, exactly as an Agent Step renders it —
+ *  is the Session's first Turn (origin `managed`), so the human never re-types what a
+ *  Launch input already carries. Sent at most once: a resume after any admitted entry
+ *  Turn (even an interrupted one) finds it in history and waits for the human rather
+ *  than silently re-sending it. Returns undefined when no entry Turn is due. */
+export async function runInteractiveEntryTurn(
+  step: AgentStep,
+  context: StepContext,
+  attemptId: string,
+): Promise<TurnResult | undefined> {
+  if (step.entryTurn !== true) return undefined;
+  const owner = context.owner;
+  if (owner.turns().some((turn) => turn.attemptId === attemptId)) {
+    return undefined;
+  }
+  const harness = context.harness;
+  if (harness === undefined) {
+    throw new Error(
+      "execution: an interactive entry Turn ran without a prepared Harness.",
+    );
+  }
+  const rendered = renderAgentPrompt(step, context, harness);
+  if (!rendered.ok) return rendered.result;
+  const recovery = sessionRecovery(owner, step.session);
+  if (recovery.unusable) return unusableTurnResult(step.session);
+  return driveHarnessTurn(owner, harness.prepared, {
+    session: step.session,
+    origin: "managed",
+    kind: "interactive-agent",
+    attemptId,
+    turnId: `${attemptId}#entry`,
+    input: rendered.prompt,
+    // Settle `detached` like a human Turn, so the next Turn resumes this Session.
+    detachAfterTurn: true,
+    ...(recovery.resume !== undefined ? { resume: recovery.resume } : {}),
+    ...(context.requestChannel !== undefined
+      ? { requestChannel: context.requestChannel }
+      : {}),
+    ...(context.cancelSignal !== undefined
+      ? { cancelSignal: context.cancelSignal }
+      : {}),
+  });
+}
+
 /** The failed result an interactive Turn returns for an unusable Session (#122). */
 function unusableTurnResult(session: string): TurnResult {
   return {

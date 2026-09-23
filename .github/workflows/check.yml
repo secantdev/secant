@@ -205,31 +205,10 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
           if [ "${{ runner.os }}" = 'Windows' ]; then
-            hidden_candidate="$RUNNER_TEMP/not-present"
-            if output="$(sh ./install.sh --candidate-dir "$hidden_candidate" 2>&1)"; then
-              echo 'Expected the POSIX installer to refuse Windows.' >&2
-              exit 1
-            fi
-            grep -F 'Unsupported platform: windows-x64' <<<"$output"
-            if grep -F "$hidden_candidate" <<<"$output"; then
-              echo 'The installer accessed its candidate source before refusing Windows.' >&2
-              exit 1
-            fi
+            bash scripts/posix-installer-consumer.sh --scenario unsupported --candidate-dir dist/release
           else
-            isolated_home="$(mktemp -d)"
-            application_home="$isolated_home/application-data"
-            output="$(HOME="$isolated_home" SECANT_HOME="$application_home" sh ./install.sh --candidate-dir dist/release --no-modify-path)"
-            printf '%s\n' "$output"
-            test -x "$isolated_home/.secant/bin/secant"
-            test ! -e "$application_home/bin/secant"
-            expected_version="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' dist/release/candidate-manifest.json | head -n 1)"
-            test "$("$isolated_home/.secant/bin/secant" --version)" = "$expected_version"
-            grep -F 'export PATH="$HOME/.secant/bin:$PATH"' <<<"$output"
-            if [ "${{ runner.os }}" = 'macOS' ]; then
-              grep -F 'Run Secant from Terminal; do not double-click a downloaded executable.' <<<"$output"
-            fi
+            bash scripts/posix-installer-consumer.sh --scenario supported --candidate-dir dist/release
           fi
       - name: Terminal lifecycle
         id: terminal_lifecycle

@@ -93,12 +93,16 @@ induced: doing so deterministically would require a private installer hook or an
 
 ## POSIX Installer Consumer
 
-The `POSIX installer consumer` step ([check.yml](../../.github/workflows/check.yml)) gives root `install.sh` the local candidate without a product runtime.
-macOS arm64 and Linux x64 install under fixed `~/.secant/bin` in isolated homes and retain the declined-PATH instruction; macOS pins Terminal guidance.
-Windows x64 and the source suite there prove only refusal before candidate access. The deterministic `tests/release/posix-installer.test.ts` suite —
-which drove `install.sh` through a real shell and additionally covered target/identity, checksum/layout/version/legal refusal, failed-update preservation,
-`SECANT_HOME` independence, latest/exact versions, and PATH idempotency — was retired in the #185 subprocess-test migration so the semantic suite spawns no
-child. That refusal/replacement/idempotency coverage is not currently re-exercised; widening this consumer step to restore it is a known follow-up.
+The `POSIX installer consumer` step ([check.yml](../../.github/workflows/check.yml)) runs `scripts/posix-installer-consumer.sh` (the POSIX sibling of
+`scripts/powershell-installer-consumer.ps1`) to give root `install.sh` the local candidate without a product runtime. On macOS arm64 and Linux x64 the
+`supported` scenario installs the real candidate under fixed `~/.secant/bin` in an isolated home and proves: the executable runs and reports the candidate
+version, `LICENSE`/`THIRD-PARTY-NOTICES.md` are installed while `SECANT_HOME` is not used as the install root, the declined-PATH instruction is printed
+(with macOS Terminal guidance), exact-version selection accepts the matching version and rejects a mismatch, and PATH modification is idempotent. It then
+tampers a local copy to prove a malformed candidate — a checksum, archive-layout, manifest-version, or legal-material fault — is refused while the existing
+installation is preserved, each assertion naming its scenario on failure. Windows x64 runs the `unsupported` scenario, proving only refusal before candidate
+access. This restores at the compiled-binary layer the coverage the deterministic `tests/release/posix-installer.test.ts` suite carried before it was retired
+in the #185 subprocess-test migration so the semantic suite spawns no child; the install, replacement, and tamper round-trips on the real binary live only
+in this CI job, the way the compiled-binary smoke ([testing](./testing.md)) lives outside `bun test`.
 
 The manual-dispatch candidate validation and the tag-triggered protected promotion are workflow-shape policy, not consumer round-trips; they live in
 [release-workflow.md](./release-workflow.md).

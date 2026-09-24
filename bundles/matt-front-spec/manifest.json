@@ -2,9 +2,9 @@
   "formatVersion": 1,
   "bundle": {
     "id": "dev.secant.matt-front",
-    "version": "2.4.0",
+    "version": "2.5.0",
     "name": "Matt Front Spec",
-    "description": "Grill the human about their launch idea, let them choose the tracker, then write the spec and plan the tickets in the same Session."
+    "description": "Grill the human about their launch idea, let them choose the tracker, write the spec and plan the tickets in the same Session, then implement one ready ticket per fresh Session."
   },
   "platforms": ["windows", "macos", "linux"],
   "inputs": {
@@ -31,6 +31,10 @@
       "kind": "prompt"
     },
     {
+      "path": "prompts/implement.md",
+      "kind": "prompt"
+    },
+    {
       "path": "skills/grill-me",
       "kind": "skill"
     },
@@ -44,6 +48,22 @@
     },
     {
       "path": "skills/to-tickets",
+      "kind": "skill"
+    },
+    {
+      "path": "skills/implement",
+      "kind": "skill"
+    },
+    {
+      "path": "skills/tdd",
+      "kind": "skill"
+    },
+    {
+      "path": "skills/code-review",
+      "kind": "skill"
+    },
+    {
+      "path": "skills/codebase-design",
       "kind": "skill"
     }
   ],
@@ -135,6 +155,37 @@
           "type": "text"
         }
       ]
+    },
+    {
+      "repeat": {
+        "control": "human",
+        "steps": [
+          {
+            "id": "implement",
+            "kind": "interactive-agent",
+            "session": "implement",
+            "requires": ["tracker", "spec-ref", "tickets-ref"],
+            "entryTurn": true,
+            "prompt": {
+              "asset": "prompts/implement.md"
+            },
+            "uses": [
+              {
+                "asset": "skills/implement"
+              },
+              {
+                "asset": "skills/tdd"
+              },
+              {
+                "asset": "skills/code-review"
+              },
+              {
+                "asset": "skills/codebase-design"
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

@@ -48,6 +48,10 @@ Six keys, all required (the guidance-structure suite enforces their presence):
   - `ignoreSigterm` — swallow SIGTERM so only a force-kill stops the process.
 - `resume` — a separate `{ exitCode, turns }` played when the launch carries
   `--resume` (a reattached, detached Session).
+- `sessions[]` — optional later fresh Sessions: the Nth `--session-id` launch
+  after the first plays `sessions[N-1]`, a `{ exitCode, turns }` of its own (one
+  conversation per human-controlled Repeat iteration). Without it, every fresh
+  launch replays the initial recording.
 
 Session ids are **not** redacted: Secant mints the session UUID and passes it at
 spawn, so each recording is made with the canonical per-case UUID its tests use,

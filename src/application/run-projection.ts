@@ -668,7 +668,7 @@ function continueRepeatOffer(runId: string, stepId: string): ActionOffer {
     runId,
     stepId,
     consequence:
-      "next iteration, fresh Session; no ticket is checked or closed.",
+      "this does not close the ticket; a fresh Session reads the tracker again and may choose it while it is still open.",
   };
 }
 

@@ -1,0 +1,13 @@
+diff --git a/issues/01-theme-end-to-end-system-mode.md b/issues/01-theme-end-to-end-system-mode.md
+index 6e5c457..863b99e 100644
+--- a/issues/01-theme-end-to-end-system-mode.md
++++ b/issues/01-theme-end-to-end-system-mode.md
+@@ -1,7 +1,7 @@
+ # 01: Theme end-to-end: System mode with profile field
+ 
+ **Blocked by:** None
+-**Status:** ready-for-agent
++**Status:** done
+ 
+ Add a `themePreference` profile field (default "system"), a theme control on the Settings page, and live OS tracking applied before first paint.
+ 

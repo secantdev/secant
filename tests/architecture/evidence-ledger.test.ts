@@ -28,6 +28,9 @@ const PROCESS_FREE_MARKER_EXCEPTIONS = new Set([
   // Born process-free (#220): the Matt Local spec runs against the fake Bundle
   // Process and fake Harness Adapters under both Harness selections.
   "tests/application/matt-local-spec.test.ts",
+  // Born process-free (#224): the Matt implementation stage runs against the fake
+  // Bundle Process and fake Harness Adapters under both Harness selections.
+  "tests/application/matt-local-implement.test.ts",
   // Construct an Application through the compatibility helper but reach no Command,
   // Git probe, or Harness child: catalog and projection behavior only, and the helper
   // now injects a throwing Process stub (#200 A21), so none can silently reach the

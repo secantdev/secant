@@ -60,6 +60,11 @@ const SESSION_IDS = {
   "protocol-corruption": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
   "matt-front": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 } as const;
+/** The matt-front implementation Sessions (#224): one fresh id per ticket. */
+const MATT_FRONT_IMPLEMENT_SESSION_IDS = [
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+] as const;
 
 // --- The launch contract (must mirror src/harness/claude-code.ts `launch`) ----
 
@@ -818,9 +823,10 @@ function splitAroundCalls(
   return { files, steps };
 }
 
-/** Record the Matt front Bundle's Harness Turns (#123, #222): a two-Turn
+/** Record the Matt front Bundle's Harness Turns (#123, #222, #224): a two-Turn
  *  interactive grill, the autonomous spec Turn, a two-Turn interactive ticket
- *  review, and the autonomous ticket-publish Turn, all in one Session. The grill's
+ *  review, and the autonomous ticket-publish Turn, all in one Session, then two
+ *  implementation Sessions of their own. The grill's
  *  first Turn mints the Session (`--session-id`); every later Turn resumes it
  *  (`--resume`). Every launch carries the Run working area as `--add-dir`, as the
  *  Adapter forwards it, and the Local spec and ticket files are written there —
@@ -923,6 +929,43 @@ async function recordMattFront(): Promise<void> {
       bridge.calls.slice(callsBefore),
     );
 
+    // The implementation stage (#224): each ticket gets a fresh Session of its own,
+    // minted with its own `--session-id`. The first reads the Local tracker, names
+    // the ready ticket, and marks it done in its own file; a later question stays in
+    // that Session. The next Session reads the tracker again, with no edit.
+    const [implementSid, nextSid] = MATT_FRONT_IMPLEMENT_SESSION_IDS;
+    const choose =
+      `This is a fresh conversation. The Local tracker holds ticket files in ` +
+      `${join(area, "issues")}. Read every file there. Choose the one ticket ` +
+      "whose Status is ready-for-agent and whose Blocked by line names no " +
+      "ticket that is still ready-for-agent. ";
+    callsBefore = bridge.calls.length;
+    const implement = await turn(
+      ["--session-id", implementSid],
+      choose +
+        "Using the Edit tool, change that file's `**Status:** ready-for-agent` " +
+        "line to `**Status:** done`. Edit nothing else. Then reply with only " +
+        "the chosen file's name, without its directory.",
+      true,
+    );
+    const implementPatch = turnPatch(area, "implement");
+    const implementSplit = splitAroundCalls(
+      "implement",
+      implement.stdout,
+      bridge.calls.slice(callsBefore),
+    );
+    const question = await turn(
+      ["--resume", implementSid],
+      "What is that ticket's Status line now? Answer in under 15 words and " +
+        "use no tools.",
+    );
+    const next = await turn(
+      ["--session-id", nextSid],
+      choose +
+        "Do not edit any file. Reply with only the chosen file's name, " +
+        "without its directory.",
+    );
+
     writeCase({
       name: "matt-front",
       files: [
@@ -934,6 +977,10 @@ async function recordMattFront(): Promise<void> {
         { name: "tickets-2.stdout", bytes: tickets2.stdout },
         ...publishSplit.files,
         { name: "tickets.patch", bytes: ticketsPatch },
+        ...implementSplit.files,
+        { name: "implement.patch", bytes: implementPatch },
+        { name: "question.stdout", bytes: question.stdout },
+        { name: "next.stdout", bytes: next.stdout },
       ],
       // Secant holds one process across an interactive Step's Turns and resumes
       // the Session in a fresh process per Step, so the grill's two Turns share
@@ -950,6 +997,20 @@ async function recordMattFront(): Promise<void> {
             { steps: publishSplit.steps, workingAreaPatch: "tickets.patch" },
           ],
         },
+        // Each ticket Session is its own fresh launch, held across its Turns.
+        sessions: [
+          {
+            exitCode: question.exitCode,
+            turns: [
+              {
+                steps: implementSplit.steps,
+                workingAreaPatch: "implement.patch",
+              },
+              { stdout: "question.stdout" },
+            ],
+          },
+          { exitCode: next.exitCode, turns: [{ stdout: "next.stdout" }] },
+        ],
       },
       workspace: ws,
       workingArea: area,

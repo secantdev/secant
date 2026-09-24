@@ -198,11 +198,57 @@ const protocolCase = JSON.parse(
   readFileSync(join(caseDirectory, "case.json"), "utf8"),
 );
 
+// The invocation log's entries, which this replayer wrote itself one JSON object
+// per line. A line that will not parse means the log is corrupt: fail loudly
+// rather than silently mis-count and replay the wrong process or Turn.
+function logEntries() {
+  if (!recording.log) return [];
+  return readFileSync(recording.log, "utf8")
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        process.stderr.write("secant replayer: invocation log is not JSON\n");
+        process.exit(2);
+      }
+    });
+}
+
+/** The ids of earlier launches carrying `flag` (this process's own start is logged
+ *  already, so it is excluded by id). */
+function priorLaunches(entries, flag) {
+  return new Set(
+    entries
+      .filter(
+        (entry) =>
+          entry.type === "start" &&
+          entry.id !== invocationId &&
+          Array.isArray(entry.args) &&
+          entry.args.includes(flag),
+      )
+      .map((entry) => entry.id),
+  );
+}
+
 // A launch with `--resume` reattaches a detached Session: replay the case's
 // separately recorded resumed process (its init may or may not acknowledge the
-// Session, exactly as recorded). A first launch uses the initial recording.
+// Session, exactly as recorded). A first launch uses the initial recording. A case
+// may also record later fresh Sessions under `sessions` (#224): each iteration of a
+// human-controlled Repeat opens its own conversation with `--session-id`, so the
+// Nth fresh launch after the first plays `sessions[N-1]`. A case without
+// `sessions` replays its initial recording for every fresh launch, as before.
 const resuming = valueAfter("--resume") !== undefined;
-const playback = resuming ? protocolCase.resume : protocolCase;
+const freshOrdinal =
+  !resuming && Array.isArray(protocolCase.sessions)
+    ? priorLaunches(logEntries(), "--session-id").size
+    : 0;
+const playback = resuming
+  ? protocolCase.resume
+  : freshOrdinal === 0
+    ? protocolCase
+    : protocolCase.sessions[freshOrdinal - 1];
 if (!playback) {
   process.stderr.write(
     "secant replayer: no recorded process for this launch\n",
@@ -222,33 +268,8 @@ if (!playback) {
 // this count; a single resumed process sees offset 0, unchanged.
 let resumeOffset = 0;
 if (resuming && recording.log) {
-  const entries = readFileSync(recording.log, "utf8")
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        // The replayer wrote this log itself, one JSON object per line; a line
-        // that will not parse means the log is corrupt. Fail loudly rather than
-        // silently mis-count the offset and replay the wrong Turn.
-        process.stderr.write("secant replayer: invocation log is not JSON\n");
-        process.exit(2);
-      }
-    });
-  // Prior `--resume` launches (this process's own start is logged already, so
-  // exclude it by id), and the stdin Turns they consumed.
-  const priorResumeIds = new Set(
-    entries
-      .filter(
-        (entry) =>
-          entry.type === "start" &&
-          entry.id !== invocationId &&
-          Array.isArray(entry.args) &&
-          entry.args.includes("--resume"),
-      )
-      .map((entry) => entry.id),
-  );
+  const entries = logEntries();
+  const priorResumeIds = priorLaunches(entries, "--resume");
   resumeOffset = entries.filter(
     (entry) => entry.type === "stdin" && priorResumeIds.has(entry.id),
   ).length;

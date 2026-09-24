@@ -1,21 +1,21 @@
-diff --git a/issues/01-system-following-theme.md b/issues/01-system-following-theme.md
+diff --git a/issues/01-theme-end-to-end-system-mode.md b/issues/01-theme-end-to-end-system-mode.md
 new file mode 100644
-index 0000000..77d99e8
+index 0000000..6e5c457
 --- /dev/null
-+++ b/issues/01-system-following-theme.md
++++ b/issues/01-theme-end-to-end-system-mode.md
 @@ -0,0 +1,9 @@
-+# 01: System-following theme, end to end
++# 01: Theme end-to-end: System mode with profile field
 +
 +**Blocked by:** None
 +**Status:** ready-for-agent
 +
-+Apply a light or dark theme that matches the OS before first paint, and update it live when the OS theme changes.
++Add a `themePreference` profile field (default "system"), a theme control on the Settings page, and live OS tracking applied before first paint.
 +
 +## Acceptance Criteria
-+- [ ] A new user sees the theme that matches their OS on first load, with no flash of the wrong theme, and it updates live when the OS theme changes.
++- [ ] A user with no saved preference sees the theme that matches their OS, with no flash on load, and it updates live when the OS setting changes.
 diff --git a/issues/02-theme-toggle-control.md b/issues/02-theme-toggle-control.md
 new file mode 100644
-index 0000000..4457278
+index 0000000..7765411
 --- /dev/null
 +++ b/issues/02-theme-toggle-control.md
 @@ -0,0 +1,9 @@
@@ -24,7 +24,7 @@ index 0000000..4457278
 +**Blocked by:** 01
 +**Status:** ready-for-agent
 +
-+Add a Light/Dark/System control to the Settings page. Save the choice as `themePreference` in the user's profile, apply it right away, and use it on every device.
++Add Light/Dark overrides that save to the profile and apply instantly, sync across devices, revert on save errors, and meet WCAG AA contrast.
 +
 +## Acceptance Criteria
-+- [ ] Choosing Dark takes effect right away and still applies after logout, login, and switching devices.
++- [ ] Choosing Light or Dark applies immediately, persists across logout/login and devices, and reverts with an error message if the save fails.

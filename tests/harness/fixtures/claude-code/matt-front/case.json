@@ -21,7 +21,7 @@
               "tool_name": "Write",
               "input": {
                 "file_path": "«WORKING_AREA»/spec.md",
-                "content": "# Spec: Dark-Mode Toggle\n\nStatus: ready-for-agent\n\n## Summary\nAdd a theme control to the Settings page so users can choose light or dark mode. Each user's choice is saved in their profile.\n\n## Requirements\n- Settings page shows a theme control with three options: **Light**, **Dark**, **System**.\n- Default is **System**, which follows the OS `prefers-color-scheme` setting.\n- The choice is saved to the user's profile, e.g. `themePreference: \"light\" | \"dark\" | \"system\"`.\n- The saved choice applies on every device and session after login.\n- A change takes effect right away, with no page reload.\n- In System mode, the app updates live when the OS theme changes.\n- Avoid a flash of the wrong theme on load: apply the theme before first paint.\n\n## Out of Scope\n- Custom color themes beyond light and dark.\n- Per-page theme overrides.\n\n## Acceptance Criteria\n- A new user sees the theme that matches their OS.\n- Choosing Dark still applies after logout, login, and switching devices.\n- Switching back to System follows the OS again.\n- The control is keyboard-accessible and labeled for screen readers.\n"
+                "content": "# Spec: Dark-Mode Toggle\n\nStatus: ready-for-agent\n\n## Summary\nAdd a theme control to the Settings page so users can choose between light and dark modes, or follow their OS setting.\n\n## Options\n- **System** (default): follows `prefers-color-scheme` and updates live when the OS setting changes.\n- **Light**: always light.\n- **Dark**: always dark.\n\n## Behavior\n- The selection is saved per user in their profile (e.g., `themePreference: \"system\" | \"light\" | \"dark\"`).\n- New and existing users with no saved value default to **System**.\n- Changing the setting applies immediately, with no page reload.\n- The preference follows the user across devices and sessions.\n- Apply the theme before first paint (for example, from a cached value) so the page doesn't flash the wrong theme.\n\n## Acceptance Criteria\n1. The Settings page shows a three-option theme control.\n2. The selection persists to the user profile and survives logout/login.\n3. System mode tracks OS changes in real time.\n4. All pages meet WCAG AA contrast in both themes.\n5. If saving fails, show an error and revert the control.\n"
               }
             }
           },
@@ -46,8 +46,8 @@
             "bridge": {
               "tool_name": "Write",
               "input": {
-                "file_path": "«WORKING_AREA»/issues/01-system-following-theme.md",
-                "content": "# 01: System-following theme, end to end\n\n**Blocked by:** None\n**Status:** ready-for-agent\n\nApply a light or dark theme that matches the OS before first paint, and update it live when the OS theme changes.\n\n## Acceptance Criteria\n- [ ] A new user sees the theme that matches their OS on first load, with no flash of the wrong theme, and it updates live when the OS theme changes.\n"
+                "file_path": "«WORKING_AREA»/issues/01-theme-end-to-end-system-mode.md",
+                "content": "# 01: Theme end-to-end: System mode with profile field\n\n**Blocked by:** None\n**Status:** ready-for-agent\n\nAdd a `themePreference` profile field (default \"system\"), a theme control on the Settings page, and live OS tracking applied before first paint.\n\n## Acceptance Criteria\n- [ ] A user with no saved preference sees the theme that matches their OS, with no flash on load, and it updates live when the OS setting changes.\n"
               }
             }
           },
@@ -59,7 +59,7 @@
               "tool_name": "Write",
               "input": {
                 "file_path": "«WORKING_AREA»/issues/02-theme-toggle-control.md",
-                "content": "# 02: Theme toggle control\n\n**Blocked by:** 01\n**Status:** ready-for-agent\n\nAdd a Light/Dark/System control to the Settings page. Save the choice as `themePreference` in the user's profile, apply it right away, and use it on every device.\n\n## Acceptance Criteria\n- [ ] Choosing Dark takes effect right away and still applies after logout, login, and switching devices.\n"
+                "content": "# 02: Theme toggle control\n\n**Blocked by:** 01\n**Status:** ready-for-agent\n\nAdd Light/Dark overrides that save to the profile and apply instantly, sync across devices, revert on save errors, and meet WCAG AA contrast.\n\n## Acceptance Criteria\n- [ ] Choosing Light or Dark applies immediately, persists across logout/login and devices, and reverts with an error message if the save fails.\n"
               }
             }
           },
@@ -70,5 +70,45 @@
         "workingAreaPatch": "tickets.patch"
       }
     ]
-  }
+  },
+  "sessions": [
+    {
+      "exitCode": 0,
+      "turns": [
+        {
+          "steps": [
+            {
+              "emit": "implement-0.stdout"
+            },
+            {
+              "bridge": {
+                "tool_name": "Edit",
+                "input": {
+                  "file_path": "«WORKING_AREA»/issues/01-theme-end-to-end-system-mode.md",
+                  "old_string": "**Status:** ready-for-agent",
+                  "new_string": "**Status:** done",
+                  "replace_all": false
+                }
+              }
+            },
+            {
+              "emit": "implement-final.stdout"
+            }
+          ],
+          "workingAreaPatch": "implement.patch"
+        },
+        {
+          "stdout": "question.stdout"
+        }
+      ]
+    },
+    {
+      "exitCode": 0,
+      "turns": [
+        {
+          "stdout": "next.stdout"
+        }
+      ]
+    }
+  ]
 }

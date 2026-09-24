@@ -366,6 +366,7 @@ for (const harness of ["claude-code", "codex"] as const) {
         { reply: "Proposed: 1. Toggle (none). 2. Persist (blocked by 1)." },
         { reply: "Merged. You approved it, so I will publish now." },
         { reply: "Published 2 tickets.", receipt: TICKETS },
+        { reply: "I chose the first ready ticket." },
       ]);
       const { wired, digest } = wire(t, harness, agent.adapter);
       const { runId } = await driveToSpec(wired, digest, harness, tracker);
@@ -396,9 +397,11 @@ for (const harness of ["claude-code", "codex"] as const) {
         operation: "end-interactive-step",
         input: { runId, stepId: "plan-tickets" },
       });
+      // The implementation stage then opens its first ticket Session (#224).
       run = readRun(wired, runId);
-      assert.equal(run.state, "succeeded", JSON.stringify(run.progress));
-      assert.equal(agent.inputs.length, 5);
+      assert.equal(run.state, "blocked", JSON.stringify(run.progress));
+      assert.equal(run.progress[run.position]?.id, "implement");
+      assert.equal(agent.inputs.length, 6);
       const publish = agent.inputs[4]!;
       assertToTickets(publish);
       assert.ok(publish.includes(`tracker I chose: ${tracker}.`), publish);
@@ -420,6 +423,7 @@ for (const harness of ["claude-code", "codex"] as const) {
         ["interactive-agent", "spec"],
         ["interactive-agent", "spec"],
         ["agent", "spec"],
+        ["interactive-agent", "implement-0.0:implement"],
       ]);
     });
   }

@@ -2626,7 +2626,8 @@ const CONTINUE_OFFER: ContinueRepeatOffer = {
   action: "continue-repeat",
   runId: "run-1",
   stepId: "discuss",
-  consequence: "next iteration, fresh Session; no ticket is checked or closed.",
+  consequence:
+    "this does not close the ticket; a fresh Session reads the tracker again and may choose it while it is still open.",
 };
 
 test("Continue replaces End Step in a human-controlled Repeat: ^N arms a confirmation that says no ticket is closed, and y dispatches (#217)", async () => {
@@ -2641,7 +2642,7 @@ test("Continue replaces End Step in a human-controlled Repeat: ^N arms a confirm
   await press(wb.t, wb.renderer, "n", { ctrl: true });
   const armed = wb.t.captureCharFrame();
   assert.match(armed, /y continue · esc keep/);
-  assert.match(armed, /no ticket is checked or closed/);
+  assert.match(armed, /this does not close the ticket/);
   // The arm blurs the field, so the confirming y is never text.
   await type(wb.t, "y");
   assert.doesNotMatch(wb.t.captureCharFrame(), /> drafty/);

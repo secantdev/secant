@@ -67,7 +67,11 @@ const LOCKED_COORDINATION_WORKER = fileURLToPath(
 // The maintained Matt-front Bundle recorded-replayer traversal (#185, from
 // tests/tui/matt-front-workbench.test.tsx): the replayer echoes whichever Session
 // id the Adapter mints, so the recording's own id gives a verbatim transcript.
-const MATT_FRONT_SESSION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const MATT_FRONT_SESSION_IDS = [
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+];
 const MATT_FRONT_REPLAYER_VERSION = "2.1.281 (Claude Code)";
 const MATT_FRONT_IDEA = "Add a dark-mode toggle to the settings page.";
 
@@ -365,6 +369,7 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     join(repoRoot, "tests", "harness", "fixtures", "claude-code", "matt-front"),
   );
   const workspace = runtimeTemp("secant-runtime-matt-front-ws-");
+  let minted = 0;
   const wired = wireApplication({
     secantHome: runtimeTemp("secant-runtime-matt-front-home-"),
     launchCwd: workspace,
@@ -380,7 +385,12 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     harnessAdapter: createClaudeCodeAdapter({
       path: replayer.path,
       env: {},
-      sessionId: () => MATT_FRONT_SESSION_ID,
+      // The planning Session, then one fresh Session per implementation ticket.
+      sessionId: () => {
+        const id = MATT_FRONT_SESSION_IDS[minted++];
+        assert.ok(id, "the recording has no further fresh Session");
+        return id;
+      },
     }),
   });
   try {
@@ -481,8 +491,8 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
       .map((entry) => entry.content)
       .join("\n");
     // The recorded grill: a question on the entry Turn, a confirmation on the second.
-    assert.match(assistantText, /OS setting by default/);
-    assert.match(assistantText, /That's all I need/);
+    assert.match(assistantText, /match system setting/);
+    assert.match(assistantText, /That's everything I need/);
     // A detached Session that recorded human Turns still advertises its transcript
     // page/export References alongside its availability (#124).
     assert.deepEqual(afterGrill.sessions, [
@@ -551,12 +561,19 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
       const settled = awaitSettled(wired.projectionPort, operationId).finally(
         () => watch.close(),
       );
-      const allowed = new Set<string>();
+      // Request ids are scoped to their Turn, so a later Turn may reuse one: an id
+      // is remembered only while its request is still offered.
+      const pending = new Set<string>();
+      let allowedCount = 0;
       for await (const update of watch.updates) {
         if (update.kind !== "live") continue;
+        const offered = new Set(
+          update.overlay.offers.map((offer) => offer.requestId),
+        );
+        for (const id of pending) if (!offered.has(id)) pending.delete(id);
         for (const offer of update.overlay.offers) {
-          if (allowed.has(offer.requestId)) continue;
-          if (allowed.size === 0) {
+          if (pending.has(offer.requestId)) continue;
+          if (allowedCount === 0) {
             const prompt = userTurns().at(-1) ?? "";
             const receiptPath = new RegExp(
               `Write the required output "${output}" as UTF-8 text to (.+) before you finish;`,
@@ -566,10 +583,11 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
             assert.ok(receiptPath.startsWith(areaOf(prompt)), receiptPath);
             writeFileSync(receiptPath, `${content(prompt)}\n`);
           }
-          allowed.add(offer.requestId);
+          pending.add(offer.requestId);
+          allowedCount += 1;
           assert.ok(
             wired.projectionPort.submit({
-              operationId: `${operationId}-allow-${allowed.size}`,
+              operationId: `${operationId}-allow-${allowedCount}`,
               operation: "answer-harness-request",
               input: {
                 runId,
@@ -583,7 +601,7 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
         }
       }
       assert.equal((await settled).status, "applied");
-      return allowed.size;
+      return allowedCount;
     };
 
     // Choose the Local suggestion — the same `text` answer a typed Other sends. The
@@ -664,37 +682,144 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
         "tickets-ref",
         (prompt) => join(areaOf(prompt), "issues"),
       ),
-      2,
+      // The two ticket writes, then the first ticket Session's status edit (#224).
+      3,
     );
 
-    const done = readRun();
-    assert.equal(done.state, "succeeded");
+    const [revision, publishPrompt] = userTurns().slice(-2);
+    assert.equal(revision, "Rename ticket 2 to Theme toggle control.");
+    assert.equal(areaOf(publishPrompt ?? ""), area);
+    assert.match(publishPrompt ?? "", /"tickets-ref"/);
+    // One file per approved ticket in the working area, each with its blocking
+    // edge; the Workspace holds no planning file.
+    const issues = join(area, "issues");
+    const tickets = readdirSync(issues).sort();
+    assert.equal(tickets.length, 2);
+    const ticketText = (index: number): string =>
+      readFileSync(join(issues, tickets[index]!), "utf8");
+    for (const index of [0, 1]) {
+      assert.match(ticketText(index), /\*\*Blocked by:\*\*/);
+    }
+    assert.deepEqual(readdirSync(workspace), []);
+
+    // The implementation stage (#224) opened the first ticket Session: a fresh
+    // Session whose Entry Turn names the Local tracker and the bundled implement
+    // skills. The agent chose the unblocked ticket and marked it done in its own
+    // file; Secant only allowed the edit it asked for.
+    const atImplement = readRun();
+    assert.equal(atImplement.state, "blocked");
     assert.deepEqual(
-      done.progress.map((step) => [step.id, step.status]),
+      atImplement.progress.map((step) => [step.id, step.status]),
       [
         ["grill", "succeeded"],
         ["choose-tracker", "succeeded"],
         ["write-spec", "succeeded"],
         ["plan-tickets", "succeeded"],
         ["publish-tickets", "succeeded"],
+        ["implement", "blocked"],
       ],
     );
-    const [revision, publishPrompt] = userTurns().slice(-2);
-    assert.equal(revision, "Rename ticket 2 to Theme toggle control.");
-    assert.equal(areaOf(publishPrompt ?? ""), area);
-    assert.match(publishPrompt ?? "", /"tickets-ref"/);
-    // One file per approved ticket in the working area, each with its blocking
-    // edge and the skill's status; the Workspace holds no planning file.
-    const issues = join(area, "issues");
-    const tickets = readdirSync(issues);
-    assert.equal(tickets.length, 2);
-    for (const ticket of tickets) {
-      const text = readFileSync(join(issues, ticket), "utf8");
-      assert.match(text, /\*\*Blocked by:\*\*/);
-      assert.match(text, /\*\*Status:\*\* ready-for-agent/);
+    const sessionTurns = (session: string) => {
+      const reference = readRun().sessions?.find(
+        (candidate) => candidate.session === session,
+      )?.transcriptPage;
+      assert.ok(reference, `no transcript for Session ${session}`);
+      const read = wired.projectionPort.readTranscript(reference);
+      assert.ok(read.found);
+      if (!read.found) throw new Error("unreachable");
+      return {
+        user: read.entries
+          .filter((entry) => entry.role === "user")
+          .map((entry) => entry.content),
+        assistant: read.entries
+          .filter((entry) => entry.role === "assistant")
+          .map((entry) => entry.content)
+          .join("\n"),
+      };
+    };
+    const [firstTicket, nextTicket] = [
+      "implement-0.0:implement",
+      "implement-1.0:implement",
+    ];
+    const first = sessionTurns(firstTicket);
+    const [implementPrompt] = first.user;
+    assert.ok(implementPrompt?.startsWith("# Implement one ticket"));
+    assert.ok(implementPrompt.includes(issues), implementPrompt);
+    assert.equal(areaOf(implementPrompt), area);
+    for (const skill of [
+      "implement",
+      "tdd",
+      "code-review",
+      "codebase-design",
+    ]) {
+      assert.match(
+        implementPrompt,
+        new RegExp(`[\\\\/]${skill}[\\\\/]SKILL\\.md`),
+      );
     }
-    assert.deepEqual(readdirSync(workspace), []);
-    // The kept ticket reference is the issues directory, never a ticket list.
+    assert.ok(first.assistant.includes(tickets[0]!), first.assistant);
+    assert.match(ticketText(0), /\*\*Status:\*\* done/);
+    assert.match(ticketText(1), /\*\*Status:\*\* ready-for-agent/);
+
+    const settle = async (
+      submission: Parameters<typeof wired.projectionPort.submit>[0],
+    ): Promise<void> => {
+      assert.ok(wired.projectionPort.submit(submission).admitted);
+      const outcome = await awaitSettled(
+        wired.projectionPort,
+        submission.operationId,
+      );
+      assert.equal(outcome.status, "applied", JSON.stringify(outcome));
+    };
+    const implementStep = { runId, stepId: "implement" };
+
+    // A later question stays in the same ticket Session.
+    const question = "What is that ticket's Status line now?";
+    await settle({
+      operationId: "matt-front-question",
+      operation: "send-interactive-turn",
+      input: { ...implementStep, text: question },
+    });
+    assert.deepEqual(sessionTurns(firstTicket).user.slice(1), [question]);
+    assert.match(sessionTurns(firstTicket).assistant, /done/);
+
+    // Continue opens the next fresh Session, which reads the tracker again and
+    // finds the second ticket unblocked; the tracker is as the agent left it.
+    const trackerBefore = [ticketText(0), ticketText(1)];
+    await settle({
+      operationId: "matt-front-continue",
+      operation: "continue-repeat",
+      input: implementStep,
+    });
+    const next = sessionTurns(nextTicket);
+    assert.equal(next.user.length, 1);
+    assert.ok(next.user[0]?.startsWith("# Implement one ticket"));
+    assert.ok(next.assistant.includes(tickets[1]!), next.assistant);
+    assert.deepEqual([ticketText(0), ticketText(1)], trackerBefore);
+
+    // Only the confirmed End Stage ends the Run, as a human declaration.
+    await settle({
+      operationId: "matt-front-end-stage",
+      operation: "end-stage",
+      input: implementStep,
+    });
+    const done = readRun();
+    assert.equal(done.state, "succeeded");
+    assert.equal(done.completion, "human-declared");
+    assert.deepEqual(
+      done.timeline
+        .map((event) => event.event)
+        .filter(
+          (event) => event === "repeat-continued" || event === "stage-ended",
+        ),
+      ["repeat-continued", "stage-ended"],
+    );
+    assert.deepEqual(
+      done.sessions?.map((session) => session.session),
+      ["spec", firstTicket, nextTicket],
+    );
+    // No ticket-status mirror: the kept ticket reference is still the issues
+    // directory, and the working area holds only the agent's tracker files.
     assert.deepEqual(done.outputs.map((output) => output.name).sort(), [
       "spec-ref",
       "tickets-ref",
@@ -706,6 +831,13 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     assert.ok(ticketsRef, "the ticket reference is not a Run output");
     const ticketsRead = wired.projectionPort.readResource(ticketsRef.reference);
     assert.equal(ticketsRead.found && ticketsRead.content, issues);
+    assert.deepEqual(
+      readdirSync(area)
+        .filter((name) => name !== ".receipts")
+        .sort(),
+      ["issues", "spec.md"],
+    );
+    assert.deepEqual(readdirSync(workspace), []);
   } finally {
     wired.runGroup.close();
     wired.catalog.close();

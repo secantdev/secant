@@ -1,6 +1,6 @@
 diff --git a/spec.md b/spec.md
 new file mode 100644
-index 0000000..7c66506
+index 0000000..45237c9
 --- /dev/null
 +++ b/spec.md
 @@ -0,0 +1,25 @@
@@ -9,23 +9,23 @@ index 0000000..7c66506
 +Status: ready-for-agent
 +
 +## Summary
-+Add a theme control to the Settings page so users can choose light or dark mode. Each user's choice is saved in their profile.
++Add a theme control to the Settings page so users can choose between light and dark modes, or follow their OS setting.
 +
-+## Requirements
-+- Settings page shows a theme control with three options: **Light**, **Dark**, **System**.
-+- Default is **System**, which follows the OS `prefers-color-scheme` setting.
-+- The choice is saved to the user's profile, e.g. `themePreference: "light" | "dark" | "system"`.
-+- The saved choice applies on every device and session after login.
-+- A change takes effect right away, with no page reload.
-+- In System mode, the app updates live when the OS theme changes.
-+- Avoid a flash of the wrong theme on load: apply the theme before first paint.
++## Options
++- **System** (default): follows `prefers-color-scheme` and updates live when the OS setting changes.
++- **Light**: always light.
++- **Dark**: always dark.
 +
-+## Out of Scope
-+- Custom color themes beyond light and dark.
-+- Per-page theme overrides.
++## Behavior
++- The selection is saved per user in their profile (e.g., `themePreference: "system" | "light" | "dark"`).
++- New and existing users with no saved value default to **System**.
++- Changing the setting applies immediately, with no page reload.
++- The preference follows the user across devices and sessions.
++- Apply the theme before first paint (for example, from a cached value) so the page doesn't flash the wrong theme.
 +
 +## Acceptance Criteria
-+- A new user sees the theme that matches their OS.
-+- Choosing Dark still applies after logout, login, and switching devices.
-+- Switching back to System follows the OS again.
-+- The control is keyboard-accessible and labeled for screen readers.
++1. The Settings page shows a three-option theme control.
++2. The selection persists to the user profile and survives logout/login.
++3. System mode tracks OS changes in real time.
++4. All pages meet WCAG AA contrast in both themes.
++5. If saving fails, show an error and revert the control.

@@ -312,6 +312,7 @@ for (const harness of ["claude-code", "codex"] as const) {
         ["write-spec", "succeeded"],
         ["plan-tickets", "blocked"],
         ["publish-tickets", "pending"],
+        ["implement", "pending"],
       ],
     );
     // The grill's planning Session is retained for the spec and review Turns.
@@ -413,15 +414,16 @@ for (const harness of ["claude-code", "codex"] as const) {
       operation: "end-interactive-step",
       input: { runId, stepId: "plan-tickets" },
     });
-    const publish = agent.inputs.at(-1)!;
+    const publish = agent.inputs.at(-2)!;
     assert.ok(publish.startsWith("# Publish the tickets"), publish);
     assert.ok(publish.includes(area), publish);
     assert.ok(publish.includes("the tracker I chose: Local."), publish);
-    assert.equal(agent.inputs.length, 5);
+    // The implementation stage's first ticket Session then opens (#224).
+    assert.equal(agent.inputs.length, 6);
     assert.ok(agent.granted.every((dir) => dir === area));
 
     const run = readRun(wired, runId);
-    assert.equal(run.state, "succeeded", JSON.stringify(run.progress));
+    assert.equal(run.state, "blocked", JSON.stringify(run.progress));
     assert.equal(workingArea(wired, runId), area);
     assert.deepEqual(
       run.progress.map((step) => [step.id, step.status]),
@@ -431,6 +433,7 @@ for (const harness of ["claude-code", "codex"] as const) {
         ["write-spec", "succeeded"],
         ["plan-tickets", "succeeded"],
         ["publish-tickets", "succeeded"],
+        ["implement", "blocked"],
       ],
     );
     assert.deepEqual(turnSessions(wired, runId), [
@@ -439,6 +442,7 @@ for (const harness of ["claude-code", "codex"] as const) {
       "spec",
       "spec",
       "spec",
+      "implement-0.0:implement",
     ]);
     assert.deepEqual(planningFiles(area), [
       ...TICKETS.map(([file]) => join("issues", file)),

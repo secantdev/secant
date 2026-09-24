@@ -5,7 +5,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 ## Invariants
 
 - The digest is taken over the exact archive bytes, so any change to the ZIP writer's layout (entry order, timestamps, permissions, manifest encoding)
-  rewrites every digest. A built archive and an imported one are the same Installed Bundle only when their bytes are identical.
+  rewrites every digest. A built archive and an imported one are the same Installed Bundle only when their bytes are identical. The Shipped Bundle
+  digests are pinned in `bundles/builtin.lock.json`, so such a change, like any authored byte change, needs a manifest version bump and a lock update.
 - Build and install validate the manifest in `manifest.ts`, but through two validators over two schemas: `validateManifest`→`authoredManifest` on build,
   `validatePackagedManifest`→`packagedManifest` on install (`requires`/`platforms` differ; nested schemas are shared). Install additionally re-derives
   `requires.engine` to reject an understated range, and runs the same Composition check the build runs over the archived prompt/schema text, so a

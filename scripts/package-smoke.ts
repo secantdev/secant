@@ -22,6 +22,11 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import which from "which";
+import {
+  SHIPPED_BUNDLE_FOLDERS,
+  assertLocked,
+  readLock,
+} from "./shipped-bundles.js";
 import { TARGETS, hostTargetKey } from "./targets.js";
 import { installReplayerAt } from "../tests/harness/replayer-install.js";
 import { installCodexReplayerAt } from "../tests/harness/codex-replayer-install.js";
@@ -952,26 +957,62 @@ try {
     headlessRefusalFixturesScenario,
   );
 
+  async function shippedBundlesEmbeddedScenario(): Promise<string> {
+    // The Shipped Bundles (#226, ADR 0029 amended by ADR 0030): this OS's copy of the
+    // binary rebuilds every allow-listed folder through the ordinary `bundle build`
+    // to exactly the locked digest, and carries those exact bytes embedded. The
+    // Linux leg cross-compiles all three binaries from one `dist/builtin`, so each
+    // OS proving its own binary proves the three carry identical bytes. The
+    // External Proof Bundle's bytes (built above) must not be embedded.
+    const binaryBytes = readFileSync(binary);
+    const built = SHIPPED_BUNDLE_FOLDERS.map((folder) => {
+      const output = join(smokeRoot, `${basename(folder)}.wfb`);
+      const report = JSON.parse(
+        run(
+          binary,
+          [
+            "bundle",
+            "build",
+            join(projectRoot, folder),
+            "--no-install",
+            "--output",
+            output,
+            "--json",
+          ],
+          { cwd: smokeRoot, env: workspaceEnv },
+        ),
+      ) as { identity: { id: string; version: string }; digest: string };
+      return { ...report.identity, digest: report.digest, output };
+    });
+    assertLocked(built, readLock());
+    for (const { id, version, output } of built) {
+      if (!binaryBytes.includes(readFileSync(output))) {
+        throw new Error(
+          `The compiled binary does not embed the locked bytes of ${id}@${version}.`,
+        );
+      }
+    }
+    if (binaryBytes.includes(readFileSync(join(smokeRoot, "proof.wfb")))) {
+      throw new Error(
+        "The compiled binary embeds the Test Repair Proof Bundle, which must stay External.",
+      );
+    }
+    const matt = built.find((bundle) => bundle.id === "dev.secant.matt-front");
+    if (matt === undefined) {
+      throw new Error("The Matt Bundle is not a Shipped Bundle.");
+    }
+    return matt.output;
+  }
+
+  const mattFrontWfb = await runNamedScenario(
+    "shipped-bundles-embedded",
+    shippedBundlesEmbeddedScenario,
+  );
+
   async function mattFrontRefusalScenario(): Promise<void> {
-    // The maintained Matt front Bundle (#123): built and installed the way a user's
-    // Bundle is (nothing in target source names its id), then refused headlessly with
-    // the exact interactive-step-needs-tui code AND its remediation — the assertion
-    // the M2 not-executable check was replaced by, now pointed at the Matt front. It
-    // runs to succeeded only in the TUI (tests/tui/matt-front-workbench.test.tsx).
-    const mattFrontFolder = join(projectRoot, "bundles", "matt-front-spec");
-    const mattFrontWfb = join(smokeRoot, "matt-front.wfb");
-    run(
-      binary,
-      [
-        "bundle",
-        "build",
-        mattFrontFolder,
-        "--no-install",
-        "--output",
-        mattFrontWfb,
-      ],
-      { cwd: smokeRoot, env: workspaceEnv },
-    );
+    // The embedded Matt built-in's exact bytes, installed through ordinary ingestion
+    // (nothing in target source names its id), then refused headlessly with the exact
+    // interactive-step-needs-tui code AND its remediation.
     run(binary, ["bundle", "install", mattFrontWfb], {
       cwd: smokeRoot,
       env: workspaceEnv,

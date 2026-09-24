@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
 import pkg from "../package.json" with { type: "json" };
+import { buildShippedBundles } from "./shipped-bundles.js";
 import { TARGETS, hostTargetKey } from "./targets.js";
 
 // Compiles the shell to a Bun single-file executable, one per gated target
@@ -9,7 +10,12 @@ import { TARGETS, hostTargetKey } from "./targets.js";
 // every platform's @opentui native package); with no flag it builds only the
 // host target, which is all `bun run check`'s per-OS smoke needs. The version is
 // embedded as a build-time define — a single-file executable has no on-disk
-// package.json to read.
+// package.json to read. The Shipped Bundles are built once, checked against
+// their lock, and embedded in every target's binary as the `builtin/` asset
+// directory beside the entry module (ADR 0029 amendment), so all three binaries
+// carry the same bytes.
+
+const SHIPPED_BUNDLE_DIR = "dist/builtin";
 
 // The compiler inputs every gated target's binary is built from — entrypoint,
 // resolution conditions, the Solid transform, and the version define. The release
@@ -34,7 +40,11 @@ async function compile(
 ): Promise<void> {
   const result = await Bun.build({
     ...sharedBuildInput(),
-    compile: { target: triple, outfile: `dist/${outfile}` },
+    compile: {
+      target: triple,
+      outfile: `dist/${outfile}`,
+      assets: [SHIPPED_BUNDLE_DIR],
+    },
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);
@@ -48,6 +58,9 @@ if (import.meta.main) {
   const keys = buildAll
     ? Object.keys(TARGETS)
     : [hostTargetKey(process.platform, process.arch)];
+  for (const bundle of buildShippedBundles(SHIPPED_BUNDLE_DIR)) {
+    console.log(`Built ${bundle.file} (${bundle.digest}).`);
+  }
   for (const key of keys) {
     if (key === undefined) {
       throw new Error(

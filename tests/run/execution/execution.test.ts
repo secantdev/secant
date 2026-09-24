@@ -1070,6 +1070,7 @@ async function endInteractive(
   owner: RunOwner,
   stepId: string,
   spawnCommand: SpawnCommand,
+  endsStage = false,
 ) {
   const step = flattenSteps(routing).find((s) => s.id === stepId);
   assert.ok(step?.kind === "interactive-agent");
@@ -1086,6 +1087,7 @@ async function endInteractive(
       outputs: [],
       at: AT,
       advanceState: "running",
+      ...(endsStage ? { endsStage: true as const } : {}),
     }).ok,
   );
   return run(routing, owner, { spawnCommand });
@@ -1180,6 +1182,45 @@ test("a human-controlled Repeat never reads a Verdict or blocks at a checkpoint;
       session: `impl-${iteration}.0:implement`,
     });
   }
+});
+
+test("a confirmed End Stage finishes its iteration's span and exits the human-controlled Repeat into the next node; a re-walk stays out (#218)", async (t) => {
+  const { owner, state } = ownerForFreshRun(t);
+  const fake = fakeExecutor();
+  const routing = [
+    {
+      repeat: {
+        control: "human",
+        steps: [
+          interactiveStep("implement", "impl"),
+          fakeStep("check", { exit: 0 }),
+        ],
+      },
+    },
+    fakeStep("after", { exit: 0 }),
+  ] as unknown as RoutingNode[];
+
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "blocked",
+  });
+  // Continue opens iteration 1; End Stage there ends the group after its span.
+  assert.deepEqual(
+    await endInteractive(routing, owner, "implement", fake.spawn),
+    { outcome: "blocked" },
+  );
+  assert.deepEqual(
+    await endInteractive(routing, owner, "implement", fake.spawn, true),
+    { outcome: "succeeded" },
+  );
+  assert.equal(state(), "succeeded");
+  assert.equal(fake.calls("check"), 2);
+  assert.equal(fake.calls("after"), 1);
+  // The mark is durable: a later walk replays both iterations and never opens a third.
+  assert.deepEqual(await run(routing, owner, { spawnCommand: fake.spawn }), {
+    outcome: "succeeded",
+  });
+  assert.equal(fake.calls("check"), 2);
+  assert.equal(fake.calls("after"), 1);
 });
 
 test("a top-level interactive Step keeps its named Session; `fresh` scopes it to the Attempt (#216)", async (t) => {

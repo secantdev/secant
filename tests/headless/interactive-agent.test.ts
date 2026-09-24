@@ -1168,3 +1168,232 @@ test("a human-controlled Repeat offers Continue only at a Turn boundary; one Con
     owner.close();
   }
 });
+
+async function submitEndStage(
+  wired: Wiring,
+  runId: string,
+  operationId: string,
+  stepId = "implement",
+) {
+  const admission = wired.projectionPort.submit({
+    operationId,
+    operation: "end-stage",
+    input: { runId, stepId },
+  });
+  assert.ok(admission.admitted, JSON.stringify(admission));
+  return awaitSettled(wired.projectionPort, operationId);
+}
+
+/** A Turn whose agent claims the stage is over: prose never ends it (#218). */
+const CLAIMS_DONE: FakeScript["turns"][number] = {
+  result: {
+    kind: "completed",
+    detail: {
+      finalContent: "All tickets are done. End implementation stage.",
+      effectiveModel: { known: true, model: "fake-sonnet" },
+      session: { state: "detached", coordinate: { opaque: "coord-s" } },
+    },
+  },
+};
+
+test("confirmed End Stage settles a human-controlled Repeat and the Run once as human-declared completion, only at a Turn boundary (#218)", async (t) => {
+  const { wired, runId, run } = await launchInteractive(
+    t,
+    perPrepareAdapter([
+      // Launch: iteration 0 claims done in prose, then a Turn that blocks.
+      [CLAIMS_DONE, BLOCKING],
+      // resume-run, then Continue into iteration 1, then End Stage.
+      [],
+      [],
+      [],
+    ]),
+    undefined,
+    humanRepeatRouting(),
+  );
+  // At the boundary End Stage sits beside send and Continue, never End Step, and its
+  // consequence says the tracker has not been checked.
+  const endStage = offer(run, "end-stage");
+  assert.ok(endStage, JSON.stringify(run.actionOffers));
+  assert.equal(endStage.stepId, "implement");
+  assert.match(endStage.consequence, /not checked the tracker/);
+  assert.ok(offer(run, "continue-repeat"));
+  assert.ok(offer(run, "send-interactive-turn"));
+  assert.equal(offer(run, "end-interactive-step"), undefined);
+
+  // The agent's "done" prose ends nothing: the Step still waits for the human.
+  await send(wired, runId, "op-i0-t1", "implement", "are we done?");
+  assert.equal(readRun(wired, runId).state, "blocked");
+  assert.equal(readRun(wired, runId).completion, undefined);
+
+  // A live Turn: no End Stage Offer, and a raced End Stage is refused unchanged.
+  const sent = wired.projectionPort.submit({
+    operationId: "op-i0-t2",
+    operation: "send-interactive-turn",
+    input: { runId, stepId: "implement", text: "one more thing" },
+  });
+  assert.ok(sent.admitted);
+  const interruptOffer = await awaitInterruptOffer(wired, runId);
+  assert.equal(offer(readRun(wired, runId), "end-stage"), undefined);
+  const raced = await submitEndStage(wired, runId, "op-race");
+  assert.equal(raced.status, "not-applied");
+  if (raced.status === "not-applied") {
+    assert.equal(raced.problem.code, "interactive-step-mid-turn");
+  }
+  assert.ok(
+    wired.projectionPort.submit({
+      operationId: "op-interrupt",
+      operation: "interrupt-turn",
+      input: { runId, turnId: interruptOffer.turnId },
+    }).admitted,
+  );
+  await awaitSettled(wired.projectionPort, "op-interrupt");
+  await awaitSettled(wired.projectionPort, "op-i0-t2");
+  assert.ok(
+    wired.projectionPort.submit({
+      operationId: "op-resume",
+      operation: "resume-run",
+      input: { runId },
+    }).admitted,
+  );
+  await awaitSettled(wired.projectionPort, "op-resume");
+  assert.equal(readRun(wired, runId).state, "blocked");
+
+  // Continue once, then confirmed End Stage in iteration 1: the Run succeeds, sends
+  // no Turn, and records a human declaration rather than a verified completion.
+  await submitContinue(wired, runId, "op-continue-0");
+  const turnsBefore = readRun(wired, runId).turnPosition;
+  assert.equal(
+    (await submitEndStage(wired, runId, "op-end-stage")).status,
+    "applied",
+  );
+  const done = readRun(wired, runId);
+  assert.equal(done.state, "succeeded");
+  assert.equal(done.completion, "human-declared");
+  assert.equal(done.turnPosition, turnsBefore);
+  assert.equal(offer(done, "end-stage"), undefined);
+  assert.equal(offer(done, "continue-repeat"), undefined);
+  assert.match(
+    await runShow(wired, runId),
+    /Completion: declared by a human \(Secant did not check the tracker\)/,
+  );
+  assert.deepEqual(
+    done.timeline
+      .filter(
+        (event) =>
+          event.event === "repeat-continued" || event.event === "stage-ended",
+      )
+      .map((event) => event.event),
+    ["repeat-continued", "stage-ended"],
+  );
+
+  // Replaying the same Operation id settles nothing new; a fresh End Stage on the
+  // finished Run is refused.
+  assert.equal(
+    (await submitEndStage(wired, runId, "op-end-stage")).status,
+    "applied",
+  );
+  assert.equal(
+    (await submitEndStage(wired, runId, "op-end-stage-again")).status,
+    "not-applied",
+  );
+  const owner = wired.runGroup.acquireRun(runId);
+  assert.ok(owner);
+  try {
+    assert.deepEqual(
+      owner
+        .attemptLog()
+        .map((entry) => [entry.attemptId, entry.outcome, entry.endsStage]),
+      [
+        ["0.0:implement", "succeeded", undefined],
+        ["1.0:implement", "succeeded", true],
+      ],
+    );
+  } finally {
+    owner.close();
+  }
+});
+
+test("End Stage exits a human-controlled Repeat into the next node, and is refused outside one (#218)", async (t) => {
+  const { wired, runId, run } = await launchInteractive(
+    t,
+    perPrepareAdapter([[], []]),
+    undefined,
+    [
+      ...humanRepeatRouting(),
+      {
+        id: "after",
+        kind: "command",
+        command: {
+          executable: RUNTIME_NAME,
+          arguments: ["-e", "process.exit(0)"],
+        },
+      },
+    ],
+  );
+  assert.equal(run.state, "blocked");
+  assert.equal(
+    (await submitEndStage(wired, runId, "op-end-stage")).status,
+    "applied",
+  );
+  const done = readRun(wired, runId);
+  assert.equal(done.state, "succeeded");
+  assert.equal(done.completion, "human-declared");
+  assert.deepEqual(
+    done.progress.map((step) => [step.id, step.status]),
+    [
+      ["implement", "succeeded"],
+      ["after", "succeeded"],
+    ],
+  );
+});
+
+test("after End Stage the Projection rests at the next node, not in another iteration of the group (#218)", async (t) => {
+  const { wired, runId } = await launchInteractive(
+    t,
+    perPrepareAdapter([[], []]),
+    undefined,
+    [
+      ...humanRepeatRouting(),
+      {
+        id: "review",
+        kind: "interactive-agent",
+        session: "review",
+        prompt: { asset: "prompts/discuss.md" },
+      },
+    ],
+  );
+  assert.equal(
+    (await submitEndStage(wired, runId, "op-end-stage")).status,
+    "applied",
+  );
+  const next = readRun(wired, runId);
+  assert.equal(next.state, "blocked");
+  assert.equal(next.completion, undefined);
+  assert.deepEqual(
+    next.progress.map((step) => [step.id, step.status]),
+    [
+      ["implement", "succeeded"],
+      ["review", "blocked"],
+    ],
+  );
+  assert.equal(next.progress[next.position]?.id, "review");
+  // The next Step is outside the group, so it offers End Step, not End Stage.
+  assert.ok(offer(next, "end-interactive-step"));
+  assert.equal(offer(next, "end-stage"), undefined);
+});
+
+test("End Stage is refused as a value on an interactive Step outside a human-controlled Repeat (#218)", async (t) => {
+  const { wired, runId, run } = await launchInteractive(t, {
+    profile: profile(),
+    turns: [],
+  });
+  assert.equal(offer(run, "end-stage"), undefined);
+  const refused = await submitEndStage(wired, runId, "op-end-stage", "discuss");
+  assert.equal(refused.status, "not-applied");
+  if (refused.status === "not-applied") {
+    assert.equal(refused.problem.code, "end-stage-outside-human-repeat");
+  }
+  const still = readRun(wired, runId);
+  assert.equal(still.state, "blocked");
+  assert.ok(offer(still, "end-interactive-step"));
+});

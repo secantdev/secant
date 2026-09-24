@@ -155,6 +155,7 @@ function noRun(): RunWorkbenchView {
     sendInteractiveTurn: unused,
     endInteractiveStep: unused,
     continueRepeat: unused,
+    endStage: unused,
     steer: unused,
     answerText: unused,
     answerRequest: unused,

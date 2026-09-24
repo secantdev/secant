@@ -26,6 +26,7 @@ import type {
   BundleFocusSnapshot,
   DiagnosticReference,
   ContinueRepeatOffer,
+  EndStageOffer,
   EndInteractiveStepOffer,
   InstalledBundleFocus,
   ResourceRead,
@@ -179,6 +180,7 @@ function makeRunView(initial: RunSnapshot) {
   const sends: { runId: string; stepId: string; text: string }[] = [];
   const ends: { runId: string; stepId: string }[] = [];
   const continues: { runId: string; stepId: string }[] = [];
+  const endStages: { runId: string; stepId: string }[] = [];
   // The steer seam (#148) is hand-driven the same way: it records each dispatch and
   // returns the shared outcome accessor a test advances (pending → applied/refused),
   // so tests exercise the blank guard, the applied close, and the refusal-keeps-draft.
@@ -224,6 +226,10 @@ function makeRunView(initial: RunSnapshot) {
     },
     continueRepeat: (runId, stepId) => {
       continues.push({ runId, stepId });
+      return interactiveOutcome;
+    },
+    endStage: (runId, stepId) => {
+      endStages.push({ runId, stepId });
       return interactiveOutcome;
     },
     steer: (runId, turnId, text) => {
@@ -283,6 +289,7 @@ function makeRunView(initial: RunSnapshot) {
     sends,
     ends,
     continues,
+    endStages,
     steers,
     setInteractiveOutcome,
     setSteerOutcome,
@@ -317,6 +324,7 @@ function runOf(over: Partial<RunView> = {}): RunView {
       ? { pendingGate: over.pendingGate }
       : {}),
     ...(over.conflict !== undefined ? { conflict: over.conflict } : {}),
+    ...(over.completion !== undefined ? { completion: over.completion } : {}),
     problem: over.problem,
     ...(over.sessions !== undefined ? { sessions: over.sessions } : {}),
     ...(over.effectiveModel !== undefined
@@ -595,9 +603,16 @@ test("reopened history renders End Step distinctly from a settled Command Attemp
           event: "repeat-continued",
           detail: "succeeded",
         },
+        {
+          at: "2026-09-18T00:02:00.000Z",
+          event: "stage-ended",
+          detail: "succeeded",
+        },
       ],
     }),
   );
+  // A confirmed End Stage reads as its own row, apart from Continue (#218).
+  assert.match(t.captureCharFrame(), /stage-ended succeeded/);
   assert.match(t.captureCharFrame(), /interactive-step-ended succeeded/);
   // A human-controlled Repeat's Continue reads as its own history row (#217).
   assert.match(t.captureCharFrame(), /repeat-continued succeeded/);
@@ -2651,6 +2666,70 @@ test("Escape backs out of an armed Continue, and Continue cannot arm mid-Turn (#
   assert.doesNotMatch(live.t.captureCharFrame(), /y continue/);
   await press(live.t, live.renderer, "y");
   assert.equal(live.control.continues.length, 0);
+});
+
+// --- human-controlled Repeat End Stage (#218) ------------------------------
+
+const END_STAGE_OFFER: EndStageOffer = {
+  action: "end-stage",
+  runId: "run-1",
+  stepId: "discuss",
+  consequence:
+    "Secant has not checked the tracker. This ends the stage as complete; use it only after you and the agent verified the tickets are done.",
+};
+
+test("^E arms End Stage beside Continue with a confirm saying the tracker is unchecked; esc declines keeping focus and the draft; y dispatches End Stage only (#218)", async () => {
+  const wb = await mountWorkbench(
+    interactiveRunOf({
+      actionOffers: [SEND_OFFER, CONTINUE_OFFER, END_STAGE_OFFER],
+    }),
+  );
+  assert.match(
+    wb.t.captureCharFrame(),
+    /enter send Turn · \^N continue · \^E end stage/,
+  );
+  await type(wb.t, "draft");
+  await press(wb.t, wb.renderer, "e", { ctrl: true });
+  const armed = wb.t.captureCharFrame();
+  assert.match(armed, /y end stage · esc keep — Secant has not checked the/);
+  assert.doesNotMatch(armed, /End this interactive Step\?/);
+  // Declined: nothing dispatches, and the field keeps its draft and focus.
+  await press(wb.t, wb.renderer, "escape");
+  assert.doesNotMatch(wb.t.captureCharFrame(), /y end stage/);
+  await type(wb.t, "!");
+  assert.match(wb.t.captureCharFrame(), /> draft!/);
+  assert.equal(wb.control.endStages.length, 0);
+  // Confirmed: the arm blurs the field, so y never types, and only End Stage goes.
+  await press(wb.t, wb.renderer, "e", { ctrl: true });
+  await type(wb.t, "y");
+  assert.doesNotMatch(wb.t.captureCharFrame(), /> draft!y/);
+  await press(wb.t, wb.renderer, "y");
+  assert.deepEqual(wb.control.endStages, [
+    { runId: "run-1", stepId: "discuss" },
+  ]);
+  assert.equal(wb.control.continues.length, 0);
+  assert.equal(wb.control.ends.length, 0);
+});
+
+test("End Stage cannot arm mid-Turn (#218)", async () => {
+  const live = await mountWorkbench(interactiveRunOf({ actionOffers: [] }));
+  await press(live.t, live.renderer, "e", { ctrl: true });
+  assert.doesNotMatch(live.t.captureCharFrame(), /y end stage/);
+  await press(live.t, live.renderer, "y");
+  assert.equal(live.control.endStages.length, 0);
+});
+
+test("a human-declared completion says the tracker was not checked, apart from a verified one (#218)", async () => {
+  const declared = await mountWorkbench(
+    runOf({ state: "succeeded", completion: "human-declared" }),
+  );
+  assert.match(
+    declared.t.captureCharFrame(),
+    /You declared the stage complete; Secant did not check the tracker\./,
+  );
+  const verified = await mountWorkbench(runOf({ state: "succeeded" }));
+  assert.match(verified.t.captureCharFrame(), /Workflow completed\./);
+  assert.doesNotMatch(verified.t.captureCharFrame(), /did not check/);
 });
 
 // --- live interactive Turn interrupt (#219) --------------------------------

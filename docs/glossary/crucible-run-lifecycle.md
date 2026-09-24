@@ -18,10 +18,14 @@ This cluster defines the target Crucible terms for a **Run** and everything that
 - **Iteration** — one logical occurrence of a **Repeat group**. A numbered scope, not an entity.
 - **Repeat group** — a contiguous span of **Steps** in a **Routing**, repeated until a named **Verdict** reads `pass`. The condition is evaluated
   before every **Iteration** including the first, so a group whose verdict already passes runs zero times. A **human-controlled** group instead
-  names no Verdict: each Iteration pauses at its one **Interactive agent step**, and only the human's **Continue** opens the next.
+  names no Verdict: each Iteration pauses at its one **Interactive agent step**, only the human's **Continue** opens the next, and only a
+  confirmed **End Stage** exits it.
 - **Continue** — the human's control that settles a human-controlled **Repeat group**'s current Iteration at a **Turn** boundary and opens the
   next in a fresh **Harness Session**. It is that Iteration's review decision, so the group raises no **Review checkpoint**. It never reads or
   changes a tracker.
+- **End Stage** — the human's confirmed declaration, at a **Turn** boundary, that a human-controlled **Repeat group**'s stage is complete. It
+  settles the current Iteration and exits the group, so a trailing group completes the **Run** `succeeded` as a **human-declared completion**,
+  which history and the Run summary show apart from an automatically verified one. Crucible checks no tracker for it.
 - **Review checkpoint** — the **Human Gate** Crucible raises when a **Repeat group** reaches its Bundle-authored review cadence without its
   **Verdict** passing. Every Verdict-driven Repeat group declares a positive-integer interval and plain-text message; Crucible adds current runtime evidence and
   enforces an engine-owned safety ceiling. Continuing grants another interval and stopping ends the **Run** `failed`. The cadence is not a maximum

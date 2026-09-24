@@ -17,6 +17,7 @@ import type {
   DeleteRunOffer,
   ContinueRepeatOffer,
   EndInteractiveStepOffer,
+  EndStageOffer,
   InterruptTurnOffer,
   Problem,
   ResumeRunOffer,
@@ -296,6 +297,7 @@ export function RunWorkbench(props: {
     | "delete"
     | "end-step"
     | "continue"
+    | "end-stage"
     | undefined
   >();
   // A dispatched Run Action followed to settlement: resume drives execution and a
@@ -434,6 +436,10 @@ export function RunWorkbench(props: {
         (offer): offer is ContinueRepeatOffer =>
           offer.action === "continue-repeat",
       ),
+      // ...and End Stage beside it (#218).
+      endStage: list.find(
+        (offer): offer is EndStageOffer => offer.action === "end-stage",
+      ),
     };
   });
   // A Turn is live (working) when the Step is active but the boundary offers are gone.
@@ -479,6 +485,12 @@ export function RunWorkbench(props: {
     if (offer === undefined || interactivePending()) return;
     setInteractiveRefusal(undefined);
     setInteractiveOutcome(() => view.continueRepeat(offer.runId, offer.stepId));
+  };
+  const confirmEndStage = () => {
+    const offer = interactiveOffers().endStage;
+    if (offer === undefined || interactivePending()) return;
+    setInteractiveRefusal(undefined);
+    setInteractiveOutcome(() => view.endStage(offer.runId, offer.stepId));
   };
 
   // Native Steer (#148, spec story 19): while an agent Turn is live under a Harness
@@ -927,9 +939,14 @@ export function RunWorkbench(props: {
       // ponytail: the same Ctrl+E also reaches the focused field's built-in Ctrl+E→
       // line-end, but arming blurs the field, so the cursor move is moot — a bindings
       // override to unbind it is the research's optional step, deferred (tui/AGENTS.md).
+      // In a human-controlled Repeat the same key arms End Stage (#218) instead:
+      // the two Offers never coexist.
       if (interactiveOffers().end !== undefined) {
         setInteractiveRefusal(undefined);
         setPending("end-step");
+      } else if (interactiveOffers().endStage !== undefined) {
+        setInteractiveRefusal(undefined);
+        setPending("end-stage");
       }
       return;
     }
@@ -1000,6 +1017,7 @@ export function RunWorkbench(props: {
         else if (action === "cancel") confirmCancel();
         else if (action === "delete") confirmDelete();
         else if (action === "continue") confirmContinue();
+        else if (action === "end-stage") confirmEndStage();
         else confirmEndStep();
       } else if (name === "escape") {
         setPending(undefined);
@@ -1241,6 +1259,8 @@ export function RunWorkbench(props: {
               endStepArmed={() => pending() === "end-step"}
               interactiveContinue={() => interactiveOffers().continue}
               continueArmed={() => pending() === "continue"}
+              interactiveEndStage={() => interactiveOffers().endStage}
+              endStageArmed={() => pending() === "end-stage"}
               interactivePending={interactivePending}
               interactiveRefusal={interactiveRefusal}
               steerActive={steerActive}
@@ -1349,6 +1369,8 @@ function Workbench(props: {
   interactiveEndOffered: Accessor<boolean>;
   interactiveContinue: Accessor<ContinueRepeatOffer | undefined>;
   continueArmed: Accessor<boolean>;
+  interactiveEndStage: Accessor<EndStageOffer | undefined>;
+  endStageArmed: Accessor<boolean>;
   interactiveSendOffered: Accessor<boolean>;
   draft: Accessor<string>;
   onDraftInput: (value: string) => void;
@@ -1730,6 +1752,8 @@ function Workbench(props: {
               endArmed={props.endStepArmed}
               continueOffer={props.interactiveContinue}
               continueArmed={props.continueArmed}
+              endStageOffer={props.interactiveEndStage}
+              endStageArmed={props.endStageArmed}
               pending={props.interactivePending}
               refusal={props.interactiveRefusal}
               focused={() => props.focus() === "interactive"}

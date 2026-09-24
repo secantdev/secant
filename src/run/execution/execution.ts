@@ -418,11 +418,17 @@ async function runRepeatGroup(
   // A human-controlled Repeat (#217) reads no Verdict and raises no Review
   // checkpoint: each iteration pauses at its interactive Step (`blocked`), and only
   // the human's Continue settles that Step, so the walk replays settled iterations
-  // and rests at the first unsettled one.
+  // and rests at the first unsettled one. An iteration a confirmed End Stage settled
+  // (#218) finishes its span and exits the group; a trailing group then leaves the
+  // final `succeeded` rest to executeRouting.
   if ("control" in repeat) {
     for (let iteration = 0; ; iteration++) {
       const result = await runIteration(repeat, context, isLastNode, iteration);
       if (result.outcome !== "succeeded-open") return result.outcome;
+      const ended = repeat.steps.some((step) =>
+        context.resume.stageEnded.has(instanceKey(step.id, iteration)),
+      );
+      if (ended) return "succeeded-open";
     }
   }
   const interval = Math.min(
@@ -735,6 +741,8 @@ interface ResumeState {
   /** Instance key → number of Attempts already recorded, so a re-run continues the
    *  Attempt numbering rather than colliding with a settled Attempt. */
   readonly attempts: ReadonlyMap<string, number>;
+  /** Instance keys whose Attempt a confirmed End Stage settled (#218). */
+  readonly stageEnded: ReadonlySet<string>;
 }
 
 /** The instance key for a (Step, Iteration): the Iteration is a number, so its
@@ -775,14 +783,16 @@ function decodeAttemptId(
 function buildResumeState(log: readonly AttemptLogEntry[]): ResumeState {
   const succeeded = new Set<string>();
   const attempts = new Map<string, number>();
+  const stageEnded = new Set<string>();
   for (const entry of log) {
     const decoded = decodeAttemptId(entry.attemptId);
     if (decoded === undefined) continue;
     const key = instanceKey(decoded.stepId, decoded.iteration);
     attempts.set(key, (attempts.get(key) ?? 0) + 1);
     if (entry.outcome === "succeeded") succeeded.add(key);
+    if (entry.endsStage === true) stageEnded.add(key);
   }
-  return { succeeded, attempts };
+  return { succeeded, attempts, stageEnded };
 }
 
 // --- Human Gate step (a durable pause, not a dispatch) ---------------------

@@ -3,6 +3,7 @@ import type {
   AnswerHarnessRequestInput,
   AnswerHumanGateInput,
   ContinueRepeatInput,
+  EndStageInput,
   EndInteractiveStepInput,
   LaunchRunInput,
   ResumeRunInput,
@@ -90,6 +91,10 @@ export function endInteractiveStepReplayKey(
 
 export function continueRepeatReplayKey(input: ContinueRepeatInput): string {
   return JSON.stringify(["continue-repeat", input.runId, input.stepId]);
+}
+
+export function endStageReplayKey(input: EndStageInput): string {
+  return JSON.stringify(["end-stage", input.runId, input.stepId]);
 }
 
 export function cancelReplayKey(runId: string): string {

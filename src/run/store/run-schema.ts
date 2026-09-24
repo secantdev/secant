@@ -73,6 +73,10 @@ export const attemptLog = sqliteTable("attempt_log", {
   attempt_id: text("attempt_id").notNull(),
   outcome: text("outcome").notNull(),
   at: text("at").notNull(),
+  // Set on the interactive Attempt a human's confirmed End Stage settled (#218): the
+  // human declared the human-controlled Repeat's stage complete. Null for every other
+  // Attempt, including a Continue, and for rows logged before the column existed.
+  stage_ended: integer("stage_ended", { mode: "boolean" }),
 });
 
 export const materializationConflicts = sqliteTable(

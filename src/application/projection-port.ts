@@ -64,6 +64,7 @@ export type Submission =
   | SendInteractiveTurnSubmission
   | EndInteractiveStepSubmission
   | ContinueRepeatSubmission
+  | EndStageSubmission
   | CancelRunSubmission
   | DeleteRunSubmission;
 
@@ -273,6 +274,24 @@ export interface ContinueRepeatInput {
   readonly runId: string;
   /** The interactive-agent Step to settle, read from the offer; a Run that moved past
    *  it is rejected as stale. */
+  readonly stepId: string;
+}
+
+/** End a human-controlled Repeat's stage (spec #210 stories 54, 55, 57; #218): the
+ *  human's confirmed declaration that the stage is complete. It settles the
+ *  iteration's interactive-agent Step the Run is `blocked` at and exits the group,
+ *  so a trailing group rests the Run `succeeded`, recorded as a human-declared
+ *  completion (`RunView.completion`). It neither reads nor changes any tracker.
+ *  Admitted only at a Turn boundary and only inside a human-controlled Repeat;
+ *  idempotent per operation id. Clients confirm before submitting. */
+export interface EndStageSubmission {
+  readonly operationId: string;
+  readonly operation: "end-stage";
+  readonly input: EndStageInput;
+}
+export interface EndStageInput {
+  readonly runId: string;
+  /** The interactive-agent Step to settle, read from the offer. */
   readonly stepId: string;
 }
 
@@ -693,6 +712,7 @@ export type RunTimelineKind =
   | "gate-answered"
   | "interactive-step-ended"
   | "repeat-continued"
+  | "stage-ended"
   | "materialization-conflict"
   // Harness Turn events (#116): a Turn admitted, its authoritative assistant
   // content and tool activity, and its settled result.
@@ -734,7 +754,8 @@ export interface RunTimelineEvent {
    *  every other event and on a legacy Turn row whose kind is unknown. The recorded
    *  Turn kind supersedes the earlier `interactive-turn-sent` timeline kind;
    *  `interactive-step-ended` records the distinct End Step action, and
-   *  `repeat-continued` a human-controlled Repeat's Continue (#217). */
+   *  `repeat-continued` a human-controlled Repeat's Continue (#217), and
+   *  `stage-ended` its confirmed End Stage (#218). */
   readonly turnKind?: RunTurnKind;
 }
 
@@ -889,6 +910,12 @@ export interface RunView {
   /** The number of Harness Turns admitted so far — the current Turn position
    *  (#116). Absent for a Command-only Run. */
   readonly turnPosition?: number;
+  /** How a `succeeded` Run's completion was reached, present only when it was not
+   *  verified automatically: `human-declared` when a confirmed End Stage (#218)
+   *  exited a human-controlled Repeat. Secant checked no tracker for it. It covers
+   *  the whole Run: Steps after a non-trailing group may still have verified their
+   *  own work. Additive to the frozen `--json`. */
+  readonly completion?: "human-declared";
 }
 
 export interface RunSnapshot {
@@ -1001,6 +1028,7 @@ export type ActionOffer =
   | SendInteractiveTurnOffer
   | EndInteractiveStepOffer
   | ContinueRepeatOffer
+  | EndStageOffer
   | CancelRunOffer
   | DeleteRunOffer;
 
@@ -1151,6 +1179,17 @@ export interface EndInteractiveStepOffer {
  *  submission is rejected. */
 export interface ContinueRepeatOffer {
   readonly action: "continue-repeat";
+  readonly runId: string;
+  readonly stepId: string;
+  readonly consequence: string;
+}
+
+/** End a human-controlled Repeat's stage (#218). Offered beside Continue, only
+ *  while the Run is `blocked` at the group's interactive Step at a Turn boundary. The
+ *  consequence states that Secant has not checked the tracker, so a client's
+ *  confirmation can show it verbatim. */
+export interface EndStageOffer {
+  readonly action: "end-stage";
   readonly runId: string;
   readonly stepId: string;
   readonly consequence: string;

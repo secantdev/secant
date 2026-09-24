@@ -217,6 +217,10 @@ export function renderRun(run: RunView): string {
     `Workspace: ${run.workspacePath}`,
     `Launched: ${run.launchedAt}`,
     `State: ${run.state}`,
+    // A confirmed End Stage (#218) completes by human declaration, never a check.
+    ...(run.completion === "human-declared"
+      ? ["Completion: declared by a human (Secant did not check the tracker)"]
+      : []),
     // Whether the Run is live in this instance or another, naming the owner
     // process (ADR 0031). Omitted when the Run is not live: its `State` already
     // says so, and a rested Run has no owner to name.

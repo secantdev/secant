@@ -79,6 +79,7 @@ import {
   steerRejected,
   steerUnavailable,
   turnControlRejected,
+  type InteractiveControl,
 } from "./problems.js";
 import { UpdateStream } from "./update-stream.js";
 import { listRunsSnapshot } from "./run-list.js";
@@ -96,6 +97,7 @@ import {
   deleteReplayKey,
   continueRepeatReplayKey,
   endInteractiveStepReplayKey,
+  endStageReplayKey,
   interruptTurnReplayKey,
   launchReplayKey,
   resumeReplayKey,
@@ -111,6 +113,7 @@ import type {
   BundleFocusSnapshot,
   ContinueRepeatInput,
   EndInteractiveStepInput,
+  EndStageInput,
   InterruptTurnInput,
   HarnessCatalogSnapshot,
   HarnessDiagnosticReference,
@@ -2324,17 +2327,21 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // at settle time it is refused mid-Turn, else it settles the Step's Attempt
   // succeeded and drives the Run to its next rest. Idempotent per operation id.
   // `continue-repeat` (#217) is the same settle for a Step inside a human-controlled
-  // Repeat, where it opens the next iteration; each control is refused on the other's
-  // Step, so the two never both settle one iteration.
+  // Repeat, where it opens the next iteration; `end-stage` (#218) settles it marked
+  // as the human's confirmed End Stage, so the group exits instead. End Step is
+  // refused inside such a group and the other two outside one, so one iteration is
+  // never settled by two controls.
   function submitEndInteractiveStep(
     operationId: string,
-    input: EndInteractiveStepInput | ContinueRepeatInput,
-    control: "end-interactive-step" | "continue-repeat",
+    input: EndInteractiveStepInput | ContinueRepeatInput | EndStageInput,
+    control: InteractiveControl,
   ): SubmissionAdmission {
     const replayKey =
       control === "continue-repeat"
         ? continueRepeatReplayKey(input)
-        : endInteractiveStepReplayKey(input);
+        : control === "end-stage"
+          ? endStageReplayKey(input)
+          : endInteractiveStepReplayKey(input);
     const existing = operations.get(operationId);
     if (existing !== undefined) {
       if (existing.replayKey === replayKey) {
@@ -2364,7 +2371,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
   // at the Step, or mid-Turn — never overwrites a live Turn's `tracking.promise`.
   function startEndInteractiveStep(
     input: EndInteractiveStepInput,
-    control: "end-interactive-step" | "continue-repeat",
+    control: InteractiveControl,
   ): Promise<OperationOutcome> {
     if (
       runGroup === undefined ||
@@ -2390,17 +2397,17 @@ export function createApplication(deps: ApplicationDependencies): Application {
       });
     }
     const humanRepeat = inHumanRepeat(begun.facts.routing, begun.step.id);
-    if (humanRepeat !== (control === "continue-repeat")) {
+    if (humanRepeat !== (control !== "end-interactive-step")) {
       return Promise.resolve({
         status: "not-applied",
         problem: interactiveControlMismatch(
           input.runId,
           begun.step.id,
-          humanRepeat,
+          control,
         ),
       });
     }
-    const promise = runInteractiveEnd(input, begun);
+    const promise = runInteractiveEnd(input, begun, control === "end-stage");
     begun.tracking.promise = promise;
     return promise;
   }
@@ -2408,6 +2415,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
   async function runInteractiveEnd(
     input: EndInteractiveStepInput,
     begun: InteractiveContext,
+    endsStage: boolean,
   ): Promise<OperationOutcome> {
     const { tracking, owner, record, facts, step } = begun;
     const observed = observedOwner(owner, input.runId);
@@ -2426,7 +2434,8 @@ export function createApplication(deps: ApplicationDependencies): Application {
         // Settle the interactive Step's Attempt succeeded (no outputs — an
         // interactive-agent Step produces no Artifacts, #215), then drive the Run to
         // its next rest. The empty succeeded Attempt stages no commit (store/AGENTS),
-        // and a resume skips the Step.
+        // and a resume skips the Step. An End Stage marks the Attempt in the same
+        // transaction, so the re-walk exits the group; no tracker is read or written.
         publishGateAttemptOrThrow(
           observed.publishAttempt({
             attemptId,
@@ -2435,6 +2444,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
             outputs: [],
             at: new Date(),
             advanceState: "running",
+            ...(endsStage ? { endsStage: true as const } : {}),
           }),
         );
         const report = await executeTrackedRouting({
@@ -2738,6 +2748,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
           );
         case "end-interactive-step":
         case "continue-repeat":
+        case "end-stage":
           return submitEndInteractiveStep(
             submission.operationId,
             submission.input,

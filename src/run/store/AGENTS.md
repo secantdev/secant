@@ -75,7 +75,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   `failed`.
 - `publishAttempt` for a **succeeded Attempt with no outputs and no required outputs** stages no commit (an empty tree is not valid `git mktree` input) and settles with
   no version — the approve-reject authored-gate answer (#108), the interactive End Step, and an Agent-step Attempt declaring no output. Every other succeeded Attempt
-  produces at least one output and stages a commit as before.
+  produces at least one output and stages a commit as before. Its `endsStage` sets the nullable `attempt_log.stage_ended` in that transaction (#218): the one
+  durable End Stage fact, read back as `AttemptLogEntry.endsStage` (absent when null).
 - `outputReceiptDirectory` (#215) hands execution one emptied `.receipts/<sha256(attemptId)>` directory inside the Run working area (#220), so the one Harness grant covers
   it; hashed because Attempt ids carry `:`.
   It is candidate storage, never canonical and never fenced; only `publishAttempt` binds validated receipt bytes, and Run deletion removes it with the directory.

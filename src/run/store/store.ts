@@ -201,6 +201,10 @@ export interface PublishAttemptRequest {
   /** Present for autonomous Agent Attempts; absent for Command/Gate and synthetic
    *  interactive Attempts. */
   readonly agentEvidence?: AgentAttemptEvidence;
+  /** Marks the interactive Attempt a human's confirmed End Stage settles (#218), so
+   *  the scheduler exits its human-controlled Repeat and the Projection records a
+   *  human-declared completion. */
+  readonly endsStage?: true;
 }
 
 export interface AgentAttemptEvidence {
@@ -242,6 +246,9 @@ export interface AttemptLogEntry {
   readonly attemptId: string;
   readonly outcome: AttemptOutcome;
   readonly at: string;
+  /** True on the interactive Attempt a confirmed End Stage settled (#218); absent
+   *  on every other entry. */
+  readonly endsStage?: true;
 }
 
 /** A recorded Materialization conflict: a `home: workspace` Artifact's Workspace

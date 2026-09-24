@@ -493,14 +493,28 @@ export function interactiveStepMidTurn(runId: string, stepId: string): Problem {
   };
 }
 
-/** The interactive Step's control does not match its Routing (#217): inside a
- *  human-controlled Repeat only Continue settles it; elsewhere only End Step does. */
+/** The three human controls that settle an interactive-agent Step (#122, #217, #218). */
+export type InteractiveControl =
+  "end-interactive-step" | "continue-repeat" | "end-stage";
+
+/** The interactive Step's control does not match its Routing (#217, #218): inside a
+ *  human-controlled Repeat only Continue or End Stage settles it; elsewhere only End
+ *  Step does. */
 export function interactiveControlMismatch(
   runId: string,
   stepId: string,
-  humanRepeat: boolean,
+  control: InteractiveControl,
 ): Problem {
-  return humanRepeat
+  if (control === "end-stage") {
+    return {
+      code: "end-stage-outside-human-repeat",
+      explanation: `Interactive Step "${stepId}" of Run ${runId} is not inside a human-controlled Repeat; there is no stage to end.`,
+      remediation: "Take the Run's End Step Offer instead.",
+      possibleEffects: "none",
+      details: { runId, stepId },
+    };
+  }
+  return control === "end-interactive-step"
     ? {
         code: "end-step-in-human-repeat",
         explanation: `Interactive Step "${stepId}" of Run ${runId} is inside a human-controlled Repeat; it is settled by Continue, not End Step.`,

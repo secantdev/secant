@@ -1,0 +1,1 @@
+ALTER TABLE `attempt_log` ADD `stage_ended` integer;

@@ -104,6 +104,9 @@ function noRunView(): RunWorkbenchView {
     continueRepeat() {
       throw new Error("run workbench not used in this test");
     },
+    endStage() {
+      throw new Error("run workbench not used in this test");
+    },
     steer() {
       throw new Error("run workbench not used in this test");
     },

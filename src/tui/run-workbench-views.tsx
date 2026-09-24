@@ -4,6 +4,7 @@ import type {
   AnswerHumanGateOffer,
   CancelRunOffer,
   ContinueRepeatOffer,
+  EndStageOffer,
   DeleteRunOffer,
   InterruptTurnOffer,
   Problem,
@@ -36,6 +37,8 @@ export function InteractiveInput(props: {
   endArmed: Accessor<boolean>;
   continueOffer: Accessor<ContinueRepeatOffer | undefined>;
   continueArmed: Accessor<boolean>;
+  endStageOffer: Accessor<EndStageOffer | undefined>;
+  endStageArmed: Accessor<boolean>;
   pending: Accessor<boolean>;
   refusal: Accessor<Problem | undefined>;
   focused: Accessor<boolean>;
@@ -50,7 +53,8 @@ export function InteractiveInput(props: {
     props.focused() &&
     !props.pending() &&
     !props.endArmed() &&
-    !props.continueArmed();
+    !props.continueArmed() &&
+    !props.endStageArmed();
   const hint = () => {
     if (props.endArmed())
       return "  ⚠ End this interactive Step? Press y to confirm · esc to keep";
@@ -58,6 +62,11 @@ export function InteractiveInput(props: {
     const continueOffer = props.continueOffer();
     if (props.continueArmed() && continueOffer !== undefined)
       return `  ⚠ y continue · esc keep — ${continueOffer.consequence}`;
+    // End Stage's confirm (#218) names that the tracker was not checked right after
+    // its keys, so the warning survives a narrow clip.
+    const endStageOffer = props.endStageOffer();
+    if (props.endStageArmed() && endStageOffer !== undefined)
+      return `  ⚠ y end stage · esc keep — ${endStageOffer.consequence}`;
     if (props.pending()) return "  … sending…";
     if (props.turnLive()) {
       // The live Turn's Interrupt (#219) leads with its key so a narrow clip keeps it.
@@ -69,7 +78,9 @@ export function InteractiveInput(props: {
     }
     if (props.sendOffered())
       return continueOffer !== undefined
-        ? "  enter send Turn · ^N continue · esc back"
+        ? endStageOffer !== undefined
+          ? "  enter send Turn · ^N continue · ^E end stage · esc back"
+          : "  enter send Turn · ^N continue · esc back"
         : "  enter send Turn · ^E end step · esc back";
     return "  esc back";
   };
@@ -274,7 +285,10 @@ export function restingProse(run: RunView): string | undefined {
     case "running":
       return undefined;
     case "succeeded":
-      return "Workflow completed.";
+      // A confirmed End Stage (#218) is the human's declaration, never a check.
+      return run.completion === "human-declared"
+        ? "You declared the stage complete; Secant did not check the tracker."
+        : "Workflow completed.";
     case "failed":
       return "This Run has ended.";
     case "cancelled":

@@ -132,6 +132,7 @@ const attemptLogRow = z.object({
   attempt_id: z.string(),
   outcome: attemptOutcome,
   at: z.string(),
+  stage_ended: z.boolean().nullable(),
 });
 const reconcileRow = z.object({ run_id: z.string(), state: z.string() });
 const conflictRow = z.object({
@@ -527,6 +528,7 @@ function commitAttempt(params: TCommitAttemptParams): void {
       attempt_id: params.request.attemptId,
       outcome: params.request.outcome,
       at,
+      stage_ended: params.request.endsStage ?? null,
     })
     .run();
   if (params.request.advanceState !== undefined) {
@@ -816,6 +818,7 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
           attempt_id: attemptLog.attempt_id,
           outcome: attemptLog.outcome,
           at: attemptLog.at,
+          stage_ended: attemptLog.stage_ended,
         })
         .from(attemptLog)
         .orderBy(asc(attemptLog.seq))
@@ -826,6 +829,9 @@ function createRunOwner(params: TCreateRunOwnerParams): RunOwner {
             attemptId: parsed.attempt_id,
             outcome: parsed.outcome,
             at: parsed.at,
+            ...(parsed.stage_ended === true
+              ? { endsStage: true as const }
+              : {}),
           };
         });
     },

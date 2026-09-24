@@ -56,6 +56,8 @@ write, launch, and read invariants; the abort-reason vocabulary and the resting 
   does. `send` is refused blank at admission (before any stdin); `end` mid-Turn (a live Turn) is refused as a value.
 - `continue-repeat` (#217) is `end` for a Step inside a human-controlled Repeat, which the scheduler re-walks into the next iteration; the Projection offers it
   in End Step's place. Each control is refused as a value on the other's Step (`inHumanRepeat`), so one iteration is never settled by both.
+- `end-stage` (#218) is `continue-repeat` whose published Attempt carries `endsStage`, one durable `attempt_log` mark: the re-walk finishes that iteration and exits
+  the group, the Projection walks past it and reports `completion: "human-declared"` once the Run succeeds. Offered beside Continue; no tracker is read.
 
 ## Live overlay
 

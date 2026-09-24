@@ -314,13 +314,17 @@ function runResult(
           // interactive-agent Step at a Turn boundary (no gate, no live Turn), the
           // human can send the next Turn or end the Step. End Step is offered only at
           // a boundary — a live Turn suppresses both, exactly when interrupt is offered.
-          // Inside a human-controlled Repeat, Continue takes End Step's place (#217).
+          // Inside a human-controlled Repeat, Continue and End Stage take End Step's
+          // place (#217, #218).
           ...(interactiveStep !== undefined
             ? [
                 sendInteractiveTurnOffer(runId, interactiveStep.id),
-                inHumanRepeat(facts.routing, interactiveStep.id)
-                  ? continueRepeatOffer(runId, interactiveStep.id)
-                  : endInteractiveStepOffer(runId, interactiveStep.id),
+                ...(inHumanRepeat(facts.routing, interactiveStep.id)
+                  ? [
+                      continueRepeatOffer(runId, interactiveStep.id),
+                      endStageOffer(runId, interactiveStep.id),
+                    ]
+                  : [endInteractiveStepOffer(runId, interactiveStep.id)]),
               ]
             : []),
           isLive || derivedRun.state === "blocked"
@@ -355,6 +359,12 @@ function runResult(
             }
           : {}),
         ...(turns.length > 0 ? { turnPosition: turns.length } : {}),
+        // A confirmed End Stage (#218) completed this Run by human declaration, not
+        // automatic verification; the summary says so rather than imply a check.
+        ...(derivedRun.state === "succeeded" &&
+        log.some((entry) => entry.endsStage === true)
+          ? { completion: "human-declared" as const }
+          : {}),
       },
     };
   };
@@ -662,6 +672,18 @@ function continueRepeatOffer(runId: string, stepId: string): ActionOffer {
   };
 }
 
+/** The `end-stage` offer beside Continue (#218). Its consequence is what the
+ *  client's confirmation shows: the human declares the stage done, unverified. */
+function endStageOffer(runId: string, stepId: string): ActionOffer {
+  return {
+    action: "end-stage",
+    runId,
+    stepId,
+    consequence:
+      "Secant has not checked the tracker. This ends the stage as complete; use it only after you and the agent verified the tickets are done.",
+  };
+}
+
 /** The `cancel-run` offer for a live Run (#87). */
 function cancelRunOffer(runId: string): ActionOffer {
   return {
@@ -894,6 +916,9 @@ export function deriveRun(
         detail: String(iterations),
       });
       for (const spanStep of span) mark(spanStep, "succeeded");
+      // A confirmed End Stage (#218) exits a human-controlled group after this
+      // iteration, so the walk moves to the next node rather than project another.
+      if (iteration.endsStage) break;
       if (cursor >= log.length) {
         // A passing Verdict ends the group even when the next node has not settled
         // an Attempt yet. This is the normal shape when that node is an authored
@@ -966,7 +991,7 @@ function consumeSpan(
   cursor: number,
   span: readonly Step[],
 ):
-  | { complete: true; next: number; at: string }
+  | { complete: true; next: number; at: string; endsStage: boolean }
   | { complete: false; stalled: Step; next: number } {
   let probe = cursor;
   let at = "";
@@ -980,7 +1005,10 @@ function consumeSpan(
   }
   // A non-empty span consumed every Step; an empty span (Composition rejects one)
   // consumes nothing, which `next === cursor` lets the caller detect and stop on.
-  return { complete: true, next: probe, at };
+  const endsStage = log
+    .slice(cursor, probe)
+    .some((entry) => entry.endsStage === true);
+  return { complete: true, next: probe, at, endsStage };
 }
 
 /** Mark every span Step before `stalled` as succeeded (they ran this iteration). */
@@ -1113,7 +1141,7 @@ function trailingGroupIterations(
         // Stop on a partial iteration or one that consumed nothing (an empty span).
         if (!iteration.complete || iteration.next === cursor) break;
         cursor = iteration.next;
-        if (cursor >= log.length) break;
+        if (iteration.endsStage || cursor >= log.length) break;
       }
     } else {
       cursor = consumeStep(log, cursor).next;
@@ -1312,7 +1340,8 @@ function buildTimeline(
     }
   }
   // Only End Step publishes an interactive-agent Attempt, in any iteration (#216);
-  // inside a human-controlled Repeat only Continue does (#217).
+  // inside a human-controlled Repeat only Continue (#217) or End Stage (#218) does,
+  // told apart by the End Stage mark on the log entry.
   const interactiveSteps = new Set(
     flattenSteps(routing)
       .filter((step) => step.kind === "interactive-agent")
@@ -1325,9 +1354,11 @@ function buildTimeline(
       event:
         stepId === undefined || !interactiveSteps.has(stepId)
           ? "attempt-settled"
-          : inHumanRepeat(routing, stepId)
-            ? "repeat-continued"
-            : "interactive-step-ended",
+          : attempt.endsStage === true
+            ? "stage-ended"
+            : inHumanRepeat(routing, stepId)
+              ? "repeat-continued"
+              : "interactive-step-ended",
       detail: attempt.outcome,
     });
   }
@@ -1420,6 +1451,7 @@ const TIMELINE_CATEGORY_RANK: Record<RunTimelineKind, number> = {
   "turn-settled": 8,
   "interactive-step-ended": 9,
   "repeat-continued": 9,
+  "stage-ended": 9,
   "attempt-settled": 10,
   iteration: 11,
   "checkpoint-blocked": 12,

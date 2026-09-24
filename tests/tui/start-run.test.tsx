@@ -490,6 +490,9 @@ function noRunView(): RunWorkbenchView {
     continueRepeat() {
       throw new Error("run workbench not opened in this test");
     },
+    endStage() {
+      throw new Error("run workbench not opened in this test");
+    },
     steer() {
       throw new Error("run workbench not opened in this test");
     },
@@ -560,6 +563,9 @@ function succeedingRunView(): RunWorkbenchView {
       throw new Error("no interactive Step ended in this test");
     },
     continueRepeat() {
+      throw new Error("no interactive Step ended in this test");
+    },
+    endStage() {
       throw new Error("no interactive Step ended in this test");
     },
     steer() {

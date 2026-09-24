@@ -250,22 +250,25 @@ for (const harness of ["claude-code", "codex"] as const) {
     const { wired, workspace, digest } = wire(t, harness, agent.adapter);
     const runId = await planToLocal(wired, digest, harness);
 
-    // Spec writing followed the tracker choice with no approval Gate between.
+    // Spec writing followed the tracker choice with no approval Gate between; the
+    // Run then rests at ticket review (#223).
     const run = readRun(wired, runId);
-    assert.equal(run.state, "succeeded", JSON.stringify(run.progress));
+    assert.equal(run.state, "blocked", JSON.stringify(run.progress));
     assert.deepEqual(
       run.progress.map((step) => [step.id, step.status]),
       [
         ["grill", "succeeded"],
         ["choose-tracker", "succeeded"],
         ["write-spec", "succeeded"],
+        ["plan-tickets", "blocked"],
+        ["publish-tickets", "pending"],
       ],
     );
-    // The grill's planning Session is retained for the spec Turn.
-    assert.deepEqual(turnSessions(wired, runId), ["spec", "spec"]);
+    // The grill's planning Session is retained for the spec and review Turns.
+    assert.deepEqual(turnSessions(wired, runId), ["spec", "spec", "spec"]);
 
     const area = workingArea(wired, runId);
-    const prompt = agent.inputs.at(-1)!;
+    const prompt = agent.inputs.find((input) => RECEIPT_LINE.test(input))!;
     // Every prepare granted exactly the working area, which the prompt names.
     assert.ok(agent.granted.length > 0);
     assert.ok(agent.granted.every((dir) => dir === area));
@@ -315,7 +318,10 @@ test("[matt-local-spec] a completed spec Turn without a receipt fails the Run wi
 
   const run = readRun(wired, runId);
   assert.equal(run.state, "failed");
-  assert.equal(run.progress.at(-1)?.status, "failed");
+  assert.equal(
+    run.progress.find((step) => step.id === "write-spec")?.status,
+    "failed",
+  );
   // One spec Turn only: a retry would publish the spec a second time.
   assert.equal(agent.receipts.length, 1);
   assert.equal(

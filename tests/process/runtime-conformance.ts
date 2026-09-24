@@ -354,9 +354,10 @@ async function applicationOnDoubles(): Promise<void> {
 // replays the recorded grill and spec Turns. The launch idea is sent as the grill's
 // authored entry Turn (#212) and replays the first recorded grill Turn; one human
 // grill Turn follows, the Step is ended, the suggested tracker gate is answered with
-// its `Local` suggestion (#213), and the spec Turn's file-write approval is allowed;
-// the Run reaches `succeeded` with the spec written and the chosen tracker rendered
-// into the spec Turn exactly once. The replayer does not match Turn input, so the
+// its `Local` suggestion (#213), and the spec Turn's file-write approval is allowed.
+// The ticket review Step (#223) then rests at its Turn boundary until the human ends
+// it, and the publish Turn follows; the Run reaches `succeeded` with the spec written,
+// the chosen tracker rendered into the spec Turn exactly once, and both references kept. The replayer does not match Turn input, so the
 // recording taken before the entry Turn existed still serves the same grill Turns.
 async function mattFrontReplayerWorkbench(): Promise<void> {
   const replayer = installReplayer(
@@ -521,65 +522,116 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     // overlay for the outstanding request (the .tsx test watches the same overlay
     // rather than a rendered frame) and answer it `allow` over the Port — the exact
     // answer-harness-request the Workbench's [Allow] control submits (#121).
-    const gate = atGate.pendingGate!.gate;
-    const overlayWatch = wired.projectionPort.openProjection({
-      family: "run",
-      runId,
-    });
-    wired.projectionPort.submit({
-      operationId: "matt-front-answer-gate",
-      operation: "answer-human-gate",
-      input: { runId, gate, text: "Local" },
-    });
-    let offer: AnswerHarnessRequestOffer | undefined;
-    for await (const update of overlayWatch.updates) {
-      if (update.kind === "live" && update.overlay.offers.length > 0) {
-        offer = update.overlay.offers[0];
-        break;
+    // The spec Step and the ticket publish Step each require an Output receipt
+    // (#221, #223) at a per-Attempt path the recording cannot know. Each replayed
+    // Turn pauses at a file-write approval on the live overlay, so the scenario
+    // writes the receipt on the agent's behalf from the admitted prompt while the
+    // Turn is live, then answers `allow` over the Port — the exact
+    // answer-harness-request the Workbench's [Allow] control submits (#121). The
+    // overlay is watched rather than a rendered frame, as the .tsx test does.
+    const allowWithReceipt = async (
+      operationId: string,
+      submit: () => void,
+      output: string,
+      content: string,
+    ): Promise<string> => {
+      const overlayWatch = wired.projectionPort.openProjection({
+        family: "run",
+        runId,
+      });
+      submit();
+      let offer: AnswerHarnessRequestOffer | undefined;
+      for await (const update of overlayWatch.updates) {
+        if (update.kind === "live" && update.overlay.offers.length > 0) {
+          offer = update.overlay.offers[0];
+          break;
+        }
       }
-    }
-    overlayWatch.close();
-    assert.ok(offer, "the spec Turn raised no approval request");
-    // The spec Step requires a `spec-ref` Output receipt (#221) at a per-Attempt
-    // path the recording cannot know, so the scenario writes it on the agent's
-    // behalf from the admitted prompt while the Turn is live.
-    const livePrompt = wired.projectionPort.readTranscript(transcriptReference);
-    assert.ok(livePrompt.found);
-    if (!livePrompt.found) throw new Error("unreachable");
-    const receiptPath =
-      /Write the required output "spec-ref" as UTF-8 text to (.+) before you finish;/.exec(
+      overlayWatch.close();
+      assert.ok(offer, `the ${output} Turn raised no approval request`);
+      const livePrompt =
+        wired.projectionPort.readTranscript(transcriptReference);
+      assert.ok(livePrompt.found);
+      if (!livePrompt.found) throw new Error("unreachable");
+      const receiptPath = new RegExp(
+        `Write the required output "${output}" as UTF-8 text to (.+) before you finish;`,
+      ).exec(
         livePrompt.entries.filter((entry) => entry.role === "user").at(-1)
           ?.content ?? "",
       )?.[1];
-    assert.ok(receiptPath, "the spec prompt names no spec-ref receipt");
-    writeFileSync(receiptPath, "specs/spec.md\n");
-    assert.ok(
-      wired.projectionPort.submit({
-        operationId: "matt-front-allow-request",
-        operation: "answer-harness-request",
-        input: {
-          runId,
-          requestId: offer.requestId,
-          generation: offer.generation,
-          decision: "allow",
-          by: "client-policy",
-        },
-      }).admitted,
+      assert.ok(receiptPath, `the prompt names no ${output} receipt`);
+      writeFileSync(receiptPath, content);
+      assert.ok(
+        wired.projectionPort.submit({
+          operationId: `${operationId}-allow`,
+          operation: "answer-harness-request",
+          input: {
+            runId,
+            requestId: offer.requestId,
+            generation: offer.generation,
+            decision: "allow",
+            by: "client-policy",
+          },
+        }).admitted,
+      );
+      // The drive settles once the Run rests at its next boundary.
+      assert.equal(
+        (await awaitSettled(wired.projectionPort, operationId)).status,
+        "applied",
+      );
+      return receiptPath;
+    };
+
+    // Choose the Local suggestion — the same `text` answer a typed Other sends; the
+    // spec Agent Step resumes the Session and raises a file-write approval. The spec
+    // Turn completes and applies the recorded Workspace patch; the ticket review
+    // Step then sends its entry Turn and the Run rests at its Turn boundary.
+    const gate = atGate.pendingGate!.gate;
+    const receiptPath = await allowWithReceipt(
+      "matt-front-answer-gate",
+      () =>
+        wired.projectionPort.submit({
+          operationId: "matt-front-answer-gate",
+          operation: "answer-human-gate",
+          input: { runId, gate, text: "Local" },
+        }),
+      "spec-ref",
+      "specs/spec.md\n",
     );
 
-    // The spec Turn completes, applies the recorded Workspace patch, and the Run
-    // reaches `succeeded`; the answer-gate drive settles once the Run rests.
+    // Ticket review (#223): the recording predates the ticket stage and the replayer
+    // does not match Turn input, so the review entry Turn replays the recorded
+    // second grill Turn and the publish Turn replays the recorded spec Turn's frames
+    // (its approval pause, without a Workspace patch). The review rests `blocked`
+    // until the human ends it; ending it is the approval, and publication follows.
+    const atReview = readRun();
+    assert.equal(atReview.state, "blocked");
     assert.equal(
-      (await awaitSettled(wired.projectionPort, "matt-front-answer-gate"))
-        .status,
-      "applied",
+      atReview.progress.find((step) => step.status === "blocked")?.id,
+      "plan-tickets",
+    );
+    assert.equal(
+      atReview.outputs.find((output) => output.name === "tickets-ref"),
+      undefined,
+    );
+    await allowWithReceipt(
+      "matt-front-approve-tickets",
+      () =>
+        wired.projectionPort.submit({
+          operationId: "matt-front-approve-tickets",
+          operation: "end-interactive-step",
+          input: { runId, stepId: "plan-tickets" },
+        }),
+      "tickets-ref",
+      // An opaque placeholder: the Local ticket reference shape belongs to #222.
+      "recorded-tickets\n",
     );
 
     const done = readRun();
     assert.equal(done.state, "succeeded");
     assert.deepEqual(
       done.progress.map((step) => step.status),
-      ["succeeded", "succeeded", "succeeded"],
+      ["succeeded", "succeeded", "succeeded", "succeeded", "succeeded"],
     );
     const specFile = join(workspace, "specs", "spec.md");
     assert.ok(existsSync(specFile), "the spec Turn wrote specs/spec.md");
@@ -589,9 +641,12 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
       wired.projectionPort.readTranscript(transcriptReference);
     assert.ok(doneTranscript.found);
     if (!doneTranscript.found) throw new Error("unreachable");
-    const specPrompt = doneTranscript.entries
+    const userTurns = doneTranscript.entries
       .filter((entry) => entry.role === "user")
-      .at(-1)?.content;
+      .map((entry) => entry.content);
+    const specPrompt = userTurns.find((content) =>
+      content.includes('"spec-ref"'),
+    );
     assert.equal(specPrompt?.split("the tracker I chose: Local.").length, 2);
     assert.match(specPrompt ?? "", /[\\/]to-spec[\\/]SKILL\.md/);
     // The Local destination is the Run working area, never the Workspace (#220).
@@ -607,6 +662,18 @@ async function mattFrontReplayerWorkbench(): Promise<void> {
     const specRefRead = wired.projectionPort.readResource(specRef.reference);
     assert.ok(specRefRead.found);
     assert.equal(specRefRead.found && specRefRead.content, "specs/spec.md");
+    // The review and publish Turns continue the same Session with to-tickets; only
+    // the publish Turn asks for the ticket references, kept as a Run output.
+    const [reviewPrompt, publishPrompt] = userTurns.slice(-2);
+    assert.match(reviewPrompt ?? "", /[\\/]to-tickets[\\/]SKILL\.md/);
+    assert.doesNotMatch(reviewPrompt ?? "", /required output/);
+    assert.match(publishPrompt ?? "", /"tickets-ref"/);
+    const ticketsRef = done.outputs.find(
+      (output) => output.name === "tickets-ref",
+    );
+    assert.ok(ticketsRef, "the ticket references are not a Run output");
+    const ticketsRead = wired.projectionPort.readResource(ticketsRef.reference);
+    assert.equal(ticketsRead.found && ticketsRead.content, "recorded-tickets");
   } finally {
     wired.runGroup.close();
     wired.catalog.close();

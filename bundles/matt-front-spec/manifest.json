@@ -2,9 +2,9 @@
   "formatVersion": 1,
   "bundle": {
     "id": "dev.secant.matt-front",
-    "version": "2.2.0",
+    "version": "2.3.0",
     "name": "Matt Front Spec",
-    "description": "Grill the human about their launch idea, let them choose the tracker, then write the spec in the same Session."
+    "description": "Grill the human about their launch idea, let them choose the tracker, then write the spec and plan the tickets in the same Session."
   },
   "platforms": ["windows", "macos", "linux"],
   "inputs": {
@@ -23,6 +23,14 @@
       "kind": "prompt"
     },
     {
+      "path": "prompts/tickets.md",
+      "kind": "prompt"
+    },
+    {
+      "path": "prompts/publish-tickets.md",
+      "kind": "prompt"
+    },
+    {
       "path": "skills/grill-me",
       "kind": "skill"
     },
@@ -32,6 +40,10 @@
     },
     {
       "path": "skills/to-spec",
+      "kind": "skill"
+    },
+    {
+      "path": "skills/to-tickets",
       "kind": "skill"
     }
   ],
@@ -84,6 +96,42 @@
       "produces": [
         {
           "name": "spec-ref",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "id": "plan-tickets",
+      "kind": "interactive-agent",
+      "session": "spec",
+      "requires": ["tracker", "spec-ref"],
+      "entryTurn": true,
+      "prompt": {
+        "asset": "prompts/tickets.md"
+      },
+      "uses": [
+        {
+          "asset": "skills/to-tickets"
+        }
+      ]
+    },
+    {
+      "id": "publish-tickets",
+      "kind": "agent",
+      "retry": 0,
+      "session": "spec",
+      "requires": ["tracker", "spec-ref"],
+      "prompt": {
+        "asset": "prompts/publish-tickets.md"
+      },
+      "uses": [
+        {
+          "asset": "skills/to-tickets"
+        }
+      ],
+      "produces": [
+        {
+          "name": "tickets-ref",
           "type": "text"
         }
       ]

@@ -30,6 +30,28 @@
           }
         ],
         "workspacePatch": "workspace.patch"
+      },
+      {
+        "stdout": "grill-2.stdout"
+      },
+      {
+        "steps": [
+          {
+            "emit": "spec-0.stdout"
+          },
+          {
+            "bridge": {
+              "tool_name": "Write",
+              "input": {
+                "file_path": "«WORKSPACE»/specs/spec.md",
+                "content": "# Dark Mode Toggle\n\n## Summary\n\nAdd a dark-mode toggle to the settings page. The choice is stored per-user in their profile and applies across all their logged-in sessions and devices.\n\n## Behavior\n\n- Settings page exposes a theme control with three states: **System**, **Light**, **Dark**.\n- Default for a user with no stored preference is **System**, which follows the OS/browser setting via `prefers-color-scheme`.\n- While set to System, changing the OS setting updates the app theme live, without a reload.\n- Selecting Light or Dark pins the theme and overrides the system setting.\n- Changes apply immediately on selection; no separate save step.\n\n## Persistence\n\n- Preference field on the user profile: `theme` — one of `system` | `light` | `dark`, defaulting to `system`.\n- Saved server-side on change and loaded with the user's profile at session start.\n- A local cache of the value is applied before first paint to avoid a flash of the wrong theme.\n\n## Out of Scope\n\n- Per-device overrides that diverge from the profile setting.\n- Scheduled or automatic time-of-day switching.\n- Custom themes beyond light and dark.\n"
+              }
+            }
+          },
+          {
+            "emit": "spec-final.stdout"
+          }
+        ]
       }
     ]
   }

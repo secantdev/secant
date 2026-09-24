@@ -862,6 +862,11 @@ async function recordMattFront(): Promise<void> {
           turns: [
             { stdout: "grill-2.stdout" },
             { steps: specSteps, workspacePatch: "workspace.patch" },
+            // The ticket review and publish Turns (#223) reuse recorded frames: the
+            // replayer does not match input, and the publish Turn needs the spec
+            // Turn's approval pause so its receipt can be written while it is live.
+            { stdout: "grill-2.stdout" },
+            { steps: specSteps },
           ],
         },
       },

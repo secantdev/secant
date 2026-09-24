@@ -24,12 +24,14 @@ import { awaitSettled } from "../helpers/settleOperation.js";
 // own tools (Secant has no tracker Adapter) and writes the reference to its Output
 // receipt. An unavailable tracker is a completed Turn with no receipt, which fails
 // the Step once — no retry publishes again, and no other tracker is substituted.
+// After the spec, the Run rests at ticket review; the [matt-remote-tickets] cases
+// below cover that stage.
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const MATT_FOLDER = join(repoRoot, "bundles", "matt-front-spec");
 const MATT_ID = "dev.secant.matt-front";
 const RECEIPT_LINE =
-  /Write the required output "spec-ref" as UTF-8 text to (.+) before you finish;/;
+  /Write the required output "(spec-ref|tickets-ref)" as UTF-8 text to (.+) before you finish;/;
 
 type HarnessId = "claude-code" | "codex";
 
@@ -100,7 +102,7 @@ function trackerAgent(
               const index = inputs.length;
               inputs.push(request.input.text);
               const receipt = turns[index]?.receipt;
-              const path = RECEIPT_LINE.exec(request.input.text)?.[1];
+              const path = RECEIPT_LINE.exec(request.input.text)?.[2];
               if (receipt !== undefined && path !== undefined) {
                 writeFileSync(path, receipt);
               }
@@ -259,7 +261,7 @@ function assertSpecPrompt(prompt: string, tracker: string): void {
       readFileSync(join(MATT_FOLDER, "skills", "to-spec", file)),
     );
   }
-  assert.match(prompt, RECEIPT_LINE);
+  assert.equal(RECEIPT_LINE.exec(prompt)?.[1], "spec-ref");
 }
 
 for (const harness of ["claude-code", "codex"] as const) {
@@ -274,18 +276,20 @@ for (const harness of ["claude-code", "codex"] as const) {
           reply: `Published the spec: ${reference}`,
           receipt: `${reference}\n`,
         },
+        { reply: "Proposed breakdown: 1. Toggle. 2. Persist." },
       ]);
       const { wired, digest } = wire(t, harness, agent.adapter);
       const { runId, run } = await driveToSpec(wired, digest, harness, tracker);
 
-      assert.equal(run.state, "succeeded");
-      assert.equal(agent.inputs.length, 2);
+      // The Run moves on to ticket review (#223) and rests there.
+      assert.equal(run.state, "blocked");
+      assert.equal(agent.inputs.length, 3);
       assertSpecPrompt(agent.inputs[1]!, tracker);
       // The reference is a Run output for ticket planning; the choice stays bound.
       assert.equal(readOutput(wired, run, "spec-ref"), reference);
       assert.equal(readOutput(wired, run, "tracker"), tracker);
       // The spec Turn continues the grill's planning Session.
-      assert.deepEqual(turnSessions(wired, runId), [
+      assert.deepEqual(turnSessions(wired, runId).slice(0, 2), [
         ["interactive-agent", "spec"],
         ["agent", "spec"],
       ]);
@@ -314,5 +318,143 @@ for (const harness of ["claude-code", "codex"] as const) {
         .map((event) => event.detail),
       ["completed", "completed"],
     );
+  });
+}
+
+// [matt-remote-tickets] Ticket planning for a remote tracker (#223). The original
+// to-tickets skill continues the same planning Session: the review Step proposes and
+// revises the breakdown across Turns; its prompt forbids publication, it asks for no
+// receipt, and agent prose never ends it. (Secant has no tracker Adapter, so the
+// prompt is the only guard against an agent publishing early with its own tools.) The human's End Step is the approval;
+// only then does the one-Turn publish Step create the tickets, parented to the spec
+// with native blocking links, and return their references through its receipt. Secant
+// keeps those references as agent observations and stores no ticket status.
+
+const TICKETS =
+  "https://github.com/example/app/issues/8\nhttps://github.com/example/app/issues/9\n";
+
+async function sendTurn(wired: Wiring, runId: string, text: string) {
+  await submitAndSettle(wired, {
+    operationId: `op-turn-${text.length}`,
+    operation: "send-interactive-turn",
+    input: { runId, stepId: "plan-tickets", text },
+  });
+}
+
+/** The prompt points at the complete, unedited to-tickets folder. */
+function assertToTickets(prompt: string): void {
+  const match = /(\S*[\\/]to-tickets[\\/]SKILL\.md)/.exec(prompt);
+  assert.ok(match, `to-tickets path missing from: ${prompt}`);
+  const bundled = dirname(match[1]!);
+  for (const file of ["SKILL.md", join("agents", "openai.yaml")]) {
+    assert.deepEqual(
+      readFileSync(join(bundled, file)),
+      readFileSync(join(MATT_FOLDER, "skills", "to-tickets", file)),
+    );
+  }
+}
+
+for (const harness of ["claude-code", "codex"] as const) {
+  for (const [tracker, specRef] of [
+    ["GitHub", "https://github.com/example/app/issues/7"],
+    ["Linear", "LIN-42"],
+  ] as const) {
+    test(`[matt-remote-tickets] [${harness}] ${tracker} tickets are published only after the human approves the revised breakdown (#223)`, async (t) => {
+      const agent = trackerAgent(harness, [
+        { reply: "Q1 - Who toggles it? Recommended: each user." },
+        { reply: `Published the spec: ${specRef}`, receipt: `${specRef}\n` },
+        { reply: "Proposed: 1. Toggle (none). 2. Persist (blocked by 1)." },
+        { reply: "Merged. You approved it, so I will publish now." },
+        { reply: "Published 2 tickets.", receipt: TICKETS },
+      ]);
+      const { wired, digest } = wire(t, harness, agent.adapter);
+      const { runId } = await driveToSpec(wired, digest, harness, tracker);
+
+      // The review's entry Turn reads the published spec with to-tickets and must
+      // not publish: it names no receipt, and the Run rests at a Turn boundary.
+      const review = agent.inputs[2]!;
+      assertToTickets(review);
+      assert.ok(review.includes(specRef), review);
+      assert.ok(review.includes(`tracker I chose: ${tracker}.`), review);
+      assert.match(review, /Do not publish/);
+      assert.match(review, /End Step/);
+      assert.equal(RECEIPT_LINE.exec(review), null);
+      let run = readRun(wired, runId);
+      assert.equal(run.state, "blocked");
+      assert.equal(readOutput(wired, run, "tickets-ref"), undefined);
+
+      // A revision Turn in the same Session; the agent claiming approval ends nothing.
+      await sendTurn(wired, runId, "Merge them into one ticket.");
+      run = readRun(wired, runId);
+      assert.equal(run.state, "blocked");
+      assert.equal(agent.inputs.length, 4);
+      assert.equal(agent.inputs[3], "Merge them into one ticket.");
+
+      // End Step is the approval; the publish Turn follows in the same Session.
+      await submitAndSettle(wired, {
+        operationId: "op-approve-tickets",
+        operation: "end-interactive-step",
+        input: { runId, stepId: "plan-tickets" },
+      });
+      run = readRun(wired, runId);
+      assert.equal(run.state, "succeeded", JSON.stringify(run.progress));
+      assert.equal(agent.inputs.length, 5);
+      const publish = agent.inputs[4]!;
+      assertToTickets(publish);
+      assert.ok(publish.includes(`tracker I chose: ${tracker}.`), publish);
+      assert.ok(publish.includes(`parent is the spec at ${specRef}`), publish);
+      assert.match(publish, /blocking/);
+      assert.match(publish, /triage label the skill names/);
+      assert.equal(RECEIPT_LINE.exec(publish)?.[1], "tickets-ref");
+
+      // The references are kept as agent observations; no status list is stored.
+      assert.equal(readOutput(wired, run, "tickets-ref"), TICKETS.trimEnd());
+      assert.deepEqual(run.outputs.map((output) => output.name).sort(), [
+        "spec-ref",
+        "tickets-ref",
+        "tracker",
+      ]);
+      assert.deepEqual(turnSessions(wired, runId), [
+        ["interactive-agent", "spec"],
+        ["agent", "spec"],
+        ["interactive-agent", "spec"],
+        ["interactive-agent", "spec"],
+        ["agent", "spec"],
+      ]);
+    });
+  }
+
+  test(`[matt-remote-tickets] [${harness}] an unavailable tracker at publication fails once without a receipt (#223)`, async (t) => {
+    const agent = trackerAgent(harness, [
+      { reply: "Q1 - Who toggles it? Recommended: each user." },
+      { reply: "Published LIN-42", receipt: "LIN-42\n" },
+      { reply: "Proposed: 1. Toggle." },
+      { reply: "Linear is no longer connected, so I published nothing." },
+    ]);
+    const { wired, digest } = wire(t, harness, agent.adapter);
+    const { runId } = await driveToSpec(wired, digest, harness, "Linear");
+    await submitAndSettle(wired, {
+      operationId: "op-approve-tickets",
+      operation: "end-interactive-step",
+      input: { runId, stepId: "plan-tickets" },
+    });
+
+    const run = readRun(wired, runId);
+    assert.equal(run.state, "failed");
+    // One publish Turn only: a retry could publish duplicate tickets.
+    assert.equal(agent.inputs.length, 4);
+    assert.equal(
+      run.progress.find((step) => step.id === "publish-tickets")?.status,
+      "failed",
+    );
+    // Every Turn completed: the missing receipt alone failed the Step.
+    assert.deepEqual(
+      run.timeline
+        .filter((event) => event.event === "turn-settled")
+        .map((event) => event.detail),
+      ["completed", "completed", "completed", "completed"],
+    );
+    assert.equal(readOutput(wired, run, "tickets-ref"), undefined);
+    assert.equal(readOutput(wired, run, "spec-ref"), "LIN-42");
   });
 }

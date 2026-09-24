@@ -16,8 +16,12 @@ triage label the skill names. Do not close or modify the spec.
 This Step is a single Turn, so I cannot answer questions inside it. Do not change
 the approved breakdown.
 
-- Local: this Step does not publish Local tickets yet. Say so plainly, write no
-  ticket file anywhere, and do not write the output file.
+- Local: the Local tracker is the directory `{{run:working-area}}`, which already
+  holds the spec. It stands in for the skill's `.scratch/<feature-slug>/`
+  directory: write one file per ticket as `issues/<NN>-<slug>.md` inside it,
+  using the skill's Local ticket template with its `Blocked by` and `Status`
+  lines. Write nothing into the project Workspace. There is no parent issue to
+  link; the spec file sits beside the tickets.
 - GitHub: create each ticket as a GitHub issue in this repository, using the tools
   available to you.
 - Any other tracker: publish through the tool connected for it, such as an MCP
@@ -28,7 +32,8 @@ list of tickets or their status anywhere else.
 
 When the tickets are published, record where they live in the required output
 named below: each ticket's issue URL or the tracker's own identifier, one per
-line, in the order you created them. If the chosen tracker is not available to
-you, or publishing fails, say so plainly and name any ticket that was already
-created; in that case do not publish anywhere else and do not write the output
-file. A finished Turn alone does not count as published tickets.
+line, in the order you created them. For Local, record only the absolute path of
+the `issues` directory. If the chosen tracker is not available to you, or
+publishing fails, say so plainly and name any ticket that was already created; in
+that case do not publish anywhere else and do not write the output file. A
+finished Turn alone does not count as published tickets.

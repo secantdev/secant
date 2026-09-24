@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -28,6 +29,10 @@ import { awaitSettled } from "../helpers/settleOperation.js";
 // path, is told the Run's exact working area, and writes the spec there — never in
 // the Workspace. The spec reference is captured only from its Output receipt and is
 // retained as the `spec-ref` Run output; a completed Turn without a receipt fails the Run.
+// [matt-local-tickets] (#222) Ticket review then continues that Session with the
+// original to-tickets folder: the breakdown is revised across verbatim human Turns
+// with no file written, End Step approves it, and only then does the publish Turn
+// write one file per ticket in the working area. Secant stores no ticket list.
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const MATT_FOLDER = join(repoRoot, "bundles", "matt-front-spec");
@@ -35,6 +40,12 @@ const MATT_ID = "dev.secant.matt-front";
 const IDEA = "Add a dark-mode toggle that follows me across devices.";
 const RECEIPT_LINE =
   /Write the required output "spec-ref" as UTF-8 text to (.+) before you finish;/;
+const TICKETS_RECEIPT_LINE =
+  /Write the required output "tickets-ref" as UTF-8 text to (.+) before you finish;/;
+const TICKETS = [
+  ["01-store-preference.md", "None (can start immediately)"],
+  ["02-toggle-ui.md", "01"],
+] as const;
 
 type HarnessId = "claude-code" | "codex";
 
@@ -103,6 +114,22 @@ function planningAgent(harness: HarnessId, writeReceipt: boolean) {
               const spec = join(area, "spec.md");
               writeFileSync(spec, "# Dark mode\n");
               if (writeReceipt) writeFileSync(receipt, `${spec}\n`);
+            }
+            // The publish Turn writes one file per approved ticket, as the skill's
+            // Local template shapes it, and records the issues directory.
+            const ticketsReceipt = TICKETS_RECEIPT_LINE.exec(
+              request.input.text,
+            )?.[1];
+            if (ticketsReceipt !== undefined && area !== undefined) {
+              const issues = join(area, "issues");
+              mkdirSync(issues, { recursive: true });
+              for (const [file, blockedBy] of TICKETS) {
+                writeFileSync(
+                  join(issues, file),
+                  `# ${file}\n\n**Blocked by:** ${blockedBy}\n\n**Status:** ready-for-agent\n`,
+                );
+              }
+              writeFileSync(ticketsReceipt, `${issues}\n`);
             }
             return inner.startTurn(request);
           },
@@ -244,6 +271,29 @@ function filesUnder(dir: string): string[] {
     .sort();
 }
 
+/** The prompt names the skill's SKILL.md by a bundled path whose folder is the
+ *  original one, complete and byte-identical. */
+function assertBundledSkill(prompt: string, skill: string): void {
+  const match = new RegExp(`(\\S*[\\\\/]${skill}[\\\\/]SKILL\\.md)`).exec(
+    prompt,
+  );
+  assert.ok(match, prompt);
+  const bundled = dirname(match[1]!);
+  const source = join(MATT_FOLDER, "skills", skill);
+  assert.deepEqual(filesUnder(bundled), filesUnder(source));
+  for (const file of filesUnder(source)) {
+    assert.deepEqual(
+      readFileSync(join(bundled, file)),
+      readFileSync(join(source, file)),
+    );
+  }
+}
+
+/** The working area's planning files, without the Store-named receipt directory. */
+function planningFiles(area: string): string[] {
+  return filesUnder(area).filter((file) => !file.startsWith(".receipts"));
+}
+
 for (const harness of ["claude-code", "codex"] as const) {
   test(`[matt-local-spec] [${harness}] the spec lands in the Run working area and its reference is retained (#220)`, async (t) => {
     const agent = planningAgent(harness, true);
@@ -282,17 +332,7 @@ for (const harness of ["claude-code", "codex"] as const) {
     );
 
     // The original to-spec folder resolves complete through its bundled path.
-    const match = /(\S*[\\/]to-spec[\\/]SKILL\.md)/.exec(prompt);
-    assert.ok(match, prompt);
-    const bundled = dirname(match[1]!);
-    const source = join(MATT_FOLDER, "skills", "to-spec");
-    assert.deepEqual(filesUnder(bundled), filesUnder(source));
-    for (const file of filesUnder(source)) {
-      assert.deepEqual(
-        readFileSync(join(bundled, file)),
-        readFileSync(join(source, file)),
-      );
-    }
+    assertBundledSkill(prompt, "to-spec");
     assert.doesNotMatch(prompt, /spec-writing/);
 
     // The spec is in the working area; the Workspace holds no planning file.
@@ -329,3 +369,94 @@ test("[matt-local-spec] a completed spec Turn without a receipt fails the Run wi
     undefined,
   );
 });
+
+for (const harness of ["claude-code", "codex"] as const) {
+  test(`[matt-local-tickets] [${harness}] the breakdown is revised across Turns and one ticket file per approved ticket appears only after End Step (#222)`, async (t) => {
+    const agent = planningAgent(harness, true);
+    const { wired, workspace, digest } = wire(t, harness, agent.adapter);
+    const runId = await planToLocal(wired, digest, harness);
+    // Read from the grant: acquiring an owner here would fence the live claim.
+    const area = agent.granted.at(-1)!;
+    const spec = join(area, "spec.md");
+
+    // Ticket planning opens on an entry Turn in the planning Session that reads the
+    // published spec through the original to-tickets folder, and rests for the human.
+    const planning = readRun(wired, runId);
+    assert.equal(planning.state, "blocked");
+    assert.equal(planning.progress[planning.position]?.id, "plan-tickets");
+    const entry = agent.inputs.at(-1)!;
+    assert.ok(entry.startsWith("# Plan the tickets"), entry);
+    assert.ok(entry.includes(spec), entry);
+    assertBundledSkill(entry, "to-tickets");
+    assert.match(entry, /Do not publish any ticket in this Step/);
+    assert.match(entry, /End\s+Step control/);
+    assert.deepEqual(planningFiles(area), ["spec.md"]);
+
+    // The human revises the breakdown in a later verbatim Turn; still nothing lands.
+    await settle(wired, {
+      operationId: "op-revise",
+      operation: "send-interactive-turn",
+      input: {
+        runId,
+        stepId: "plan-tickets",
+        text: "Merge the last two tickets.",
+      },
+    });
+    assert.equal(agent.inputs.at(-1), "Merge the last two tickets.");
+    assert.equal(readRun(wired, runId).state, "blocked");
+    assert.deepEqual(planningFiles(area), ["spec.md"]);
+
+    // Ending the Step is the approval: the publish Turn follows in the same Session,
+    // told the exact Local directory, and writes one file per approved ticket.
+    await settle(wired, {
+      operationId: "op-approve-tickets",
+      operation: "end-interactive-step",
+      input: { runId, stepId: "plan-tickets" },
+    });
+    const publish = agent.inputs.at(-1)!;
+    assert.ok(publish.startsWith("# Publish the tickets"), publish);
+    assert.ok(publish.includes(area), publish);
+    assert.ok(publish.includes("the tracker I chose: Local."), publish);
+    assert.equal(agent.inputs.length, 5);
+    assert.ok(agent.granted.every((dir) => dir === area));
+
+    const run = readRun(wired, runId);
+    assert.equal(run.state, "succeeded", JSON.stringify(run.progress));
+    assert.equal(workingArea(wired, runId), area);
+    assert.deepEqual(
+      run.progress.map((step) => [step.id, step.status]),
+      [
+        ["grill", "succeeded"],
+        ["choose-tracker", "succeeded"],
+        ["write-spec", "succeeded"],
+        ["plan-tickets", "succeeded"],
+        ["publish-tickets", "succeeded"],
+      ],
+    );
+    assert.deepEqual(turnSessions(wired, runId), [
+      "spec",
+      "spec",
+      "spec",
+      "spec",
+      "spec",
+    ]);
+    assert.deepEqual(planningFiles(area), [
+      ...TICKETS.map(([file]) => join("issues", file)),
+      "spec.md",
+    ]);
+    assert.deepEqual(readdirSync(workspace), []);
+    // The Local files alone own ticket status: the kept reference is the issues
+    // directory, never a list of tickets or their status.
+    assert.deepEqual(run.outputs.map((output) => output.name).sort(), [
+      "spec-ref",
+      "tickets-ref",
+      "tracker",
+    ]);
+    const ticketsRef = run.outputs.find(
+      (output) => output.name === "tickets-ref",
+    );
+    const read = wired.projectionPort.readResource(ticketsRef!.reference);
+    assert.ok(read.found, JSON.stringify(read));
+    assert.equal(read.content, join(area, "issues"));
+  });
+}

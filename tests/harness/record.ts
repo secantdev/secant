@@ -63,7 +63,12 @@ const SESSION_IDS = {
 
 // --- The launch contract (must mirror src/harness/claude-code.ts `launch`) ----
 
-function launchArgs(sessionArgs: string[], bridge: RecorderBridge): string[] {
+function launchArgs(
+  sessionArgs: string[],
+  bridge: RecorderBridge,
+  /** The Run working area the Adapter forwards as `--add-dir` (#214). */
+  writableDirectory?: string,
+): string[] {
   return [
     "-p",
     "--input-format",
@@ -80,6 +85,9 @@ function launchArgs(sessionArgs: string[], bridge: RecorderBridge): string[] {
     // the Adapter treats as generic activity, so the protocol shape is the same.
     "--restricted",
     ...sessionArgs,
+    ...(writableDirectory !== undefined
+      ? ["--add-dir", writableDirectory]
+      : []),
     ...bridge.launchArgs,
   ];
 }
@@ -324,6 +332,8 @@ function writeCase(options: {
   workspace?: string;
   /** The scenario's temp config dir, redacted (the authentication case). */
   configDir?: string;
+  /** The scenario's temp Run working area, redacted (the matt-front case). */
+  workingArea?: string;
 }): void {
   const dir = join(FIXTURES, options.name);
   rmSync(dir, { recursive: true, force: true });
@@ -337,6 +347,11 @@ function writeCase(options: {
       "recording workspace path",
     ),
     ...pathSecrets(options.configDir, "«CONFIG»", "recording config directory"),
+    ...pathSecrets(
+      options.workingArea,
+      "«WORKING_AREA»",
+      "recording Run working area path",
+    ),
     ...options.secrets,
   ];
   const applied: Redaction[] = [...(options.extraRedactions ?? [])];
@@ -751,22 +766,70 @@ async function recordProtocolCorruption(): Promise<void> {
   }
 }
 
-/** Record the Matt front Bundle's Harness Turns (#123): a two-Turn interactive
- *  grill and the autonomous spec Turn, all in one Session. The grill's first Turn
- *  mints the Session (`--session-id`); every later Turn resumes it (`--resume`),
- *  exactly as the Adapter drives a fresh prepared Harness per human Turn and then
- *  the following Agent Step. The spec Turn writes `specs/spec.md` through one real
- *  permission-bridge approval, and its Workspace patch is the created file. The
- *  replayer serves the two resumed processes their own Turn from the resume block. */
+/** A git directory with an empty baseline commit, so each Turn's file writes are
+ *  captured as a `git apply`-able patch. */
+function gitBaseline(dir: string): void {
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "rec@secant.test"], {
+    cwd: dir,
+  });
+  execFileSync("git", ["config", "user.name", "recorder"], { cwd: dir });
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "baseline"], {
+    cwd: dir,
+  });
+}
+
+/** The files a Turn created in `dir` as a new-file patch, then committed so the
+ *  next Turn's patch holds only its own writes. */
+function turnPatch(dir: string, what: string): Buffer {
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  const patch = execFileSync("git", ["diff", "--cached"], { cwd: dir });
+  if (patch.toString().trim().length === 0) {
+    throw new Error(`matt-front: the ${what} Turn wrote no file`);
+  }
+  execFileSync("git", ["commit", "-q", "-m", what], { cwd: dir });
+  return patch;
+}
+
+/** Split a Turn's stdout around each bridge call, as test-repair does, so recorded
+ *  bytes after a permission prompt emit only once the verdict is in. */
+function splitAroundCalls(
+  prefix: string,
+  stdout: Buffer,
+  calls: readonly BridgeCall[],
+): { files: WriteFile[]; steps: unknown[] } {
+  const files: WriteFile[] = [];
+  const steps: unknown[] = [];
+  let cursor = 0;
+  calls.forEach((call, index) => {
+    files.push({
+      name: `${prefix}-${index}.stdout`,
+      bytes: stdout.subarray(cursor, call.stdoutOffset),
+    });
+    steps.push({ emit: `${prefix}-${index}.stdout` });
+    steps.push({ bridge: { tool_name: call.tool_name, input: call.input } });
+    cursor = call.stdoutOffset;
+  });
+  files.push({
+    name: `${prefix}-final.stdout`,
+    bytes: stdout.subarray(cursor),
+  });
+  steps.push({ emit: `${prefix}-final.stdout` });
+  return { files, steps };
+}
+
+/** Record the Matt front Bundle's Harness Turns (#123, #222): a two-Turn
+ *  interactive grill, the autonomous spec Turn, a two-Turn interactive ticket
+ *  review, and the autonomous ticket-publish Turn, all in one Session. The grill's
+ *  first Turn mints the Session (`--session-id`); every later Turn resumes it
+ *  (`--resume`). Every launch carries the Run working area as `--add-dir`, as the
+ *  Adapter forwards it, and the Local spec and ticket files are written there —
+ *  never in the Workspace (#220). Each writing Turn's files are its
+ *  `workingAreaPatch`, which the replayer applies in its `--add-dir` directory. */
 async function recordMattFront(): Promise<void> {
   const ws = tempWorkspace("secant-rec-ws-");
-  // A git Workspace so the created spec file is captured as a `git apply`-able patch.
-  execFileSync("git", ["init", "-q"], { cwd: ws });
-  execFileSync("git", ["config", "user.email", "rec@secant.test"], { cwd: ws });
-  execFileSync("git", ["config", "user.name", "recorder"], { cwd: ws });
-  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "baseline"], {
-    cwd: ws,
-  });
+  const area = realpathSync(tempWorkspace("secant-rec-area-"));
+  gitBaseline(area);
 
   const sid = SESSION_IDS["matt-front"];
   let stdoutLen = 0;
@@ -774,103 +837,122 @@ async function recordMattFront(): Promise<void> {
     () => ({ behavior: "allow" }),
     () => stdoutLen,
   );
+  const turn = (sessionArgs: string[], text: string, tracked = false) => {
+    stdoutLen = 0;
+    return runTurn({
+      args: launchArgs(sessionArgs, bridge, area),
+      cwd: ws,
+      env: baseEnv(),
+      input: userFrame(text),
+      ...(tracked
+        ? {
+            control: {
+              onChunk: (_child, stdout) => (stdoutLen = stdout.length),
+            },
+          }
+        : {}),
+    });
+  };
+  const resume = ["--resume", sid];
   try {
     // Grill Turn 1 mints the Session. Bounded replies keep the fixture small; this
     // frame stands in for the grill's Entry Turn (#212), which carries the launch
     // idea. The replayer does not match input, so the bounded frame is kept.
-    const grill1 = await runTurn({
-      args: launchArgs(["--session-id", sid], bridge),
-      cwd: ws,
-      env: baseEnv(),
-      input: userFrame(
-        "Let's design a feature together. I want to add a dark-mode toggle to " +
-          "our web app's settings page. Interview me: ask exactly one short " +
-          "question about it, under 40 words. Do not write any files.",
-      ),
-    });
+    const grill1 = await turn(
+      ["--session-id", sid],
+      "Let's design a feature together. I want to add a dark-mode toggle to " +
+        "our web app's settings page. Interview me: ask exactly one short " +
+        "question about it, under 40 words. Do not write any files.",
+    );
     // Grill Turn 2 resumes the same Session and concludes the interview.
-    const grill2 = await runTurn({
-      args: launchArgs(["--resume", sid], bridge),
-      cwd: ws,
-      env: baseEnv(),
-      input: userFrame(
-        "The toggle should persist per-user in their profile and default to the " +
-          "system setting. That is enough context. In under 30 words, confirm " +
-          "you have what you need. Do not ask more questions or write files.",
-      ),
-    });
+    const grill2 = await turn(
+      resume,
+      "The toggle should persist per-user in their profile and default to the " +
+        "system setting. That is enough context. In under 30 words, confirm " +
+        "you have what you need. Do not ask more questions or write files.",
+    );
 
-    // Spec Turn resumes the Session and writes the one file through an approval.
-    stdoutLen = 0;
-    const callsBefore = bridge.calls.length;
-    const spec = await runTurn({
-      args: launchArgs(["--resume", sid], bridge),
-      cwd: ws,
-      env: baseEnv(),
-      input: userFrame(
-        "Now write the spec. Using the Write tool, create the file " +
-          "specs/spec.md containing a short (under 200 words) Markdown spec for " +
-          "the dark-mode toggle we discussed. Write only that one file.",
-      ),
-      control: { onChunk: (_child, stdout) => (stdoutLen = stdout.length) },
-    });
-    // Stage the created file so the diff is a `git apply`-able new-file patch.
-    execFileSync("git", ["add", "-A"], { cwd: ws });
-    const patch = execFileSync("git", ["diff", "--cached"], {
-      cwd: ws,
-    }).toString();
-    if (patch.trim().length === 0) {
-      throw new Error("matt-front: the spec Turn wrote no file");
-    }
+    // The spec Turn writes the one Local spec file into the working area.
+    let callsBefore = bridge.calls.length;
+    const spec = await turn(
+      resume,
+      "Now write the spec. Using the Write tool, create the file " +
+        `${join(area, "spec.md")} containing a short (under 200 words) ` +
+        "Markdown spec for the dark-mode toggle we discussed, with the line " +
+        "`Status: ready-for-agent` near the top. Write only that one file. " +
+        // A path echoed in streamed text fragments past substring redaction.
+        "Then reply with only the word Done, without naming any path.",
+      true,
+    );
+    const specPatch = turnPatch(area, "spec");
+    const specSplit = splitAroundCalls(
+      "spec",
+      spec.stdout,
+      bridge.calls.slice(callsBefore),
+    );
 
-    // Split the spec Turn's stdout around each bridge call, as test-repair does,
-    // so recorded bytes after a permission prompt emit only once the verdict is in.
-    const specCalls = bridge.calls.slice(callsBefore);
-    const specFiles: WriteFile[] = [];
-    const specSteps: unknown[] = [];
-    let cursor = 0;
-    specCalls.forEach((call, index) => {
-      specFiles.push({
-        name: `spec-${index}.stdout`,
-        bytes: spec.stdout.subarray(cursor, call.stdoutOffset),
-      });
-      specSteps.push({ emit: `spec-${index}.stdout` });
-      specSteps.push({
-        bridge: { tool_name: call.tool_name, input: call.input },
-      });
-      cursor = call.stdoutOffset;
-    });
-    specFiles.push({
-      name: "spec-final.stdout",
-      bytes: spec.stdout.subarray(cursor),
-    });
-    specSteps.push({ emit: "spec-final.stdout" });
+    // The ticket review: a proposed breakdown, then one revision. No files.
+    const tickets1 = await turn(
+      resume,
+      "Now break the spec into tracer-bullet tickets. Propose exactly two as a " +
+        "numbered list, each with its title, what blocks it, and one line on " +
+        "what it delivers, in under 80 words. Do not write any files.",
+    );
+    const tickets2 = await turn(
+      resume,
+      "Rename ticket 2 to 'Theme toggle control' and show the revised list in " +
+        "under 60 words. Do not write any files.",
+    );
+
+    // The publish Turn writes one Local file per approved ticket.
+    callsBefore = bridge.calls.length;
+    const publish = await turn(
+      resume,
+      "The breakdown is approved. Using the Write tool, create one file per " +
+        `ticket in ${join(area, "issues")}, named 01-<slug>.md and ` +
+        "02-<slug>.md. Each file has a `# <NN>: <title>` heading, a " +
+        "`**Blocked by:**` line, a `**Status:** ready-for-agent` line, and one " +
+        "acceptance-criterion checkbox. Write only those two files. Then reply " +
+        "with only the word Done, without naming any path.",
+      true,
+    );
+    const ticketsPatch = turnPatch(area, "tickets");
+    const publishSplit = splitAroundCalls(
+      "publish",
+      publish.stdout,
+      bridge.calls.slice(callsBefore),
+    );
 
     writeCase({
       name: "matt-front",
       files: [
         { name: "grill-1.stdout", bytes: grill1.stdout },
         { name: "grill-2.stdout", bytes: grill2.stdout },
-        ...specFiles,
-        { name: "workspace.patch", bytes: Buffer.from(patch, "utf8") },
+        ...specSplit.files,
+        { name: "spec.patch", bytes: specPatch },
+        { name: "tickets-1.stdout", bytes: tickets1.stdout },
+        { name: "tickets-2.stdout", bytes: tickets2.stdout },
+        ...publishSplit.files,
+        { name: "tickets.patch", bytes: ticketsPatch },
       ],
+      // Secant holds one process across an interactive Step's Turns and resumes
+      // the Session in a fresh process per Step, so the grill's two Turns share
+      // the first launch and each ticket-review Turn follows the spec's resume.
       caseJson: {
         exitCode: grill1.exitCode,
-        turns: [{ stdout: "grill-1.stdout" }],
+        turns: [{ stdout: "grill-1.stdout" }, { stdout: "grill-2.stdout" }],
         resume: {
-          exitCode: spec.exitCode,
+          exitCode: publish.exitCode,
           turns: [
-            { stdout: "grill-2.stdout" },
-            { steps: specSteps, workspacePatch: "workspace.patch" },
-            // The ticket review and publish Turns (#223) reuse recorded frames: the
-            // replayer does not match input, and the publish Turn needs the spec
-            // Turn's approval pause so its receipt can be written while it is live.
-            { stdout: "grill-2.stdout" },
-            { steps: specSteps },
+            { steps: specSplit.steps, workingAreaPatch: "spec.patch" },
+            { stdout: "tickets-1.stdout" },
+            { stdout: "tickets-2.stdout" },
+            { steps: publishSplit.steps, workingAreaPatch: "tickets.patch" },
           ],
         },
       },
       workspace: ws,
+      workingArea: area,
       secrets: hostSecrets(bridge.token),
       executableVersion: claudeVersion(),
       protocolVersion: protocolVersionOf(grill1.stdout),
@@ -878,6 +960,7 @@ async function recordMattFront(): Promise<void> {
   } finally {
     await bridge.close();
     rmSync(ws, { recursive: true, force: true });
+    rmSync(area, { recursive: true, force: true });
   }
 }
 

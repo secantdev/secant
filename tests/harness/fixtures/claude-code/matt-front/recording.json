@@ -1,8 +1,8 @@
 {
   "harness": "claude-code",
-  "executableVersion": "2.1.274 (Claude Code)",
-  "protocolVersion": "2.1.274",
-  "recordedAt": "2026-09-17T05:59:56.295Z",
+  "executableVersion": "2.1.281 (Claude Code)",
+  "protocolVersion": "2.1.281",
+  "recordedAt": "2026-09-24T01:29:32.248Z",
   "redactions": [
     {
       "placeholder": "«WORKSPACE»",
@@ -11,6 +11,10 @@
     {
       "placeholder": "«TOOL-INPUT-DELTAS»",
       "reason": "streamed tool-input JSON deltas removed (not consumed by the Adapter; they fragment host paths past substring redaction)"
+    },
+    {
+      "placeholder": "«WORKING_AREA»",
+      "reason": "recording Run working area path"
     }
   ],
   "refreshCommand": "bun tests/harness/record.ts matt-front"

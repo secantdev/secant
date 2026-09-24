@@ -20,8 +20,8 @@
             "bridge": {
               "tool_name": "Write",
               "input": {
-                "file_path": "«WORKSPACE»/specs/spec.md",
-                "content": "# Dark Mode Toggle\n\n## Summary\n\nAdd a dark-mode toggle to the settings page. The choice is stored per-user in their profile and applies across all their logged-in sessions and devices.\n\n## Behavior\n\n- Settings page exposes a theme control with three states: **System**, **Light**, **Dark**.\n- Default for a user with no stored preference is **System**, which follows the OS/browser setting via `prefers-color-scheme`.\n- While set to System, changing the OS setting updates the app theme live, without a reload.\n- Selecting Light or Dark pins the theme and overrides the system setting.\n- Changes apply immediately on selection; no separate save step.\n\n## Persistence\n\n- Preference field on the user profile: `theme` — one of `system` | `light` | `dark`, defaulting to `system`.\n- Saved server-side on change and loaded with the user's profile at session start.\n- A local cache of the value is applied before first paint to avoid a flash of the wrong theme.\n\n## Out of Scope\n\n- Per-device overrides that diverge from the profile setting.\n- Scheduled or automatic time-of-day switching.\n- Custom themes beyond light and dark.\n"
+                "file_path": "«WORKING_AREA»/spec.md",
+                "content": "# Spec: Dark-Mode Toggle\n\nStatus: ready-for-agent\n\n## Summary\nAdd a theme control to the Settings page so users can choose light or dark mode. Each user's choice is saved in their profile.\n\n## Requirements\n- Settings page shows a theme control with three options: **Light**, **Dark**, **System**.\n- Default is **System**, which follows the OS `prefers-color-scheme` setting.\n- The choice is saved to the user's profile, e.g. `themePreference: \"light\" | \"dark\" | \"system\"`.\n- The saved choice applies on every device and session after login.\n- A change takes effect right away, with no page reload.\n- In System mode, the app updates live when the OS theme changes.\n- Avoid a flash of the wrong theme on load: apply the theme before first paint.\n\n## Out of Scope\n- Custom color themes beyond light and dark.\n- Per-page theme overrides.\n\n## Acceptance Criteria\n- A new user sees the theme that matches their OS.\n- Choosing Dark still applies after logout, login, and switching devices.\n- Switching back to System follows the OS again.\n- The control is keyboard-accessible and labeled for screen readers.\n"
               }
             }
           },
@@ -29,29 +29,45 @@
             "emit": "spec-final.stdout"
           }
         ],
-        "workspacePatch": "workspace.patch"
+        "workingAreaPatch": "spec.patch"
       },
       {
-        "stdout": "grill-2.stdout"
+        "stdout": "tickets-1.stdout"
+      },
+      {
+        "stdout": "tickets-2.stdout"
       },
       {
         "steps": [
           {
-            "emit": "spec-0.stdout"
+            "emit": "publish-0.stdout"
           },
           {
             "bridge": {
               "tool_name": "Write",
               "input": {
-                "file_path": "«WORKSPACE»/specs/spec.md",
-                "content": "# Dark Mode Toggle\n\n## Summary\n\nAdd a dark-mode toggle to the settings page. The choice is stored per-user in their profile and applies across all their logged-in sessions and devices.\n\n## Behavior\n\n- Settings page exposes a theme control with three states: **System**, **Light**, **Dark**.\n- Default for a user with no stored preference is **System**, which follows the OS/browser setting via `prefers-color-scheme`.\n- While set to System, changing the OS setting updates the app theme live, without a reload.\n- Selecting Light or Dark pins the theme and overrides the system setting.\n- Changes apply immediately on selection; no separate save step.\n\n## Persistence\n\n- Preference field on the user profile: `theme` — one of `system` | `light` | `dark`, defaulting to `system`.\n- Saved server-side on change and loaded with the user's profile at session start.\n- A local cache of the value is applied before first paint to avoid a flash of the wrong theme.\n\n## Out of Scope\n\n- Per-device overrides that diverge from the profile setting.\n- Scheduled or automatic time-of-day switching.\n- Custom themes beyond light and dark.\n"
+                "file_path": "«WORKING_AREA»/issues/01-system-following-theme.md",
+                "content": "# 01: System-following theme, end to end\n\n**Blocked by:** None\n**Status:** ready-for-agent\n\nApply a light or dark theme that matches the OS before first paint, and update it live when the OS theme changes.\n\n## Acceptance Criteria\n- [ ] A new user sees the theme that matches their OS on first load, with no flash of the wrong theme, and it updates live when the OS theme changes.\n"
               }
             }
           },
           {
-            "emit": "spec-final.stdout"
+            "emit": "publish-1.stdout"
+          },
+          {
+            "bridge": {
+              "tool_name": "Write",
+              "input": {
+                "file_path": "«WORKING_AREA»/issues/02-theme-toggle-control.md",
+                "content": "# 02: Theme toggle control\n\n**Blocked by:** 01\n**Status:** ready-for-agent\n\nAdd a Light/Dark/System control to the Settings page. Save the choice as `themePreference` in the user's profile, apply it right away, and use it on every device.\n\n## Acceptance Criteria\n- [ ] Choosing Dark takes effect right away and still applies after logout, login, and switching devices.\n"
+              }
+            }
+          },
+          {
+            "emit": "publish-final.stdout"
           }
-        ]
+        ],
+        "workingAreaPatch": "tickets.patch"
       }
     ]
   }

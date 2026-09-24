@@ -1,0 +1,31 @@
+diff --git a/spec.md b/spec.md
+new file mode 100644
+index 0000000..7c66506
+--- /dev/null
++++ b/spec.md
+@@ -0,0 +1,25 @@
++# Spec: Dark-Mode Toggle
++
++Status: ready-for-agent
++
++## Summary
++Add a theme control to the Settings page so users can choose light or dark mode. Each user's choice is saved in their profile.
++
++## Requirements
++- Settings page shows a theme control with three options: **Light**, **Dark**, **System**.
++- Default is **System**, which follows the OS `prefers-color-scheme` setting.
++- The choice is saved to the user's profile, e.g. `themePreference: "light" | "dark" | "system"`.
++- The saved choice applies on every device and session after login.
++- A change takes effect right away, with no page reload.
++- In System mode, the app updates live when the OS theme changes.
++- Avoid a flash of the wrong theme on load: apply the theme before first paint.
++
++## Out of Scope
++- Custom color themes beyond light and dark.
++- Per-page theme overrides.
++
++## Acceptance Criteria
++- A new user sees the theme that matches their OS.
++- Choosing Dark still applies after logout, login, and switching devices.
++- Switching back to System follows the OS again.
++- The control is keyboard-accessible and labeled for screen readers.

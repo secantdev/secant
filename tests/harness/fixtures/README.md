@@ -15,6 +15,7 @@ fixtures/<harness>/<case>/
   *.stdout          byte-faithful stdout chunks case.json references
   *.stderr          optional byte-faithful stderr chunks
   workspace.patch   optional git diff the replayer applies at the Turn's result
+  *.patch           optional working-area diffs (`workingAreaPatch`, below)
 ```
 
 ## `recording.json` (sidecar)
@@ -41,6 +42,8 @@ Six keys, all required (the guidance-structure suite enforces their presence):
     after a bridge step emits only once the verdict is in.
   - `workspacePatch` — a git diff file the replayer `git apply`s in the launch
     cwd as the Turn concludes (the "applied at the Turn's result" step).
+  - `workingAreaPatch` — the same, applied in the launch's `--add-dir` directory
+    (the Run working area); the replay fails if the launch carries none.
   - `exitAfter` — exit right after this Turn's bytes (models lost/corruption).
   - `ignoreSigterm` — swallow SIGTERM so only a force-kill stops the process.
 - `resume` — a separate `{ exitCode, turns }` played when the launch carries

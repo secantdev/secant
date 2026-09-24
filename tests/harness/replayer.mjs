@@ -16,7 +16,8 @@
 // under tests/harness/fixtures/claude-code/<case>/, and a Turn may carry a
 // `workspacePatch` — a git diff the replayer applies in its launch cwd as the
 // Turn concludes, so a replayed Test Repair Turn leaves the Workspace fixed
-// exactly as the real recording did.
+// exactly as the real recording did. A `workingAreaPatch` is applied the same way
+// in the directory named by `--add-dir` — the Run working area (#222).
 
 import { appendFileSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -295,22 +296,33 @@ for await (const line of lines) {
   }
   let workspacePatchApplied = false;
   const applyWorkspacePatch = () => {
-    if (workspacePatchApplied || typeof turn.workspacePatch !== "string") {
-      return;
-    }
-    const patchPath = join(caseDirectory, turn.workspacePatch);
-    try {
-      execFileSync("git", ["apply", "--whitespace=nowarn", patchPath], {
-        cwd: process.cwd(),
-      });
-      workspacePatchApplied = true;
-    } catch (error) {
-      process.stderr.write(
-        `secant replayer: git apply ${turn.workspacePatch} failed: ${
-          error?.message ?? error
-        }\n`,
-      );
-      process.exit(3);
+    if (workspacePatchApplied) return;
+    workspacePatchApplied = true;
+    for (const [patch, cwd] of [
+      [turn.workspacePatch, process.cwd()],
+      [turn.workingAreaPatch, valueAfter("--add-dir")],
+    ]) {
+      if (typeof patch !== "string") continue;
+      if (cwd === undefined) {
+        process.stderr.write(
+          `secant replayer: ${patch} needs a --add-dir directory\n`,
+        );
+        process.exit(3);
+      }
+      try {
+        execFileSync(
+          "git",
+          ["apply", "--whitespace=nowarn", join(caseDirectory, patch)],
+          { cwd },
+        );
+      } catch (error) {
+        process.stderr.write(
+          `secant replayer: git apply ${patch} failed: ${
+            error?.message ?? error
+          }\n`,
+        );
+        process.exit(3);
+      }
     }
   };
   if (Array.isArray(turn.steps)) {

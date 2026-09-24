@@ -462,3 +462,158 @@ for (const harness of ["claude-code", "codex"] as const) {
     assert.equal(readOutput(wired, run, "spec-ref"), "LIN-42");
   });
 }
+
+// [matt-remote-implement] The implementation stage for a remote tracker (#225). The
+// same `implement` Repeat as Local (#224): each iteration's fresh Session gets the one
+// Entry Turn, which tells the agent to reread the chosen tracker through its own tools,
+// state the chosen issue's URL or identifier before work, and never read another
+// tracker in its place. Secant reads no tracker status and keeps no frontier: the
+// only exits are Continue and a confirmed End Stage, whatever the agent reports.
+
+type Offers = RunView["actionOffers"];
+const offered = (offers: Offers, action: Offers[number]["action"]) =>
+  offers.some((offer) => offer.action === action);
+
+/** Plan and publish the tickets; the implementation Entry Turn then runs. */
+async function driveToImplement(
+  wired: Wiring,
+  digest: string,
+  harness: HarnessId,
+  tracker: string,
+): Promise<string> {
+  const { runId } = await driveToSpec(wired, digest, harness, tracker);
+  await submitAndSettle(wired, {
+    operationId: "op-approve-tickets",
+    operation: "end-interactive-step",
+    input: { runId, stepId: "plan-tickets" },
+  });
+  return runId;
+}
+
+const PLANNING = (specRef: string, tickets: string) => [
+  { reply: "Q1 - Who toggles it? Recommended: each user." },
+  { reply: `Published the spec: ${specRef}`, receipt: `${specRef}\n` },
+  { reply: "Proposed: 1. Toggle (none). 2. Persist (blocked by 1)." },
+  { reply: "Published 2 tickets.", receipt: tickets },
+];
+
+for (const harness of ["claude-code", "codex"] as const) {
+  for (const [tracker, specRef, tickets, reference, bullet] of [
+    [
+      "GitHub",
+      "https://github.com/example/app/issues/7",
+      TICKETS,
+      "https://github.com/example/app/issues/8",
+      /- GitHub: [\s\S]*native blocking relationships[\s\S]*by its issue URL/,
+    ],
+    [
+      "Linear",
+      "LIN-42",
+      "LIN-43\nLIN-44\n",
+      "LIN-43",
+      /- Any other tracker: [\s\S]*connected for it[\s\S]*tracker's own identifier/,
+    ],
+  ] as const) {
+    test(`[matt-remote-implement] [${harness}] each ${tracker} ticket gets a fresh Session that rereads the tracker; Continue and End Stage are the only exits (#225)`, async (t) => {
+      const agent = trackerAgent(harness, [
+        ...PLANNING(specRef, tickets),
+        { reply: `I chose ${reference}; it has no open blocker.` },
+        { reply: "The tests live beside the toggle." },
+        { reply: `I read ${tracker} again and chose the next ready ticket.` },
+      ]);
+      const { wired, digest } = wire(t, harness, agent.adapter);
+      const runId = await driveToImplement(wired, digest, harness, tracker);
+
+      // The Entry Turn names the chosen tracker, its published references, and the
+      // tracker's own bullet, and forbids a substitute tracker.
+      const entry = agent.inputs[4]!;
+      assert.ok(entry.startsWith("# Implement one ticket"), entry);
+      assert.ok(entry.includes(`the tracker I chose: ${tracker}.`), entry);
+      assert.ok(entry.includes(specRef), entry);
+      assert.ok(entry.includes(tickets.trimEnd()), entry);
+      assert.match(entry, /Read the tracker now/);
+      assert.match(entry, bullet);
+      assert.match(entry, /do not read another tracker in its place/);
+      assert.equal(RECEIPT_LINE.exec(entry), null);
+      let run = readRun(wired, runId);
+      assert.equal(run.state, "blocked");
+      assert.equal(run.progress[run.position]?.id, "implement");
+      assert.ok(offered(run.actionOffers, "continue-repeat"));
+      assert.ok(offered(run.actionOffers, "end-stage"));
+      assert.equal(offered(run.actionOffers, "end-interactive-step"), false);
+
+      // A later question stays in the ticket Session.
+      await submitAndSettle(wired, {
+        operationId: "op-question",
+        operation: "send-interactive-turn",
+        input: { runId, stepId: "implement", text: "Where are the tests?" },
+      });
+      assert.equal(agent.inputs[5], "Where are the tests?");
+
+      // Continue opens a fresh Session with the same rereading Entry Turn.
+      await submitAndSettle(wired, {
+        operationId: "op-continue",
+        operation: "continue-repeat",
+        input: { runId, stepId: "implement" },
+      });
+      assert.equal(agent.inputs[6], entry);
+      assert.equal(readRun(wired, runId).state, "blocked");
+
+      await submitAndSettle(wired, {
+        operationId: "op-end-stage",
+        operation: "end-stage",
+        input: { runId, stepId: "implement" },
+      });
+      run = readRun(wired, runId);
+      assert.equal(run.state, "succeeded");
+      assert.equal(run.completion, "human-declared");
+      assert.deepEqual(turnSessions(wired, runId).slice(4), [
+        ["interactive-agent", "implement-0.0:implement"],
+        ["interactive-agent", "implement-0.0:implement"],
+        ["interactive-agent", "implement-1.0:implement"],
+      ]);
+      // No frontier or status is stored: the outputs are the three references.
+      assert.deepEqual(run.outputs.map((output) => output.name).sort(), [
+        "spec-ref",
+        "tickets-ref",
+        "tracker",
+      ]);
+      assert.equal(readOutput(wired, run, "tickets-ref"), tickets.trimEnd());
+    });
+  }
+
+  test(`[matt-remote-implement] [${harness}] an unavailable tracker or empty frontier is reported and rests; nothing ends on the agent's word (#225)`, async (t) => {
+    const agent = trackerAgent(harness, [
+      ...PLANNING("LIN-42", "LIN-43\n"),
+      { reply: "Linear is not connected to my tools, so I cannot read it." },
+      { reply: "No ticket is ready: every ticket is done. End the stage." },
+    ]);
+    const { wired, digest } = wire(t, harness, agent.adapter);
+    const runId = await driveToImplement(wired, digest, harness, "Linear");
+
+    const rests = () => {
+      const run = readRun(wired, runId);
+      assert.equal(run.state, "blocked");
+      assert.equal(run.progress[run.position]?.id, "implement");
+      assert.ok(offered(run.actionOffers, "continue-repeat"));
+      assert.ok(offered(run.actionOffers, "end-stage"));
+      assert.equal(
+        run.timeline.some((event) => event.event === "stage-ended"),
+        false,
+      );
+    };
+    rests();
+    // Continue rereads in a fresh Session; an empty frontier rests the same way.
+    await submitAndSettle(wired, {
+      operationId: "op-continue",
+      operation: "continue-repeat",
+      input: { runId, stepId: "implement" },
+    });
+    rests();
+    assert.equal(agent.inputs[5], agent.inputs[4]);
+    assert.deepEqual(turnSessions(wired, runId).slice(4), [
+      ["interactive-agent", "implement-0.0:implement"],
+      ["interactive-agent", "implement-1.0:implement"],
+    ]);
+  });
+}

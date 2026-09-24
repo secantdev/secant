@@ -34,9 +34,16 @@ us says in this conversation ends the ticket or the stage.
   absolute path. Record progress by editing that file's `Status` line. Do not
   write planning files into the project Workspace, and never delete or rename a
   ticket file.
+- GitHub: the tickets are GitHub issues in this repository. Read them, their
+  labels, and their native blocking relationships with the tools available to
+  you. Name the chosen ticket by its issue URL. Record progress on that issue.
+- Any other tracker: read it through the tool connected for it, such as an MCP
+  server. Name the chosen ticket by the tracker's own identifier. Record progress
+  on that ticket.
 
 If no ticket is ready, or you cannot read the tracker, say so plainly and stop:
-do not start any other work. I decide what happens next.
+do not read another tracker in its place and do not start any other work. I
+decide what happens next.
 
 I may ask more questions in later messages of this same conversation. When I am
 finished with this ticket I press Continue, which does not close it: the next

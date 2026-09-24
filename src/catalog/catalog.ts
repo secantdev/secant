@@ -30,10 +30,12 @@ export interface WorkspaceApproval {
   readonly approvedAt: string; // ISO 8601
 }
 
-/** Where a Bundle came from. M6 adds `built-in`; M1 has only local origins. */
+/** Where a Bundle came from: a local build or file, or a Shipped Bundle the
+ *  named Secant release installed at startup (ADR 0029). */
 export type BundleOrigin =
   | { readonly kind: "local-build"; readonly folder: string }
-  | { readonly kind: "local-file"; readonly path: string };
+  | { readonly kind: "local-file"; readonly path: string }
+  | { readonly kind: "built-in"; readonly secantVersion: string };
 
 /** A recorded Installed Bundle. Its bytes live in the digest-named store. */
 export interface CatalogEntry {
@@ -174,7 +176,7 @@ const catalogEntryRow = z.object({
   id: z.string(),
   version: z.string(),
   digest: z.string(),
-  origin_kind: z.enum(["local-build", "local-file"]),
+  origin_kind: z.enum(["local-build", "local-file", "built-in"]),
   origin_location: z.string(),
   installed_at: z.string(),
   installation_generation: z.number(),
@@ -356,7 +358,9 @@ export function openCatalog(
     const origin: BundleOrigin =
       r.origin_kind === "local-build"
         ? { kind: "local-build", folder: r.origin_location }
-        : { kind: "local-file", path: r.origin_location };
+        : r.origin_kind === "local-file"
+          ? { kind: "local-file", path: r.origin_location }
+          : { kind: "built-in", secantVersion: r.origin_location };
     return {
       id: r.id,
       version: r.version,
@@ -428,10 +432,7 @@ export function openCatalog(
               version,
               digest: install.digest,
               origin_kind: install.origin.kind,
-              origin_location:
-                install.origin.kind === "local-build"
-                  ? install.origin.folder
-                  : install.origin.path,
+              origin_location: originLocation(install.origin),
               installed_at: install.installedAt.toISOString(),
               installation_generation: generation,
             })
@@ -580,4 +581,17 @@ export function openCatalog(
       database.close();
     },
   };
+}
+
+// The one text column a kind's location lives in: the folder, the file, or the
+// installing Secant version.
+function originLocation(origin: BundleOrigin): string {
+  switch (origin.kind) {
+    case "local-build":
+      return origin.folder;
+    case "local-file":
+      return origin.path;
+    case "built-in":
+      return origin.secantVersion;
+  }
 }

@@ -6,6 +6,7 @@ import test, { type TestContext } from "node:test";
 import { createApplication } from "../helpers/application.js";
 import { type HeadlessIO, runHeadless } from "../../src/headless/headless.js";
 import { openCatalog } from "../../src/catalog/catalog.js";
+import { buildBundle } from "../../src/bundle/bundle.js";
 import { openHeadlessHarness } from "../helpers/headlessHarness.js";
 import { makeTempDir } from "../helpers/tempDir.js";
 import type { HarnessProfile } from "../../src/harness/harness.js";
@@ -86,6 +87,7 @@ test("approve then show --json reports approved with the canonical path", async 
         .approvedAt,
     },
     installedBundleCount: 0,
+    startupNotices: [],
     harnesses: [],
     actionOffers: [],
   });
@@ -599,6 +601,63 @@ test("bundle list and inspect show a trusted Bundle once a grant is recorded", a
     h.stdout(),
     /Trust: trusted \(granted 2026-09-12T09:00:00\.000Z\)/,
   );
+});
+
+test("bundle list and inspect name a built-in's Secant release and app-release trust", async (t) => {
+  const h = await harness(t);
+  const built = buildBundle(proofBundle);
+  assert.ok(built.ok);
+  const file = join(makeTempDir("secant-headless-shipped-"), "proof.wfb");
+  writeFileSync(file, built.built.bytes);
+  assert.deepEqual(h.clients.ensureShippedBundles([file]), []);
+
+  assert.equal(await runHeadless(h.clients, ["bundle", "list"], h.io), 0);
+  assert.match(
+    h.stdout(),
+    /origin: Built-in, shipped with Secant 0\.0\.0-dev · in this release/,
+  );
+  assert.match(h.stdout(), /trust: trusted \(app release\)/);
+
+  h.reset();
+  assert.equal(
+    await runHeadless(
+      h.clients,
+      ["bundle", "inspect", "dev.secant.test-repair", "--json"],
+      h.io,
+    ),
+    0,
+  );
+  const focus = JSON.parse(h.stdout()) as Record<string, unknown>;
+  assert.deepEqual(focus.origin, {
+    kind: "built-in",
+    secantVersion: "0.0.0-dev",
+  });
+  assert.equal(focus.shippedWithRunningSecant, true);
+  assert.deepEqual(focus.trust, { state: "app-release" });
+});
+
+test("startup notices reach stderr before the command and leave its --json intact", async (t) => {
+  const h = await harness(t);
+  const clients = {
+    ...h.clients,
+    startupNotices: [
+      {
+        code: "shipped-bundle-not-installed",
+        explanation: "Secant could not install its built-in Bundle x.wfb.",
+        remediation: "Point SECANT_HOME at a fresh home.",
+        possibleEffects: "none" as const,
+      },
+    ],
+  };
+  assert.equal(
+    await runHeadless(clients, ["bundle", "list", "--json"], h.io),
+    0,
+  );
+  assert.match(
+    h.stderr(),
+    /^Notice \[shipped-bundle-not-installed\]: Secant could not install its built-in Bundle x\.wfb\.\nRemediation: Point SECANT_HOME at a fresh home\.\n$/,
+  );
+  assert.equal(JSON.parse(h.stdout()).family, "bundle-catalog");
 });
 
 test("bundle list with nothing installed says so", async (t) => {

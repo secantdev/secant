@@ -1,4 +1,5 @@
 import type {
+  BundleOriginView,
   BundleTrustState,
   EngineRange,
   ExecutionSummary,
@@ -26,7 +27,7 @@ export function renderRow(bundle: InstalledBundleSummary): string {
     `${bundle.id}@${bundle.version} [${bundle.stability}]`,
     `  name: ${bundle.name}`,
     `  digest: sha256:${bundle.digest}`,
-    `  origin: ${bundle.origin.kind} ${bundle.origin.location}`,
+    `  origin: ${renderOrigin(bundle.origin, bundle.shippedWithRunningSecant)}`,
     `  platforms: ${bundle.platforms.join(", ")}`,
     `  engine: ${renderEngine(bundle.engine)}`,
     `  trust: ${renderTrust(bundle.trust)}`,
@@ -40,7 +41,7 @@ export function renderFocus(bundle: InstalledBundleFocus): string {
     `Name: ${bundle.name}`,
     `Description: ${bundle.description}`,
     `Digest: sha256:${bundle.digest}`,
-    `Origin: ${bundle.origin.kind} ${bundle.origin.location}`,
+    `Origin: ${renderOrigin(bundle.origin, bundle.shippedWithRunningSecant)}`,
     `Platforms: ${bundle.platforms.join(", ")}`,
     `Engine: ${renderEngine(bundle.engine)}`,
     `Trust: ${renderTrust(bundle.trust)}`,
@@ -516,6 +517,15 @@ function renderExecutionSummary(summary: ExecutionSummary): string[] {
 
 function renderEngine(engine: EngineRange): string {
   return engine.satisfied ? engine.range : `${engine.range} (${engine.note})`;
+}
+
+function renderOrigin(
+  origin: BundleOriginView,
+  shippedWithRunningSecant: boolean,
+): string {
+  if (origin.kind !== "built-in") return `${origin.kind} ${origin.location}`;
+  const marker = shippedWithRunningSecant ? " · in this release" : "";
+  return `Built-in, shipped with Secant ${origin.secantVersion}${marker}`;
 }
 
 function renderTrust(trust: BundleTrustState): string {

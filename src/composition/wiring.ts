@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   type RunExecution,
   type RunInteractiveStep,
 } from "../application/application.js";
+import type { Problem } from "../application/projection-port.js";
 import { openCatalog, type Catalog } from "../catalog/catalog.js";
 import {
   DEFAULT_BUDGETS,
@@ -101,11 +102,34 @@ export interface WiringOverrides {
   readonly discoverClaudeCode?: () => HarnessDiscovery;
   /** Deterministic Codex discovery for tests. */
   readonly discoverCodex?: () => HarnessDiscovery;
+  /** Where the Shipped Bundle `.wfb` files are read from. Production reads the
+   *  `builtin/` asset directory `scripts/build.ts` embeds beside the entry module. */
+  readonly shippedBundleDir?: string;
 }
 
 export interface Wiring extends Application {
   readonly catalog: Catalog;
   readonly runGroup: RunGroup;
+  /** The startup ensure's notices, one per Shipped Bundle it could not install. */
+  readonly startupNotices: readonly Problem[];
+}
+
+// The Shipped Bundles embedded in the compiled binary (ADR 0029 amended by ADR
+// 0030): `scripts/build.ts` embeds `dist/builtin` as the `builtin/` asset directory
+// beside the entry module, read through `node:fs` with no Bun API. Under
+// `bun src/cli/main.ts` and in tests the directory does not exist, so there are
+// zero Shipped Bundles and nothing is reported.
+function shippedBundleFiles(dir: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((name) => name.endsWith(".wfb"))
+    .sort()
+    .map((name) => join(dir, name));
 }
 
 /** Resolves the Secant home, opens the Catalog and the launch Workspace's Run
@@ -172,7 +196,14 @@ export function wireApplication(overrides: WiringOverrides = {}): Wiring {
         prepareRunInteractiveStep:
           makePrepareRunInteractiveStep(harnessRegistry),
       });
-      return { catalog, runGroup, ...application };
+      // Every startup, in both roots, before either client reads (ADR 0029). A
+      // failure is a notice, never a thrown startup error.
+      const startupNotices = application.ensureShippedBundles(
+        shippedBundleFiles(
+          overrides.shippedBundleDir ?? join(import.meta.dirname, "builtin"),
+        ),
+      );
+      return { catalog, runGroup, startupNotices, ...application };
     } catch (error) {
       runGroup.close();
       throw error;

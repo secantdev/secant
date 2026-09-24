@@ -50,6 +50,9 @@ export interface BundleCatalogDependencies {
   readonly budgets: Budgets;
   /** The running Secant engine version, for the "needs Secant ≥" note. */
   readonly engineVersion: string;
+  /** The digests the running Secant ships (the startup ensure's result), for the
+   *  catalog's shipped marker. */
+  readonly shipped?: ReadonlySet<string>;
   /** The platform the Execution summary resolves commands for; the host when it
    *  is a supported platform, else the Bundle's first supported platform. */
   readonly hostPlatform?: Platform;
@@ -179,6 +182,9 @@ function summaryOf(
     name: bundle.name,
     description: bundle.description,
     origin: originView(entry.origin),
+    shippedWithRunningSecant:
+      entry.origin.kind === "built-in" &&
+      (deps.shipped?.has(entry.digest) ?? false),
     stability:
       semver.prerelease(entry.version) === null ? "stable" : "prerelease",
     platforms: inspection.platforms,
@@ -189,20 +195,20 @@ function summaryOf(
 
 // Trust is read from the Catalog's recorded grant for this exact installed
 // digest (#78), never derived from anything the Bundle declares. No grant reads
-// as not-yet-trusted; External Bundles have no other trust in M1/M2, and
-// built-in `app-release` trust lands with M6 origins.
+// as not-yet-trusted. A built-in's grant is the one the startup ensure recorded,
+// so it reads as the app-release trust it carries (ADR 0029).
 function trustState(catalog: Catalog, entry: CatalogEntry): BundleTrustState {
   const grant = catalog.getTrustGrant(
     entry.digest,
     entry.installationGeneration,
   );
-  return grant === undefined
-    ? { state: "not-yet-trusted" }
-    : {
-        state: "trusted",
-        operationId: grant.operationId,
-        grantedAt: grant.grantedAt,
-      };
+  if (grant === undefined) return { state: "not-yet-trusted" };
+  if (entry.origin.kind === "built-in") return { state: "app-release" };
+  return {
+    state: "trusted",
+    operationId: grant.operationId,
+    grantedAt: grant.grantedAt,
+  };
 }
 
 function focusOf(
@@ -245,10 +251,16 @@ function focusOf(
   };
 }
 
-function originView(origin: BundleOrigin): BundleOriginView {
-  return origin.kind === "local-build"
-    ? { kind: "local-build", location: origin.folder }
-    : { kind: "local-file", location: origin.path };
+/** The client view of an Entry's origin; the Execution summary shares it. */
+export function originView(origin: BundleOrigin): BundleOriginView {
+  switch (origin.kind) {
+    case "local-build":
+      return { kind: "local-build", location: origin.folder };
+    case "local-file":
+      return { kind: "local-file", location: origin.path };
+    case "built-in":
+      return { kind: "built-in", secantVersion: origin.secantVersion };
+  }
 }
 
 function launchInputViews(

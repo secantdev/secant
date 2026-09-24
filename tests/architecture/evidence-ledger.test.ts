@@ -39,6 +39,7 @@ const PROCESS_FREE_MARKER_EXCEPTIONS = new Set([
   "tests/application/bundle-install.test.ts",
   "tests/application/harness-catalog.test.ts",
   "tests/application/projection-port.test.ts",
+  "tests/application/shipped-bundles.test.ts",
 ]);
 
 const SUBPROCESS_SOURCE_PATTERNS = [

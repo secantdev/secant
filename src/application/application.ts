@@ -36,7 +36,14 @@ import {
 import { createHarnessCatalog } from "./harness-catalog.js";
 import { createLaunchPreparation } from "./launch-preparation.js";
 import type { BundleManagement } from "./bundle-management.js";
-import { createBundleManagement } from "./build-bundle.js";
+import {
+  createBundleManagement,
+  type BundleManagementDependencies,
+} from "./build-bundle.js";
+import {
+  ensureShippedBundles,
+  type ShippedBundleEnsure,
+} from "./shipped-bundles.js";
 import {
   deriveRun,
   deriveRunFacts,
@@ -329,6 +336,12 @@ export interface ApplicationDependencies {
 export interface Application {
   readonly projectionPort: ProjectionPort;
   readonly bundleManagement: BundleManagement;
+  /** The startup ensure (ADR 0029): install each embedded Shipped Bundle `.wfb`
+   *  through ordinary ingestion as a built-in of this engine version with
+   *  app-release trust. Never throws; returns one notice per file it could not
+   *  install, which the `workspace` Projection also carries. Composition calls it
+   *  once, before either client reads. */
+  ensureShippedBundles(files: readonly string[]): readonly Problem[];
   /** Release Runs already blocked without changing their rest, then abort every
    *  running Run and await settlement. Composition calls this from its OS-signal
    *  handler before teardown, so no prepared Harness or child is left running. */
@@ -400,10 +413,18 @@ export function createApplication(deps: ApplicationDependencies): Application {
     readonly resumable: boolean;
     readonly before?: string;
   }>();
+  // Filled once by the startup ensure; empty until then (and in tests that skip it).
+  let shippedBundles: ShippedBundleEnsure = {
+    shipped: new Set(),
+    notices: [],
+  };
   const bundleCatalog: BundleCatalogDependencies = {
     catalog,
     budgets,
     engineVersion: deps.engineVersion ?? "0.0.0-dev",
+    get shipped() {
+      return shippedBundles.shipped;
+    },
     ...(deps.hostPlatform !== undefined
       ? { hostPlatform: deps.hostPlatform }
       : {}),
@@ -440,6 +461,7 @@ export function createApplication(deps: ApplicationDependencies): Application {
         ? { state: "approved", approvedAt: approval.approvedAt }
         : { state: "unapproved" },
       installedBundleCount: catalog.countInstalledBundles(),
+      startupNotices: shippedBundles.notices,
       harnesses: harnessChoices,
       actionOffers: approval
         ? []
@@ -2850,21 +2872,31 @@ export function createApplication(deps: ApplicationDependencies): Application {
     );
   }
 
+  const bundleManagementDeps: BundleManagementDependencies = {
+    catalog,
+    budgets: bundleCatalog.budgets,
+    onInstalled() {
+      // A fresh install changes the list; push the new snapshot to observers.
+      if (bundleCatalogObservers.size === 0) return;
+      const snapshot = listSnapshot(bundleCatalog);
+      for (const observer of bundleCatalogObservers) {
+        observer.push({ kind: "durable", snapshot });
+      }
+    },
+  };
+
   return {
     projectionPort,
     shutdown,
-    bundleManagement: createBundleManagement({
-      catalog,
-      budgets: bundleCatalog.budgets,
-      onInstalled() {
-        // A fresh install changes the list; push the new snapshot to observers.
-        if (bundleCatalogObservers.size === 0) return;
-        const snapshot = listSnapshot(bundleCatalog);
-        for (const observer of bundleCatalogObservers) {
-          observer.push({ kind: "durable", snapshot });
-        }
-      },
-    }),
+    bundleManagement: createBundleManagement(bundleManagementDeps),
+    ensureShippedBundles(files) {
+      shippedBundles = ensureShippedBundles(
+        bundleManagementDeps,
+        files,
+        bundleCatalog.engineVersion,
+      );
+      return shippedBundles.notices;
+    },
   };
 }
 

@@ -70,6 +70,7 @@ function approvedWorkspace(): WorkspaceView {
     path: WORKSPACE,
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
     installedBundleCount: 1,
+    startupNotices: [],
     harnesses: [],
     actionOffers: [],
   });
@@ -84,6 +85,7 @@ const BUNDLE: InstalledBundleFocus = {
   name: "Alpha Flow",
   description: "A flow.",
   origin: { kind: "local-file", location: "/bundles/x.wfb" },
+  shippedWithRunningSecant: false,
   stability: "stable",
   platforms: ["linux"],
   engine: { range: ">=0.1.0", satisfied: true },

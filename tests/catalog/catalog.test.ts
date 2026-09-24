@@ -513,3 +513,17 @@ test("a Catalog opened without an asset reader derives an empty tree", async (t)
   assert.ok(root !== undefined);
   assert.deepEqual(readdirSync(root), []);
 });
+
+test("a built-in origin keeps its installing Secant version across a reopen", async (t) => {
+  const home = makeTempDir("secant-catalog-");
+  const origin: BundleOrigin = { kind: "built-in", secantVersion: "1.2.3" };
+  const first = openCatalog(home);
+  first.installBundle(
+    install("io.example.shipped", "1.0.0", new Uint8Array([7]), origin),
+  );
+  first.close();
+
+  const reopened = openCatalog(home);
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.listEntries()[0]?.origin, origin);
+});

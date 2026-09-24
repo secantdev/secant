@@ -30,8 +30,14 @@ export {
 export async function withClients<T>(
   fn: (clients: HeadlessClients) => T | Promise<T>,
 ): Promise<Awaited<T>> {
-  const { catalog, runGroup, projectionPort, bundleManagement, shutdown } =
-    wireApplication();
+  const {
+    catalog,
+    runGroup,
+    projectionPort,
+    bundleManagement,
+    shutdown,
+    startupNotices,
+  } = wireApplication();
   const signals: NodeJS.Signals[] = ["SIGINT", "SIGHUP", "SIGTERM"];
   let signalled = false;
   const onSignal = (signal: NodeJS.Signals): void => {
@@ -48,7 +54,7 @@ export async function withClients<T>(
   };
   for (const signal of signals) process.on(signal, onSignal);
   try {
-    return await fn({ projectionPort, bundleManagement });
+    return await fn({ projectionPort, bundleManagement, startupNotices });
   } finally {
     for (const signal of signals) process.off(signal, onSignal);
     // A signal handler already closed the stores (and is re-raising); closing again

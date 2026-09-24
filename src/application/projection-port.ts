@@ -359,6 +359,10 @@ export interface WorkspaceSnapshot {
   readonly path: string;
   readonly approval: WorkspaceApprovalState;
   readonly installedBundleCount: number;
+  /** One notice per Shipped Bundle the startup ensure could not install, naming
+   *  cause and remedy; Secant still starts and every other Bundle stays usable
+   *  (ADR 0029). Empty when every Shipped Bundle is installed. */
+  readonly startupNotices: readonly Problem[];
   /** The closed semantic Harness choices this Secant build can launch. Adapter
    *  objects, native capabilities, executable paths, and native identifiers stay
    *  behind composition; clients receive only stable choice facts. */
@@ -514,10 +518,10 @@ export type BundleStability = "stable" | "prerelease";
 
 /** Where a Bundle came from. Advisory provenance, never a runtime dependency;
  *  the managed store path is not this and never crosses. */
-export interface BundleOriginView {
-  readonly kind: "local-build" | "local-file";
-  readonly location: string;
-}
+export type BundleOriginView =
+  | { readonly kind: "local-build" | "local-file"; readonly location: string }
+  /** A Shipped Bundle, with the Secant release that installed it (ADR 0029). */
+  | { readonly kind: "built-in"; readonly secantVersion: string };
 
 /** The Bundle's engine range and whether the running engine satisfies it. */
 export interface EngineRange {
@@ -548,6 +552,9 @@ export interface InstalledBundleSummary {
   readonly name: string;
   readonly description: string;
   readonly origin: BundleOriginView;
+  /** This exact identity and digest ships inside the running Secant (ADR 0029's
+   *  catalog marker); false for every other row, including older built-ins. */
+  readonly shippedWithRunningSecant: boolean;
   readonly stability: BundleStability;
   readonly platforms: readonly BundlePlatform[];
   readonly engine: EngineRange;

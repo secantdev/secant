@@ -73,6 +73,7 @@ function approvedWorkspace(
     path: WORKSPACE,
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
     installedBundleCount: 2,
+    startupNotices: [],
     harnesses,
     actionOffers: [],
   });
@@ -92,6 +93,7 @@ function focus(
     name: over.name ?? over.id,
     description: over.description ?? "A bundle.",
     origin: over.origin ?? { kind: "local-file", location: "/bundles/x.wfb" },
+    shippedWithRunningSecant: over.shippedWithRunningSecant ?? false,
     stability: over.stability ?? "stable",
     platforms: over.platforms ?? ["linux"],
     engine: over.engine ?? { range: ">=0.1.0", satisfied: true },

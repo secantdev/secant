@@ -30,6 +30,7 @@ import { useExit } from "./vendor/exit.js";
 import { useDialog } from "./vendor/dialog.js";
 import { useTheme } from "./vendor/theme-context.js";
 import { useWorkspaceView } from "./workspace-view.js";
+import { formatOrigin } from "./bundle-format.js";
 
 // Pure presentational leaves and step components for the Start-a-Run flow. The draft
 // signal, step transitions, refusal routing, and the interleaved key dispatcher stay
@@ -347,7 +348,7 @@ function SidePanel(props: {
           <box flexDirection="column" flexShrink={0}>
             <text fg={theme.textMuted}>Source</text>
             <text fg={theme.text}>
-              {`${bundle().origin.kind} ${bundle().origin.location}`}
+              {formatOrigin(bundle().origin, bundle().shippedWithRunningSecant)}
             </text>
           </box>
           <box flexDirection="column" flexShrink={0}>

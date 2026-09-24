@@ -570,9 +570,11 @@ try {
         env: workspaceEnv,
       }),
     );
-    if (afterInstall.installedBundleCount !== 1) {
+    // The Proof Bundle plus the built-ins every startup ensures (#227).
+    const expectedCount = 1 + readLock().length;
+    if (afterInstall.installedBundleCount !== expectedCount) {
       throw new Error(
-        `Home reported ${afterInstall.installedBundleCount} Installed Bundles instead of 1.`,
+        `Home reported ${afterInstall.installedBundleCount} Installed Bundles instead of ${expectedCount}.`,
       );
     }
 
@@ -957,7 +959,7 @@ try {
     headlessRefusalFixturesScenario,
   );
 
-  async function shippedBundlesEmbeddedScenario(): Promise<string> {
+  async function shippedBundlesEmbeddedScenario(): Promise<void> {
     // The Shipped Bundles (#226, ADR 0029 amended by ADR 0030): this OS's copy of the
     // binary rebuilds every allow-listed folder through the ordinary `bundle build`
     // to exactly the locked digest, and carries those exact bytes embedded. The
@@ -997,26 +999,196 @@ try {
         "The compiled binary embeds the Test Repair Proof Bundle, which must stay External.",
       );
     }
-    const matt = built.find((bundle) => bundle.id === "dev.secant.matt-front");
-    if (matt === undefined) {
-      throw new Error("The Matt Bundle is not a Shipped Bundle.");
-    }
-    return matt.output;
   }
 
-  const mattFrontWfb = await runNamedScenario(
+  await runNamedScenario(
     "shipped-bundles-embedded",
     shippedBundlesEmbeddedScenario,
   );
 
-  async function mattFrontRefusalScenario(): Promise<void> {
-    // The embedded Matt built-in's exact bytes, installed through ordinary ingestion
-    // (nothing in target source names its id), then refused headlessly with the exact
-    // interactive-step-needs-tui code AND its remediation.
-    run(binary, ["bundle", "install", mattFrontWfb], {
+  async function shippedBundlesStartupScenario(): Promise<void> {
+    // The startup ensure from this OS's copied binary (#227, ADR 0029 Installation):
+    // a first startup against a fresh SECANT_HOME installs every embedded built-in
+    // through ordinary ingestion with origin built-in and app-release trust, a
+    // second startup changes no row, a same-identity import follows the ordinary
+    // collision naming the built-in, another version installs beside it, and an
+    // ensure blocked by a pre-seeded identity is a notice that blocks nothing.
+    const home = join(smokeRoot, "shipped-home");
+    const env = homeEnv(home);
+    const matt = readLock().find(
+      (entry) => entry.id === "dev.secant.matt-front",
+    );
+    if (matt === undefined) throw new Error("The Matt Bundle is not locked.");
+    const catalogRows = (): string => {
+      const database = new Database(join(home, "catalog.db"));
+      try {
+        return JSON.stringify([
+          database.query("SELECT * FROM catalog_entries").all(),
+          database.query("SELECT * FROM trust_grants").all(),
+        ]);
+      } finally {
+        database.close();
+      }
+    };
+    type Row = {
+      id: string;
+      version: string;
+      digest: string;
+      origin: { kind: string; secantVersion?: string };
+      shippedWithRunningSecant: boolean;
+      trust: { state: string };
+    };
+    const list = (listEnv = env): Row[] =>
+      JSON.parse(
+        run(binary, ["bundle", "list", "--json"], {
+          cwd: smokeRoot,
+          env: listEnv,
+        }),
+      ).result.bundles;
+
+    const first = list();
+    const expected = readLock().map(({ id, version, digest }) => ({
+      id,
+      version,
+      digest,
+      origin: { kind: "built-in", secantVersion: pkg.version },
+      shippedWithRunningSecant: true,
+      trust: { state: "app-release" },
+    }));
+    const shown = first.map(
+      ({ id, version, digest, origin, shippedWithRunningSecant, trust }) => ({
+        id,
+        version,
+        digest,
+        origin,
+        shippedWithRunningSecant,
+        trust,
+      }),
+    );
+    if (JSON.stringify(shown) !== JSON.stringify(expected)) {
+      throw new Error(
+        `The first startup did not install exactly the locked built-ins as built-in app-release Bundles: ${JSON.stringify(shown)}`,
+      );
+    }
+    const focus = JSON.parse(
+      run(
+        binary,
+        ["bundle", "inspect", `${matt.id}@${matt.version}`, "--json"],
+        {
+          cwd: smokeRoot,
+          env,
+        },
+      ),
+    ) as Row;
+    if (focus.digest !== matt.digest || focus.origin.kind !== "built-in") {
+      throw new Error(
+        `bundle inspect did not show the installed built-in's exact identity: ${JSON.stringify(focus)}`,
+      );
+    }
+
+    const before = catalogRows();
+    list();
+    if (catalogRows() !== before) {
+      throw new Error("A second startup changed the built-in's Catalog rows.");
+    }
+
+    // Byte-different and version-bumped copies of the Matt authoring folder.
+    const mattFolder = SHIPPED_BUNDLE_FOLDERS.find((folder) =>
+      folder.endsWith("matt-front-spec"),
+    );
+    if (mattFolder === undefined) throw new Error("No Matt authoring folder.");
+    const variant = async (name: string, version?: string): Promise<string> => {
+      const folder = join(smokeRoot, name);
+      await cp(join(projectRoot, mattFolder), folder, { recursive: true });
+      const manifestPath = join(folder, "manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      manifest.bundle.description += " (package-smoke variant)";
+      if (version !== undefined) manifest.bundle.version = version;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+      const output = join(smokeRoot, `${name}.wfb`);
+      run(
+        binary,
+        ["bundle", "build", folder, "--no-install", "--output", output],
+        {
+          cwd: smokeRoot,
+          env,
+        },
+      );
+      return output;
+    };
+    const sameIdentity = await variant("matt-collision");
+    const collision = spawnSync(binary, ["bundle", "install", sameIdentity], {
       cwd: smokeRoot,
-      env: workspaceEnv,
+      encoding: "utf8",
+      env,
     });
+    if (collision.error) throw collision.error;
+    if (
+      collision.status === 0 ||
+      !collision.stderr.includes("bundle-identity-collision") ||
+      !collision.stderr.includes("built-in shipped with Secant")
+    ) {
+      throw new Error(
+        `A byte-different import of the built-in's identity was not the collision naming the built-in: ${collision.stdout}\n${collision.stderr}`,
+      );
+    }
+    run(binary, ["bundle", "install", await variant("matt-older", "0.9.0")], {
+      cwd: smokeRoot,
+      env,
+    });
+    const versions = list()
+      .filter((row) => row.id === matt.id)
+      .map((row) => `${row.version}:${row.origin.kind}`);
+    if (versions.join(" ") !== `${matt.version}:built-in 0.9.0:local-file`) {
+      throw new Error(
+        `Another version did not install beside the built-in: ${versions.join(" ")}`,
+      );
+    }
+
+    // A home whose built-in identity another Bundle already holds, seeded through
+    // the source CLI (no embedded directory, so no ensure): the binary's ensure
+    // collides, names cause and remedy on stderr, and the command still succeeds.
+    const blockedHome = join(smokeRoot, "blocked-home");
+    const blockedEnv = homeEnv(blockedHome);
+    run(
+      process.execPath,
+      [
+        join(projectRoot, "src", "cli", "main.ts"),
+        "bundle",
+        "install",
+        sameIdentity,
+      ],
+      { cwd: smokeRoot, env: blockedEnv },
+    );
+    const blocked = spawnSync(binary, ["bundle", "list", "--json"], {
+      cwd: smokeRoot,
+      encoding: "utf8",
+      env: blockedEnv,
+    });
+    if (blocked.error) throw blocked.error;
+    const blockedRows = JSON.parse(blocked.stdout).result.bundles as Row[];
+    if (
+      blocked.status !== 0 ||
+      !blocked.stderr.includes("Notice [shipped-bundle-not-installed]") ||
+      !blocked.stderr.includes("Remediation:") ||
+      blockedRows.length !== 1 ||
+      blockedRows[0]?.origin.kind !== "local-file"
+    ) {
+      throw new Error(
+        `A blocked ensure did not surface a notice while the other Bundle stayed usable: ${blocked.stdout}\n${blocked.stderr}`,
+      );
+    }
+  }
+
+  await runNamedScenario(
+    "shipped-bundles-startup",
+    shippedBundlesStartupScenario,
+  );
+
+  async function mattFrontRefusalScenario(): Promise<void> {
+    // The Matt built-in the startup ensure installed into this home (no explicit
+    // install: nothing in target source names its id), refused headlessly with the
+    // exact interactive-step-needs-tui code AND its remediation.
     {
       const refused = spawnSync(
         binary,

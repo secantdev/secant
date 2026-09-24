@@ -119,6 +119,7 @@ function workspace(): WorkspaceView {
     path: "/tmp/secant-demo-workspace",
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
     installedBundleCount: 2,
+    startupNotices: [],
     harnesses: [],
     actionOffers: [],
   });

@@ -11,6 +11,7 @@ import type {
   BundleInstallResult,
   BundleOrigin,
   Catalog,
+  CatalogEntry,
 } from "../catalog/catalog.js";
 import type { CompositionFinding } from "../workflow/workflow.js";
 import type {
@@ -36,32 +37,34 @@ export interface BundleManagementDependencies {
   readonly onInstalled?: () => void;
 }
 
+/** The one ordinary ingestion every install takes — a build, a received file,
+ *  and a Shipped Bundle at startup alike: validate the exact bytes, then commit
+ *  them first-install-wins under `origin`. */
+export function installBytes(
+  deps: BundleManagementDependencies,
+  bytes: Uint8Array,
+  origin: BundleOrigin,
+  extra: Partial<BundleReport> = {},
+): BundleResult {
+  const outcome = readBundle(bytes, deps.budgets);
+  if (!outcome.ok)
+    return {
+      ok: false,
+      problem:
+        "composition" in outcome
+          ? compositionProblem(outcome.composition)
+          : toProblem(outcome.finding, outcome.findings),
+    };
+  const result = commit(deps.catalog, outcome.read, bytes, origin, extra);
+  if (result.ok && result.report.installed?.status === "installed") {
+    deps.onInstalled?.();
+  }
+  return result;
+}
+
 export function createBundleManagement(
   deps: BundleManagementDependencies,
 ): BundleManagement {
-  const { catalog, budgets } = deps;
-
-  function installBytes(
-    bytes: Uint8Array,
-    origin: BundleOrigin,
-    extra: Partial<BundleReport>,
-  ): BundleResult {
-    const outcome = readBundle(bytes, budgets);
-    if (!outcome.ok)
-      return {
-        ok: false,
-        problem:
-          "composition" in outcome
-            ? compositionProblem(outcome.composition)
-            : toProblem(outcome.finding, outcome.findings),
-      };
-    const result = commit(catalog, outcome.read, bytes, origin, extra);
-    if (result.ok && result.report.installed?.status === "installed") {
-      deps.onInstalled?.();
-    }
-    return result;
-  }
-
   return {
     build(folder: string, options: BundleBuildOptions): BundleResult {
       if (options.noInstall && options.output === undefined) {
@@ -105,6 +108,7 @@ export function createBundleManagement(
         };
       }
       return installBytes(
+        deps,
         built.built.bytes,
         { kind: "local-build", folder },
         extra,
@@ -118,7 +122,7 @@ export function createBundleManagement(
       } catch (error) {
         return { ok: false, problem: fileUnreadable(file, error) };
       }
-      return installBytes(bytes, { kind: "local-file", path: file }, {});
+      return installBytes(deps, bytes, { kind: "local-file", path: file });
     },
   };
 }
@@ -146,7 +150,7 @@ function commit(
   if (result.outcome === "identity-collision") {
     return {
       ok: false,
-      problem: identityCollision(read, result.existing.digest),
+      problem: identityCollision(read, result.existing),
     };
   }
   return {
@@ -208,15 +212,27 @@ function compositionProblem(findings: readonly CompositionFinding[]): Problem {
   };
 }
 
-function identityCollision(read: ReadBundle, installedDigest: string): Problem {
+function identityCollision(read: ReadBundle, existing: CatalogEntry): Problem {
   const { id, version } = read.identity;
+  // A built-in cannot be removed in v1, so the usual "remove the installed one"
+  // remedy does not exist for it (ADR 0029 Upgrade and coexistence).
+  const builtIn =
+    existing.origin.kind === "built-in" ? existing.origin : undefined;
   return {
     code: "bundle-identity-collision",
-    explanation: `A different ${id}@${version} is already installed; identities are first-install-wins.`,
-    remediation:
-      "Bump bundle.version to install this as a new identity, or remove the installed one first.",
+    explanation: builtIn
+      ? `A different ${id}@${version} is already installed as a built-in shipped with Secant ${builtIn.secantVersion}; identities are first-install-wins.`
+      : `A different ${id}@${version} is already installed; identities are first-install-wins.`,
+    remediation: builtIn
+      ? "Built-in Bundles cannot be removed in this version; bump bundle.version to install this as a new identity."
+      : "Bump bundle.version to install this as a new identity, or remove the installed one first.",
     possibleEffects: "none",
-    details: { id, version, installedDigest, incomingDigest: read.digest },
+    details: {
+      id,
+      version,
+      installedDigest: existing.digest,
+      incomingDigest: read.digest,
+    },
   };
 }
 

@@ -46,16 +46,20 @@ function unapproved(): WorkspaceSnapshot {
     path: PATH,
     approval: { state: "unapproved" },
     installedBundleCount: 0,
+    startupNotices: [],
     harnesses: [],
     actionOffers: [{ action: "approve-workspace", input: { path: PATH } }],
   };
 }
-function approved(): WorkspaceSnapshot {
+function approved(
+  startupNotices: WorkspaceSnapshot["startupNotices"] = [],
+): WorkspaceSnapshot {
   return {
     family: "workspace",
     path: PATH,
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
     installedBundleCount: 0,
+    startupNotices,
     harnesses: [],
     actionOffers: [],
   };
@@ -145,8 +149,9 @@ async function mount(width = 60, height = 16) {
 async function mountApproved(
   liveRunCount: number,
   suppliedRunList?: RunListView,
+  startupNotices: WorkspaceSnapshot["startupNotices"] = [],
 ) {
-  const [snapshot] = createSignal<WorkspaceSnapshot>(approved());
+  const [snapshot] = createSignal<WorkspaceSnapshot>(approved(startupNotices));
   const view: WorkspaceView = { snapshot, approve() {} };
   const runList: RunListView = suppliedRunList ?? {
     openRunList: () => ({
@@ -235,6 +240,23 @@ test("Ctrl+C on the approval dialog declines and exits", async () => {
   t.mockInput.pressCtrlC();
   await t.waitFor(() => exits.length > 0);
   assert.deepEqual(exits, ["declined"]);
+});
+
+test("Home shows a failed Shipped Bundle ensure's cause and remedy and stays usable", async () => {
+  const { t, exits } = await mountApproved(0, undefined, [
+    {
+      code: "shipped-bundle-not-installed",
+      explanation: "Secant could not install its built-in Bundle x.wfb.",
+      remediation: "Point SECANT_HOME at a fresh home.",
+      possibleEffects: "none",
+    },
+  ]);
+  const frame = t.captureCharFrame();
+  assert.match(frame, /Notice: Secant could not install its built-in Bundle/);
+  assert.match(frame, /Point SECANT_HOME at a fresh home\./);
+  assert.match(frame, /Start a Run/);
+  t.mockInput.pressKey("q");
+  await t.waitFor(() => exits.length === 1);
 });
 
 test("q quits immediately with no live Runs", async () => {

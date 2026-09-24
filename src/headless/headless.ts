@@ -30,6 +30,9 @@ import { registerHarnessCommands } from "./harness-commands.js";
 export interface HeadlessClients {
   readonly projectionPort: ProjectionPort;
   readonly bundleManagement: BundleManagement;
+  /** The Shipped Bundle startup ensure's notices (ADR 0029). Each command prints
+   *  them to stderr before it runs, leaving stdout and its `--json` untouched. */
+  readonly startupNotices?: readonly Problem[];
 }
 
 export interface HeadlessIO {
@@ -98,9 +101,18 @@ export async function runHeadlessCli(
 function buildProgram(
   io: HeadlessIO,
   version: string,
-  execute: CommandExecutor,
+  wired: CommandExecutor,
 ): { program: Command; state: { code: number } } {
   const state = { code: 0 };
+  // A failed Shipped Bundle ensure never blocks the command: it is a notice.
+  const execute: CommandExecutor = (run) =>
+    wired((clients) => {
+      for (const notice of clients.startupNotices ?? []) {
+        io.err(`Notice [${notice.code}]: ${notice.explanation}\n`);
+        io.err(`Remediation: ${notice.remediation}\n`);
+      }
+      return run(clients);
+    });
   // An action returns the executor's result; when it is a Promise, return it so
   // `parseAsync` awaits it, otherwise set the exit code synchronously for `parse`.
   const settle = (result: number | Promise<number>): void | Promise<void> => {

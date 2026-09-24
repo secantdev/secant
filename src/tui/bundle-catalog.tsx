@@ -15,6 +15,7 @@ import {
 } from "./catalog-navigation.js";
 import { Panel, PanelGroup } from "./vendor/panels.js";
 import { useTheme } from "./vendor/theme-context.js";
+import { formatOrigin } from "./bundle-format.js";
 
 // One read-only Workflow Bundles catalog over the existing list/focus
 // Projections. Its two-pane shape is reduced from OpenCode's diff viewer and its
@@ -147,7 +148,10 @@ export function BundleCatalog(props: {
                         title={entry.bundle.name}
                         details={[
                           `${entry.bundle.id}@${entry.bundle.version}`,
-                          `${entry.bundle.origin.kind} ${entry.bundle.origin.location}`,
+                          formatOrigin(
+                            entry.bundle.origin,
+                            entry.bundle.shippedWithRunningSecant,
+                          ),
                         ]}
                         selected={entry.index === activeEntry()?.index}
                         focused={pane() === "list"}
@@ -236,8 +240,7 @@ function filterBundles(
         bundle.name,
         bundle.id,
         bundle.description,
-        bundle.origin.kind,
-        bundle.origin.location,
+        formatOrigin(bundle.origin),
       ].some((value) => value.toLocaleLowerCase().includes(needle));
     });
 }

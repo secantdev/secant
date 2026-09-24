@@ -60,6 +60,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `deriveRun`'s walk assumes `attempt_log` holds only per-Step Attempts, but the Run Store already appends the reconciliation `indeterminate` marker row
   there (see `store/AGENTS.md`). The marker is harmless only because its outcome is not `succeeded`, not because the walk excludes it — keep that true if
   you add marker rows.
+- App-release trust is a recorded Trust grant (operation id `app-release`) that the startup ensure (`shipped-bundles.ts`) writes only on an Entry whose
+  origin is `built-in`, re-checked every startup, so launch, resume, and the timeline read it like any grant; `trustState` shows a grant on a built-in as
+  `app-release`. Equal bytes a user imported first keep their own origin and trust (#227).
 - `createApplication` stays one closure on purpose: its regions share the mutable `runs` map, operations map, and observer sets, it has one caller
   (composition), and no second adapter exists, so extracting a block would only pass a wide context object across a shallow Seam (#199 A1).
 

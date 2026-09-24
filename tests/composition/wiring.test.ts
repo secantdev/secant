@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { wireApplication, type Wiring } from "../../src/composition/main.js";
+import { buildBundle } from "../../src/bundle/bundle.js";
 import type {
   CleanupReport,
   HarnessAdapter,
@@ -639,4 +640,51 @@ test("a legacy run-assets directory is swept once at open", (t) => {
     wired.catalog.close();
   });
   assert.ok(!existsSync(join(home, "run-assets")));
+});
+
+test("both roots ensure the Shipped Bundles at startup, and a later startup changes nothing", (t) => {
+  const built = buildBundle(proofBundle);
+  assert.ok(built.ok);
+  const shippedBundleDir = makeTempDir("secant-wire-shipped-");
+  writeFileSync(join(shippedBundleDir, "proof.wfb"), built.built.bytes);
+  writeFileSync(join(shippedBundleDir, "notes.txt"), "not a Bundle");
+  const home = makeTempDir("secant-wire-shipped-home-");
+  const wire = (supportsInteractiveTurns: boolean) => {
+    const wired = wireApplication({
+      secantHome: home,
+      launchCwd: makeTempDir("secant-wire-shipped-ws-"),
+      engineVersion: "3.1.4",
+      process: wiringProcess(),
+      shippedBundleDir,
+      supportsInteractiveTurns,
+    });
+    t.after(() => {
+      wired.runGroup.close();
+      wired.catalog.close();
+    });
+    return wired;
+  };
+
+  const tui = wire(true);
+  assert.deepEqual(tui.startupNotices, []);
+  const [entry] = tui.catalog.listEntries();
+  assert.deepEqual(entry?.origin, { kind: "built-in", secantVersion: "3.1.4" });
+
+  const headless = wire(false);
+  assert.deepEqual(headless.startupNotices, []);
+  assert.deepEqual(headless.catalog.listEntries(), [entry]);
+
+  // No shipped directory (dev and tests): zero Shipped Bundles, nothing reported.
+  const bare = wireApplication({
+    secantHome: makeTempDir("secant-wire-bare-home-"),
+    launchCwd: makeTempDir("secant-wire-bare-ws-"),
+    process: wiringProcess(),
+    shippedBundleDir: join(shippedBundleDir, "absent"),
+  });
+  t.after(() => {
+    bare.runGroup.close();
+    bare.catalog.close();
+  });
+  assert.deepEqual(bare.startupNotices, []);
+  assert.equal(bare.catalog.countInstalledBundles(), 0);
 });

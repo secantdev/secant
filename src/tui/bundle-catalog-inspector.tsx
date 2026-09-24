@@ -6,7 +6,7 @@ import type {
   RoutingNodeView,
   RoutingStepView,
 } from "../application/projection-port.js";
-import { formatEngine, formatTrust } from "./bundle-format.js";
+import { formatEngine, formatOrigin, formatTrust } from "./bundle-format.js";
 import { useTheme } from "./vendor/theme-context.js";
 
 // Pure presentational leaf for the Bundle catalog. The screen owns Projection
@@ -32,7 +32,7 @@ export function BundleCatalogInspector(props: {
       <box flexDirection="column" flexShrink={0}>
         <Label>Source</Label>
         <text fg={theme.text}>
-          {`${bundle().origin.kind} · ${bundle().origin.location}`}
+          {formatOrigin(bundle().origin, bundle().shippedWithRunningSecant)}
         </text>
         <text fg={theme.text}>
           {`Platforms · ${bundle().platforms.join(", ")}`}

@@ -48,7 +48,10 @@ refusal, the smoke runs on each of the three operating systems:
   a Command naming it passes Preflight and runs; a runner without such an alias records the reasoned gap.
 - **Shipped Bundles embedded**: this OS's binary rebuilds each allow-listed folder to its `bundles/builtin.lock.json` digest and embeds those exact bytes,
   and not the External Proof Bundle's.
-- The **Matt front** refusal: the embedded built-in's bytes, installed, refused headlessly with the `interactive-step-needs-tui` code and its remediation.
+- **Shipped Bundles startup** (#227): a fresh home's first startup installs exactly the locked built-ins with origin `built-in` and app-release trust, a
+  second startup changes no Catalog row, a byte-different import collides naming the built-in, another version installs beside it, and a home whose
+  built-in identity is already held (seeded through the source CLI) gets a stderr notice while the command succeeds.
+- The **Matt front** refusal: the built-in the startup ensure installed, refused headlessly with the `interactive-step-needs-tui` code and its remediation.
 - **launch-preparation-headless** (#189): a not-ready draft (missing input, untrusted digest) `run launch` prints in full (text and JSON), exiting one and creating no Run.
 - **Install and collision**: building the Proof Bundle with `--no-install --output`, installing it, and rejecting a byte-different same-identity archive as
   a `bundle-identity-collision` (first-install-wins).

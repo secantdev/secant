@@ -8,6 +8,7 @@ import { selectPlatform } from "./select-platform.js";
 import type { ApplicationHarnessRegistration } from "./harness-registry.js";
 import type { ApplicationHarnessQualification } from "./harness-registry.js";
 import { selectRunEntry } from "./run-projection.js";
+import { originView } from "./bundle-catalog.js";
 import {
   bundleBytesCorrupt,
   bundleBytesMissing,
@@ -20,7 +21,6 @@ import {
 import { UpdateStream } from "./update-stream.js";
 import type {
   ActionOffer,
-  BundleOriginView,
   ExecutionSummary,
   HarnessChoice,
   LaunchPreparationDraftView,
@@ -313,7 +313,7 @@ export function createLaunchPreparation(
       deps.hostPlatform,
     );
     const core = generateExecutionSummary(manifest, entry.digest, platform);
-    return { ...core, origin: originView(entry) };
+    return { ...core, origin: originView(entry.origin) };
   }
 
   return { evaluate, open };
@@ -348,12 +348,6 @@ function draftView(
       ? { trustDigest: draft.trustDigest }
       : {}),
   };
-}
-
-function originView(entry: CatalogEntry): BundleOriginView {
-  return entry.origin.kind === "local-build"
-    ? { kind: "local-build", location: entry.origin.folder }
-    : { kind: "local-file", location: entry.origin.path };
 }
 
 function settled(

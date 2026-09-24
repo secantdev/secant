@@ -40,6 +40,7 @@ function approvedWorkspace(): WorkspaceView {
     path: WORKSPACE,
     approval: { state: "approved", approvedAt: "2026-01-01T00:00:00.000Z" },
     installedBundleCount: 3,
+    startupNotices: [],
     harnesses: [],
     actionOffers: [],
   });
@@ -54,6 +55,7 @@ function summary(
     digest: "a1b2c3",
     description: "",
     origin: { kind: "local-file", location: "/bundles/x.wfb" },
+    shippedWithRunningSecant: false,
     stability: "stable",
     platforms: ["macos", "linux", "windows"],
     engine: { range: ">=0.1.0", satisfied: true },
@@ -400,6 +402,30 @@ test("a trusted Bundle uses the shared Trust wording in its inspector", async ()
   await t.waitForFrame((f) => f.includes("Trusted Flow"));
   await t.waitForFrame((f) => f.includes("A trusted pipeline"));
   assert.match(t.captureCharFrame(), /trusted \(granted 2026-09-12/);
+});
+
+test("a built-in reads its Secant release, the shipped marker, and app-release trust", async () => {
+  const { t } = await mount(
+    [
+      summary({
+        id: "dev.secant.shipped",
+        version: "2.0.0",
+        name: "Shipped Flow",
+        origin: { kind: "built-in", secantVersion: "1.1.0" },
+        shippedWithRunningSecant: true,
+        trust: { state: "app-release" },
+      }),
+    ],
+    140,
+  );
+  await t.waitForFrame((f) => f.includes("Workflow Bundles"));
+  t.mockInput.pressArrow("down"); // select Workflow Bundles (index 1)
+  t.mockInput.pressEnter();
+  await t.waitForFrame((f) => f.includes("trusted (app release)"));
+  assert.match(
+    t.captureCharFrame(),
+    /Built-in, shipped with Secant 1\.1\.0 · in this release/,
+  );
 });
 
 test("empty Catalog names the headless install commands", async () => {

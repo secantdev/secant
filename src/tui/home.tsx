@@ -85,6 +85,15 @@ export function Home(props: {
         <text fg={theme.textMuted}>Workspace</text>
         <text fg={theme.text}>{view.snapshot().path}</text>
       </box>
+      {/* A failed Shipped Bundle ensure is a notice, never a block (ADR 0029). */}
+      <For each={view.snapshot().startupNotices}>
+        {(notice) => (
+          <box flexDirection="column" flexShrink={0}>
+            <text fg={theme.warning}>{`Notice: ${notice.explanation}`}</text>
+            <text fg={theme.textMuted}>{notice.remediation}</text>
+          </box>
+        )}
+      </For>
       <Show when={approved()}>
         <text fg={theme.textMuted} flexShrink={0}>
           {homeSummary({

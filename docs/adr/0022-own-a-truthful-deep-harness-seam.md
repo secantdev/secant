@@ -98,3 +98,14 @@ Bundle). The caller renders the prompt text and hands it in as the Turn's semant
 Recorded while [choosing whether OpenCode earns the third v1 Harness slot](https://github.com/secantdev/secant/issues/175). The original decision's
 named three-Adapter portfolio was a migration-plan fact, not an architectural constraint. The Harness Seam applies unchanged to every shipped Adapter;
 the current portfolio and any qualification condition live in the product-scope and sequencing decisions.
+
+## Amendment (2026-09-23): one additional writable directory crosses the Seam
+
+Recorded while tidying the M6 audit ([#231](https://github.com/secantdev/secant/issues/231), audit
+[#230](https://github.com/secantdev/secant/issues/230)). [#214](https://github.com/secantdev/secant/issues/214) added a second declared caller-supplied
+path to `prepare` beside the Workspace: `PrepareOptions.writableDirectory`, one additional absolute directory every Session may write. The Adapter
+grants it natively only where the Harness's sandbox rules would otherwise refuse it, without changing the user's broader permission posture. A path
+that is not an existing absolute directory is a typed `writable-directory-unavailable` prepare failure, and a native policy that does not admit it
+fails the Turn. Composition supplies the Run working area that [ADR 0023](./0023-own-durable-run-truth-in-isolated-run-stores.md)'s 2026-09-23
+amendment gives each Run Store; the Adapter sees only a path, never a Run fact, so it still knows no Run state and is never granted the Run database
+or Artifact repository.

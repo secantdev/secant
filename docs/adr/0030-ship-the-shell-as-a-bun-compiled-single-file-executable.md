@@ -62,7 +62,11 @@ marker is present, then falls back to `bun:ffi` `GetConsoleWindow` + `IsWindowVi
 marker is supplemental rather than the only discriminator because Windows Terminal documents that it can be absent when configured as the default
 terminal host ([microsoft/terminal#13006](https://github.com/microsoft/terminal/issues/13006)). The recorded #66 real-terminal check found that an
 ordinary Windows Terminal tab can still expose a visible console window, disproving the original assumption that ConPTY visibility alone was
-sufficient. In legacy conhost Secant prints a one-line notice pointing at Windows Terminal; the TUI still runs and headless is unaffected. The wedge is exit-only — a dead console window, no Secant data lost — and OpenCode ships no handling for it with
+sufficient. In legacy conhost Secant prints a notice pointing at Windows Terminal before the TUI starts; headless is unaffected. (Edited
+2026-09-24, [#70](https://github.com/secantdev/secant/issues/70): the notice is two lines — the warning, then "Press any key to continue, or Ctrl+C
+to exit" — and waits for one keypress before the renderer is created, so it can be read before the TUI takes the screen. Any key launches the TUI;
+Ctrl+C at the wait exits 130 without TUI takeover. Windows Terminal is still checked first, so its launch never probes, prints, or waits, and headless
+behaviour is unchanged.) The wedge is exit-only — a dead console window, no Secant data lost — and OpenCode ships no handling for it with
 eight stale-closed bug reports, so the notice is what prevents that noise. The human release check retargets from conhost to **Windows Terminal**,
 run when the Bun pin, the OpenTUI pin, or `src/tui/renderer/` changed. The notice can be removed once Bun merges the stdin-release fix
 ([bun#35621](https://github.com/oven-sh/bun/pull/35621)).

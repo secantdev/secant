@@ -32,9 +32,11 @@ import { useTheme } from "./vendor/theme-context.js";
 import { useWorkspaceView } from "./workspace-view.js";
 import { formatOrigin } from "./bundle-format.js";
 
-// Pure presentational leaves and step components for the Start-a-Run flow. The draft
-// signal, step transitions, refusal routing, and the interleaved key dispatcher stay
-// in start-run.tsx; these views receive only Accessors and callbacks from that owner.
+// Presentational leaves and step components for the Start-a-Run flow. The draft
+// signal, step transitions, and refusal routing stay in start-run.tsx; each step
+// component owns its transient UI state (highlight, phase, focused field) and its
+// own key bindings, and the review step opens the launch-preparation Projection
+// directly.
 
 const NARROW_BREAKPOINT = 60;
 

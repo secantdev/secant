@@ -112,8 +112,8 @@ yet.
 open, and in doing so reversed three sentences above. Recorded here because that ADR names this one in its supersession list:
 
 - **Legacy conhost is no longer a supported host.** ADR 0030 drops the legacy-conhost support-matrix row. Secant still ships the stdin-release
-  teardown workaround and prints a one-line notice pointing at Windows Terminal, and the TUI still runs there, but "legacy conhost stays a supported
-  host" no longer holds — the segment is surrendered, not preserved.
+  teardown workaround and prints a notice pointing at Windows Terminal (edited 2026-09-24, #70: two lines, then one keypress before the TUI runs; see
+  ADR 0030), but "legacy conhost stays a supported host" no longer holds — the segment is surrendered, not preserved.
 - **The Bun-adoption conditional has fired.** The clause reading that adopting Bun later "would forfeit legacy conhost support until someone finds a
   Bun-side release" is spent: Bun is the shipped runtime now, and that forfeit is the accepted cost rather than a future risk.
 - **The human real-console check retargets to Windows Terminal.** It is re-run when the Bun pin, the OpenTUI pin, or `src/tui/renderer/` changed —

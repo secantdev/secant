@@ -68,5 +68,7 @@ ADR 0030 governs.
 The **Shipping** section above is **not** unchanged. ADR 0030 replaced the whole packaging toolchain it describes: the TypeScript bundler that deletes
 `dist/` before writing, the npm package whose `package.json` `files` lists only `dist`, and the release tarball are all gone, superseded by a Bun
 single-file executable compiled by [`scripts/build.ts`](../../scripts/build.ts). What survives is only the per-built-in `.wfb` build step
-(`bundle build --no-install --output`) and its allow-list; the built-in bytes are then embedded as binary assets, never placed in a tarball. M6 must
-implement built-in shipping from ADR 0030's compiled-binary toolchain, not the stale Shipping text above.
+(`bundle build --no-install --output`) and its allow-list; the built-in bytes are then embedded as binary assets, never placed in a tarball. (Edited 2026-09-24: M6 implemented
+built-in shipping from ADR 0030's compiled-binary toolchain, not the stale Shipping text above: the Matt Bundle is locked and embedded as the sole
+Shipped Bundle ([#226](https://github.com/secantdev/secant/issues/226)) and installed at startup from those embedded bytes
+([#227](https://github.com/secantdev/secant/issues/227)).)

@@ -18,3 +18,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   system/global config (#166). `GIT_CONFIG_PARAMETERS` is removed because Git applies it after the counted entries and could undo the hardening.
 - An interactive-agent Step's Entry Turn (`entryTurn`) is due only while no Turn of its Attempt was admitted, so resume never re-sends it; an interrupted or
   lost Entry Turn rests the Run `halted` without publishing an Attempt, and only `end-interactive-step` publishes one (#212).
+- `runRepeatGroup` has two branches (#217): the Verdict-driven one re-reads `until` after each iteration and blocks at the Review cadence; the human-controlled
+  one (`control: "human"`) reads no Verdict and raises no checkpoint, resting `blocked` at each iteration's interactive Step. Neither reads agent text to choose the exit.
+- Continue and End Stage settle an iteration only at a Turn boundary (the Application refuses them mid-Turn). Confirmed End Stage publishes that iteration's Attempt
+  marked `endsStage`, so the walk exits the group once and a trailing group rests the Run `succeeded` as human-declared completion, never a second settle (#218).
+- Each Repeat iteration of an Interactive Step is its own Attempt (`encodeAttemptId` carries the iteration) with its own Session (`interactiveSession` scopes the
+  name to that Attempt id), so Continue always opens a fresh conversation; `interactiveStepTarget` finds the resting iteration from the log (#216).

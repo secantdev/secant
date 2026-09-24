@@ -84,7 +84,8 @@ This cluster defines the target Crucible terms for a **Run** and everything that
   visible: the requested model is the one durable Run-level choice, while the effective model is the per-Attempt observation of what actually served.
   _Avoid_: Requested model, served model.
 - **Human Gate** — a Crucible-owned pause carrying a Bundle-authored question in one of its shapes: approve/reject, whose rejection ends the
-  **Run** `failed`, or free text. Its answer is a durable **Run Artifact**, so a Run can wait on one indefinitely.
+  **Run** `failed`, or free text. A free-text Gate may offer authored suggestions: quick-choice answers plus an Other free-text entry, and either way
+  the answer is one durable text **Run Artifact**, so a Run can wait on one indefinitely.
 - **Harness Request** — an ephemeral **Harness**-originated request raised during a **Turn**: either a tool approval with exact offered decisions
   or a structured clarification with an exact answer shape. It lives and dies with the Turn; an ordinary assistant question that ends a Turn is
   answered in the next Turn instead.

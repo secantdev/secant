@@ -53,6 +53,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - The `harness` command group lives in `harness-commands.ts`. `harness inspect` waits for the first durable focus update when its initial snapshot is
   `not-checked` (#188). Its frozen JSON is the inner focused Harness; `harness list --json` prints the whole list snapshot, and neither command derives or
   exposes Action Offers.
+- Every command prints the startup notices (`clients.startupNotices`, the ADR 0029 Shipped Bundle ensure) to stderr before executing (`buildProgram`'s
+  `execute`). A failed ensure never blocks the command, and stdout, the `--json` shapes, and exit codes are untouched by the notices.
 - Commander settings (`exitOverride`, `configureOutput`, `enablePositionalOptions`, `configureHelp`) must be configured on the program before the
   `.command(...)` calls: Commander copies them into each subcommand as it is added, so a subcommand added before a setting silently misses it.
 

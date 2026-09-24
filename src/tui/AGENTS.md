@@ -65,7 +65,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   (`submitAndSettle`) owns submit-then-follow and reopens a lost pending Operation receipt (A23).
 - Read [tui-workbench](../../docs/agents/tui-workbench.md) before changing the Run Workbench's key routing, modal stack, steer compose, interactive input,
   destructive confirms, or details panel.
-- `start-run-views.tsx` holds Start a Run's step components and leaves; the draft signal, step transitions, refusal routing, and key dispatcher stay in `start-run.tsx` (A3).
+- `start-run-views.tsx` holds Start a Run's step components and leaves; the draft signal, step transitions, and refusal routing stay in `start-run.tsx` (A3).
+  Each step owns its transient UI state and its own `useBindings`, and `ReviewStep` opens the `launch-preparation` Projection directly (#231 A16).
 - `previous-runs.tsx` is the Previous Runs screen reached from Home.
 - `clip.ts` is the ellipsis affordance above, and `bundle-format.ts` holds the Bundle-catalog status wording — keep it matching `headless/render.ts` so
   the TUI and headless surfaces say the same thing about the same fact.

@@ -60,6 +60,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - `deriveRun`'s walk assumes `attempt_log` holds only per-Step Attempts, but the Run Store already appends the reconciliation `indeterminate` marker row
   there (see `store/AGENTS.md`). The marker is harmless only because its outcome is not `succeeded`, not because the walk excludes it — keep that true if
   you add marker rows.
+- One settle path (`submitEndInteractiveStep` → `startEndInteractiveStep`) backs `end-interactive-step`, `continue-repeat` (#217), and `end-stage` (#218), each refused
+  mid-Turn. End Step is refused inside a human-controlled Repeat group and the other two outside one (`interactiveControlMismatch`), so no iteration settles twice.
 - App-release trust is a recorded Trust grant (operation id `app-release`) that the startup ensure (`shipped-bundles.ts`) writes only on an Entry whose
   origin is `built-in`, re-checked every startup, so launch, resume, and the timeline read it like any grant; `trustState` shows a grant on a built-in as
   `app-release`. Equal bytes a user imported first keep their own origin and trust (#227).

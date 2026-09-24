@@ -4,12 +4,13 @@ import { join } from "node:path";
 import type { CandidateManifest } from "./assemble.js";
 import { MANIFEST_FILE } from "./assemble.js";
 import { runGit } from "./release-helpers.js";
+import type { LockedBundle } from "./shipped-bundles.js";
 
 // The tag-admission and protected-release boundary (#158, spec #137 stories 82/90/94/
 // 96/97 and the "Release artifact set and publication workflow" decisions): a `v*` tag
 // is eligible only when it exactly equals the package version, and the release-approval
 // job that gates the protected `release` environment writes the reviewer's approval
-// summary — tag, commit, version, candidate digests, blocking jobs, checklist
+// summary — tag, commit, version, candidate digests, Shipped Bundles, blocking jobs, checklist
 // reference, and the Windows Terminal evidence trigger decision — before any human
 // approves. Nothing here publishes; publication of the bytes is #159.
 //
@@ -132,11 +133,42 @@ export function windowsTerminalTrigger(
   };
 }
 
+/** The committed Shipped Bundle lock. It equals `LOCK_FILE` in shipped-bundles.ts
+ *  (a test pins that); it is restated because that module pulls in the Bundle
+ *  builder, and the release-approval job neither installs dependencies nor rebuilds
+ *  a `.wfb`. */
+export const SHIPPED_BUNDLE_LOCK = "bundles/builtin.lock.json";
+
+/** Validate the parsed lock, so a malformed entry fails the gate rather than
+ *  printing `undefined` into the summary the reviewer approves. */
+export function parseShippedBundleLock(json: unknown): LockedBundle[] {
+  const valid =
+    Array.isArray(json) &&
+    json.every(
+      (entry: unknown) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as LockedBundle).id === "string" &&
+        typeof (entry as LockedBundle).version === "string" &&
+        typeof (entry as LockedBundle).digest === "string" &&
+        /^[0-9a-f]{64}$/.test((entry as LockedBundle).digest),
+    );
+  if (!valid) {
+    throw new Error(
+      `${SHIPPED_BUNDLE_LOCK} is not a list of { id, version, digest } entries with SHA-256 digests.`,
+    );
+  }
+  return json as LockedBundle[];
+}
+
 export interface ApprovalSummaryFields {
   readonly tag: string;
   readonly commit: string;
   readonly version: string;
   readonly manifest: CandidateManifest;
+  /** The committed Shipped Bundle lock at the tag commit (ADR 0029): every OS's
+   *  build already failed unless the embedded bytes match it, so it names them. */
+  readonly shippedBundles: readonly LockedBundle[];
   readonly terminalTrigger: TerminalTrigger;
 }
 
@@ -148,6 +180,9 @@ export function formatApprovalSummary(fields: ApprovalSummaryFields): string {
       (target) =>
         `  - ${target.key}: archive \`${target.archiveSha256}\`, binary \`${target.binarySha256}\``,
     )
+    .join("\n");
+  const bundleLines = fields.shippedBundles
+    .map((bundle) => `  - ${bundle.id}@${bundle.version}: \`${bundle.digest}\``)
     .join("\n");
   return `## Release promotion: ${fields.tag}
 
@@ -161,6 +196,8 @@ evidence. Publication itself is a later step (#159); this is the human gate.
 ${digestLines}
   - LICENSE: \`${fields.manifest.licenseSha256}\`
   - THIRD-PARTY-NOTICES.md: \`${fields.manifest.noticesSha256}\`
+- Shipped Bundles (from ${SHIPPED_BUNDLE_LOCK}, never rebuilt):
+${bundleLines}
 - Blocking jobs (all must be green before this environment is reachable): ${CANDIDATE_CHECK_JOBS.join(", ")}
 - Checklist: docs/release-checklist.md
 - Windows Terminal evidence: ${fields.terminalTrigger.reason}`;
@@ -249,11 +286,21 @@ async function main(): Promise<void> {
     );
   }
 
+  if (!existsSync(SHIPPED_BUNDLE_LOCK)) {
+    throw new Error(
+      `Shipped Bundle lock missing: ${SHIPPED_BUNDLE_LOCK}. The approval summary names the committed lock at the tag commit.`,
+    );
+  }
+  const shippedBundles = parseShippedBundleLock(
+    JSON.parse(readFileSync(SHIPPED_BUNDLE_LOCK, "utf8")),
+  );
+
   const summary = formatApprovalSummary({
     tag,
     commit,
     version: pkg.version,
     manifest,
+    shippedBundles,
     terminalTrigger,
   });
   console.log(summary);

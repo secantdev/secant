@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CandidateManifest } from "../../scripts/assemble.js";
+import { LOCK_FILE } from "../../scripts/shipped-bundles.js";
 import {
   formatApprovalSummary,
+  parseShippedBundleLock,
   parseTagVersion,
+  SHIPPED_BUNDLE_LOCK,
   tagMatchesVersion,
   terminalInputs,
   windowsTerminalTrigger,
@@ -115,6 +118,9 @@ test("the approval summary exposes every field the reviewer approves", () => {
     commit: "deadbeef",
     version: "1.2.3",
     manifest,
+    shippedBundles: [
+      { id: "dev.secant.matt-front", version: "2.6.0", digest: "e".repeat(64) },
+    ],
     terminalTrigger: { fresh: false, reason: "carried forward from v1.0.0" },
   });
   for (const needle of [
@@ -123,10 +129,36 @@ test("the approval summary exposes every field the reviewer approves", () => {
     "1.2.3", // version
     "c".repeat(64), // binary digest
     "d".repeat(64), // archive digest
+    `dev.secant.matt-front@2.6.0: \`${"e".repeat(64)}\``, // Shipped Bundle identity and digest
     "docs/release-checklist.md", // checklist reference
     "Blocking jobs", // dependency evidence
     "Windows Terminal evidence: carried forward", // WT trigger decision
   ]) {
     assert.ok(summary.includes(needle), `summary missing: ${needle}`);
+  }
+});
+
+test("the gate reads the same lock file the build checks the embedded bytes against", () => {
+  assert.equal(SHIPPED_BUNDLE_LOCK, LOCK_FILE);
+});
+
+test("a malformed Shipped Bundle lock fails the gate instead of printing a hole", () => {
+  const entry = {
+    id: "dev.secant.matt-front",
+    version: "2.6.0",
+    digest: "e".repeat(64),
+  };
+  assert.deepEqual(parseShippedBundleLock([entry]), [entry]);
+  for (const bad of [
+    {},
+    [{ ...entry, digest: undefined }],
+    [{ ...entry, digest: "not-a-sha" }],
+    [{ ...entry, id: 1 }],
+    [{ id: entry.id, version: entry.version, sha256: entry.digest }],
+  ]) {
+    assert.throws(
+      () => parseShippedBundleLock(bad),
+      /bundles\/builtin\.lock\.json/,
+    );
   }
 });

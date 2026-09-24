@@ -240,8 +240,8 @@ jobs:
   # The `release-protection-policy` scenario, runtime half (#158, spec #137 stories
   # 82/90/96/97): on a `v*` tag ONLY, admit the tag when it exactly matches the package
   # version — no branch run substitutes — and write the reviewer's approval summary
-  # (tag, commit, version, candidate digests, blocking jobs, checklist reference, and
-  # Windows Terminal evidence trigger) to the run summary the protected `promote` job
+  # (tag, commit, version, candidate digests, locked Shipped Bundles, blocking jobs,
+  # checklist reference, and Windows Terminal evidence trigger) to the run summary the protected `promote` job
   # gates on. It depends on every candidate check, so the summary can only be produced
   # once they are green, and it downloads the assembled candidate rather than rebuilding
   # it. It holds no credential and publishes nothing. Enumerated in

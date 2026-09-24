@@ -46,7 +46,8 @@ reruns the whole gate on its commit through the existing `push:` trigger; then t
 
 - `release-approval` depends on every candidate check, so it runs only once they are green. It runs `scripts/release-gate.ts`, which admits the tag **only
   when it exactly equals the package version** — no branch run substitutes — and writes the reviewer's approval summary: tag, commit, version, candidate
-  digests (read from the downloaded candidate manifest, never rebuilt), blocking jobs, checklist reference (`docs/release-checklist.md`), and the Windows
+  digests (read from the downloaded candidate manifest, never rebuilt), each Shipped Bundle's `id@version` and digest (read from the committed
+  `bundles/builtin.lock.json` at the tag commit, never rebuilt — ADR 0029), blocking jobs, checklist reference (`docs/release-checklist.md`), and the Windows
   Terminal evidence trigger (fresh when the Bun pin, `@opentui/core` pin, or `src/tui/renderer/` changed since the previous tag, else carried forward). It
   holds no credential.
 - `promote` depends on `release-approval` (and so, transitively, on every candidate check), targets the GitHub `release` environment, and pauses until the sole

@@ -15,6 +15,7 @@ workflow run. A checked item is an attestation, not a request to rebuild it.
   - macOS arm64 archive and binary SHA-256: `<archive>` / `<binary>`
   - Linux x64 archive and binary SHA-256: `<archive>` / `<binary>`
   - npm launcher and platform-package digests: `<digests>`
+- Shipped Bundles (`id@version` and digest, as the approval summary prints them): `<bundles>`
 
 ## Automated gates
 
@@ -32,6 +33,7 @@ workflow run. A checked item is an attestation, not a request to rebuild it.
 - [ ] Installed Claude Code report attached; candidate binary SHA-256 matches
 - [ ] Installed Codex report attached; candidate binary SHA-256 matches
 - [ ] Windows Terminal trigger decision recorded
+- [ ] Legacy-conhost notice observation recorded (observed only; not a support claim)
 - Claude Code report: `<report URL>`
 - Codex report: `<report URL>`
 - Windows Terminal basis: `<fresh report URL | carried report name>`

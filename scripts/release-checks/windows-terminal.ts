@@ -219,15 +219,21 @@ Observed-only legacy conhost row (this does not decide the outcome):
    $env:SECANT_HOME = ${quotePowerShell(home)}
    Set-Location -LiteralPath ${quotePowerShell(workspace)}
    & ${quotePowerShell(binary)}
-3. Wait for Home, note whether the startup notice appeared, press q, then test
-   whether the same window still accepts input. Close it when finished.
-4. Return to this Windows Terminal tab and answer the two questions.`);
+3. Note whether the startup notice appeared and stayed on screen until you
+   pressed a key, then press a key to continue.
+4. Wait for Home, press q, then test whether the same window still accepts
+   input. Close it when finished.
+5. Return to this Windows Terminal tab and answer the three questions.`);
     await prompt.question(
       "Press Enter after the conhost observation is complete. ",
     );
     const conhostNoticeAppeared = await askYesNo(
       prompt,
       "Did the legacy-conhost startup notice appear?",
+    );
+    const conhostNoticeReadable = await askYesNo(
+      prompt,
+      "Could you read the notice and press a key before the TUI took over?",
     );
     const conhostWindowSurvived = await askYesNo(
       prompt,
@@ -256,6 +262,7 @@ Observed-only legacy conhost row (this does not decide the outcome):
       quitBindingPassed,
       ctrlCPassed,
       conhostNoticeAppeared,
+      conhostNoticeReadable,
       conhostWindowSurvived,
     });
     console.log("\nPaste the report below into the release checklist:\n");

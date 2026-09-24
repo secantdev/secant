@@ -17,6 +17,7 @@ export interface WindowsTerminalReport {
   readonly quitBindingPassed: boolean;
   readonly ctrlCPassed: boolean;
   readonly conhostNoticeAppeared: boolean;
+  readonly conhostNoticeReadable: boolean;
   readonly conhostWindowSurvived: boolean;
 }
 
@@ -63,5 +64,6 @@ ${evidence}
 | Windows Terminal | quit binding (q) | Key delivered, shell exited, and terminal remained responsive | ${formatPassFail(report.quitBindingPassed)} |
 | Windows Terminal | Ctrl+C | Key delivered, shell exited, and terminal remained responsive | ${formatPassFail(report.ctrlCPassed)} |
 | legacy conhost (observed only; does not decide outcome) | quit binding (q) | Startup notice appeared | ${formatYesNo(report.conhostNoticeAppeared)} |
+| legacy conhost (observed only; does not decide outcome) | startup | Notice read and a key pressed before TUI takeover | ${formatYesNo(report.conhostNoticeReadable)} |
 | legacy conhost (observed only; does not decide outcome) | quit binding (q) | Window survived and remained responsive | ${formatYesNo(report.conhostWindowSurvived)} |`;
 }

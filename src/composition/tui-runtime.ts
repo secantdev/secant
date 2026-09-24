@@ -3,8 +3,9 @@ import {
   conhostConsoleProbe,
   createProcessStdinRelease,
   createProductionRenderer,
+  createStdinKeypress,
   createTeardown,
-  printConhostNotice,
+  runBehindConhostNotice,
 } from "../tui/renderer/renderer.js";
 import { mountTui } from "../tui/tui.js";
 import { wireApplication } from "./wiring.js";
@@ -53,16 +54,24 @@ export async function runTuiApp(): Promise<number> {
   }
 
   // The one named seam for the legacy-conhost notice: after the no-TTY
-  // rejection, before the renderer is created. Suppressed everywhere but a
-  // visible conhost window (see conhost-notice.ts). To stdout, not stderr: the
-  // gate above guarantees stdout is the (visible) console TTY, whereas stderr
-  // may be redirected — so this is where the warning is certain to be seen.
-  printConhostNotice(
-    conhostConsoleProbe,
-    (text) => process.stdout.write(text),
-    process.env.WT_SESSION !== undefined,
+  // rejection, before anything is wired or the renderer is created. Suppressed
+  // everywhere but a visible conhost window (see conhost-notice.ts), where it
+  // waits for one key; Ctrl+C there exits before any TUI takeover. To stdout,
+  // not stderr: the gate above guarantees stdout is the (visible) console TTY,
+  // whereas stderr may be redirected — so this is where the warning is certain
+  // to be seen.
+  return runBehindConhostNotice(
+    {
+      probe: conhostConsoleProbe,
+      isWindowsTerminalSession: process.env.WT_SESSION !== undefined,
+      write: (text) => process.stdout.write(text),
+      waitForKeypress: createStdinKeypress(process.stdin),
+    },
+    launchTui,
   );
+}
 
+async function launchTui(): Promise<number> {
   const {
     catalog,
     runGroup,

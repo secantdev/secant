@@ -141,6 +141,7 @@ test("[release-evidence-contract] Windows Terminal names fresh and carry-forward
     quitBindingPassed: true,
     ctrlCPassed: true,
     conhostNoticeAppeared: true,
+    conhostNoticeReadable: false,
     conhostWindowSurvived: false,
   };
 

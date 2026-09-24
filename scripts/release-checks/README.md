@@ -23,8 +23,10 @@ replace this real-terminal check.
 5. Only a report whose Windows Terminal outcome is `pass` satisfies the release
    check. Paste the complete Markdown report printed by the script into the
    release checklist issue for the milestone currently in progress (the open
-   milestone gate issue), not a pinned issue number. The conhost row records what
-   happened but does not decide the outcome.
+   milestone gate issue), not a pinned issue number. The conhost rows record what
+   happened — whether the notice appeared, whether it could be read before a
+   keypress let the TUI take over, and whether the window survived quit — but do
+   not decide the outcome.
 
 The generated report records `fresh real-terminal check`. When the Bun pin,
 OpenTUI pin, and renderer are unchanged, the release checklist may instead name

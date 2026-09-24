@@ -22,6 +22,7 @@ test("formats the ADR 0027 report with a non-deciding conhost observation", () =
     quitBindingPassed: true,
     ctrlCPassed: true,
     conhostNoticeAppeared: true,
+    conhostNoticeReadable: true,
     conhostWindowSurvived: false,
   });
 
@@ -44,6 +45,7 @@ test("formats the ADR 0027 report with a non-deciding conhost observation", () =
 | Windows Terminal | quit binding (q) | Key delivered, shell exited, and terminal remained responsive | pass |
 | Windows Terminal | Ctrl+C | Key delivered, shell exited, and terminal remained responsive | pass |
 | legacy conhost (observed only; does not decide outcome) | quit binding (q) | Startup notice appeared | yes |
+| legacy conhost (observed only; does not decide outcome) | startup | Notice read and a key pressed before TUI takeover | yes |
 | legacy conhost (observed only; does not decide outcome) | quit binding (q) | Window survived and remained responsive | no |`,
   );
 });

@@ -480,7 +480,8 @@ test("the headless client refuses the Matt grill at Preflight with the TUI remed
     io,
   );
   const output = out.join("");
-  assert.notEqual(code, 0, output);
+  // A Preflight refusal is exit 1, never the Human-Gate `blocked` exit 2.
+  assert.equal(code, 1, output);
   assert.match(output, /interactive-step-needs-tui/);
   assert.match(output, /Run this Bundle in the TUI\./);
   assert.equal(prepares(), 0);

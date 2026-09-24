@@ -65,6 +65,8 @@ function profile(overrides: Partial<HarnessProfile> = {}): HarnessProfile {
 interface Fixture {
   readonly owner: RunOwner;
   readonly workspace: string;
+  /** The Run's canonical state as the Store records it right now. */
+  readonly state: () => string;
 }
 
 function fixture(
@@ -85,7 +87,12 @@ function fixture(
   const owner = group.acquireRun(created.runId);
   assert.ok(owner);
   t.after(() => owner.close());
-  return { owner, workspace };
+  const state = () => {
+    const read = group.readRun(created.runId);
+    assert.ok(read.ok);
+    return read.run.state;
+  };
+  return { owner, workspace, state };
 }
 
 function promptAssets(
@@ -297,6 +304,59 @@ for (const [kind, scenario] of Object.entries(RESULT_CASES)) {
       .harnessSessions()
       .find((candidate) => candidate.session === SESSION);
     assert.equal(session?.availability, scenario.expectedAvailability);
+  });
+}
+
+// An interrupted or lost Entry Turn rests the Run `halted` with no Attempt, and the
+// resume walk finds the admitted Entry Turn in history: it rests `blocked` for the
+// human without re-sending it, so the Entry Turn is sent exactly once (#212, A24).
+for (const kind of ["interrupted", "lost"] as const) {
+  test(`an Entry Turn result ${kind} rests the Run halted with no Attempt, and resume never re-sends it (#212)`, async (t) => {
+    const f = fixture(t);
+    const assets = promptAssets(f.workspace, "Grill the idea.\n");
+    const prepared = await preparedHarness(profile(), [
+      { result: RESULT_CASES[kind].result },
+    ]);
+    t.after(() => prepared.close());
+    let starts = 0;
+    const counted: PreparedHarness = {
+      profile: prepared.profile,
+      startTurn(request) {
+        starts++;
+        return prepared.startTurn(request);
+      },
+      close: () => prepared.close(),
+    };
+    const walk = () =>
+      executeRouting(
+        [agentStep({ kind: "interactive-agent", entryTurn: true })],
+        {
+          owner: f.owner,
+          platform: HOST,
+          resolveAsset: assets.resolveAsset,
+          now: () => AT,
+          process: executionProcess,
+          harness: {
+            prepared: counted,
+            inputTypes: {},
+            assetKinds: { "prompt.md": "prompt" },
+          },
+        },
+      );
+
+    assert.deepEqual(await walk(), { outcome: "halted" });
+    assert.equal(f.state(), "halted");
+    assert.deepEqual(f.owner.attemptLog(), []);
+    assert.equal(starts, 1);
+
+    assert.deepEqual(await walk(), { outcome: "blocked" });
+    assert.equal(f.state(), "blocked");
+    assert.deepEqual(f.owner.attemptLog(), []);
+    assert.equal(starts, 1);
+    assert.deepEqual(
+      f.owner.turns().map((turn) => [turn.turnId, turn.origin]),
+      [["0.0:agent#entry", "managed"]],
+    );
   });
 }
 

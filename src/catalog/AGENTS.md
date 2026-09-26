@@ -17,3 +17,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   rewrite can `rmSync` the old tree without a chmod pass first.
 - The installed asset root (`assetRoot`) is the one storage path that deliberately crosses the Interface — a Run reads the extracted layer from it; every
   other store path (the managed bytes, the tree layout) stays private (ADR 0025).
+- `origin_location` is one polymorphic text column decoded by `origin_kind`: the build folder, the imported file path, or the installing Secant version for
+  `built-in` (ADR 0029). A new origin kind must change the read-ingress `z.enum` on the entry row schema, `toEntry`, and `originLocation()` together, or persisted
+  rows fail read ingress.

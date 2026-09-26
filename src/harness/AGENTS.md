@@ -20,8 +20,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Terminal ordering is exact and load-bearing: on terminal an Adapter publishes remaining events, expires every still-outstanding request, closes the
   event producer, then settles the one authoritative result. No event is observable after the result settles. The fake enforces this with an
   `emit after result` guard; a real Adapter must hold the same order.
-- A Turn result may settle before its native child emits `close`; an Adapter that reuses a child across Turns never attributes an old child's close to the
-  next Turn (the Claude Code mechanics are in [harness-adapters](../../docs/agents/harness-adapters.md)).
+- Child reuse across Turns (a result may settle before the native `close`) is in [harness-adapters](../../docs/agents/harness-adapters.md).
 - Operational failures are typed values (`HarnessFailure`, `ControlReceipt` rejections, `RecordingReceipt`, `CleanupReport`). Only caller-contract
   violations throw: a second concurrent Turn on one Prepared Harness, a Turn after `close`, or a Turn beyond what an Adapter can serve. Control races
   (`expired`, `already-settled`, `shape-mismatch`, `unsupported`) are rejected receipts, never throws.
@@ -34,14 +33,14 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Steer is a profile capability like the others (`HarnessProfile.steer`, evidence-bearing). An Adapter derives its `steer` receipt from it rather than
   hard-coding a second rejection; the Claude Code profile declares it unavailable (print mode has no same-Turn guidance frame) and the fake's script
   decides it through the profile it supplies.
-
 - Model selection is a profile fact. `modelSelection` declares where a model can be chosen (`launch`, `per-turn`, both, or `unavailable`) and carries a
   `ModelDeclaration`: a `list` of admitted models or `free-text`. `modelObservation` separately declares whether the effective model is read from native
   evidence. Codex declares `launch-and-per-turn` with the `model/list` result observed at qualification; Claude Code declares `launch` with free text
   (`--model`). Both observe the effective model.
-- `PrepareOptions.writableDirectory` (#214) is validated identically before anything native runs (not an existing absolute directory ⇒ typed
-  `writable-directory-unavailable`). Claude Code forwards it as `--add-dir` on every launch; Codex sends a per-thread `sandbox_workspace_write.writable_roots`
-  config override and refuses the Turn `writable-directory-refused` only when an acknowledged `workspaceWrite` sandbox omits it (read-only defers to approvals).
+- `PrepareOptions.writableDirectory` (#214) is validated by the one shared `writableDirectoryFailure` (`writable-directory.ts`) before anything
+  native runs (not an existing absolute directory ⇒ typed `writable-directory-unavailable`). Claude Code forwards it as `--add-dir` on every launch; Codex
+  sends a per-thread `sandbox_workspace_write.writable_roots` config override and refuses the Turn `writable-directory-refused` only when an acknowledged
+  `workspaceWrite` sandbox omits it (read-only defers to approvals).
 - `PrepareOptions.requestedModel` is the caller's durable request, normalized identically by both Adapters (empty means none). A request outside a declared
   list, including an empty one, is a typed `model-unavailable` prepare failure, never a substitution; free text forwards any value. The effective model a
   Turn reports is observed and never copies the request.
@@ -49,9 +48,9 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 ## Invariants (interrupt, recovery, cleanup)
 
 - A Turn settles `interrupted` only on confirmed interruption; a force-kill, lost connection, or unconfirmed termination settles it `lost` with
-  `interruption-unknown`. On Windows the process Module has no graceful stage (a hidden console child cannot observe one, #127 A6 amended), so a
-  process-signal interrupt of a live child there is a force-kill and truthfully settles `lost`. The profile's interruption evidence states what each
-  Harness delivers per OS, and the conformance `interruptOutcome` option (on both the interrupt/recovery and the approval-request case groups) pins it.
+  `interruption-unknown`. Windows has no graceful stage ([process notes](../process/AGENTS.md)), so a live-child interrupt there truthfully settles
+  `lost`; the profile's interruption evidence states what each Harness delivers per OS, and the conformance `interruptOutcome` option (interrupt/recovery
+  and approval-request groups) pins it.
 - Recovery is caller- and history-driven: a relaunch of a Session that already ran, or any Turn carrying `resume`, resumes that exact native conversation.
   A resume the native side does not acknowledge is a `recovery`-phase failure that marks the Session `unusable`; recovery never silently starts a fresh
   conversation. Each Adapter's resume mechanics are in [harness-adapters](../../docs/agents/harness-adapters.md).
@@ -70,9 +69,10 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   child's top-level code runs hits the default disposition and kills it (this is a startup race, not a `bun test` limitation; plain `bun` shows the same
   window). So the replayer installs its SIGTERM handler at startup, and interrupt/close cases wait for the `session` event (init observed) before
   interrupting. Never signal a freshly spawned child before it has announced readiness.
-- The replayer's `case.json` carries the interrupt/recovery vocabulary: `ignoreSigterm` (swallow SIGTERM → force-kill path; moot on Windows, where every
-  live child is force-killed regardless), per-turn `exitAfter` (exit without a result → lost/corruption), and a `resume` section replayed when the launch
-  has `--resume`.
+- The replayer's `case.json` vocabulary (`tests/harness/fixtures/README.md` is the reference): `ignoreSigterm` (swallow SIGTERM → force-kill path; moot on
+  Windows, where every live child is force-killed regardless), per-turn `exitAfter` (exit without a result → lost/corruption) and `workingAreaPatch` (applied in
+  the launch's `--add-dir` directory), a `resume` section replayed when the launch has `--resume`, and `sessions[]` (#224: the Nth fresh `--session-id` launch
+  after the first plays `sessions[N-1]`, one conversation per human-controlled Repeat iteration).
 
 ## Read next
 

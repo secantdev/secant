@@ -30,34 +30,8 @@ load-bearing: each file runs in its own worker, so module-level helpers and envi
 sequential; do not replace file parallelism with `--concurrent`, which would race their shared fixtures. Should child-lifecycle flakiness return, keep
 the spawn out of the semantic suite — never a retry, sleep, or timeout increase.
 
-Package smoke tests copy the produced Bun compiled single-file executable out of `dist/` into an isolated temporary location and exercise it there. They
-are the CI acceptance seam for headless work and do not invoke a real Harness. This is the one home for the package-smoke enumeration — the support matrix
-and the `Compiled-binary smoke` step of `check.yml`'s per-OS `consumer` job point here rather than restating it. Beyond `--help`/`--version` and the no-TTY
-refusal, the smoke runs on each of the three operating systems:
-
-- The **M3 gate** ([#106](https://github.com/secantdev/secant/issues/106)): the headless Test Repair Proof Bundle Run launched from the installed binary
-  against the recorded Claude Code replayer on PATH, reaching its authored Human Gate and, once answered, `succeeded` with the frozen Run `--json` fields.
-- The **signal halt-then-resume** path: a Run interrupted by SIGINT mid-execution rests `halted` (POSIX aborts the live Run and leaves the claim live;
-  Windows SIGINT terminates and leaves the same claim), and a later `resume` completes it.
-- The **owner-death recovery** path (#86): a Run whose owner is killed by SIGKILL — uncatchable, so no handler runs and the claim is left live at a now-dead
-  pid, exactly like a crash — is reconciled `halted` by a later invocation running no Step work, and a plain `resume` (no `--takeover`, because nothing is live)
-  recovers it to `succeeded`, re-running no earlier Step. This is the one compiled-binary home for owner death; the process-free suite never spawns.
-- **Windows `.cmd` shim** acceptance and refusal: a Command step naming an npm-style `.cmd` shim resolves through the shim, while a broken shim is refused
-  at Preflight (POSIX has no shim, so it is skipped there).
-- **Windows App Execution Alias** acceptance: when the runner exposes a `pwsh` or `winget` alias that `where.exe` finds after the primary PATH walk misses,
-  a Command naming it passes Preflight and runs; a runner without such an alias records the reasoned gap.
-- **Shipped Bundles embedded**: this OS's binary rebuilds each allow-listed folder to its `bundles/builtin.lock.json` digest and embeds those exact bytes,
-  and not the External Proof Bundle's.
-- **Shipped Bundles startup** (#227): a fresh home's first startup installs exactly the locked built-ins with origin `built-in` and app-release trust, a
-  second startup changes no Catalog row, a byte-different import collides naming the built-in, another version installs beside it, and a home whose
-  built-in identity is already held (seeded through the source CLI) gets a stderr notice while the command succeeds.
-- The **Matt front** refusal: the built-in the startup ensure installed, refused headlessly with the `interactive-step-needs-tui` code and its remediation.
-- **launch-preparation-headless** (#189): a not-ready draft (missing input, untrusted digest) `run launch` prints in full (text and JSON), exiting one and creating no Run.
-- **Install and collision**: building the Proof Bundle with `--no-install --output`, installing it, and rejecting a byte-different same-identity archive as
-  a `bundle-identity-collision` (first-install-wins).
-- **Run list and delete**: listing Previous Runs over `bundle-catalog`/`run-list`, refusing to cancel a resting Run, and deleting a Run's store.
-- The **relocated pre-Drizzle home**: the checked-in pre-Drizzle fixture relocated beneath the isolated install, proving the compiled binary migrates and
-  opens it through its embedded migration registries.
+Package smoke tests exercise the compiled binary in an isolated location on each of the three operating systems; every scenario is enumerated
+once in [package smoke](./package-smoke.md), the CI acceptance seam for headless work.
 
 Verifying each shipped release channel as a consumer receives it — the archive, platform-package, npm-launcher, and installer scenarios and their CI steps
 — is its own concern; see [release-consumers.md](./release-consumers.md).

@@ -18,15 +18,19 @@ Read the line that matches your task, then the file it names. The canonical gate
 - Before creating or moving target source, changing a public entrypoint, or crossing a Module, read `docs/agents/topology.md`.
 - Before changing dependencies, composition, or allowed import direction, read `docs/agents/dependencies.md`.
 - Before changing tests or fixtures, read `docs/agents/testing.md`.
+- Before changing `scripts/package-smoke.ts` or a compiled-binary smoke scenario, read `docs/agents/package-smoke.md`.
 - Before changing the private internals of the Claude Code or Codex Harness Adapter, read `docs/agents/harness-adapters.md`.
-- Before changing live Run control (interrupt, steer, cancel, shutdown, takeover, interactive-Step drive, or the live overlay), read `docs/agents/run-control.md`.
-- Before changing the Run Workbench's key routing, modal stack, steer compose, or details panel, read `docs/agents/tui-workbench.md`.
-- Before changing a release-channel consumer scenario (archive, platform package, npm launcher, or installer) or its CI job, read `docs/agents/release-consumers.md`.
+- Before changing live Run control (deferred settlement, interrupt, steer, cancel, shutdown, takeover, interactive-Step drive, or the live overlay),
+  read `docs/agents/run-control.md`.
+- Before changing the Run Workbench's key routing, modal stack, steer compose, interactive input, destructive confirms, or details panel, read
+  `docs/agents/tui-workbench.md`.
+- Before changing a release-channel consumer scenario (archive, platform package, npm launcher, or installer), the release legal-closure gate, or
+  their CI steps, read `docs/agents/release-consumers.md`.
 - Before changing release-workflow policy (candidate validation, tag admission, the `release-gate.ts` approval summary, protected promotion) or its CI
   jobs, read `docs/agents/release-workflow.md`.
 - Before handling external or persisted input or translating external failures, read `docs/agents/validation.md`.
 - Before starting or changing a prototype, read `docs/agents/prototypes.md`.
-- Before replacing or deleting existing behavior, a compatibility layer, or Provider-era identifiers a change crosses, read `docs/agents/refactoring.md`.
+- Before replacing or deleting existing behavior or a compatibility layer, read `docs/agents/refactoring.md`.
 - Before adding, moving, splitting, or materially expanding agent guidance, read `docs/agents/guidance.md`.
 - Before declaring an implementation issue complete, read `docs/agents/change-review.md`.
 

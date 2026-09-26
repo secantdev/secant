@@ -118,7 +118,7 @@ jobs:
       # identity cannot publish regardless, and the credential is scoped to this one
       # dispatch-gated step. No publication credential, publish step, GitHub-release
       # step, retry, or public-asset path exists anywhere in this workflow; the
-      # release-workflow policy check proves it. Enumerated in release-consumers.md.
+      # release-workflow policy check proves it. Enumerated in release-workflow.md.
       - name: Dry-run the npm candidate under the read-only identity
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -245,7 +245,7 @@ jobs:
   # gates on. It depends on every candidate check, so the summary can only be produced
   # once they are green, and it downloads the assembled candidate rather than rebuilding
   # it. It holds no credential and publishes nothing. Enumerated in
-  # docs/agents/release-consumers.md; the deterministic policy check proves the shape.
+  # docs/agents/release-workflow.md; the deterministic policy check proves the shape.
   release-approval:
     needs:
       - check

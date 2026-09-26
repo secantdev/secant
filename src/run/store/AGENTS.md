@@ -69,37 +69,35 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   id (`onConflictDoNothing`), so a resume that re-reaches the gate re-records nothing. The gate is "pending" only until that Attempt settles: `pendingGate()` returns the
   row whose Attempt id is not yet in `attempts` (the Projection derives the authored gate from it, distinct from a derived checkpoint).
   A `free-text` gate's authored `suggestions` (#213) ride the same row as a nullable JSON string array, parsed and validated at the read ingress; they only
-  pre-fill the `text` answer, so answering never checks the text against them.
-  Unlike the derived checkpoint, the authored gate is answered by **settling its Attempt through `publishAttempt`** (into `attempt_log`, so resume skips the gate):
-  `free-text` publishes the `text` answer as the declared output and advances `running`; approve settles succeeded with no output; reject settles failed and rests
-  `failed`.
+  pre-fill the `text` answer, so answering never checks the text against them. How the gate is answered is the [Application's](../../application/AGENTS.md).
 - `publishAttempt` for a **succeeded Attempt with no outputs and no required outputs** stages no commit (an empty tree is not valid `git mktree` input) and settles with
   no version — the approve-reject authored-gate answer (#108), the interactive End Step, and an Agent-step Attempt declaring no output. Every other succeeded Attempt
   produces at least one output and stages a commit as before. Its `endsStage` sets the nullable `attempt_log.stage_ended` in that transaction (#218): the one
-  durable End Stage fact, read back as `AttemptLogEntry.endsStage` (absent when null).
-- `outputReceiptDirectory` (#215) hands execution one emptied `.receipts/<sha256(attemptId)>` directory inside the Run working area (#220), so the one Harness grant covers
-  it; hashed because Attempt ids carry `:`.
+  durable End Stage fact, read back as `AttemptLogEntry.endsStage` only when stored `true` — a stored `false` reads absent exactly like
+  `null`.
+- `outputReceiptDirectory` (#215) hands execution one emptied `.receipts/<first 32 hex characters of sha256(attemptId)>` directory inside the Run working
+  area (#220), so the one Harness grant covers it; hashed because Attempt ids carry `:`.
   It is candidate storage, never canonical and never fenced; only `publishAttempt` binds validated receipt bytes, and Run deletion removes it with the directory.
 - Harness Turn records (#116): `admitTurn` writes the `turn` row **before** the stdin frame is sent (the durable admission the Adapter awaits) — it upserts the named Session
   `open` and the rendered input as a `user` transcript entry in one transaction, and a fenced owner refuses it, proving the Turn `not-started` so no stdin is sent.
 - `settleTurn` is immutable: it no-ops once the `turn` row's `result_kind` is set, so a second settle rewrites neither the result nor the Session availability. `turn_event`s
   append only. The Attempt's `effective_model` is set through `publishAttempt` (the `attempt` row is written after the Turn settles), never through `settleTurn`.
-- Turn `kind` (#126): `admitTurn` records the Crucible Step kind that produced the Turn — `agent` or `interactive-agent` — in the nullable `turn.kind` column, Crucible-owned
+- Turn `kind` (#126): `admitTurn` records the Secant Step kind that produced the Turn — `agent` or `interactive-agent` — in the nullable `turn.kind` column, Secant-owned
   durable truth independent of `origin` (`managed`/`human`). The column is nullable so a row admitted before it existed reads its kind back **null** (undefined in
   `TurnRecord`) — a legacy row whose kind is genuinely unknown, never fabricated to a guess.
 - The `attempt` row also carries the normalized Harness identity and steer evidence of an Agent-step Attempt (#125, #134):
   `harness`/`executable`/`executable_version` plus `steer_available`/`steer_evidence`, written together by `publishAttempt` from the prepared profile (all null for a
-  Command/Gate Attempt). The `PublishAttemptRequest` union permits an identity plus optional model or neither, never a new model-only row. `harnessEvidence()` reads both
-  facts from the one latest Agent-evidence row, so a model-less resumed Attempt clears the projected model rather than inheriting an older value. A non-null model still
-  admits an explicit legacy model-only row written before identity existed. Identity is recorded on every autonomous Agent Step outcome, including
-  `cancelled`/`indeterminate` and recovery refusal; the interactive-agent Step's synthetic Attempt (#122) records neither, so a purely-interactive Run projects none (#147).
+  Command/Gate Attempt). `PublishAttemptRequest` carries an optional `agentEvidence` (identity required, model optional), so a write can never create a model-only
+  row; the read-side `HarnessEvidenceRecord` union is what still admits a legacy model-only row written before identity existed. `harnessEvidence()` reads both
+  facts from the one latest Agent-evidence row, so a model-less resumed Attempt clears the projected model rather than inheriting an older value. Which Attempts
+  carry evidence is [execution's](../execution/AGENTS.md).
 - Transcript ordering (#124): `transcript_entry.seq` is an `INTEGER PRIMARY KEY`, i.e. an alias for the database-wide rowid, so it is monotonic across the whole `run.db`, not
   per Session; a page filters it by Session key and pages upward by `seq` (`before`). The rowid alias is exactly why a page cursor stays stable — appending later rows never
   renumbers earlier ones — so an opaque `before` cursor keeps naming the same boundary.
 - Turn ordering (#116): `turn.sequence` is `count(turn)` taken under the admit transaction, so it numbers every Turn in the Run regardless of Session — two Sessions' Turns
   interleave in one numbering, and it is not a per-Session sequence.
 - `turn_event.payload` is opaque JSON, never a raw protocol frame: the Store neither validates nor interprets it, and the Projection reads it tolerantly (an unrecognized event
-  kind projects nothing). Only Crucible-shaped normalized events are ever written.
+  kind projects nothing). Only Secant-shaped normalized events are ever written.
 - There are no foreign keys and no `foreign_keys` pragma anywhere in either schema (only `busy_timeout` is set), so referential integrity rests entirely on the write
   transactions that keep related rows consistent; nothing the database enforces stands behind them.
 - Run delete drops the registration and reclaims the directory as one lifecycle unit; with no foreign keys there is nothing to cascade — the directory holds the whole Run.
@@ -113,5 +111,5 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 ## Tests
 
 - Store Interface tests are split by concern into `ownership-and-recovery.test.ts`, `attempt-and-artifact-publication.test.ts`,
-  `session-and-transcript-evidence.test.ts`, `materialization.test.ts`, `reconcile-turn.test.ts`, and `working-area.test.ts`; keep every file independently
-  runnable with explicit fixtures.
+  `session-and-transcript-evidence.test.ts`, `materialization.test.ts`, `reconcile-turn.test.ts`, and `working-area.test.ts`, with the private Artifact
+  Module's own `artifacts/artifacts.test.ts` beside them; keep every file independently runnable with explicit fixtures.

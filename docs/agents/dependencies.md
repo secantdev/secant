@@ -12,7 +12,7 @@ Read this before changing dependencies, composition, or allowed import direction
 - **Growth rule.** Hand-roll only what is frozen. If the hand-rolled surface must grow whenever the product grows, take the builtin or library now,
   while the rewrite is small. If the spec is fixed by an external standard and reproducibility or security depends on controlling the bytes, hand-roll
   and say so in a comment. There is no size threshold; applying the rule takes an informed guess about whether the surface grows.
-- Every milestone re-judges the whole of `src/` against both rules in the [Milestone audit](./milestone-audit.md).
+- Both rules are re-judged over the whole of `src/` by the [Milestone audit](./milestone-audit.md).
 - Before adding a package, or hand-rolling what a package provides, check how OpenCode decides the same question: its dependency list, where it prefers
   Node built-ins such as `node:fs` over a library, and where it prefers a library such as `fs-extra` over a built-in. Take that evaluation seriously; the
   codebase is maintained by industry-grade engineers and is rarely wrong. Ask the user for the local OpenCode checkout path whenever you need to look, and

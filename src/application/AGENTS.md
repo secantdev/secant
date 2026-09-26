@@ -58,10 +58,11 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   independently exposes the latest Agent-step Attempt's normalized name/executable/version as `run.harness` plus its sibling `effectiveModel` (#125, #147).
   Resume may replace only the observed fields; Command-only Runs omit both selection and observations.
 - `deriveRun`'s walk assumes `attempt_log` holds only per-Step Attempts, but the Run Store already appends the reconciliation `indeterminate` marker row
-  there (see `store/AGENTS.md`). The marker is harmless only because its outcome is not `succeeded`, not because the walk excludes it — keep that true if
-  you add marker rows.
-- One settle path (`submitEndInteractiveStep` → `startEndInteractiveStep`) backs `end-interactive-step`, `continue-repeat` (#217), and `end-stage` (#218), each refused
-  mid-Turn. End Step is refused inside a human-controlled Repeat group and the other two outside one (`interactiveControlMismatch`), so no iteration settles twice.
+  there (see [the Run Store's notes](../run/store/AGENTS.md)). The marker is harmless only because its outcome is not `succeeded`, not because the walk
+  excludes it — keep that true if you add marker rows.
+- One settle path (`submitEndInteractiveStep` → `startEndInteractiveStep`) backs `end-interactive-step`, `continue-repeat` (#217), and `end-stage` (#218), so no
+  iteration settles twice; which control is legal on which Step (`interactiveControlMismatch`) and the mid-Turn refusal are
+  [run-control's](../../docs/agents/run-control.md).
 - App-release trust is a recorded Trust grant (operation id `app-release`) that the startup ensure (`shipped-bundles.ts`) writes only on an Entry whose
   origin is `built-in`, re-checked every startup, so launch, resume, and the timeline read it like any grant; `trustState` shows a grant on a built-in as
   `app-release`. Equal bytes a user imported first keep their own origin and trust (#227).
@@ -73,6 +74,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 - Read [run-control](../../docs/agents/run-control.md) before changing deferred settlement, cancel or shutdown, Turn interrupt or steer, takeover, the
   interactive-Step drive, or the live overlay; the abort-reason mapping is [execution's](../run/execution/AGENTS.md).
 - `createApplication`'s regions, in order: (1) state, observers, `observedOwner`, and the execution drivers (`runAndSettle`, `startRun`); (2) Projection dispatch
-  (`openProjection`, `openRunProjection`), with the catalog and launch-preparation families in their own files; (3) launch and resume (`submitLaunch`,
-  `resumePreconditions`, `submitResume`); (4) gate and Harness-request answering, then Turn interrupt and steer (`submitAnswer` through `steerTurnAndSettle`);
+  (`openProjection`, `openRunProjection`), with the catalog and launch-preparation families in their own files; (3) approval, launch, and resume (`submitApprove`,
+  `submitLaunch`, `resumePreconditions`, `submitResume`); (4) gate and Harness-request answering, then Turn interrupt and steer (`submitAnswer` through `steerTurnAndSettle`);
   (5) interactive turns (`beginInteractive` through `runInteractiveEnd`), then cancel, delete, read-acquire, and `shutdown`.

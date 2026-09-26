@@ -17,6 +17,9 @@ alone takes its keys, size, and resize from the Renderer Port; the Application s
   keypress is armed, so the confirming `y` confirms rather than types. The `pending()` check still sits **above** the typing branch in the Workbench key loop
   (`run-workbench.tsx`), so an armed End-Step confirm takes `y`/Escape. The one non-frozen double is Ctrl+E: it arms End Step and, on the same event, the field also runs its
   built-in Ctrl+E→line-end before the arm blurs it — a moot cursor move, so the bindings override the research left optional is deferred.
+- A free-text gate's authored suggestions (#213) ride the same control: `gateControl.handleKey` takes `up`/`down` to cycle the suggestions and Other, and the
+  Workbench dispatcher consults it before the timeline's own `up`/`down` cases, so paging never fires while the gate is up. The gate footer is `gateHeight()` rows —
+  5 with suggestions, else 4 — so the bottom-region accounting reads it rather than a constant.
 - The interactive-agent input (`run-workbench.tsx`, #122) is a native OpenTUI `<input>` (D9): while `focus` is `interactive` the field owns text, so `q`/`r`/`c`/`x`/`t`
   type into it rather than fire their bare-letter commands (only Ctrl+C still exits, and the dispatcher gates those commands on not typing). The field carries capitals,
   punctuation, paste and word delete verbatim. Enter dispatches `send-interactive-turn` (blank/whitespace refused before dispatch, and a refused send keeps the draft, A9);

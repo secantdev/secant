@@ -8,8 +8,7 @@ advisory.
 ## Activation
 
 The Minimum Verification gate is established and green — every bullet below is enforced by the canonical check — so this baseline is fully in force and
-every change to production code or a prototype obeys it. During the bootstrap, before the gate existed, only work whose purpose was to enable this
-baseline could change production code or start a prototype; that phase is over.
+every change to production code or a prototype obeys it.
 
 ## Scope
 

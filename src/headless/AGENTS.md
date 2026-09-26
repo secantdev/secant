@@ -47,6 +47,8 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
   and none was named (`readTranscript`). `run show` never inlines transcript entries; the Session's page/export References are the only read path.
 - `render.ts` ignores an unknown action-offer kind on purpose: each offer kind is rendered by its own filtered loop, so an offer kind the client does not
   recognise falls through every loop and prints nothing rather than erroring — the client never enumerates a closed set of offers.
+- `render.ts` is the wording the TUI mirrors: `src/tui/bundle-format.ts` copies its Bundle status words, so a wording change here lands in both or the two
+  surfaces disagree about the same fact.
 - The `--json` shapes are frozen: the three-OS CI gate parses specific fields (`.result.run.state`, `.checkpoint.completedIterations`, …), so renaming
   one breaks the gate. They are not uniform — `bundle inspect --json` prints the inner bundle while `bundle list --json` prints the snapshot — so match
   the existing shape a command already emits.
@@ -62,7 +64,7 @@ Inherits the engineering baseline; records only non-obvious local facts. Ownersh
 
 - The exit-code and `--json` contracts above are the CI acceptance seam; `tests/cli` does not exist (the tiny entry branches in `cli/main.ts` are
   covered by the package smoke and a child-process spawn), so assert headless behaviour here and in the package smoke, not through a separate CLI suite.
-  Named gap (testing.md "Behavioral Completeness", A64): three `cli/main.ts` behaviours are covered **only** by the compiled-binary smoke, never the
+  Named gap under testing's behavioral-completeness bar: three `cli/main.ts` behaviours are covered **only** by the compiled-binary smoke, never the
   deterministic suite — the bare-argv branch that lazily imports the TUI so Solid and OpenTUI never load on a headless path (`:19-25`); `isMainEntry`'s
   `Bun.main` separator normalisation, the #62 Windows entry quirk (`:48-53`); and the top-level error handler that prints a stack and sets exit 1
   (`:55-62`). The file records at `:40-47` why it cannot be unit-tested as written; if a fourth branch appears, revisit a small `tests/cli` rather than

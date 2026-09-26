@@ -55,8 +55,9 @@ The map is one issue labelled `wayfinder:map`; its decision tickets are child is
 Implementation tickets come from `/to-tickets` with its own body template (Parent, What to build, Acceptance criteria, Blocked by). Publish them
 **without** `ready-for-agent`.
 
-- **Packet**: the Starting context comment above, followed by three baseline lines. `Owner:` the Module and Interface touched. `Ratchet:` the checks
-  this ticket adds or retires. `Deletes:` the behavior, tests, exports, or dependencies it removes. Under the migration the
-  [slicing rulebook](./slicing.md) adds `Gate:` and `Dependencies:` as its rule 4. Fixtures touched are table rows.
+- **Packet**: the Starting context comment above, followed by five lines. `Owner:` the Module and Interface touched. `Ratchet:` the checks this
+  ticket adds or retires. `Deletes:` the behavior, tests, exports, or dependencies it removes. `Gate:` the
+  [ADR 0027](../adr/0027-gate-releases-on-three-os-ci-and-recorded-human-evidence.md) gate the slice introduces or keeps green. `Dependencies:` each
+  runtime dependency re-earned under the built-ins-first rule in [dependencies](./dependencies.md). Fixtures touched are table rows.
 - **Ready**: apply `ready-for-agent` only once the packet comment exists.
 - **Complete**: follow `change-review.md` on the ticket before closing it.

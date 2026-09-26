@@ -21,7 +21,7 @@ mechanics and reliability evidence are in [agent-guidance progressive disclosure
 ## Module-local `AGENTS.md`
 
 - Lives only at a Module root declared in the [policy table](../../tests/architecture/module-policy.ts), created by the first slice that records a
-  non-obvious local fact. Nothing is pre-seeded.
+  non-obvious local fact.
 - Claude Code and OpenCode load it when a file under it is read. Codex CLI loads only the `AGENTS.md` chain from repository root to its working
   directory, and every Harness is launched from the root, so root `AGENTS.md` lists every Module-local file by path. The check enforces the listing.
 - Sections in fixed order, only filled ones present: Owns, Never owns, Invariants, Tests, Read next. Ownership and import direction are read from
@@ -42,8 +42,7 @@ The guidance-structure suite under `tests/architecture/` enforces:
 
 ## Maintenance
 
-- Before closing an issue, record non-obvious local learnings in the nearest `AGENTS.md`, one to three lines each, and prune stale lines passed on
-  the way; [change review](./change-review.md) carries the trigger.
+- Local learnings are recorded, and stale lines pruned, at issue close; [change review](./change-review.md) owns that rule.
 - Adding, moving, splitting, or materially expanding guidance triggers a one-shot review: follow the affected pointer chain once with a
   representative task and confirm it reaches every required rule without loading unrelated branches.
 - At each refactoring gate the sequencing decision defines, walk the full tree once for relevance and run the representative tasks named by that gate,

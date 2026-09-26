@@ -10,9 +10,9 @@ write, launch, and read invariants; the abort-reason vocabulary and the resting 
 - Run settlement is deferred (#98 S1): `runAndSettle`/the answer-continue branch start the execution promise and `submit` returns `admitted` synchronously; the
   `finally` releases the owner only after a resting outcome and settlement publishes after it. A `blocked` Run keeps its owner with no execution promise until answered.
 - One `AbortController` per live Run lives in the `runs` map. The Application never imports the execution `RunCancelledError`: it aborts its own controller, so
-  `tracking.abort.signal.aborted` in the catch is exactly "our cancel/signal fired", and the reason decides the rest — `RUN_CANCEL_ABORT` throws `RunCancelledError`
-  so cancel-run writes `cancelled` through the held owner; `INTERRUPT_TURN_ABORT` and `SIGNAL_ABORT` throw nothing, so `runAndSettle` returns through its normal
-  path and a signal leaves the claim live for the next open to reconcile.
+  `tracking.abort.signal.aborted` in the catch is exactly "our cancel/signal fired", and the reason decides the rest
+  ([execution's mapping](../../src/run/execution/AGENTS.md)): only `RUN_CANCEL_ABORT` throws (`RunCancelledError`, so cancel-run writes the rest through the
+  held owner); the other two reasons throw nothing, so `runAndSettle` returns through its normal path, and a signal leaves the claim live for the next open to reconcile.
 - `cancel-run` is cancel-as-abort for active work in this process; a held blocked Run is rested directly, a non-live blocked Run is acquired and rested, and a Run live
   elsewhere takes the fresh-owner epoch-bump path. `shutdown()` has two phases: close and release blocked Runs without changing their state, then abort and await running
   work with `SIGNAL_ABORT`, leaving those ownership records live for startup reconciliation.

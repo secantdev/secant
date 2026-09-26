@@ -10,7 +10,7 @@ legacy-conhost row.
 
 Each cross-compiled single-file binary is built and then smoked on its own operating system inside the canonical three-OS gate, on every push and pull
 request. The `build` job cross-compiles all three targets; the `consumer` job's `Compiled-binary smoke` step runs against the matching binary on the
-matching runner. The scenarios it covers are enumerated once in [testing guidance](./agents/testing.md) — this row does not restate them.
+matching runner. The scenarios it covers are enumerated once in [package smoke](./agents/package-smoke.md) — this row does not restate them.
 
 | OS      | Architecture | Binary                   | Evidence                                                                                                                                                                                                         |
 | ------- | ------------ | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

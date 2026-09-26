@@ -1,12 +1,12 @@
 # Target Module Topology
 
-Read before creating or moving target source, changing public entrypoints, or crossing a Module's Interface. This is the target of
-[Define the target Module seams and folder topology](https://github.com/secantdev/secant/issues/27); legacy files are migration evidence.
+Read before creating or moving target source, changing public entrypoints, or crossing a Module's Interface. Decided in
+[Define the target Module seams and folder topology](https://github.com/secantdev/secant/issues/27); `src/` holds only the areas below (ADR 0026).
 The [Module design](./module-design.md), [dependency](./dependencies.md), and [testing](./testing.md) standards still apply.
 
 ## Ownership
 
-One ESM package contains these ownership areas. Reserve the paths, but create files only when an implementation slice needs their behavior.
+One ESM package contains these ownership areas. Every path exists; new files land under the area that owns their behavior, never in a new one.
 
 | Source area                | Responsibility                                                                                                 |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -21,8 +21,8 @@ One ESM package contains these ownership areas. Reserve the paths, but create fi
 | `src/run/store/`           | Run creation/deletion, Workspace coordination and fencing, `run.db`, canonical records, and atomic publication |
 | `src/run/store/artifacts/` | Private Run Artifact capture, Git staging/history, and verified Workspace materialization                      |
 | `src/process/`             | Owned child process: PATH-walk executable resolution, Windows shim resolution, direct spawn, tree-reaping kill |
-| `src/harness/`             | Crucible's Harness Interface, discovery/qualification, and private native Adapters                             |
-| `src/tui/`                 | Crucible presentation plus the reduced OpenCode-derived presentation subset                                    |
+| `src/harness/`             | Secant's Harness Interface, discovery/qualification, and private native Adapters                               |
+| `src/tui/`                 | Secant presentation plus the reduced OpenCode-derived presentation subset                                      |
 | `src/tui/renderer/`        | Renderer Port lifecycle and terminal teardown ordering                                                         |
 | `src/headless/`            | Headless client, including Bundle-management commands                                                          |
 

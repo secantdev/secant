@@ -318,6 +318,8 @@ OpenCode at 1ead9e3d7f; no OpenCode source crosses.
   src/tui/run-workbench-views.tsx
                                 interactive-input interrupt cue studied
                                 packages/tui/src/component/prompt/index.tsx
+  src/tui/run-workbench.tsx     the two-press Esc dispatch behind that cue; its
+                                dispatcher comment cites the same prompt study
 
 What was taken and changed:
 

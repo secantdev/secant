@@ -14,3 +14,6 @@ Inherits the engineering baseline; records only non-obvious local facts. Cross-M
 - `wireApplication` runs the Shipped Bundle startup ensure for both roots, reading the `.wfb` files from the `builtin/` asset directory beside the entry
   module (`import.meta.dirname`, `/$bunfs/root` in the binary); no directory means zero built-ins. Its notices reach headless stderr through
   `HeadlessClients.startupNotices` and Home through the `workspace` Projection (#227).
+- `prepareRunHarness` (`wiring.ts`) is the one prepare site for launch, resume, and the interactive reopen: it threads `writableDirectory: owner.workingArea().path`
+  and the stored `requestedModel` identically, and an unusable area is a typed `working-area-unavailable` prepare failure, so the Run halts before any Turn rather
+  than writing planning files anywhere else (#214). Execution never passes the area itself.

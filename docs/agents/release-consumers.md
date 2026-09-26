@@ -3,22 +3,18 @@
 Read this before changing a release-channel consumer scenario — the archive, platform-package, npm-launcher, or installer steps — or the scripts and CI
 they run through.
 
-Each shipped release channel is verified on the Windows x64, macOS arm64, and Linux x64 matrix (ADR 0027) by a named step of the per-OS `consumer` job in
-[check.yml](../../.github/workflows/check.yml), driving the channel exactly as a consumer receives it. That job downloads each candidate artifact once,
-runs the compiled-binary smoke, archive, platform-package, npm-launcher, PowerShell installer, POSIX installer, and terminal-lifecycle scenarios as seven
-independent `continue-on-error` steps, then always aggregates their outcomes so every result stays visible and any non-success fails the job. The artifacts
-are assembled once on the Linux `build` job from the just-built candidate bytes through the one target manifest (`scripts/targets.ts`). Release-channel
-pure logic is unit-tested under `bun test` in `tests/release/` with no subprocess, because the semantic suite never reaches a real child (the
-evidence layers in [testing](./testing.md)); every real round-trip on real binaries below therefore lives only in the consumer job, like the
-compiled-binary smoke. The per-OS `check` job's
-`Process runtime conformance` step is the sibling layer for real child processes below the binary; it is not a consumer scenario ([testing](./testing.md)).
+Each shipped release channel is verified on the Windows x64, macOS arm64, and Linux x64 matrix (ADR 0027) by a named step of the per-OS `consumer`
+job in [check.yml](../../.github/workflows/check.yml), driving the channel exactly as a consumer receives it. The job's shape (one download per
+artifact, `continue-on-error` scenarios, the always-run aggregation) is owned by [release-workflow.md](./release-workflow.md); the evidence layers,
+including why the semantic suite never reaches a real child, by [testing](./testing.md). Release-channel pure logic is unit-tested under `bun test`
+in `tests/release/` with no subprocess; every real round-trip on real binaries below lives only in the consumer job, like the compiled-binary smoke.
 
 ## Release Archive Consumer
 
 Separate from the package smoke, the `Release archive consumer` step ([check.yml](../../.github/workflows/check.yml)) verifies the assembled release
-archives (`scripts/assemble.ts`, #150) as a consumer receives them. Assembly runs once on the Linux `build` job from the just-built candidate bytes
-through the one target manifest (`scripts/targets.ts`), emitting the three archives, a candidate manifest, and `SHA256SUMS`; it never rebuilds an input
-and fails closed on any identity/version/digest disagreement. On the Windows x64, macOS arm64, and Linux x64 matrix, `scripts/release-consumer.ts`
+archives (`scripts/assemble.ts`, #150) as a consumer receives them. Assembly runs once on the Linux `build` job, emitting the three archives, a
+candidate manifest, and `SHA256SUMS`; it never rebuilds an input and fails closed on any identity/version/digest disagreement. On the Windows x64,
+macOS arm64, and Linux x64 matrix, `scripts/release-consumer.ts`
 extracts the matching archive and proves layout, executable mode, inner-binary digest, bundled `LICENSE`/`THIRD-PARTY-NOTICES.md`, native execution and
 version, and — on macOS — the strict ad-hoc signature. `tests/release/assemble.test.ts` unit-tests the pure logic — manifest facts and digests
 (`computeCandidate`), the immutability/identity/version/digest checks (`assertAgrees`), and the consumer's pre-extraction refusals — and spawns no
@@ -64,8 +60,9 @@ The M4 artifact-level legal gate (spec [#137](https://github.com/secantdev/secan
 [#156](https://github.com/secantdev/secant/issues/156)) extends the fast declared-dependency notices check — `checkNoticesCoverage` in
 [tests/architecture/check-vendor-provenance.ts](../../tests/architecture/check-vendor-provenance.ts), which **stays** in `bun run check` — into a
 target-specific release gate. Unlike the channel consumers it is OS-independent (text and digest comparison, no binary to run), so it needs no matrix:
-it runs once, as the final step of the Linux `build` job (`scripts/inventory.ts`), the one place that has cross-compiled every target and installed every
-platform's @opentui native, and it spawns no child process. It derives the transitive
+it runs once on the Linux `build` job (`scripts/inventory.ts`, after packing and before the dispatch-gated npm dry-run that
+[release-workflow.md](./release-workflow.md) owns), the one place that has cross-compiled every target and installed every platform's @opentui native,
+and it spawns no child process. It derives the transitive
 runtime closure **actually embedded** per target from the actual compiler inputs (a real `Bun.build` of the shared build input, walked through the
 sourcemap `sources`, each embedded file's version and licence read from the package that owns it on disk — the deepest `node_modules/` segment, so a
 hoisted or nested duplicate reports the bytes actually shipped), adds the one `@opentui/core-<os>-<cpu>` native per target from the one target manifest

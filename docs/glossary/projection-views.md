@@ -2,7 +2,7 @@
 
 This cluster defines the concrete client-facing **Projection** families and view vocabulary M5 added over the **Projection Port**: assessing one
 launch draft before a **Run** exists, discovering and qualifying the installed **Harnesses**, and reading a live view's freshness. It owns the
-launch-and-catalog read surface; the Run it eventually creates lives in the [Crucible Run Lifecycle](./crucible-run-lifecycle.md) cluster, and the
+launch-and-catalog read surface; the Run it eventually creates lives in the [Secant Run Lifecycle](./secant-run-lifecycle.md) cluster, and the
 generic **Projection**, **Action Offer**, and **Operation** terms live in the [context index](../../CONTEXT.md).
 
 ## Terms
@@ -49,7 +49,7 @@ generic **Projection**, **Action Offer**, and **Operation** terms live in the [c
 
 ## Related decisions
 
-- [Crucible Run Lifecycle](./crucible-run-lifecycle.md) owns the **Run** a ready draft creates, and defines **Requested model** and **Effective model**,
+- [Secant Run Lifecycle](./secant-run-lifecycle.md) owns the **Run** a ready draft creates, and defines **Requested model** and **Effective model**,
   the pair a `launch-preparation` draft and the Run Workbench both surface.
 - [Workflow Bundle](./workflow-bundle.md) owns **Bundle identity**, **Trust grant**, and the **Installed Bundle** bytes a `launch-preparation` draft
   re-checks.

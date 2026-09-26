@@ -48,10 +48,10 @@ installed-Harness report, real-terminal report, or three-OS native-binary row.
 - [ ] Terminal claims cite a fresh or validly carried real-terminal report
 - [ ] Harness claims cite the matching real installed-Harness report and version
 - [ ] No replay result is cited as real-Harness or three-OS evidence
-- [ ] ADR 0028 trademark clearance recorded for launch jurisdictions
+- [ ] ADR 0028 trademark clearance recorded for launch jurisdictions, or its waiver by the 2026-09-26 amendment still stands
 - [ ] ADR 0028 npm/package-identity gate remains satisfied
 - [ ] ADR 0028 website decision recorded; registrar confirmation attached when `secant.sh` is wanted, otherwise explicitly marked not applicable
-- [ ] ADR 0028 launch-market native-speaker checks recorded
+- [ ] ADR 0028 launch-market native-speaker checks recorded, or their waiver by the 2026-09-26 amendment still stands
 - Support-matrix change: `<commit/diff>`
 - Public-use evidence: `<URLs or explicit not-cleared status>`
 

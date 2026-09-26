@@ -16,7 +16,7 @@ connecting two points on it, is a plain story for a tool that reaches an outcome
 | Repository          | `secantdev/secant`  | One repository, one product. Renamed on 2026-09-07; the old `DevFlow-HQ/devflow-cli` links in earlier ADRs and tickets redirect.                                                                                                                                                                                                                                                                                                     |
 | npm package         | `@secantdev/secant` | The bare `secant` name is unregistered but blocked from publishing (npm rejects it as too similar to `recast`), so the scoped fallback under the `secantdev` npm org is the package name. Reserved with a `0.0.0` placeholder on 2026-09-07 (amended 2026-09-07).                                                                                                                                                                    |
 | Executable          | `secant`            | No package on npm, PyPI, crates.io, RubyGems, NuGet, Homebrew, conda-forge, Docker Hub, Debian, Ubuntu, Fedora, AUR, Chocolatey, winget, or Scoop installs a `secant` command.                                                                                                                                                                                                                                                       |
-| Website             | `secant.sh`         | The only unregistered domain among `.com`, `.io`, `.dev`, `.app`, and `.sh`. A domain is not required, so it is registered if convenient and never blocks a release.                                                                                                                                                                                                                                                                 |
+| Website             | `secant.sh`         | The only unregistered domain among `.com`, `.io`, `.dev`, `.app`, and `.sh`. A domain is not required and never blocks a release. Registered and serving the project site (amended 2026-09-26).                                                                                                                                                                                                                                      |
 
 ## Coexistence accepted
 
@@ -41,6 +41,19 @@ ownership wait for:
 3. Registrar confirmation of `secant.sh` if a website is wanted.
 4. A native-speaker check in each launch market. Romance-language `secante` means drying or blotting and is informally "annoying" in some dialects;
    nothing offensive was found elsewhere, but that is absence of evidence only.
+
+## Amendment (2026-09-26): gates settled for `v0.1.0`
+
+The [v0.1.0 release](https://github.com/secantdev/secant/issues/234) settles the four gates above as follows:
+
+- **Gate 2 (npm identity)** stays satisfied: the M6 candidate's authenticated dry-run published nothing and `@secantdev/secant` remains reserved.
+- **Gate 3 (website)** is met: `secant.sh` is registered and serves the project site.
+- **Gates 1 and 4 (trademark clearance and native-speaker checks)** are waived, not met. Secant is an open-source tool, no company is registered
+  in any jurisdiction, and at its current audience these checks cost more than the risk they retire. Trademark status stays unknown, and Secant
+  makes no claim of exclusive ownership of the name.
+
+Revisit gates 1 and 4 before any commercial offering, company registration, trademark filing, or claim of exclusive ownership, or if a conflicting
+mark holder or a launch-market speaker raises the name. Until then, public announcement and npm publishing no longer wait on them.
 
 ## Migration point
 
